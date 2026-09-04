@@ -38,6 +38,9 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
     open(my $fh, '>', $output_file) or die "Cannot open $output_file: $!\n";
 
     my $found_lefs = 0;
+    #<!-- read after every LEF, since it stamps cells that only exist in PLDB
+    #     once a LEF has been read -->
+    my @func_maps = ();
 
     if (!exists $config->{$foundry}) {
         close($fh);
@@ -110,6 +113,14 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
                     }
                 }
 
+                # Cell function map: says which cells are combinational,
+                # sequential or memory when no liberty is read
+                if (exists $file_group->{'cell-func-map'}) {
+                    my $map_files = ref($file_group->{'cell-func-map'}) eq 'ARRAY' ?
+                                    $file_group->{'cell-func-map'} : [$file_group->{'cell-func-map'}];
+                    push(@func_maps, @$map_files);
+                }
+
                 # Process IO cell LEFs if the switch is enabled
                 if ($read_io_lefs && exists $file_group->{'io-cell-lefs'}) {
                     my $io_lef_group = $file_group->{'io-cell-lefs'};
@@ -128,6 +139,12 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
                 }
             }
         }
+    }
+
+    foreach my $map_file (@func_maps) {
+        next unless (defined $map_file && $map_file ne "");
+        print $fh "read_cell_func_map -file $map_file\n";
+        &read_cell_func_map("-file", $map_file);
     }
 
     close($fh);
@@ -153,6 +170,9 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
         $lef_types .= " and " . join(" and ", @extra_types);
     }
     print "Generated $output_file with $found_lefs read_lef commands ($lef_types)\n";
+    if (@func_maps) {
+        print "Read " . scalar(@func_maps) . " cell function map(s) from the config\n";
+    }
     # &source($output_file);
     return;
 

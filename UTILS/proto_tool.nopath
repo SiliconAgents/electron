@@ -552,6 +552,7 @@ require "$BEEHOME/KNOWLEDGEBASE/make_write_excel";
 require "$BEEHOME/LIBANALYSIS/make_pinAccess";
 require "$BEEHOME/LIBANALYSIS/make_pinAccessII";
 require "$BEEHOME/LIBANALYSIS/make_cell_footprint";
+require "$BEEHOME/LIBANALYSIS/make_cell_func_map";
 #require "$BEEHOME/LIBANALYSIS/make_overlapAcess";
 require "$BEEHOME/LIBANALYSIS/make_report_pin_access";
 require "$BEEHOME/LIBANALYSIS/make_report_inst_and_net";

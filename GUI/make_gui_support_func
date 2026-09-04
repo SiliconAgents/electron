@@ -1378,6 +1378,7 @@ sub import_foundry_lef_popup {
   my $stdCellFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $libFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $vmodelsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $funcMapFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $MainFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'both');
   my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
   
@@ -1389,16 +1390,20 @@ sub import_foundry_lef_popup {
   $libEntry = $libFrame->Entry(-textvariable => \$libPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
   my $vmodelsLabel = $vmodelsFrame->Label(-text=>"Verilog Models :")->pack(-side=>'left');
   $vmodelsEntry = $vmodelsFrame->Entry(-textvariable => \$vmodelsPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
+  my $funcMapLabel = $funcMapFrame->Label(-text=>"Cell Func Map :", -foreground=>"navy")->pack(-side=>'left');
+  $funcMapEntry = $funcMapFrame->Entry(-textvariable => \$funcMapPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
   
   $techPathEntry = $techFrame->Entry(-textvariable => \$techFullPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
   $stdCellPathEntry = $stdCellFrame->Entry(-textvariable => \$stdCellFullPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
   $libPathEntry = $libFrame->Entry(-textvariable => \$libFullPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
   $vmodelsPathEntry = $libFrame->Entry(-textvariable => \$vmodelsFullPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
+  $funcMapPathEntry = $funcMapFrame->Entry(-textvariable => \$funcMapFullPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
 
   $techPathEntry->packForget(); 
   $stdCellPathEntry->packForget();
   $libPathEntry->packForget(); 
   $vmodelsPathEntry->packForget(); 
+  $funcMapPathEntry->packForget(); 
   
   
   my $top_pane = $MainFrame->Scrolled(qw/Pane -width 400 -height 400 -scrollbars se -sticky nsew/);
@@ -1464,6 +1469,12 @@ sub displayLibrary {
                my $stdCellFile = $file->{'std-cells'};
                my $vmodelsFile = $file->{'verilog-models'};
                my $libFile = $file->{'lib'};
+               #<!-- optional: says which cells are combinational, sequential or
+               #     memory without anyone having to read the liberty -->
+               my $funcMapFile = $file->{'cell-func-map'};
+               if(ref $funcMapFile eq "ARRAY"){
+                  $funcMapFile = join (",", @{$file->{'cell-func-map'}});
+               }
                ${"button".$lib.$nodeType.$layer} = $frame->Button(-text=>$layer,-relief=>"flat", -foreground=>"orange2",-background=>"light gray", 
                                                               -command=>sub{ 
                                                                             &highlight_selected_lib($data, $lib, $nodeType, $layer);
@@ -1471,10 +1482,19 @@ sub displayLibrary {
                                                                             $stdCellPath = (split(/\//, $stdCellFile))[-1];      
                                                                             $libPath = (split(/\//, $libFile))[-1];      
                                                                             $vmodelsPath = (split(/\//, $vmodelsFile))[-1];      
+                                                                            #<!-- the key is optional, so do not print "" as a name -->
+                                                                            my @funcMaps = split (/\,/, $funcMapFile);
+                                                                            my @fmPath = ();
+                                                                            foreach my $fm (@funcMaps){
+                                                                              push (@fmPath, (split(/\//, $fm))[-1]);      
+                                                                            }
+                                                                            $funcMapPath = join (",", @fmPath);
+
                                                                             $techFullPath = $techFile;
                                                                             $stdCellFullPath = $stdCellFile;
                                                                             $libFullPath = $libFile;
                                                                             $vmodelsFullPath = $vmodelsFile;
+                                                                            $funcMapFullPath = $funcMapFile;
                                                               })->pack(-side=>'top',-fill=>'x');
            }#foreach file
         }#if nodeType
@@ -1558,6 +1578,7 @@ sub import_sel_library{
   my $stdCellsLef = $stdCellPathEntry->cget('-text');
   my $libertyFile = $libPathEntry->cget('-text'); 
   my $vmodelsFile = $vmodelsPathEntry->cget('-text'); 
+  my $funcMapFile = $funcMapPathEntry->cget('-text'); 
   #print "tech:$$techLef | stdcell:$$stdCellsLef | liberty:$$libertyFile | vmodels:$$vmodelsFile\n";
 
   my @lefFiles = (split(/\,/,$$stdCellsLef));
@@ -1575,6 +1596,16 @@ sub import_sel_library{
   }
   foreach my $lib (@libFiles){
      #&read_lib ("-lib","$lib");
+  }
+
+  #<!-- Optional, and read after the liberty on purpose: read_cell_func_map
+  #     leaves alone any cell liberty already described, so with both present
+  #     the map only fills in what the liberty did not cover. -->
+  my @funcMapFiles = (split(/\,/,$$funcMapFile));
+  foreach my $map (@funcMapFiles){
+     next if ($map eq "");
+     &read_cell_func_map ("-file","$map");
+     print WRITE "read_cell_func_map -file $map\n";
   }
 
   &call_read_lef;

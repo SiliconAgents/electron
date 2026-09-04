@@ -1,0 +1,419 @@
+#****f* /read_cell_func_map
+#  read_cell_func_map
+# FUNCTION
+#  Read a cell function map and stamp the function and type onto the cells in
+#  PLDB, so a design can be told apart into combinational cells, sequential
+#  cells and memory macros without parsing Liberty.
+#
+#  read_lib already sets both (dbMdbSetFunction / dbMdbSetType), but Liberty is
+#  slow to read and is not always around -- a LEF only flow has no idea what any
+#  cell does.  This is the cheap substitute, and it is what the "cell-func-map"
+#  entry in library.config points at.
+#
+#  Two file formats are taken, chosen by looking at the first non comment
+#  character, so a map can be hand written or generated:
+#
+#  text
+#    # comment
+#    <cell>  <type>  [function]
+#    DFF*     seq     flop
+#    *LATCH*  seq     latch
+#    SRAM_*   memory
+#    AND2_X1  comb    and
+#
+#    <cell> may be a glob, * and ? only, and the first line that matches a cell
+#    wins.  Fields may be separated by whitespace, commas or colons.
+#
+#    The type and function columns may be either way round.  proton's own
+#    write_footprint writes "<cell> <function> <type>", the other order from
+#    this, so a footprint file can be handed straight to this command:
+#
+#      DFF_X1   flop  seq  D Q CK      # footprint order, extra columns ignored
+#      AND2_X1  and   combi
+#
+#  json
+#    { "DFF_X1": "seq" }
+#    { "DFF_X1": {"type": "seq", "function": "flop"} }
+#    { "cells": [ {"name": "DFF_X1", "type": "seq", "function": "flop"} ] }
+#
+#  Accepted type words are anything dbMdbSetType takes: comb, seq, flop, latch,
+#  block, macro, mem, memory, sram, dram, rom, ram, register-file.
+#****
+sub read_cell_func_map {
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $file;
+my $report = 0;
+my $overwrite = 0;
+
+if ( $noOfArguments < 1 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP' ) {
+  print "Usage : read_cell_func_map -file <cell function map>\n";
+  print "                           --overwrite\n";
+  print "                                 replace a function and type a liberty read already set\n";
+  print "                           --report\n";
+  print "                                 print how many cells of each type are known\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-file" || $_[$i] eq "-map") { $file = $_[$i+1]; }
+  elsif ($_[$i] eq "--overwrite")               { $overwrite = 1; }
+  elsif ($_[$i] eq "--report")                  { $report = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)                    { print "WARN-LIB-FUNC_MAP : 001 : invalid option $_[$i]\n"; }
+}
+
+unless ( defined $file && $file ne "" ) {
+  print "ERR-LIB-FUNC_MAP : 002 : no map file given, use -file\n";
+  return;
+}
+unless ( -e $file ) {
+  print "ERR-LIB-FUNC_MAP : 003 : cell function map $file does not exist\n";
+  return;
+}
+unless ( keys %PLDB ) {
+  print "WARN-LIB-FUNC_MAP : 004 : no cells are loaded, read a LEF before the map\n";
+  return;
+}
+
+my @rules = &dbfLibReadCellFuncMap($file);
+unless ( @rules ) {
+  print "WARN-LIB-FUNC_MAP : 005 : $file holds no usable entries, nothing was set\n";
+  return;
+}
+
+#<!-- Exact names are matched by hash, globs by walking the rule list in file
+#     order.  A library is tens of thousands of cells and a map is usually a
+#     handful of globs, so doing it the other way round -- every rule against
+#     every cell -- is the slow way and gets slower with the library. -->
+my %exact = ();
+my @globs = ();
+foreach my $rule ( @rules ) {
+  my ($pattern, $type, $func) = @$rule;
+  if ( $pattern =~ m/[\*\?]/ ) {
+    my $re = quotemeta($pattern);
+    $re =~ s/\\\*/.*/g;
+    $re =~ s/\\\?/./g;
+    push(@globs, [qr/^$re$/, $type, $func]);
+  }
+  else {
+    #<!-- first rule for a name wins, matching the glob behaviour below -->
+    unless ( exists $exact{$pattern} ) {
+      $exact{$pattern} = [$type, $func];
+    }
+  }
+}
+
+my $setCnt = 0;
+my $keptCnt = 0;
+my @unmatched = ();
+foreach my $cell ( keys %PLDB ) {
+  my ($type, $func);
+  if ( exists $exact{$cell} ) {
+    ($type, $func) = @{$exact{$cell}};
+  }
+  else {
+    foreach my $g ( @globs ) {
+      if ( $cell =~ $g->[0] ) {
+        ($type, $func) = ($g->[1], $g->[2]);
+        last;
+      }
+    }
+  }
+  unless ( defined $type || defined $func ) {
+    push(@unmatched, $cell);
+    next;
+  }
+
+  #<!-- A liberty read that classified the cell wins unless told otherwise.
+  #
+  #     The test is whether a TYPE is known, not whether a function string
+  #     exists.  Those come apart, and exactly on the cells this map is for:
+  #     read_lib only calls dbMdbSetType for a cell carrying an ff or a latch
+  #     group, so a flop modelled some other way ends up with a function off its
+  #     output pin expression and no type at all.  Skipping it because "liberty
+  #     already said something" would leave that flop unclassified, which is the
+  #     case the map exists to repair. -->
+  if ( ! $overwrite && $PLDB{$cell}->dbMdbTypeIsKnown ) {
+    $keptCnt++;
+    next;
+  }
+
+  if ( defined $type && $type ne "" ) {
+    #<!-- A family word is coarse, and two of them hide state elements: the
+    #     integrated clock gate sits in CLOCK, the latch based isolation cell in
+    #     POWER, and both are sequential.  They say so in the function column,
+    #     which is finer grained than the family, so let it lift the type.  Only
+    #     ever upwards from combinational: a family that already said sequential
+    #     or memory is not second guessed. -->
+    my $useType = $type;
+    if ( &dbfLibIsClassWord($type) && $type !~ m/^seq/i && $type !~ m/^mem/i &&
+         defined $func && $func =~ m/icg|latch|flop|\bff\b|dff|reg/i ) {
+      $useType = "seq";
+    }
+    $PLDB{$cell}->dbMdbSetType($useType);
+  }
+  if ( defined $func && $func ne "" ) {
+    $PLDB{$cell}->dbMdbSetFunction($func);
+  }
+  $setCnt++;
+}
+
+print "INFO-LIB-FUNC_MAP : 006 : $file : set the type of $setCnt cell(s) from ",
+      scalar(@rules), " rule(s)\n";
+if ( $keptCnt > 0 ) {
+  print "INFO-LIB-FUNC_MAP : 007 : $keptCnt cell(s) were already classified by liberty and were left alone,\n";
+  print "INFO-LIB-FUNC_MAP : 008 : re-run with --overwrite to replace them\n";
+}
+if ( @unmatched > 0 ) {
+  print "WARN-LIB-FUNC_MAP : 009 : ", scalar(@unmatched),
+        " cell(s) matched no rule and keep their current type, first few: ",
+        join(" ", @unmatched[0..($#unmatched > 4 ? 4 : $#unmatched)]), "\n";
+}
+
+if ( $report ) {
+  &report_cell_func;
+}
+
+}# sub read_cell_func_map
+
+
+#<!-- A class word names a category of cell and nothing else: it is never what
+#     a library calls a function.  This is the strong signal for telling the two
+#     columns apart. -->
+sub dbfLibIsClassWord {
+
+my $w = $_[0];
+unless ( defined $w && $w ne "" ) {
+  return (0);
+}
+if ( $w =~ /^comb/i || $w =~ /^seq/i ||
+     $w =~ /^block/i || $w =~ /^macro/i || $w =~ /^mem/i || $w =~ /^sram/i ||
+     $w =~ /^dram/i || $w =~ /^ram$/i || $w =~ /^rom$/i || $w =~ /^reg.?file/i ||
+     #<!-- the coarse family words a generated map uses -->
+     #<!-- "filler" is a type dbMdbSetType understands, but it is NOT listed
+     #     here: a generated map writes FILLER in the function column beside a
+     #     family of PHYSICAL, and treating both as class words would leave the
+     #     function reading PHYSICAL and lose the finer word. -->
+     $w =~ /^arith/i || $w =~ /^clock$/i || $w =~ /^clk$/i ||
+     $w =~ /^power$/i || $w =~ /^phys/i ) {
+  return (1);
+}
+return (0);
+
+}#sub dbfLibIsClassWord
+
+
+#<!-- flop and latch are both: they name a category dbMdbSetType understands and
+#     they are also what proton's own footprint file carries as the function.
+#     Usable as a type when nothing better is on the line. -->
+sub dbfLibIsTypeWord {
+
+my $w = $_[0];
+unless ( defined $w && $w ne "" ) {
+  return (0);
+}
+if ( &dbfLibIsClassWord($w) || $w =~ /^flop$/i || $w =~ /^latch$/i ) {
+  return (1);
+}
+return (0);
+
+}#sub dbfLibIsTypeWord
+
+
+#<!-- Which of the two columns is the type and which is the function.
+#
+#     This has to be worked out rather than assumed, because proton already
+#     writes a file with these same three fields in the other order:
+#     write_footprint emits "<cell> <function> <type>", so "DFF_X1 flop seq"
+#     and "AND2_X1 and combi", while this map is documented as
+#     "<cell> <type> [function]".  Pointing cell-func-map at a footprint file
+#     is an obvious thing to do, and taking the columns positionally would read
+#     every function name as a type: dbMdbSetType would reject "and" as an
+#     unknown type, once per cell, and set the function to "combi".
+#
+#     Whichever field is a type word is the type.  flop and latch are both, and
+#     mean sequential either way, so the ambiguity is harmless. -->
+sub dbfLibSplitTypeFunc {
+
+my ($a, $b) = @_;
+my $aIsClass = &dbfLibIsClassWord($a);
+my $bIsClass = &dbfLibIsClassWord($b);
+
+#<!-- Exactly one class word settles it, whichever column it is in.  That makes
+#     "DFF_X1 flop seq" and "DFF* seq flop" mean the same thing, type seq and
+#     function flop, which is what both spellings are trying to say. -->
+if ( $aIsClass && ! $bIsClass ) {
+  return ($a, $b);
+}
+if ( $bIsClass && ! $aIsClass ) {
+  return ($b, $a);
+}
+if ( $aIsClass && $bIsClass ) {
+  #<!-- both, so nothing to go on but the documented order -->
+  return ($a, $b);
+}
+
+#<!-- No class word.  flop or latch will serve as the type, and is its own
+#     function: "DFF* flop" says both things at once. -->
+if ( &dbfLibIsTypeWord($a) ) {
+  return ($a, (defined $b && $b ne "") ? $b : lc($a));
+}
+if ( &dbfLibIsTypeWord($b) ) {
+  return ($b, $a);
+}
+return ($a, $b);
+
+}#sub dbfLibSplitTypeFunc
+
+
+#<!-- Parse the map into (pattern, type, function) rules, in file order.
+#     Returns the empty list when nothing usable is in there. -->
+sub dbfLibReadCellFuncMap {
+
+my $file = $_[0];
+my @rules = ();
+
+unless ( open(READ_FUNC_MAP, "$file") ) {
+  print "ERR-LIB-FUNC_MAP : 010 : cannot open $file : $!\n";
+  return (@rules);
+}
+my @lines = <READ_FUNC_MAP>;
+close(READ_FUNC_MAP);
+
+#<!-- json or text?  Look at the first character that is not blank or a
+#     comment, rather than trusting the file name. -->
+my $isJson = 0;
+foreach my $line ( @lines ) {
+  next if ( $line =~ m/^\s*$/ || $line =~ m/^\s*#/ );
+  $isJson = 1 if ( $line =~ m/^\s*[\{\[]/ );
+  last;
+}
+
+if ( $isJson ) {
+  my $data;
+  my $text = join("", @lines);
+  eval {
+    my $json = JSON->new;
+    $data = $json->decode($text);
+  };
+  if ( $@ || ! defined $data ) {
+    print "ERR-LIB-FUNC_MAP : 011 : $file is not valid json : $@\n";
+    return (());
+  }
+  #<!-- { "cells": [ ... ] } or a bare name => value map -->
+  my @entries = ();
+  if ( ref($data) eq "HASH" && exists $data->{cells} ) {
+    @entries = @{$data->{cells}};
+    foreach my $e ( @entries ) {
+      my $name = $e->{name};
+      $name = $e->{cell} unless ( defined $name );
+      next unless ( defined $name && $name ne "" );
+      push(@rules, [$name, $e->{type}, $e->{function}]);
+    }
+  }
+  elsif ( ref($data) eq "HASH" ) {
+    foreach my $name ( sort keys %$data ) {
+      my $val = $data->{$name};
+      if ( ref($val) eq "HASH" ) {
+        push(@rules, [$name, $val->{type}, $val->{function}]);
+      }
+      else {
+        push(@rules, [$name, $val, undef]);
+      }
+    }
+  }
+  else {
+    print "ERR-LIB-FUNC_MAP : 012 : $file must hold a json object, not a list\n";
+  }
+  return (@rules);
+}
+
+my $lineNo = 0;
+foreach my $line ( @lines ) {
+  $lineNo++;
+  chomp($line);
+  $line =~ s/#.*$//;
+  next if ( $line =~ m/^\s*$/ );
+  #<!-- whitespace, commas or colons, so a csv drops straight in -->
+  $line =~ s/^\s+//;
+  $line =~ s/\s+$//;
+  my @f = split(/[\s\,\:]+/, $line);
+  unless ( @f >= 2 ) {
+    print "WARN-LIB-FUNC_MAP : 013 : $file line $lineNo needs a cell and a type, skipped: $line\n";
+    next;
+  }
+  my ($type, $func) = &dbfLibSplitTypeFunc($f[1], $f[2]);
+  unless ( &dbfLibIsTypeWord($type) ) {
+    print "WARN-LIB-FUNC_MAP : 014 : $file line $lineNo names no cell type, skipped: $line\n";
+    next;
+  }
+  push(@rules, [$f[0], $type, $func]);
+}
+
+return (@rules);
+
+}# sub dbfLibReadCellFuncMap
+
+
+#****f* /report_cell_func
+#  report_cell_func
+# FUNCTION
+#  How many loaded cells are combinational, sequential, block or memory, and
+#  which cells they are.  Answers "is this cell combo, seq or a mem macro" for
+#  one cell when given -cell.
+#****
+sub report_cell_func {
+
+my $noOfArguments = @_;
+my $cell;
+my $listCells = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : report_cell_func -cell <cell name>\n";
+  print "                         --cells\n";
+  print "                               list the cells under each type, not just the counts\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-cell")  { $cell = $_[$i+1]; }
+  elsif ($_[$i] eq "--cells"){ $listCells = 1; }
+  elsif ($_[$i] =~ m/^-+\w/) { print "WARN-LIB-FUNC_RPT : 001 : invalid option $_[$i]\n"; }
+}
+
+if ( defined $cell && $cell ne "" ) {
+  unless ( exists $PLDB{$cell} ) {
+    print "ERR-LIB-FUNC_RPT : 002 : cell $cell is not loaded\n";
+    return;
+  }
+  my $type = $PLDB{$cell}->dbMdbGetTypeName;
+  my $func = $PLDB{$cell}->dbMdbGetFunction;
+  my $class = $PLDB{$cell}->dbMdbGetClass;
+  print "$cell : type $type : function $func : class $class\n";
+  return;
+}
+
+my %byType = ();
+foreach my $c ( keys %PLDB ) {
+  push(@{$byType{$PLDB{$c}->dbMdbGetTypeName}}, $c);
+}
+print "INFO-LIB-FUNC_RPT : 003 : cell types over ", scalar(keys %PLDB), " loaded cell(s)\n";
+foreach my $type ( sort keys %byType ) {
+  my @cells = sort @{$byType{$type}};
+  printf("  %-15s %6d\n", $type, scalar(@cells));
+  if ( $listCells ) {
+    foreach my $c ( @cells ) {
+      print "      $c\n";
+    }
+  }
+}
+#<!-- Everything starts life as type 0, so a big combinational count on a
+#     library that was never described is the default showing through, not a
+#     library made entirely of gates. -->
+unless ( exists $byType{sequential} || exists $byType{memory} ) {
+  print "WARN-LIB-FUNC_RPT : 004 : nothing is marked sequential or memory, so no liberty\n";
+  print "WARN-LIB-FUNC_RPT : 005 : and no cell function map has been read yet\n";
+}
+
+}# sub report_cell_func
+
+1;

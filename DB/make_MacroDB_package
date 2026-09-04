@@ -8,7 +8,9 @@ package MacroDB;
 ##                           [lay2]->{rects}
 ##    SN tells whether the spice netlist exists or not 1 means exists 0 means does not exist
 ##    F is cell function
-##    T is cell type sequential or combinational 0 means combi 1 means seq 2 means block
+##    T is cell type: 0 means combinational, 1 means sequential, 2 means block,
+##      3 means memory (a memory is also a block, see dbMdbIsBlock),
+##      4 means physical (filler, tap, decap, tie, antenna, boundary)
 ##    R is pin routibility factor
 ##
 ##    FLAGS Explanation : 0 == signal 
@@ -47,6 +49,7 @@ my $Cellref = {
                     F => "UND",
                     CFP => "UND",
                     T => 0,
+                    TSET => 0,
                     C => 0,
                     OBS => [],
                     OBS_POLYGON => [],
@@ -523,19 +526,88 @@ my $funct = $self->{F};
    print "Function  = $funct\n";
 }#sub dbgMdbGetFunction
 
+#<!-- Memory is tested before block because the words overlap: "mem-macro"
+#     and "register-file" both name a memory, and matching /macro/ first would
+#     file them as a plain hard block. -->
 sub dbMdbSetType {
 my ($self,$type) = @_;
-    if ( $type =~ /comb/ || $type =~ /COMB/ ) { $self->{T} = 0; }
-    elsif ( $type =~ /seq/ || $type =~ /SEQ/ ) { $self->{T} = 1; }
-    elsif ( $type =~ /block/ || $type =~ /BLOCK/ ) { $self->{T} = 2; }
-    else { print "WARN : 0 :  the cell type is unknown\n"; }
+    if ( ! defined $type || $type eq "" ) {
+      print "WARN-MDB-SET_TYPE : 001 : no cell type given\n";
+      return;
+    }
+    #<!-- Coarse library families map onto the four logic types: arithmetic
+    #     cells are combinational, and so are clock buffers, level shifters,
+    #     isolation cells and power switches.  The state holding exceptions in
+    #     those families, an integrated clock gate or a latch based isolation
+    #     cell, name themselves in the function column and read_cell_func_map
+    #     lifts them to sequential from there. -->
+       if ( $type =~ /^phys/i || $type =~ /^fill/i ) { $self->{T} = 4; }
+    elsif ( $type =~ /comb/i || $type =~ /arith/i ||
+            $type =~ /^clock$/i || $type =~ /^clk$/i || $type =~ /^power$/i ) { $self->{T} = 0; }
+    elsif ( $type =~ /seq/i || $type =~ /flop/i || $type =~ /latch/i ) { $self->{T} = 1; }
+    elsif ( $type =~ /mem/i || $type =~ /\bram\b/i || $type =~ /\brom\b/i ||
+            $type =~ /sram/i || $type =~ /dram/i || $type =~ /reg.?file/i ) { $self->{T} = 3; }
+    elsif ( $type =~ /block/i || $type =~ /macro/i ) { $self->{T} = 2; }
+    else { print "WARN-MDB-SET_TYPE : 002 : the cell type $type is unknown\n"; return; }
+    $self->{TSET} = 1;
 }#sub dbMdbSetType
+
+#<!-- Whether anything ever called dbMdbSetType, as opposed to the cell still
+#     sitting at the constructor's 0.  Without this there is no telling "someone
+#     said combinational" from "nobody said anything", since both read as type
+#     0, and a guess would then override a statement. -->
+sub dbMdbTypeIsKnown {
+my ($self) = @_;
+return( $self->{TSET} ? 1 : 0 );
+}#sub dbMdbTypeIsKnown
 
 sub dbMdbGetType {
 my ($self) = @_;
 my $type = $self->{T};
 return($type);
 }#sub dbMdbGetType
+
+#<!-- The spelling of the type, for reports and for anything that would rather
+#     not hard code the numbers. -->
+sub dbMdbGetTypeName {
+my ($self) = @_;
+my $type = $self->{T};
+   if ( $type == 0 ) { return("combinational"); }
+elsif ( $type == 1 ) { return("sequential"); }
+elsif ( $type == 2 ) { return("block"); }
+elsif ( $type == 3 ) { return("memory"); }
+elsif ( $type == 4 ) { return("physical"); }
+return("unknown");
+}#sub dbMdbGetTypeName
+
+sub dbMdbIsCombinational {
+my ($self) = @_;
+return( $self->{T} == 0 ? 1 : 0 );
+}#sub dbMdbIsCombinational
+
+sub dbMdbIsSequential {
+my ($self) = @_;
+return( $self->{T} == 1 ? 1 : 0 );
+}#sub dbMdbIsSequential
+
+#<!-- A memory is a block too, so anything asking "may I treat this as a hard
+#     macro" gets a yes for both.  Ask dbMdbIsMemory to tell them apart. -->
+sub dbMdbIsBlock {
+my ($self) = @_;
+return( ($self->{T} == 2 || $self->{T} == 3) ? 1 : 0 );
+}#sub dbMdbIsBlock
+
+sub dbMdbIsMemory {
+my ($self) = @_;
+return( $self->{T} == 3 ? 1 : 0 );
+}#sub dbMdbIsMemory
+
+#<!-- Filler, tap, decap, antenna, tie and boundary cells: they occupy area but
+#     carry no logic, so a placer should leave them out of its netlist. -->
+sub dbMdbIsPhysical {
+my ($self) = @_;
+return( $self->{T} == 4 ? 1 : 0 );
+}#sub dbMdbIsPhysical
 
 sub dbgMdbGetType {
 my ($self) = @_;
