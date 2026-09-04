@@ -420,6 +420,12 @@ $floorplanmenu->command(
     -underline => 0); # D in Display
 
 $floorplanmenu->separator;
+$floorplanmenu->command(
+    -command => \&hier_pin_planner,
+    -label => "Pin Planner",
+    -underline => 0); # D in Display
+
+$floorplanmenu->separator;
 
 $floorplanbutton->pack(-side=>'left',-fill=>"x", -expand=>1);
 
@@ -519,6 +525,21 @@ $placemenu->separator;
      $placemenu->command(
     -command => \&arrange_macros_popup,
     -label => "Arrange Macros",
+    -underline => 0); # D in Display
+$placemenu->separator;
+     $placemenu->command(
+    -command => \&eplacer_popup,
+    -label => "ePlacer",
+    -underline => 0); # D in Display
+$placemenu->separator;
+     $placemenu->command(
+    -command => \&mincut_placer_popup,
+    -label => "Min-cut Placer",
+    -underline => 0); # D in Display
+$placemenu->separator;
+     $placemenu->command(
+    -command => \&seed_place_popup,
+    -label => "seedPlace",
     -underline => 0); # D in Display
 $placemenu->separator;
      $placemenu->command(

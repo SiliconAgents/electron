@@ -39,6 +39,54 @@ $design_worldcanvas->delete("flight_line");
 ##########################################################################################################
 ################################### Creating popup Gui to run mpl placer #################################
 ##########################################################################################################
+#<!-- Drives place_flat_design: write_flat_graph, then 3RDBIN/flat_graph_placer,
+#     then read_flat_graph_placement.  Replaces Graywolf Placer on the Place
+#     menu, which needed a graywolf binary on PATH. -->
+sub flat_place {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Flat Place");
+  $subWin->geometry("380x170+0+0");
+
+  my $fanoutLimit = "";
+  my ($keepFiles, $writeOnly, $legalize) = ("", "", "");
+
+  my $fanoutFrame = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $optFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $noteFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $buttonFrame = $subWin->Frame()->pack(-side => 'bottom');
+
+  $fanoutFrame->Label(-text => "Fanout limit ")->pack(-side=>'left');
+  $fanoutFrame->Entry(-textvariable => \$fanoutLimit, -width=>8)->pack(-side=>'left');
+
+  $optFrame->Checkbutton(-text => "keep graph files", -variable => \$keepFiles,
+                         -onvalue => "--keep", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "write only", -variable => \$writeOnly,
+                         -onvalue => "--write_only", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  #<!-- off by default: the grid snap discards the embedding's own positions and
+  #     is not row legalisation, that is legalizePlace -->
+  $optFrame->Checkbutton(-text => "grid snap", -variable => \$legalize,
+                         -onvalue => "--legalize", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $noteFrame->Label(-text => "leaves a layout plot in <top>.png",
+                    -font=>"Times 8")->pack(-side=>'left');
+
+  $buttonFrame->Button(-text=>'Run', -command => sub {
+                         my @args = ();
+                         if ( $fanoutLimit =~ m/^\d+$/ && $fanoutLimit > 0 ) {
+                           push(@args, "-fanout_limit", $fanoutLimit);
+                         }
+                         if ( $legalize  ne "" ) { push(@args, $legalize); }
+                         if ( $keepFiles ne "" ) { push(@args, $keepFiles); }
+                         if ( $writeOnly ne "" ) { push(@args, $writeOnly); }
+                         &place_flat_design(@args);
+                         $subWin->destroy;
+                       })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel', -command => sub {$subWin->destroy;})->pack(-side=>"left");
+
+}#sub flat_place
 
 sub create_hPlace_popup {
 my $popupgui = MainWindow->new();
@@ -53,6 +101,313 @@ my $Frame2 = $popupgui->Frame()->pack(-side=>'bottom');
    $Frame2->Button(-text=>"Cancel", -padx=>0,-pady=>0,-command=>sub{$popupgui->destroy;})->pack(-side=>"left");
 }#sub create_hPlace_popup 
 
+##########################################################################################################
+################################ Creating popup Gui to run the ePlacer ###################################
+##########################################################################################################
+#<!-- Drives eplacer: write_flat_graph, then 3RDBIN/eplacer, then
+#     read_flat_graph_placement.  Needs the graph as well as the nodefile,
+#     because eplace trades wirelength against density and the wirelength comes
+#     from the edge list.  Nodes the database marks FIXED stay put, and placed
+#     nodes keep their locations so the placer spreads density out from the
+#     current placement instead of starting over. -->
+sub eplacer_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("ePlacer");
+  $subWin->geometry("330x230+0+0");
+
+  my ($iters, $density, $maxDisp, $fanout) = ("", "", "", "");
+  my $fix = "status";
+  my ($keepFiles, $writeOnly) = ("", "");
+
+  my $iterFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $densFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $dispFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $fanFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $fixFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $optFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $noteFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $buttonFrame = $subWin->Frame()->pack(-side => 'bottom');
+
+  $iterFrame->Label(-text => "Iterations       ")->pack(-side=>'left');
+  $iterFrame->Entry(-textvariable => \$iters, -width=>8)->pack(-side=>'left');
+  $densFrame->Label(-text => "Target density   ")->pack(-side=>'left');
+  $densFrame->Entry(-textvariable => \$density, -width=>8)->pack(-side=>'left');
+  $dispFrame->Label(-text => "Max disp    (um) ")->pack(-side=>'left');
+  $dispFrame->Entry(-textvariable => \$maxDisp, -width=>8)->pack(-side=>'left');
+  $fanFrame->Label(-text  => "Fanout limit     ")->pack(-side=>'left');
+  $fanFrame->Entry(-textvariable => \$fanout, -width=>8)->pack(-side=>'left');
+
+  $fixFrame->Label(-text => "Hold ")->pack(-side=>'left');
+  $fixFrame->Optionmenu(-variable => \$fix,
+                        -options => [qw/status none ports macros ports+macros/],
+                        )->pack(-side=>'left');
+
+  $optFrame->Checkbutton(-text => "keep files", -variable => \$keepFiles,
+                         -onvalue => "--keep", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "write only", -variable => \$writeOnly,
+                         -onvalue => "--write_only", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $noteFrame->Label(-text => "starts from the current placement, FIXED nodes stay",
+                    -font=>"Times 8")->pack(-side=>'left');
+
+  $buttonFrame->Button(-text=>'Run', -command => sub {
+                         my @args = ();
+                         if ( $iters   =~ m/^\d+$/ )            { push(@args, "-iters", $iters); }
+                         if ( $density =~ m/^\d+(\.\d+)?$/ )    { push(@args, "-target_density", $density); }
+                         if ( $maxDisp =~ m/^\d+(\.\d+)?$/ )    { push(@args, "-max_displacement", $maxDisp); }
+                         if ( $fanout  =~ m/^\d+$/ && $fanout > 0 ) { push(@args, "-fanout_limit", $fanout); }
+                         if ( defined $fix && $fix ne "" )      { push(@args, "-fix", $fix); }
+                         if ( $keepFiles ne "" ) { push(@args, $keepFiles); }
+                         if ( $writeOnly ne "" ) { push(@args, $writeOnly); }
+                         &eplacer(@args);
+                         $subWin->destroy;
+                       })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel', -command => sub {$subWin->destroy;})->pack(-side=>"left");
+
+}#sub eplacer_popup
+
+
+#<!-- Min-cut bisection.  Same files and same seeding as the ePlacer popup, so
+#     the two can be run one after the other; what differs is the knobs, since
+#     mincut has no iteration count or displacement cap.  Leaf and passes are
+#     the two that matter: leaf 1 is the most uniform spread, and passes 0 skips
+#     Fiduccia-Mattheyses refinement and cuts on coordinates alone, which is
+#     much faster but ignores the netlist. -->
+sub mincut_placer_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Min-cut Placer");
+  $subWin->geometry("330x260+0+0");
+
+  my ($leaf, $passes, $tolerance, $density, $macroArea, $fanout) = ("", "", "", "", "", "");
+  my $fix = "status";
+  my ($keepFiles, $writeOnly) = ("", "");
+
+  my $leafFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $passFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $tolFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $densFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $macroFrame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $fanFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $fixFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $optFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $noteFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $buttonFrame = $subWin->Frame()->pack(-side => 'bottom');
+
+  $leafFrame->Label(-text  => "Leaf cells       ")->pack(-side=>'left');
+  $leafFrame->Entry(-textvariable => \$leaf, -width=>8)->pack(-side=>'left');
+  $passFrame->Label(-text  => "FM passes        ")->pack(-side=>'left');
+  $passFrame->Entry(-textvariable => \$passes, -width=>8)->pack(-side=>'left');
+  $tolFrame->Label(-text   => "Area tolerance   ")->pack(-side=>'left');
+  $tolFrame->Entry(-textvariable => \$tolerance, -width=>8)->pack(-side=>'left');
+  $densFrame->Label(-text  => "Target density   ")->pack(-side=>'left');
+  $densFrame->Entry(-textvariable => \$density, -width=>8)->pack(-side=>'left');
+  $macroFrame->Label(-text => "Macro area (um2) ")->pack(-side=>'left');
+  $macroFrame->Entry(-textvariable => \$macroArea, -width=>8)->pack(-side=>'left');
+  $fanFrame->Label(-text   => "Fanout limit     ")->pack(-side=>'left');
+  $fanFrame->Entry(-textvariable => \$fanout, -width=>8)->pack(-side=>'left');
+
+  $fixFrame->Label(-text => "Hold ")->pack(-side=>'left');
+  $fixFrame->Optionmenu(-variable => \$fix,
+                        -options => [qw/status none ports macros ports+macros/],
+                        )->pack(-side=>'left');
+
+  $optFrame->Checkbutton(-text => "keep files", -variable => \$keepFiles,
+                         -onvalue => "--keep", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "write only", -variable => \$writeOnly,
+                         -onvalue => "--write_only", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $noteFrame->Label(-text => "uniform density by construction, FIXED nodes stay",
+                    -font=>"Times 8")->pack(-side=>'left');
+
+  $buttonFrame->Button(-text=>'Run', -command => sub {
+                         my @args = ();
+                         if ( $leaf      =~ m/^\d+$/ && $leaf > 0 )   { push(@args, "-leaf", $leaf); }
+                         #<!-- 0 is a real value for passes, so test the string -->
+                         if ( $passes    =~ m/^\d+$/ )                { push(@args, "-passes", $passes); }
+                         if ( $tolerance =~ m/^\d*\.?\d+$/ )          { push(@args, "-tolerance", $tolerance); }
+                         if ( $density   =~ m/^\d*\.?\d+$/ )          { push(@args, "-target_density", $density); }
+                         if ( $macroArea =~ m/^\d*\.?\d+$/ )          { push(@args, "-macro_area", $macroArea); }
+                         if ( $fanout    =~ m/^\d+$/ && $fanout > 0 ) { push(@args, "-fanout_limit", $fanout); }
+                         if ( defined $fix && $fix ne "" )            { push(@args, "-fix", $fix); }
+                         if ( $keepFiles ne "" ) { push(@args, $keepFiles); }
+                         if ( $writeOnly ne "" ) { push(@args, $writeOnly); }
+                         &mincut_placer(@args);
+                         $subWin->destroy;
+                       })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel', -command => sub {$subWin->destroy;})->pack(-side=>"left");
+
+}#sub mincut_placer_popup
+
+
+#<!-- Seed placement through an anchor hypergraph.  Two stages behind one
+#     button, so the popup is split the same way: the top group shapes the
+#     hypergraph, the bottom group places it.
+#
+#     Trust types is left on "auto" on purpose.  It decides whether the anchor
+#     stage believes proton's TYPE= column about what is a flop, and forcing it
+#     on with an undescribed library hides every flop while forcing it off
+#     throws away a good liberty.  seedPlace works it out from the database and
+#     prints which way it went. -->
+sub seed_place_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Seed Placer");
+  $subWin->geometry("360x400+0+0");
+
+  my ($minEdge, $maxEdge, $maxCone, $blockArea, $seqRegex) = ("", "", "", "", "");
+  my ($iters, $density, $margin, $maxDegree, $fanout) = ("", "", "", "", "");
+  my $split = "equal";
+  my $breakLoops = "greedy";
+  my $trust = "auto";
+  my $fix = "block+port";
+  my ($noPortAnchors, $noFillers, $keepFiles, $writeOnly) = ("", "", "", "");
+
+  $subWin->Label(-text => "anchor hypergraph", -font=>"Times 10 bold",
+                 -foreground=>"navy")->pack(-side=>'top', -anchor=>'w');
+  my $splitFrame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $edgeFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $coneFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $areaFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $seqFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $loopFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $trustFrame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $anchOptFrame= $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+
+  $subWin->Label(-text => "placement", -font=>"Times 10 bold",
+                 -foreground=>"navy")->pack(-side=>'top', -anchor=>'w');
+  my $iterFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $densFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $margFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $degFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $fixFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $fanFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $optFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $noteFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $buttonFrame = $subWin->Frame()->pack(-side => 'bottom');
+
+  $splitFrame->Label(-text => "Area split     ")->pack(-side=>'left');
+  $splitFrame->Optionmenu(-variable => \$split,
+                          -options => [qw/equal flow/])->pack(-side=>'left');
+  $edgeFrame->Label(-text  => "Edge anchors min/max ")->pack(-side=>'left');
+  $edgeFrame->Entry(-textvariable => \$minEdge, -width=>5)->pack(-side=>'left');
+  $edgeFrame->Entry(-textvariable => \$maxEdge, -width=>5)->pack(-side=>'left');
+  $coneFrame->Label(-text  => "Max cone       ")->pack(-side=>'left');
+  $coneFrame->Entry(-textvariable => \$maxCone, -width=>8)->pack(-side=>'left');
+  $areaFrame->Label(-text  => "Block area (um2) ")->pack(-side=>'left');
+  $areaFrame->Entry(-textvariable => \$blockArea, -width=>8)->pack(-side=>'left');
+  $seqFrame->Label(-text   => "Seq name regex ")->pack(-side=>'left');
+  $seqFrame->Entry(-textvariable => \$seqRegex, -width=>16)->pack(-side=>'left');
+  $loopFrame->Label(-text  => "Break loops    ")->pack(-side=>'left');
+  $loopFrame->Optionmenu(-variable => \$breakLoops,
+                         -options => [qw/greedy dfs none/])->pack(-side=>'left');
+  $trustFrame->Label(-text => "Trust TYPE=    ")->pack(-side=>'left');
+  $trustFrame->Optionmenu(-variable => \$trust,
+                          -options => [qw/auto trust ignore/])->pack(-side=>'left');
+  $anchOptFrame->Checkbutton(-text => "no port anchors", -variable => \$noPortAnchors,
+                         -onvalue => "--no_port_anchors", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $iterFrame->Label(-text => "Iterations     ")->pack(-side=>'left');
+  $iterFrame->Entry(-textvariable => \$iters, -width=>8)->pack(-side=>'left');
+  $densFrame->Label(-text => "Target density ")->pack(-side=>'left');
+  $densFrame->Entry(-textvariable => \$density, -width=>8)->pack(-side=>'left');
+  $margFrame->Label(-text => "Edge margin    ")->pack(-side=>'left');
+  $margFrame->Entry(-textvariable => \$margin, -width=>8)->pack(-side=>'left');
+  $degFrame->Label(-text  => "Max edge pins  ")->pack(-side=>'left');
+  $degFrame->Entry(-textvariable => \$maxDegree, -width=>8)->pack(-side=>'left');
+  $fixFrame->Label(-text => "Hold ")->pack(-side=>'left');
+  $fixFrame->Optionmenu(-variable => \$fix,
+                        -options => ["block+port", "block", "port", "status", "none"],
+                        )->pack(-side=>'left');
+  $fanFrame->Label(-text  => "Fanout limit   ")->pack(-side=>'left');
+  $fanFrame->Entry(-textvariable => \$fanout, -width=>8)->pack(-side=>'left');
+
+  $optFrame->Checkbutton(-text => "no fillers", -variable => \$noFillers,
+                         -onvalue => "--no_fillers", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "keep files", -variable => \$keepFiles,
+                         -onvalue => "--keep", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "write only", -variable => \$writeOnly,
+                         -onvalue => "--write_only", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $noteFrame->Label(-text => "seeds anchors only, follow with ePlacer or Min-cut",
+                    -font=>"Times 8")->pack(-side=>'left');
+
+  $buttonFrame->Button(-text=>'Run', -command => sub {
+                         my @args = ();
+                         if ( defined $split && $split ne "" )        { push(@args, "-split", $split); }
+                         if ( $minEdge   =~ m/^\d+$/ )                { push(@args, "-min_edge", $minEdge); }
+                         if ( $maxEdge   =~ m/^\d+$/ )                { push(@args, "-max_edge", $maxEdge); }
+                         if ( $maxCone   =~ m/^\d+$/ )                { push(@args, "-max_cone", $maxCone); }
+                         if ( $blockArea =~ m/^\d*\.?\d+$/ )          { push(@args, "-block_area", $blockArea); }
+                         if ( $seqRegex ne "" )                       { push(@args, "-seq_regex", $seqRegex); }
+                         if ( defined $breakLoops && $breakLoops ne "" ) { push(@args, "-break_loops", $breakLoops); }
+                         if ( $trust eq "trust" )                     { push(@args, "--trust_types"); }
+                         elsif ( $trust eq "ignore" )                 { push(@args, "--ignore_types"); }
+                         if ( $noPortAnchors ne "" ) { push(@args, $noPortAnchors); }
+                         if ( $iters     =~ m/^\d+$/ )                { push(@args, "-iters", $iters); }
+                         if ( $density   =~ m/^\d*\.?\d+$/ )          { push(@args, "-target_density", $density); }
+                         if ( $margin    =~ m/^\d*\.?\d+$/ )          { push(@args, "-margin", $margin); }
+                         if ( $maxDegree =~ m/^\d+$/ )                { push(@args, "-max_degree", $maxDegree); }
+                         if ( defined $fix && $fix ne "" )            { push(@args, "-fix", $fix); }
+                         if ( $fanout    =~ m/^\d+$/ && $fanout > 0 ) { push(@args, "-fanout_limit", $fanout); }
+                         if ( $noFillers ne "" ) { push(@args, $noFillers); }
+                         if ( $keepFiles ne "" ) { push(@args, $keepFiles); }
+                         if ( $writeOnly ne "" ) { push(@args, $writeOnly); }
+                         &seedPlace(@args);
+                         $subWin->destroy;
+                       })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel', -command => sub {$subWin->destroy;})->pack(-side=>"left");
+
+}#sub seed_place_popup
+
+
+##########################################################################################################
+############################# Creating popup Gui to run mpl placer on hierarchy ##########################
+##########################################################################################################
+sub create_hier_mpl_placer_popup {
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Hier MPL Placer");
+  $popupgui->geometry("250x100+1000+300"); 
+
+  my ($incr,$keeptempFiles) = ("","");
+  my $Frame1 = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x'); 
+  my $Frame2 = $popupgui->Frame()->pack(-side=>'bottom'); 
+
+  $Frame1->Checkbutton(-text => "incr", -variable =>\$incr, -onvalue => "--incr", -font=>"Times 10 bold")->pack(-side =>"left");
+  $Frame2->Button(-text=>"Ok", -font=>"Times 8 bold", -padx=>5,-pady=>5,-command=>sub{
+                     &place_hier_mpl($incr);
+                     $popupgui->destroy;
+                   })->pack(-side=>"left");
+  $Frame2->Button(-text=>"Cancel", -font=>"Times 8 bold", -padx=>5,-pady=>5,-command=>sub{$popupgui->destroy;})->pack(-side=>"left");
+}#sub create_hier_mpl_placer_popup 
+
+
+##############################################################################################################
+############################ popup gui to run graywolf Placer on full hierarchy ##############################
+##############################################################################################################
+sub create_hier_graywolf_placer_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Graywolf Placer");
+  $subWin->geometry("400x150+0+0"); 
+  
+  my $porosity = 0;
+  my $porosityFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  $porosityFrame->Scale(-orient => 'horizontal', -showvalue => 1, -width => 3, -relief => 'flat', -sliderlength => 20,-troughcolor => 'green', -label => "Porosity", -variable => \$porosity, -to => 3, -font =>"Times 12 bold",-borderwidth => 1,-length=>100)->pack(-side=>'top');
+
+  $buttonFrame->Button(-text=>'Run',-command =>sub { 
+                                                     &place_hier_graywolf("-porosity", $porosity); 
+                                                     $subWin->destroy;
+                                                    })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
+}#sub create_hier_graywolf_placer_popup
 
 
 

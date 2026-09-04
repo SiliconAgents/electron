@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Anchor hypergraph seed placer for proton's seedPlace command.
+
+Called as
+
+    seed_placer <graph> <nodefile> <xyout> [--prefix P] [options...]
+
+Two stages, both from pyspark_cad:
+
+  1. anchor_hypergraph.py <graph> <nodefile> -o <prefix>
+       Collapses the gate level DAG onto an anchor-only hypergraph.  Anchors are
+       the things whose position actually matters -- sequential cells, memories,
+       hard blocks and I/O -- and every cone of combinational logic between them
+       becomes one hyperedge, its area charged to the anchors it feeds.  Writes
+       <prefix>.nodefile, <prefix>.graph.txt and <prefix>.hgr.
+
+  2. AnkorPlace.py <prefix>.hgr <prefix>.nodefile -o <csv>
+       Electrostatic global placement of that hypergraph.
+
+then turns the CSV into the "<node> <x> <y>" file read_flat_graph_placement
+expects.
+
+Which nodefile to read it back against
+--------------------------------------
+The anchor nodefile renumbers: it holds only anchors, ids 0..K-1, so the ids in
+the CSV are anchor ids and NOT the ids in the nodefile this was handed.  The
+names carry over unchanged, though, so proton must resolve the result against
+<prefix>.nodefile, which is why that file is left on disk rather than cleaned
+up here.  Passing the original nodefile would silently apply every anchor's
+position to the wrong instance.
+
+What comes back is a seed, not a placement
+------------------------------------------
+Only anchors are placed.  Combinational cells are not nodes in the hypergraph at
+all -- their area is smeared onto the anchors they feed -- so they keep whatever
+position they already had.  Follow this with eplacer or mincut_placer to spread
+the logic around the seeded anchors.
+
+Coordinates are lower left corners throughout, as in every other nodefile in
+this flow, so nothing is translated here.
+
+Either program can be pointed elsewhere with ANCHOR_HYPERGRAPH and ANKOR_PLACE.
+"""
+
+import os
+import subprocess
+import sys
+
+PY_DIR = "/proj_pd/user_dev/rsrivastava/pyspark_cad/python"
+DEFAULT_ANCHOR = os.path.join(PY_DIR, "anchor_hypergraph.py")
+DEFAULT_PLACE = os.path.join(PY_DIR, "AnkorPlace.py")
+
+#<!-- Which stage each option belongs to.  The two programs' option names are
+#     disjoint apart from -o, so one flat table is enough and the caller does
+#     not have to know which program owns what. -->
+ANCHOR_OPTS_VAL = ("--seq-regex", "--mem-regex", "--block-area", "--split",
+                   "--port-area", "--max-cone", "--min-edge", "--max-edge",
+                   "--break-loops", "--engine", "--graphml")
+ANCHOR_OPTS_FLAG = ("--no-port-anchors", "--trust-types", "--ignore-types")
+PLACE_OPTS_VAL = ("--fix", "--grid", "--max-bins", "--iters",
+                  "--target-density", "--stop-overflow", "--gamma",
+                  "--gamma-min", "--lambda-growth", "--margin",
+                  "--max-degree", "--workers", "--seed")
+PLACE_OPTS_FLAG = ("--no-fillers",)
+
+
+def die(msg):
+    sys.stderr.write("ERR-SEED_PLACE : %s\n" % msg)
+    sys.exit(1)
+
+
+def route(args):
+    """Split the tail of the command line into the two stages' option lists."""
+    anchor, place = [], []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ANCHOR_OPTS_FLAG:
+            anchor.append(a)
+            i += 1
+        elif a in PLACE_OPTS_FLAG:
+            place.append(a)
+            i += 1
+        elif a in ANCHOR_OPTS_VAL or a in PLACE_OPTS_VAL:
+            if i + 1 >= len(args):
+                die("%s needs a value" % a)
+            (anchor if a in ANCHOR_OPTS_VAL else place).extend([a, args[i + 1]])
+            i += 2
+        else:
+            die("unknown option %s\n"
+                "                  anchor stage: %s %s\n"
+                "                  place stage : %s %s"
+                % (a, " ".join(ANCHOR_OPTS_VAL), " ".join(ANCHOR_OPTS_FLAG),
+                   " ".join(PLACE_OPTS_VAL), " ".join(PLACE_OPTS_FLAG)))
+    return anchor, place
+
+
+def run(cmd):
+    sys.stderr.write("INFO-SEED_PLACE : running %s\n" % " ".join(cmd))
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        die("%s exited with status %d" % (os.path.basename(cmd[1]), rc))
+
+
+def main(argv):
+    args = argv[1:]
+    prefix = None
+    if "--prefix" in args:
+        i = args.index("--prefix")
+        if i + 1 >= len(args):
+            die("--prefix needs a value")
+        prefix = args[i + 1]
+        args = args[:i] + args[i + 2:]
+
+    if len(args) < 3:
+        sys.stderr.write(__doc__)
+        sys.stderr.write("\nusage: seed_placer <graph> <nodefile> <xyout> "
+                         "[--prefix P] [options]\n")
+        return 1
+
+    graph, nodefile, xyout = args[0], args[1], args[2]
+    anchorOpts, placeOpts = route(args[3:])
+
+    for f in (graph, nodefile):
+        if not os.path.exists(f):
+            die("%s does not exist" % f)
+
+    anchorProg = os.environ.get("ANCHOR_HYPERGRAPH", DEFAULT_ANCHOR)
+    placeProg = os.environ.get("ANKOR_PLACE", DEFAULT_PLACE)
+    for p, env in ((anchorProg, "ANCHOR_HYPERGRAPH"), (placeProg, "ANKOR_PLACE")):
+        if not os.path.exists(p):
+            die("%s not found\n"
+                "                  set %s to point at it" % (p, env))
+
+    if prefix is None:
+        prefix = os.path.splitext(os.path.basename(graph))[0] + ".anchors"
+    hgrFile = prefix + ".hgr"
+    anchorNode = prefix + ".nodefile"
+    csv = prefix + ".placement.csv"
+    png = prefix + ".png"
+
+    #<!-- stale outputs from an earlier run would be read back as if they were
+    #     this one, and stage 2 would happily place last night's hypergraph -->
+    for f in (hgrFile, anchorNode, csv, xyout):
+        if os.path.exists(f):
+            os.unlink(f)
+
+    run(["python3", anchorProg, graph, nodefile, "-o", prefix] + anchorOpts)
+    for f in (hgrFile, anchorNode):
+        if not os.path.exists(f):
+            die("%s produced no %s" % (os.path.basename(anchorProg), f))
+
+    run(["python3", placeProg, hgrFile, anchorNode, "-o", csv,
+         "--plot", png] + placeOpts)
+    if not os.path.exists(csv):
+        die("%s produced no %s" % (os.path.basename(placeProg), csv))
+
+    # id,name,kind,width,height,status,x,y,dx,dy,type -> "<node> <x> <y>"
+    nout = 0
+    nfixed = 0
+    try:
+        with open(csv) as fin, open(xyout, "w") as fh:
+            fh.write("# <anchor node> <x> <y> in microns, lower left corners\n")
+            fh.write("# node ids are the anchor nodefile's, read this against "
+                     "%s\n" % anchorNode)
+            first = True
+            for line in fin:
+                line = line.strip()
+                if not line:
+                    continue
+                if first:
+                    first = False
+                    if line.lower().startswith("id,"):
+                        continue
+                f = line.split(",")
+                if len(f) < 8:
+                    continue
+                try:
+                    nid = f[0]
+                    x, y = float(f[6]), float(f[7])
+                except ValueError:
+                    continue
+                if f[5] == "FIXED":
+                    nfixed += 1
+                fh.write("%s %.4f %.4f\n" % (nid, x, y))
+                nout += 1
+    except IOError as exc:
+        die("cannot write %s: %s" % (xyout, exc))
+
+    if nout == 0:
+        die("%s held no usable rows" % csv)
+
+    sys.stderr.write("INFO-SEED_PLACE : wrote %d anchors to %s, %d of them held "
+                     "fixed\n" % (nout, xyout, nfixed))
+    sys.stderr.write("INFO-SEED_PLACE : read it back against %s\n" % anchorNode)
+    sys.stderr.write("INFO-SEED_PLACE : layout plot in %s\n" % png)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

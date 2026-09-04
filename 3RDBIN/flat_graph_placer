@@ -10,11 +10,17 @@ placer over the edge list, then turns that placer's CSV into the
 "<node> <x> <y>" file read_flat_graph_placement expects.
 
 The embedding placer knows nothing about the die: it reads only the edge list,
-and its output is in its own space.  With --legalize the coordinates are grid
-slots, a column index and a row index; without it they are normalised embedding
-coordinates.  Neither is microns.  This wrapper therefore reads DIEAREA out of
-the nodefile and maps the placer's bounding box onto it, which is the only
-reason the nodefile is passed in at all.
+and its output is in its own space: normalised embedding coordinates, or, if
+--legalize is asked for, grid slots meaning a column index and a row index.
+Neither is microns.  This wrapper therefore reads DIEAREA out of the nodefile
+and maps the placer's bounding box onto it, which is the only reason the
+nodefile is passed in at all.
+
+--legalize is NOT passed by default.  Snapping to a unique slot on a near
+square grid throws away the continuous positions the embedding produced, and
+it is not row legalisation in the placement sense either, since the placer has
+no cell sizes.  Legalising properly is legalizePlace and place_output_fine_tune
+inside proton.  Pass --legalize through if you want the grid snap anyway.
 
 The mapping scales each axis independently so the result fills the die.  That
 does not preserve the aspect ratio of the embedding, which is deliberate: a
@@ -64,9 +70,17 @@ def read_sizes(nodefile):
                 f = line.split()
                 if len(f) >= 5:
                     try:
-                        sizes[f[1]] = (float(f[3]), float(f[4]))
+                        wh = (float(f[3]), float(f[4]))
                     except ValueError:
                         continue
+                    #<!-- Keyed by BOTH the node id and the name.  The graph
+                    #     write_flat_graph produces holds node numbers, so the
+                    #     placer echoes numbers back in the CSV, but a hand
+                    #     written graph may use names.  Keying only by name meant
+                    #     the size lookup silently missed on every real run and
+                    #     no cell got inset from the die edge. -->
+                    sizes[f[0]] = wh
+                    sizes[f[1]] = wh
     except IOError as exc:
         die("cannot read %s: %s" % (nodefile, exc))
     return sizes
@@ -129,7 +143,6 @@ def main(argv):
 
     cmd = ["python3", placer,
            "-m", "flow",
-           "--legalize",
            "--plot", png,
            "-o", csv,
            graph] + extra

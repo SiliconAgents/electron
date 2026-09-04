@@ -34,6 +34,67 @@
 #                       the same driver.  Nets with no driver write nothing.
 #
 #****
+#<!-- The node type label written into the nodefile, so a placer can tell a
+#     flop from a gate from a memory without reading liberty itself.
+#
+#     Type 0 is both "combinational" and "nobody ever said", since that is what
+#     MacroDB::new starts every cell at.  Calling an undescribed library
+#     combinational would be a lie the placers would then act on, so a cell is
+#     only labelled combi when something actually described it -- a function
+#     from liberty or from read_cell_func_map.  Otherwise the LEF CLASS is the
+#     last resort, and failing that the label is und.
+#
+#     Kept as one sub so every placer's nodefile agrees: they all go through
+#     write_flat_graph. -->
+sub dbfFlatNodeType {
+
+my $cellref = $_[0];
+unless ( defined $cellref && exists $PLDB{$cellref} ) {
+  return ("und");
+}
+
+#<!-- An explicit statement wins over every guess below: liberty's ff group,
+#     read_cell_func_map, read_footprint and analyse_library all call
+#     dbMdbSetType, and dbMdbTypeIsKnown is how "someone said combinational" is
+#     told apart from "nobody said anything", which are the same type 0. -->
+my $type = $PLDB{$cellref}->dbMdbGetType;
+if ( $PLDB{$cellref}->dbMdbTypeIsKnown ) {
+  if ( $type == 3 ) { return ("mem"); }
+  if ( $type == 1 ) { return ("seq"); }
+  if ( $type == 2 ) { return ("block"); }
+  if ( $type == 4 ) { return ("phys"); }
+  return ("combi");
+}
+
+#<!-- nothing set a type, so guess, and say und rather than guess wrongly -->
+my $class = $PLDB{$cellref}->dbMdbGetClass;
+if ( defined $class && $class =~ m/^BLOCK/ ) {
+  return ("block");
+}
+
+#<!-- A clock pin settles it before the function string gets a say.  read_lib
+#     only calls dbMdbSetType when the liberty cell carries an ff or a latch
+#     group; a flop modelled some other way, a state table say, falls through to
+#     make_rw_lib:3203, which sets a function off the output pin expression and
+#     no type at all.  That left DFF and SDFF sitting at type 0 with a function,
+#     which the function test below would report as combi.  Nothing with a clock
+#     pin is combinational.  The flag comes from liberty, and from LEF USE CLOCK
+#     when there is no liberty at all. -->
+foreach my $pin ( $PLDB{$cellref}->dbMdbGetPins ) {
+  if ( $PLDB{$cellref}->dbMdbGetPinIsClock($pin) ) {
+    return ("seq");
+  }
+}
+
+my $func = $PLDB{$cellref}->dbMdbGetFunction;
+if ( defined $func && $func ne "" && $func ne "UND" ) {
+  return ("combi");
+}
+return ("und");
+
+}# sub dbfFlatNodeType
+
+
 sub write_flat_graph {
 
 use Benchmark;
@@ -110,6 +171,7 @@ unless ( defined $rowHeight && $rowHeight > 0 ) {
 %FLAT_NODE_NUM = ();
 my @nodeLines = ();
 my $nodeCnt = 0;
+my %typeCnt = ();
 
 foreach my $port ( sort keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
   $FLAT_NODE_NUM{$port} = $nodeCnt;
@@ -117,6 +179,7 @@ foreach my $port ( sort keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
   my $status = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetStatus;
   #<!-- PortDB stores status as a number: 3 FIXED, 2 PLACED, 1 UNPLACED -->
   my $line = "$nodeCnt $port PORT 0 0 ";
+  $typeCnt{port}++;
   if ( $status == 3 ) {
     my @loc = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetLoc;
     my $px = (defined $loc[0]) ? $loc[0] / $dbu : 0;
@@ -132,6 +195,7 @@ foreach my $port ( sort keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
   else {
     $line .= "UNPLACED";
   }
+  $line .= " TYPE=port";
   push(@nodeLines, $line);
   $nodeCnt++;
 }
@@ -173,6 +237,13 @@ foreach my $inst ( sort keys %COMP_ALREADY ) {
   else {
     $line .= "UNPLACED";
   }
+  #<!-- trailing and self describing on purpose.  Every reader of this file
+  #     slices fields 0..5 and takes 6,7 as x,y only when there are at least
+  #     eight of them, so a keyword token on the end cannot be mistaken for a
+  #     coordinate whether or not the node carries a location. -->
+  my $nodeType = &dbfFlatNodeType($cellref);
+  $line .= " TYPE=$nodeType";
+  $typeCnt{$nodeType}++;
   push(@nodeLines, $line);
   $nodeCnt++;
 }
@@ -184,8 +255,10 @@ unless ( open(WRITE_FLAT_NODE, ">$nodeFile") ) {
 }
 print WRITE_FLAT_NODE "# flat placement nodes for $TOP_MODULE, written by proton\n";
 print WRITE_FLAT_NODE "# all coordinates and dimensions are in microns\n";
-print WRITE_FLAT_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>]\n";
+print WRITE_FLAT_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<node type>\n";
 print WRITE_FLAT_NODE "# a status of FIXED means the placer must not move the node\n";
+print WRITE_FLAT_NODE "# node type is one of combi seq mem block phys port, or und when nothing\n";
+print WRITE_FLAT_NODE "#   described the cell -- read a liberty or a cell function map to fill it in\n";
 print WRITE_FLAT_NODE "DBU $dbu\n";
 print WRITE_FLAT_NODE "DIEAREA $dieLlx $dieLly $dieUrx $dieUry\n";
 print WRITE_FLAT_NODE "ROWHEIGHT $rowHeight\n";
@@ -195,6 +268,15 @@ foreach my $line ( @nodeLines ) {
 }
 close(WRITE_FLAT_NODE);
 print "INFO-PL_FLAT_GRPH : 009 : wrote $nodeCnt nodes of $TOP_MODULE to $nodeFile\n";
+my @typeSummary = ();
+foreach my $t ( sort keys %typeCnt ) {
+  push(@typeSummary, "$t $typeCnt{$t}");
+}
+print "INFO-PL_FLAT_GRPH : 014 : node types: ", join(", ", @typeSummary), "\n";
+if ( exists $typeCnt{und} && $typeCnt{und} > 0 ) {
+  print "WARN-PL_FLAT_GRPH : 015 : $typeCnt{und} node(s) have no known function, so no placer\n";
+  print "WARN-PL_FLAT_GRPH : 016 : can tell them apart -- read_lib or read_cell_func_map fills this in\n";
+}
 
 #<!-- Consumers that only need geometry, macro_arranger among them, never read
 #     the graph.  Writing it means walking every net, which is the expensive
@@ -754,10 +836,12 @@ my $placer;
 my $fanoutLimit = 0;
 my $writeOnly = 0;
 my $keepFiles = 0;
+my $legalize = 0;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : place_flat_design -placer <path to flat graph placer>\n";
   print "                          -fanout_limit <high fan out threshold>\n";
+  print "                          --legalize\n";
   print "                          --write_only\n";
   print "                          --keep\n";
   return;
@@ -765,6 +849,7 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
 for (my $i = 0; $i < $noOfArguments; $i++) {
   if    ($_[$i] eq "-placer")       { $placer = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit") { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--legalize")    { $legalize = 1; }
   elsif ($_[$i] eq "--write_only")  { $writeOnly = 1; }
   elsif ($_[$i] eq "--keep")        { $keepFiles = 1; }
   elsif ($_[$i] =~ m/^-+\w/)        { print "WARN-PL_FLAT_DES : 001 : invalid option $_[$i]\n"; }
@@ -809,7 +894,15 @@ unless ( -x $placer ) {
 }
 
 print "INFO-PL_FLAT_DES : 007 : placing $TOP_MODULE with $placer\n";
-my $rc = system("$placer $graphFile $nodeFile $xyFile");
+#<!-- the embedding placer's --legalize snaps to a unique slot on a near square
+#     grid, which discards the continuous positions it just computed and is not
+#     row legalisation anyway, since it has no cell sizes.  Off unless asked for;
+#     legalizePlace and place_output_fine_tune are the real legalisers. -->
+my $placerCmd = "$placer $graphFile $nodeFile $xyFile";
+if ( $legalize ) {
+  $placerCmd .= " --legalize";
+}
+my $rc = system($placerCmd);
 if ( $rc != 0 ) {
   print "ERR-PL_FLAT_DES : 008 : $placer exited with status $rc, no placement read back\n";
   return;
@@ -962,5 +1055,514 @@ my $td = timediff($t1, $t0);
 print "Command arrange_macros took:",timestr($td),"\n";
 
 }# sub arrange_macros
+
+#***** /eplacer
+#  eplacer
+# FUNCTION
+#       Electrostatic global placement of the current top module: writes the
+#       nodefile and the graph, runs eplace over both, and applies the result to
+#       the flat database.
+#
+#       Unlike arrange_macros this needs the connectivity graph as well as the
+#       geometry, because eplace balances wirelength against density and the
+#       wirelength term comes from the edge list.
+#
+#       Nodes the database marks FIXED are preserved: the nodefile carries the
+#       status, the wrapper asks eplace to honour it with --fix status, and
+#       read_flat_graph_placement refuses to move a fixed node even if the
+#       placer returns a new location for it.
+#
+#       Nodes that are already placed keep their locations in the nodefile, so
+#       eplace starts from the current placement and spreads the density out from
+#       there rather than starting over.  That is what keeps the wirelength close
+#       to where it began while the density is smoothed.
+#
+# SYNOPSIS
+#  eplacer
+#
+# INPUTS
+#
+#       options :
+#               -placer <path> : defaults to $PROTON_HOME/3RDBIN/eplacer
+#               -iters <n> : eplace iterations
+#               -target_density <fraction> : density the placer aims for
+#               -max_displacement <um> : cap on how far a node may move
+#               -fanout_limit <n> : passed to write_flat_graph
+#               -fix <none|ports|macros|ports+macros|status> : which nodes to
+#                       hold, defaults to status so the nodefile decides
+#
+#       switches :
+#               --write_only : write the nodefile and graph and stop
+#               --keep : do not delete the intermediate files afterwards
+#
+# OUTPUTS
+#               instance locations in the flat database
+#
+#****
+sub eplacer {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $placer;
+my ($iters, $targetDensity, $maxDisp, $fix);
+my $fanoutLimit = 0;
+my $writeOnly = 0;
+my $keepFiles = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : eplacer -placer <path to the eplace driver>\n";
+  print "                -iters <number of eplace iterations>\n";
+  print "                -target_density <fraction>\n";
+  print "                -max_displacement <microns>\n";
+  print "                -fix <none|ports|macros|ports+macros|status>\n";
+  print "                -fanout_limit <high fan out threshold>\n";
+  print "                --write_only\n";
+  print "                --keep\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-placer")           { $placer = $_[$i+1]; }
+  elsif ($_[$i] eq "-iters")            { $iters = $_[$i+1]; }
+  elsif ($_[$i] eq "-target_density")   { $targetDensity = $_[$i+1]; }
+  elsif ($_[$i] eq "-max_displacement") { $maxDisp = $_[$i+1]; }
+  elsif ($_[$i] eq "-fix")              { $fix = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit")     { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--write_only")      { $writeOnly = 1; }
+  elsif ($_[$i] eq "--keep")            { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)            { print "WARN-PL_EPLACE : 001 : invalid option $_[$i]\n"; }
+}
+
+my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+unless ( defined $placer && $placer ne "" ) {
+  $placer = "$protonHome/3RDBIN/eplacer";
+}
+
+my $nodeFile = "$TOP_MODULE.eplace.nodefile";
+my $graphFile = "$TOP_MODULE.eplace.txt";
+my $xyFile = "$TOP_MODULE.eplace.xy.out";
+
+#<!-- a result from a previous run would be read back as if it were this one -->
+if ( -e $xyFile ) {
+  unlink($xyFile);
+}
+
+my @writeArgs = ("-nodefile", $nodeFile, "-graph", $graphFile);
+if ( $fanoutLimit > 0 ) {
+  push(@writeArgs, "-fanout_limit", $fanoutLimit);
+}
+&write_flat_graph(@writeArgs);
+
+unless ( -e $nodeFile && -e $graphFile ) {
+  print "ERR-PL_EPLACE : 002 : the nodefile and graph were not written, stopping\n";
+  return;
+}
+
+if ( $writeOnly ) {
+  print "INFO-PL_EPLACE : 003 : --write_only given, $nodeFile and $graphFile left in place\n";
+  return;
+}
+
+unless ( -x $placer ) {
+  print "WARN-PL_EPLACE : 004 : eplace driver $placer not found or not executable\n";
+  print "WARN-PL_EPLACE : 005 : $nodeFile and $graphFile have been written, nothing was placed\n";
+  print "WARN-PL_EPLACE : 006 : run it yourself, then read_flat_graph_placement -input $xyFile -nodefile $nodeFile\n";
+  return;
+}
+
+my $cmd = "$placer $graphFile $nodeFile $xyFile";
+if ( defined $iters && $iters ne "" )                 { $cmd .= " --iters $iters"; }
+if ( defined $targetDensity && $targetDensity ne "" ) { $cmd .= " --target-density $targetDensity"; }
+if ( defined $maxDisp && $maxDisp ne "" )             { $cmd .= " --max-displacement $maxDisp"; }
+if ( defined $fix && $fix ne "" )                     { $cmd .= " --fix $fix"; }
+
+print "INFO-PL_EPLACE : 007 : placing $TOP_MODULE with $placer\n";
+my $rc = system($cmd);
+if ( $rc != 0 ) {
+  print "ERR-PL_EPLACE : 008 : eplace exited with status $rc, nothing read back\n";
+  return;
+}
+unless ( -e $xyFile ) {
+  print "ERR-PL_EPLACE : 009 : eplace produced no $xyFile, nothing read back\n";
+  return;
+}
+
+&read_flat_graph_placement("-input", $xyFile, "-nodefile", $nodeFile);
+
+unless ( $keepFiles ) {
+  unlink($nodeFile);
+  unlink($graphFile);
+  unlink($xyFile);
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command eplacer took:",timestr($td),"\n";
+
+}# sub eplacer
+
+
+#****f* /mincut_placer
+#  mincut_placer
+# FUNCTION
+#  Spread the current placement with recursive min-cut bisection.
+#
+#  Same shape as eplacer, and the two read and write the same files, so either
+#  can follow the other.  The difference is what they optimise: eplace solves
+#  wirelength plus a density penalty and meets density approximately, while
+#  mincut partitions the netlist and gets uniform density by construction, at
+#  some cost in wirelength.  Both are seeded by the placement already in the
+#  database and hold whatever is marked FIXED, so running mincut after
+#  arrange_macros leaves the macros where the arranger put them.
+#****
+sub mincut_placer {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $placer;
+my ($leaf, $passes, $tolerance, $targetDensity, $macroArea, $fix);
+my $fanoutLimit = 0;
+my $writeOnly = 0;
+my $keepFiles = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : mincut_placer -placer <path to the mincut driver>\n";
+  print "                      -leaf <movable cells left in a region before it stops splitting>\n";
+  print "                      -passes <Fiduccia-Mattheyses passes per bisection, 0 cuts on coordinates alone>\n";
+  print "                      -tolerance <how far a side may stray from its area target, as a fraction>\n";
+  print "                      -target_density <fraction, reporting only>\n";
+  print "                      -macro_area <um2 above which a node counts as a macro>\n";
+  print "                      -fix <none|ports|macros|ports+macros|status>\n";
+  print "                      -fanout_limit <high fan out threshold>\n";
+  print "                      --write_only\n";
+  print "                      --keep\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-placer")           { $placer = $_[$i+1]; }
+  elsif ($_[$i] eq "-leaf")             { $leaf = $_[$i+1]; }
+  elsif ($_[$i] eq "-passes")           { $passes = $_[$i+1]; }
+  elsif ($_[$i] eq "-tolerance")        { $tolerance = $_[$i+1]; }
+  elsif ($_[$i] eq "-target_density")   { $targetDensity = $_[$i+1]; }
+  elsif ($_[$i] eq "-macro_area")       { $macroArea = $_[$i+1]; }
+  elsif ($_[$i] eq "-fix")              { $fix = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit")     { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--write_only")      { $writeOnly = 1; }
+  elsif ($_[$i] eq "--keep")            { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)            { print "WARN-PL_MINCUT : 001 : invalid option $_[$i]\n"; }
+}
+
+my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+unless ( defined $placer && $placer ne "" ) {
+  $placer = "$protonHome/3RDBIN/mincut_placer";
+}
+
+my $nodeFile = "$TOP_MODULE.mincut.nodefile";
+my $graphFile = "$TOP_MODULE.mincut.txt";
+my $xyFile = "$TOP_MODULE.mincut.xy.out";
+
+#<!-- a result from a previous run would be read back as if it were this one -->
+if ( -e $xyFile ) {
+  unlink($xyFile);
+}
+
+my @writeArgs = ("-nodefile", $nodeFile, "-graph", $graphFile);
+if ( $fanoutLimit > 0 ) {
+  push(@writeArgs, "-fanout_limit", $fanoutLimit);
+}
+&write_flat_graph(@writeArgs);
+
+unless ( -e $nodeFile && -e $graphFile ) {
+  print "ERR-PL_MINCUT : 002 : the nodefile and graph were not written, stopping\n";
+  return;
+}
+
+if ( $writeOnly ) {
+  print "INFO-PL_MINCUT : 003 : --write_only given, $nodeFile and $graphFile left in place\n";
+  return;
+}
+
+unless ( -x $placer ) {
+  print "WARN-PL_MINCUT : 004 : mincut driver $placer not found or not executable\n";
+  print "WARN-PL_MINCUT : 005 : $nodeFile and $graphFile have been written, nothing was placed\n";
+  print "WARN-PL_MINCUT : 006 : run it yourself, then read_flat_graph_placement -input $xyFile -nodefile $nodeFile\n";
+  return;
+}
+
+my $cmd = "$placer $graphFile $nodeFile $xyFile";
+if ( defined $leaf && $leaf ne "" )                   { $cmd .= " --leaf $leaf"; }
+if ( defined $passes && $passes ne "" )               { $cmd .= " --passes $passes"; }
+if ( defined $tolerance && $tolerance ne "" )         { $cmd .= " --tolerance $tolerance"; }
+if ( defined $targetDensity && $targetDensity ne "" ) { $cmd .= " --target-density $targetDensity"; }
+if ( defined $macroArea && $macroArea ne "" )         { $cmd .= " --macro-area $macroArea"; }
+if ( defined $fix && $fix ne "" )                     { $cmd .= " --fix $fix"; }
+
+print "INFO-PL_MINCUT : 007 : placing $TOP_MODULE with $placer\n";
+my $rc = system($cmd);
+if ( $rc != 0 ) {
+  print "ERR-PL_MINCUT : 008 : mincut exited with status $rc, nothing read back\n";
+  return;
+}
+unless ( -e $xyFile ) {
+  print "ERR-PL_MINCUT : 009 : mincut produced no $xyFile, nothing read back\n";
+  return;
+}
+
+&read_flat_graph_placement("-input", $xyFile, "-nodefile", $nodeFile);
+
+unless ( $keepFiles ) {
+  unlink($nodeFile);
+  unlink($graphFile);
+  unlink($xyFile);
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command mincut_placer took:",timestr($td),"\n";
+
+}# sub mincut_placer
+
+
+#<!-- Is the nodefile's TYPE= column worth trusting?
+#
+#     anchor_hypergraph.py has --trust-types, which stops it reclassifying a
+#     cell typed combi as an anchor by name or area.  Its own documentation is
+#     blunt about the risk: right when the column came from a real liberty or
+#     cell function map, and "hides every flop" when it did not.  proton knows
+#     which of those it is, so decide here rather than making the user guess.
+#
+#     Trustworthy means every instantiated cell was classified by something --
+#     no und -- and at least one came out sequential or memory.  A design where
+#     nothing is sequential is either not a real netlist or a library nobody
+#     described, and in both cases the name and area heuristics are the better
+#     bet. -->
+sub dbfFlatTypesAreTrustworthy {
+
+my ($known, $und, $stateful) = (0, 0, 0);
+my %seen = ();
+foreach my $inst ( keys %COMP_ALREADY ) {
+  next unless ( exists $CADB{$inst} );
+  my $cellref = $CADB{$inst}->dbCadbGetCellref;
+  next if ( ! defined $cellref || exists $seen{$cellref} );
+  $seen{$cellref} = 1;
+
+  my $t = &dbfFlatNodeType($cellref);
+  if ( $t eq "und" ) { $und++; next; }
+  $known++;
+  if ( $t eq "seq" || $t eq "mem" ) { $stateful++; }
+}
+return (0, $known, $und, $stateful) if ( $und > 0 || $stateful == 0 );
+return (1, $known, $und, $stateful);
+
+}# sub dbfFlatTypesAreTrustworthy
+
+
+#****f* /seedPlace
+#  seedPlace
+# FUNCTION
+#  Seed placement through an anchor hypergraph, in two stages.
+#
+#  Stage one collapses the flat netlist onto the things whose position actually
+#  matters -- sequential cells, memories, hard blocks and I/O -- and turns every
+#  cone of combinational logic between them into one hyperedge, charging its
+#  area to the anchors it feeds.  Stage two places that much smaller hypergraph
+#  electrostatically.
+#
+#  What comes back is a seed and not a placement: combinational cells are not
+#  nodes in the hypergraph, so they keep the positions they already had.  Run
+#  eplacer or mincut_placer afterwards to spread the logic around the anchors.
+#****
+sub seedPlace {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $placer;
+my ($split, $maxEdge, $minEdge, $blockArea, $seqRegex, $memRegex, $breakLoops,
+    $maxCone, $portArea);
+my ($iters, $targetDensity, $fix, $margin, $maxDegree, $grid, $workers);
+my $noPortAnchors = 0;
+my $noFillers = 0;
+my $trust = -1;   #<!-- -1 means decide from the database -->
+my $fanoutLimit = 0;
+my $writeOnly = 0;
+my $keepFiles = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : seedPlace -placer <path to the seed placer driver>\n";
+  print "        anchor hypergraph stage:\n";
+  print "                  -split <equal|flow>\n";
+  print "                  -min_edge <anchors>   -max_edge <anchors, 0 keeps all>\n";
+  print "                  -max_cone <anchors a cell may feed before it is dropped>\n";
+  print "                  -block_area <um2 above which a node is a hard block anchor>\n";
+  print "                  -seq_regex <instance name pattern marking sequential anchors>\n";
+  print "                  -mem_regex <instance name pattern marking memory anchors>\n";
+  print "                  -break_loops <greedy|dfs|none>\n";
+  print "                  -port_area <skip|absorb>\n";
+  print "                  --no_port_anchors\n";
+  print "                  --trust_types | --ignore_types\n";
+  print "                        default is decided from the database, see below\n";
+  print "        placement stage:\n";
+  print "                  -iters <iterations>   -target_density <fraction>\n";
+  print "                  -fix <block+port|block|port|status|none>\n";
+  print "                  -margin <fraction of the die kept clear at the edge>\n";
+  print "                  -max_degree <hyperedge pins, 0 keeps all>\n";
+  print "                  -grid <GXxGY|auto>    -workers <threads>\n";
+  print "                  --no_fillers\n";
+  print "        both:\n";
+  print "                  -fanout_limit <high fan out threshold for the graph>\n";
+  print "                  --write_only    --keep\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-placer")           { $placer = $_[$i+1]; }
+  elsif ($_[$i] eq "-split")            { $split = $_[$i+1]; }
+  elsif ($_[$i] eq "-min_edge")         { $minEdge = $_[$i+1]; }
+  elsif ($_[$i] eq "-max_edge")         { $maxEdge = $_[$i+1]; }
+  elsif ($_[$i] eq "-max_cone")         { $maxCone = $_[$i+1]; }
+  elsif ($_[$i] eq "-block_area")       { $blockArea = $_[$i+1]; }
+  elsif ($_[$i] eq "-seq_regex")        { $seqRegex = $_[$i+1]; }
+  elsif ($_[$i] eq "-mem_regex")        { $memRegex = $_[$i+1]; }
+  elsif ($_[$i] eq "-break_loops")      { $breakLoops = $_[$i+1]; }
+  elsif ($_[$i] eq "-port_area")        { $portArea = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_port_anchors") { $noPortAnchors = 1; }
+  elsif ($_[$i] eq "--trust_types")     { $trust = 1; }
+  elsif ($_[$i] eq "--ignore_types")    { $trust = 0; }
+  elsif ($_[$i] eq "-iters")            { $iters = $_[$i+1]; }
+  elsif ($_[$i] eq "-target_density")   { $targetDensity = $_[$i+1]; }
+  elsif ($_[$i] eq "-fix")              { $fix = $_[$i+1]; }
+  elsif ($_[$i] eq "-margin")           { $margin = $_[$i+1]; }
+  elsif ($_[$i] eq "-max_degree")       { $maxDegree = $_[$i+1]; }
+  elsif ($_[$i] eq "-grid")             { $grid = $_[$i+1]; }
+  elsif ($_[$i] eq "-workers")          { $workers = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_fillers")      { $noFillers = 1; }
+  elsif ($_[$i] eq "-fanout_limit")     { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--write_only")      { $writeOnly = 1; }
+  elsif ($_[$i] eq "--keep")            { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)            { print "WARN-PL_SEED : 001 : invalid option $_[$i]\n"; }
+}
+
+my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+unless ( defined $placer && $placer ne "" ) {
+  $placer = "$protonHome/3RDBIN/seed_placer";
+}
+
+my $nodeFile = "$TOP_MODULE.seed.nodefile";
+my $graphFile = "$TOP_MODULE.seed.txt";
+my $prefix = "$TOP_MODULE.seed.anchors";
+#<!-- the anchor stage renumbers, so the placement comes back keyed by anchor id
+#     and has to be resolved against the anchor nodefile, not the flat one -->
+my $anchorNodeFile = "$prefix.nodefile";
+my $xyFile = "$TOP_MODULE.seed.xy.out";
+
+if ( -e $xyFile ) {
+  unlink($xyFile);
+}
+
+my @writeArgs = ("-nodefile", $nodeFile, "-graph", $graphFile);
+if ( $fanoutLimit > 0 ) {
+  push(@writeArgs, "-fanout_limit", $fanoutLimit);
+}
+&write_flat_graph(@writeArgs);
+
+unless ( -e $nodeFile && -e $graphFile ) {
+  print "ERR-PL_SEED : 002 : the nodefile and graph were not written, stopping\n";
+  return;
+}
+
+if ( $writeOnly ) {
+  print "INFO-PL_SEED : 003 : --write_only given, $nodeFile and $graphFile left in place\n";
+  return;
+}
+
+unless ( -x $placer ) {
+  print "WARN-PL_SEED : 004 : seed placer driver $placer not found or not executable\n";
+  print "WARN-PL_SEED : 005 : $nodeFile and $graphFile have been written, nothing was placed\n";
+  print "WARN-PL_SEED : 006 : run it yourself, then read_flat_graph_placement -input $xyFile -nodefile $anchorNodeFile\n";
+  return;
+}
+
+#<!-- Settle --trust-types before running anything, and say why: it is the one
+#     switch that decides whether the anchor stage believes proton about what is
+#     a flop, and getting it wrong either way is quiet and expensive. -->
+if ( $trust < 0 ) {
+  my ($ok, $known, $und, $stateful) = &dbfFlatTypesAreTrustworthy();
+  $trust = $ok;
+  if ( $ok ) {
+    print "INFO-PL_SEED : 007 : all $known cell(s) are typed and $stateful are sequential or memory,\n";
+    print "INFO-PL_SEED : 008 : trusting the nodefile TYPE= column\n";
+  }
+  elsif ( $und > 0 ) {
+    print "WARN-PL_SEED : 009 : $und cell(s) have no known type, so the TYPE= column is not trusted\n";
+    print "WARN-PL_SEED : 010 : anchors will be found by instance name and area instead\n";
+    print "WARN-PL_SEED : 011 : read_lib or read_cell_func_map first for a better seed\n";
+  }
+  else {
+    print "WARN-PL_SEED : 012 : no cell is typed sequential or memory, so the TYPE= column is not trusted\n";
+    print "WARN-PL_SEED : 013 : anchors will be found by instance name and area instead\n";
+  }
+}
+
+my $cmd = "$placer $graphFile $nodeFile $xyFile --prefix $prefix";
+#<!-- anchor stage -->
+if ( $trust == 1 )                                    { $cmd .= " --trust-types"; }
+elsif ( $trust == 0 )                                 { $cmd .= " --ignore-types"; }
+if ( defined $split && $split ne "" )                 { $cmd .= " --split $split"; }
+if ( defined $minEdge && $minEdge ne "" )             { $cmd .= " --min-edge $minEdge"; }
+if ( defined $maxEdge && $maxEdge ne "" )             { $cmd .= " --max-edge $maxEdge"; }
+if ( defined $maxCone && $maxCone ne "" )             { $cmd .= " --max-cone $maxCone"; }
+if ( defined $blockArea && $blockArea ne "" )         { $cmd .= " --block-area $blockArea"; }
+if ( defined $seqRegex && $seqRegex ne "" )           { $cmd .= " --seq-regex $seqRegex"; }
+if ( defined $memRegex && $memRegex ne "" )           { $cmd .= " --mem-regex $memRegex"; }
+if ( defined $breakLoops && $breakLoops ne "" )       { $cmd .= " --break-loops $breakLoops"; }
+if ( defined $portArea && $portArea ne "" )           { $cmd .= " --port-area $portArea"; }
+if ( $noPortAnchors )                                 { $cmd .= " --no-port-anchors"; }
+#<!-- placement stage -->
+if ( defined $iters && $iters ne "" )                 { $cmd .= " --iters $iters"; }
+if ( defined $targetDensity && $targetDensity ne "" ) { $cmd .= " --target-density $targetDensity"; }
+if ( defined $fix && $fix ne "" )                     { $cmd .= " --fix $fix"; }
+if ( defined $margin && $margin ne "" )               { $cmd .= " --margin $margin"; }
+if ( defined $maxDegree && $maxDegree ne "" )         { $cmd .= " --max-degree $maxDegree"; }
+if ( defined $grid && $grid ne "" )                   { $cmd .= " --grid $grid"; }
+if ( defined $workers && $workers ne "" )             { $cmd .= " --workers $workers"; }
+if ( $noFillers )                                     { $cmd .= " --no-fillers"; }
+
+print "INFO-PL_SEED : 014 : seed placing $TOP_MODULE with $placer\n";
+my $rc = system($cmd);
+if ( $rc != 0 ) {
+  print "ERR-PL_SEED : 015 : the seed placer exited with status $rc, nothing read back\n";
+  return;
+}
+unless ( -e $xyFile && -e $anchorNodeFile ) {
+  print "ERR-PL_SEED : 016 : the seed placer produced no $xyFile or no $anchorNodeFile, nothing read back\n";
+  return;
+}
+
+&read_flat_graph_placement("-input", $xyFile, "-nodefile", $anchorNodeFile);
+print "INFO-PL_SEED : 017 : anchors are seeded; combinational cells were not placed,\n";
+print "INFO-PL_SEED : 018 : follow with eplacer or mincut_placer to spread the logic\n";
+
+unless ( $keepFiles ) {
+  unlink($nodeFile);
+  unlink($graphFile);
+  unlink($xyFile);
+  unlink($anchorNodeFile);
+  unlink("$prefix.graph.txt");
+  unlink("$prefix.hgr");
+  unlink("$prefix.placement.csv");
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command seedPlace took:",timestr($td),"\n";
+
+}# sub seedPlace
 
 1;
