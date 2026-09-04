@@ -39,7 +39,15 @@ RUN pip install matplotlib
 # scipy is required by pyspark_cad/python/graph_embed_place.py, which proton's
 # flat_graph_placer drives: it imports scipy.sparse, csgraph and sparse.linalg.
 # pandas pulls in numpy but not scipy, so it has to be asked for explicitly.
-RUN pip install numpy scipy pandas psutil openpyxl mysql-connector-python
+# scipy is also what eplace.py, mincut.py and AnkorPlace.py use for their FFT
+# and sparse work.
+#
+# networkx is required by pyspark_cad/python/anchor_hypergraph.py, which proton's
+# seedPlace drives.  Needed for both of its engines, not just --engine networkx:
+# the fast engine does the traversal on scipy CSR but still builds the resulting
+# hypergraph as an nx.Graph.  The imports are inside the functions, so a missing
+# networkx does not fail at startup, it fails partway through a run.
+RUN pip install numpy scipy networkx pandas psutil openpyxl mysql-connector-python
 
 ENV ARTEMIS_HOME=/proj_pd/user_dev/rsrivastava/artemis
 ENV PATH=$ARTEMIS_HOME:$PATH
