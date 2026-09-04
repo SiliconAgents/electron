@@ -185,29 +185,65 @@ my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
 #####   display the ports of the top module  ###
    my $moduleName = $TOP_MODULE;
    foreach my $port ( keys %{$PORTS_ALREADY{$moduleName}} ) {
-           my $status = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetStatus;
+           #<!-- one hash walk for the port object instead of seven -->
+           my $portObj = $PORTS_ALREADY{$moduleName}{$port};
+           my $status = $portObj->dbPortGetStatus;
            if($status == 2 || $status == 3 ) {
-              my @loc = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetLoc;
+              my @loc = $portObj->dbPortGetLoc;
               my ($X,$Y,$orient) = &dbPlaceFindClosestBoundary($loc[0],$loc[1]);
-              $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortSetSide($orient);
-              my $dir = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetDir;
-              my $orient = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetSide;
-              my $defDiffState = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetCompareDefState;
+              #<!-- dbPortSetSide is a plain store and dbPortGetSide reads it
+              #     straight back, so the side just written is still in $orient.
+              #     Re-reading it also masked the earlier declaration. -->
+              $portObj->dbPortSetSide($orient);
+              my $dir = $portObj->dbPortGetDir;
+              my $defDiffState = $portObj->dbPortGetCompareDefState;
               my $x = 20 + $loc[0]*$MulFactor;
               my $y = 20 + $loc[1]*$MulFactor;
               my @poly = dbWGuiCreatePin($x,$y,$orient,$dir);
-              my $desPort;
+              #<!-- tags in the create call: this was a createPolygon whose tag
+              #     was then overwritten by an itemconfigure and put back by an
+              #     addtag, three round trips to Tk for the same two tags -->
               if($defDiffState == 0){
-                 $desPort = $design_worldcanvas->createPolygon($poly[0],$poly[1], $poly[2], $poly[3],$poly[4], $poly[5], -outline => "yellow3", -fill => "yellow3", -stipple => "gray12" , -tags=>$port);
+                 $design_worldcanvas->createPolygon($poly[0],$poly[1], $poly[2], $poly[3],$poly[4], $poly[5], -outline => "yellow3", -fill => "yellow3", -stipple => "gray12" , -tags=>['PORTS', $port]);
               }else{
-                 $desPort = $design_worldcanvas->createPolygon($poly[0],$poly[1], $poly[2], $poly[3],$poly[4], $poly[5], -outline => "skyblue", -fill => "skyblue", -stipple => "gray12" , -tags=>$port);
+                 $design_worldcanvas->createPolygon($poly[0],$poly[1], $poly[2], $poly[3],$poly[4], $poly[5], -outline => "skyblue", -fill => "skyblue", -stipple => "gray12" , -tags=>['PORTS', $port]);
               }
-              $design_worldcanvas->itemconfigure($desPort, -tag =>'PORTS');
-              $design_worldcanvas->addtag($port , "withtag", $desPort);
+              #-------------------- Rajeev added code to display the Port's metal box also ------------------------#
+              #<!-- A port with no layer, or one naming a layer the tech file does
+              #     not have, used to die here on a method call on an undefined
+              #     value, which aborted the whole canvas redraw and left the
+              #     design half drawn.  Skip just this port's metal box and carry
+              #     on: the pin marker above has already been drawn, so the port
+              #     is still visible, and the ports are reported once below. -->
+              my @size = $portObj->dbPortGetSize;
+              my $layer = $portObj->dbPortGetLayer;
+              if ( defined $layer && $layer ne "" && exists $PTDB{$layer} &&
+                   @size >= 2 && defined $size[0] && defined $size[1] ) {
+                 my $color = $PTDB{$layer}->dbTechGetLayerColor;
+                 $_ *= $MulFactor for @size;
+
+                 my @pinRect = dbWGuiCreatePinRect($x,$y,$orient,$dir,$size[0],$size[1]);
+                 print "dislaying pin box for $port at $pinRect[0],$pinRect[1],$pinRect[2],$pinRect[3]\n" if($DEBUG);
+                 $design_worldcanvas->createRectangle($pinRect[0],$pinRect[1],$pinRect[2],$pinRect[3], -outline=>$color, -fill => $color,-stipple => "gray12", -tags=>['PORTS', $port]);
+              }
+              else {
+                 push(@portsNoLayer, $port);
+              }
+              #-------------------------------------------------------------------------------------------------------#
            } #if status is placed or fixed
    }# foreach
 ########  dispay the Instances  #######
 my $pix_size = $design_worldcanvas->pixelSize();
+#<!-- isDisplayTrue divides both extents by the pixel size and compares against
+#     3.  Comparing against 3 pixel sizes instead is the same test without two
+#     divisions and a sub call per instance, on the hottest path in the file. -->
+my $display_limit = 3 * $pix_size;
+#<!-- The cell type and class are constant for a cellref but were being fetched
+#     once per instance.  On a design with many instances of few cells that is
+#     hundreds of thousands of method calls for a handful of distinct answers. -->
+my %inst_ext_tag = ();
+my %inst_is_block = ();
+my $dieShift = ($dieIsCentre == 1) ? 270 : 20;
 for(my $i=0; $i<=$#GCellArray ; $i++) {
    for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
         #my @gcell_bbox = $GCellArray[$i][$j]->dbgGcellGetBBox;
@@ -217,53 +253,48 @@ for(my $i=0; $i<=$#GCellArray ; $i++) {
         my @instList = $GCellArray[$i][$j]->dbgGcellGetInst; 
         my @filtered_inst_array = ();
         foreach my $InstanceName (@instList){
-             my @Inst_bbox = $CADB{$InstanceName}->dbCadbGetbBox;
-             my @location = $CADB{$InstanceName}->dbCadbGetLoc;
-             my $orient =   $CADB{$InstanceName}->dbCadbGetOrient;
-             my $cellref =  $CADB{$InstanceName}->dbCadbGetCellref;
-             my $status =  $CADB{$InstanceName}->dbCadbGetStatus;
-             my $defDiffState = $CADB{$InstanceName}->dbCadbGetCompareDefState;
+             #<!-- one hash lookup for the object, then methods on it, rather than
+             #     re-looking up $CADB{$InstanceName} on every line -->
+             my $instObj = $CADB{$InstanceName};
+             my $cellref =  $instObj->dbCadbGetCellref;
+             my $status =  $instObj->dbCadbGetStatus;
              if(exists $PLDB{$cellref}){
-                my $type = $PLDB{$cellref}->dbMdbGetType;
-                my $InstColor = "red";      
-                my $ext_tag = "";
-                if($type == 0){$ext_tag = "COMBINATIONAL";}
-                if($type == 1){$ext_tag = "SEQUENTIAL";}
-                if($type == 2){$ext_tag = "BLOCK";}
-                if($PLDB{$cellref}->dbMdbGetClass eq "BLOCK") {
-                   $InstColor = "yellow";
-                   $areaOfHardMacro = $areaOfHardMacro + ($Inst_bbox[2]-$Inst_bbox[0])*($Inst_bbox[3]-$Inst_bbox[1]);     
+                #<!-- computed once per cellref, not once per instance -->
+                unless ( exists $inst_ext_tag{$cellref} ) {
+                   my $type = $PLDB{$cellref}->dbMdbGetType;
+                   my $tag = "";
+                   if($type == 0){$tag = "COMBINATIONAL";}
+                   if($type == 1){$tag = "SEQUENTIAL";}
+                   if($type == 2){$tag = "BLOCK";}
+                   $inst_ext_tag{$cellref} = $tag;
+                   $inst_is_block{$cellref} = ($PLDB{$cellref}->dbMdbGetClass eq "BLOCK") ? 1 : 0;
+                }
+                my $ext_tag = $inst_ext_tag{$cellref};
+                my $InstColor = $inst_is_block{$cellref} ? "yellow" : "red";
+
+                my @Inst_bbox = $instObj->dbCadbGetbBox;
+                if($inst_is_block{$cellref}) {
+                   $areaOfHardMacro = $areaOfHardMacro + ($Inst_bbox[2]-$Inst_bbox[0])*($Inst_bbox[3]-$Inst_bbox[1]);
                 }else{
                    $areaOfStdCell = $areaOfStdCell + ($Inst_bbox[2]-$Inst_bbox[0])*($Inst_bbox[3]-$Inst_bbox[1]);
                 }
                 if($status eq "PLACED" || $status eq "FIXED" ) {
-                   my $llx = $Inst_bbox[0]*$MulFactor;
-                   my $lly = $Inst_bbox[1]*$MulFactor;
-                   my $urx = $Inst_bbox[2]*$MulFactor;
-                   my $ury = $Inst_bbox[3]*$MulFactor;
-                   if($dieIsCentre == 1) {
-                      $lly = $lly + 270;
-                      $ury = $ury + 270;
-                      $llx = $llx + 270;
-                      $urx = $urx + 270;
-                   }else {
-                      $lly = $lly + 20;
-                      $ury = $ury + 20;
-                      $llx = $llx + 20;
-                      $urx = $urx + 20;
-                   }
-                   my $is_display = &isDisplayTrue($llx,$lly,$urx,$ury,$pix_size);
-                   if($is_display == 1){
-                      my $rect;
+                   my $llx = $Inst_bbox[0]*$MulFactor + $dieShift;
+                   my $lly = $Inst_bbox[1]*$MulFactor + $dieShift;
+                   my $urx = $Inst_bbox[2]*$MulFactor + $dieShift;
+                   my $ury = $Inst_bbox[3]*$MulFactor + $dieShift;
+                   #<!-- same test isDisplayTrue makes, without the divisions -->
+                   if( ($urx-$llx) > $display_limit || ($ury-$lly) > $display_limit ){
+                      #<!-- the tags go straight into create: this used to be a
+                      #     createRectangle followed by an itemconfigure and two
+                      #     addtags, four round trips to Tk where one will do -->
+                      my $defDiffState = $instObj->dbCadbGetCompareDefState;
                       if($defDiffState == 0){
-                         $rect = $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"red", -fill => $InstColor,-stipple => "gray12");
+                         $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"red", -fill => $InstColor,-stipple => "gray12", -tags => ['INSTANCE', $InstanceName, $ext_tag]);
                       }else{
-                         $rect = $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"skyblue", -fill => "skyblue",-stipple => "gray12");
+                         $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"skyblue", -fill => "skyblue",-stipple => "gray12", -tags => ['INSTANCE', $InstanceName, $ext_tag]);
                       }
-                      $design_worldcanvas->itemconfigure($rect, -tag =>'INSTANCE');
-                      $design_worldcanvas->addtag($InstanceName , "withtag", $rect);
-                      $design_worldcanvas->addtag($ext_tag , "withtag", $rect);
-                   }else{ 
+                   }else{
                       push(@filtered_inst_array,$InstanceName);
                    }
                 }# if component status is fixed or placed
@@ -297,6 +328,49 @@ for(my $i=0; $i<=$#GCellArray ; $i++) {
  #                                     }
  #                                    }
  #                             );
+
+ ################ display unplaced block instances outside the chip boundary ##################
+ my %UNPLACED_BLOCK_INST_HEIGHT = ();
+ my $startX = $burx;
+ my $startY = $blly;
+ my @MaxWidth = ();
+ foreach my $instance (keys %CADB){
+    my $cellref =  $CADB{$instance}->dbCadbGetCellref;
+    my $status =  $CADB{$instance}->dbCadbGetStatus;
+    if ( exists $PLDB{$cellref} ) {
+    if(($PLDB{$cellref}->dbMdbGetClass eq "BLOCK") && ($status eq "UNPLACED" || $status eq "UND")){
+        my @size = $PLDB{$cellref}->dbMdbGetSize;
+        $UNPLACED_BLOCK_INST_HEIGHT{$instance} = $size[1];
+    }
+                                 }
+ }
+ my @blockInst = sort { $UNPLACED_BLOCK_INST_HEIGHT{$a} <=> $UNPLACED_BLOCK_INST_HEIGHT{$b} } keys %UNPLACED_BLOCK_INST_HEIGHT;
+ foreach my $instance(@blockInst){
+    my $cellref =  $CADB{$instance}->dbCadbGetCellref;
+    my @size = $PLDB{$cellref}->dbMdbGetSize;
+    my $color = "OliveDrab1";
+    my $inst_width = $size[0]*$MICRONFACTOR; 
+    my $inst_height = $size[1]*$MICRONFACTOR;
+
+    if($inst_height > ($bury - $startY)){ 
+       $startY = $blly;
+       @MaxWidth = sort{$a<=>$b}@MaxWidth;
+       $startX = $startX + $MaxWidth[-1];
+       @MaxWidth = ();
+    } 
+ 
+    push(@MaxWidth,$inst_width);
+    my $llx = $startX; 
+    my $lly = $startY;
+    my $urx = $llx+$inst_width;
+    my $ury = $lly+$inst_height;
+    $startX = $llx;
+    $startY = $ury;
+    #<!-- tags in the create call rather than three further round trips -->
+    $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>$color, -fill=>$color, -stipple=>"gray12", -tags=>['INSTANCE', $instance, 'BLOCK']);
+ }#foreach unplaced block instance
+ #################################################################################################
+
 }#if dieArea exists
 #----------------------------------------------#
 $t1 = new Benchmark;
@@ -318,6 +392,13 @@ sub filterd_instance_display{
 my @view_area = @_;
 my $MulFactor = $MICRONFACTOR/$DEF_DATABASE_UNIT;
 my $pix_size = ($design_worldcanvas->pixelSize())/1.2;
+#<!-- this runs on every zoom, so the same trimming as design_display: compare
+#     extents against three pixel sizes rather than dividing each one, and work
+#     out the per cellref constants once instead of once per instance -->
+my $display_limit = 3 * $pix_size;
+my %inst_ext_tag = ();
+my %inst_is_block = ();
+my $dieShift = ($dieIsCentre == 1) ? 270 : 20;
 
 for (my $i=0; $i<=$#GCellArray ; $i++) {
     for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
@@ -334,50 +415,34 @@ for (my $i=0; $i<=$#GCellArray ; $i++) {
         my @filtered_inst_array = ();
         my @inst_displayed = ();
         foreach my $InstanceName (@instList){
-             my @Inst_bbox = $CADB{$InstanceName}->dbCadbGetbBox;
-             my @location = $CADB{$InstanceName}->dbCadbGetLoc;
-             my $orient =   $CADB{$InstanceName}->dbCadbGetOrient;
-             my $cellref =  $CADB{$InstanceName}->dbCadbGetCellref;
-             my $status =  $CADB{$InstanceName}->dbCadbGetStatus;
-             my $defDiffState = $CADB{$InstanceName}->dbCadbGetCompareDefState;
-             my $type = $PLDB{$cellref}->dbMdbGetType;
-             my $InstColor = "red";      
-             my $ext_tag = "";
-             if($type == 0){$ext_tag = "COMBINATIONAL";}
-             if($type == 1){$ext_tag = "SEQUENTIAL";}
-             if($type == 2){$ext_tag = "BLOCK";}
-             if($PLDB{$cellref}->dbMdbGetClass eq "BLOCK") {
-                $InstColor = "yellow";
+             my $instObj = $CADB{$InstanceName};
+             my $status =  $instObj->dbCadbGetStatus;
+             my $cellref =  $instObj->dbCadbGetCellref;
+             unless ( exists $inst_ext_tag{$cellref} ) {
+                my $type = $PLDB{$cellref}->dbMdbGetType;
+                my $tag = "";
+                if($type == 0){$tag = "COMBINATIONAL";}
+                if($type == 1){$tag = "SEQUENTIAL";}
+                if($type == 2){$tag = "BLOCK";}
+                $inst_ext_tag{$cellref} = $tag;
+                $inst_is_block{$cellref} = ($PLDB{$cellref}->dbMdbGetClass eq "BLOCK") ? 1 : 0;
              }
+             my $ext_tag = $inst_ext_tag{$cellref};
+             my $InstColor = $inst_is_block{$cellref} ? "yellow" : "red";
              if($status eq "PLACED" || $status eq "FIXED" ) {
-                my $llx = $Inst_bbox[0]*$MulFactor;
-                my $lly = $Inst_bbox[1]*$MulFactor;
-                my $urx = $Inst_bbox[2]*$MulFactor;
-                my $ury = $Inst_bbox[3]*$MulFactor;
-                if($dieIsCentre == 1) {
-                   $lly = $lly + 270;
-                   $ury = $ury + 270;
-                   $llx = $llx + 270;
-                   $urx = $urx + 270;
-                }else {
-                   $lly = $lly + 20;
-                   $ury = $ury + 20;
-                   $llx = $llx + 20;
-                   $urx = $urx + 20;
-                }
+                my @Inst_bbox = $instObj->dbCadbGetbBox;
+                my $llx = $Inst_bbox[0]*$MulFactor + $dieShift;
+                my $lly = $Inst_bbox[1]*$MulFactor + $dieShift;
+                my $urx = $Inst_bbox[2]*$MulFactor + $dieShift;
+                my $ury = $Inst_bbox[3]*$MulFactor + $dieShift;
                 if($llx >= $view_area[0] && $llx <= $view_area[2] && $lly >= $view_area[1] && $lly <= $view_area[3]){
-                   my $is_display = &isDisplayTrue($llx,$lly,$urx,$ury,$pix_size);
-                   if($is_display == 1){
-                      my $rect;
+                   if( ($urx-$llx) > $display_limit || ($ury-$lly) > $display_limit ){
+                      my $defDiffState = $instObj->dbCadbGetCompareDefState;
                       if($defDiffState == 0){
-                         $rect = $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"red", -fill => $InstColor,-stipple => "gray12");
+                         $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"red", -fill => $InstColor,-stipple => "gray12", -tags => ['INSTANCE', $InstanceName, $ext_tag, 'FILTERED']);
                       }else{
-                         $rect = $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"skyblue", -fill => "skyblue",-stipple => "gray12");
+                         $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>"skyblue", -fill => "skyblue",-stipple => "gray12", -tags => ['INSTANCE', $InstanceName, $ext_tag, 'FILTERED']);
                       }
-                      $design_worldcanvas->itemconfigure($rect, -tag =>'INSTANCE');
-                      $design_worldcanvas->addtag($InstanceName , "withtag", $rect);
-                      $design_worldcanvas->addtag($ext_tag , "withtag", $rect);
-                      $design_worldcanvas->addtag("FILTERED" , "withtag", $rect);
                       push(@inst_displayed, $InstanceName);
                    }else{ 
                       push(@filtered_inst_array,$InstanceName);
