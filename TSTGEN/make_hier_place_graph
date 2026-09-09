@@ -37,6 +37,719 @@
 #
 #
 #****
+#***** /hier_connectivity
+#  hier_connectivity
+# FUNCTION
+#       Reports which instances of a module share a net, ignoring driver and
+#       sink.  Reads the conn lines held in VNOM directly, so unlike
+#       write_hier_place_graph it needs neither edit_module nor the pseudo
+#       database: pin direction and width are never resolved, which is the
+#       expensive part of dbfTstgenLoadVNOMNets.
+#
+#       Two pins count as connected when their net names match exactly, the
+#       same rule dbfTstgenLoadVNOMNets uses.  A bit select therefore does not
+#       match its parent bus; use write_hier_place_graph if bit accuracy
+#       matters.
+#
+# SYNOPSIS
+#  hier_connectivity
+#
+# INPUTS
+#
+#       options :
+#               -module <moduleName> : module to report, defaults to TOP_MODULE
+#               -fanout_limit <n> : drop nets touching n or more instances
+#               -out <fileName> : defaults to <moduleName>.conn
+#
+#       switches :
+#               --hier_only : consider hierarchical instances only
+#               --ports : report nets tied to a module port as touching PIN
+#
+# OUTPUTS
+#               connectivity file : <moduleName>.conn, one line per net,
+#                                   "<net> <inst> <inst> ..."
+#               and, on stdout, instance pairs ranked by shared net count
+#
+#****
+#<!-- Which instances each net of a module touches, straight off the VNOM conn
+#     lines.  Same parse as the head of dbfTstgenLoadVNOMNets and nothing after
+#     it, which is the point: it does not need the module checked out, so it
+#     works after edit_module --physical_only, where PSEUDO_VNET_ALREADY is
+#     empty and there is no net object to ask.
+#
+#     Returns two hashes.  The first is net -> inst -> 1, the connectivity
+#     itself.  The second is net -> inst -> pin -> 1, which the caller needs if
+#     it wants to work out which end of a net drives it; hier_connectivity
+#     ignores it, since a connection has no direction as far as it is
+#     concerned. -->
+sub dbfTstgenHierNetToInst {
+
+my ($module, $hierOnly, $wantPorts) = @_;
+my %NET_TO_INST = ();
+my %NET_TO_PIN = ();
+
+unless ( defined $module && $module ne "" && exists $MODULE_ALREADY{$module} ) {
+  return (\%NET_TO_INST, \%NET_TO_PIN);
+}
+
+#<!-- Port names, so a net tied to one can be shown as touching PIN.  Plain
+#     VNOM reads, no pseudo module required. -->
+my %PORT_NAMES = ();
+if ( $wantPorts ) {
+  foreach my $port ( $MODULE_ALREADY{$module}->dbVNOMGetInput,
+                     $MODULE_ALREADY{$module}->dbVNOMGetOutput,
+                     $MODULE_ALREADY{$module}->dbVNOMGetBidi ) {
+    $PORT_NAMES{$port} = 1;
+  }
+}
+
+foreach my $conn ( $MODULE_ALREADY{$module}->dbVNOMGetConn ) {
+  $conn =~ s/^\s+//;
+  $conn =~ s/\s*\;?\s*$//;
+
+  my $instCell = $conn;
+  $instCell =~ s/\(.+$//;
+  my ($cellref, $inst) = ( split(/\s+/, $instCell) )[0,1];
+  unless ( defined $inst && $inst ne "" ) {
+    next;
+  }
+  if ( $hierOnly ) {
+    unless ( $MODULE_ALREADY{$module}->dbVNOMHasHierInst($inst) ) {
+      next;
+    }
+  }
+
+  $conn =~ s/\s*\(\s*/\|/;   # mark leftmost L-paren
+  $conn =~ s/^.*\|//;        # remove from left up to the mark
+  $conn =~ s/\s+//g;
+  $conn =~ s/\)+$//;
+
+  foreach my $pair ( split(/\)\,/, $conn) ) {
+    my ($pin, $net) = ( split(/\(/, $pair) )[0,1];
+    unless ( defined $net && $net ne "" ) {
+      next;
+    }
+
+    #<!-- a {a,b,c} concatenation ties every net in it to this instance -->
+    my @netList = ();
+    if ( $net =~ m/\{.*\}/ ) {
+      $net =~ s/^\{//;
+      $net =~ s/\}$//;
+      @netList = split(/,/, $net);
+    }
+    else {
+      push(@netList, $net);
+    }
+
+    foreach my $subNet ( @netList ) {
+      if ( $subNet eq "" ) {
+        next;
+      }
+      if ( $subNet =~ m/^\d*'b[01]+$/ ) {
+        next;  #<!-- tie constant, not a net -->
+      }
+      $NET_TO_INST{$subNet}{$inst} = 1;
+      if ( defined $pin && $pin ne "" ) {
+        #<!-- the conn line writes .a(din), so the split leaves the dot on the
+        #     pin.  A port list has no dots, so record the bare name or every
+        #     direction lookup misses. -->
+        my $bare = $pin;
+        $bare =~ s/^\.//;
+        $NET_TO_PIN{$subNet}{$inst}{$bare} = 1 if ( $bare ne "" );
+      }
+      #<!-- A bus port is recorded under its base name, so the net data[0] has
+      #     to be matched against data as well as against itself, or no bit of
+      #     any bus port is ever seen as reaching a port.  If data is a port
+      #     then data[0] is one of its bits; a design with an unrelated internal
+      #     net called data[0] has a name collision that is already broken. -->
+      my $netBase = $subNet;
+      $netBase =~ s/\[.*$//;
+      if ( $wantPorts &&
+           ( exists $PORT_NAMES{$subNet} || exists $PORT_NAMES{$netBase} ) ) {
+        $NET_TO_INST{$subNet}{"PIN"} = 1;
+        $NET_TO_PIN{$subNet}{"PIN"}{$subNet} = 1;
+      }
+    }
+  }# foreach pin net pair
+}# foreach conn line
+
+return (\%NET_TO_INST, \%NET_TO_PIN);
+
+}# sub dbfTstgenHierNetToInst
+
+
+sub hier_connectivity {
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $module = $TOP_MODULE;
+my $hierOnly = 0;
+my $wantPorts = 0;
+my $fanoutLimit = 0;
+my $outFile;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : hier_connectivity -module <module name>\n";
+  print "                          -fanout_limit <high fan out threshold>\n";
+  print "                          -out <file name>\n";
+  print "                          --hier_only\n";
+  print "                          --ports\n";
+  return;
+}
+
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-module")       { $module = $_[$i+1]; }
+  elsif ($_[$i] eq "-out")          { $outFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit") { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--hier_only")   { $hierOnly = 1; }
+  elsif ($_[$i] eq "--ports")       { $wantPorts = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)        { print "WARN-TST-HIER_CONN : 001 : invalid option $_[$i]\n"; }
+}
+
+unless ( defined $module && $module ne "" && exists $MODULE_ALREADY{$module} ) {
+  print "WARN-TST-HIER_CONN : 002 : module $module does not exist in the design\n";
+  return;
+}
+unless ( defined $outFile && $outFile ne "" ) {
+  $outFile = "$module.conn";
+}
+
+my ($netToInst, $netToPin) = &dbfTstgenHierNetToInst($module, $hierOnly, $wantPorts);
+my %NET_TO_INST = %$netToInst;
+
+unless ( open(WRITE_CONN_RPT, ">$outFile") ) {
+  print "WARN-TST-HIER_CONN : 003 : cannot open $outFile for writing\n";
+  return;
+}
+
+my %PAIR_COUNT = ();
+my $netCnt = 0;
+my $skipCnt = 0;
+foreach my $net ( sort keys %NET_TO_INST ) {
+  my @insts = sort keys %{$NET_TO_INST{$net}};
+  if ( @insts < 2 ) {
+    next;  #<!-- nothing to connect -->
+  }
+  if ( $fanoutLimit > 0 && @insts >= $fanoutLimit ) {
+    $skipCnt++;
+    next;
+  }
+  $netCnt++;
+  print WRITE_CONN_RPT "$net @insts\n";
+  for (my $i = 0; $i < @insts; $i++) {
+    for (my $j = $i + 1; $j < @insts; $j++) {
+      $PAIR_COUNT{"$insts[$i] $insts[$j]"}++;
+    }
+  }
+}
+close(WRITE_CONN_RPT);
+
+print "INFO-TST-HIER_CONN : 004 : wrote $netCnt nets of module $module to $outFile\n";
+if ( $skipCnt > 0 ) {
+  print "INFO-TST-HIER_CONN : 005 : $skipCnt high fan out nets skipped\n";
+}
+foreach my $pair ( sort { $PAIR_COUNT{$b} <=> $PAIR_COUNT{$a} } keys %PAIR_COUNT ) {
+  print "  $pair $PAIR_COUNT{$pair}\n";
+}
+
+return (\%NET_TO_INST, \%PAIR_COUNT);
+
+}# sub hier_connectivity
+
+
+#<!-- Is this pin an output of the child cell, so the instance holding it drives
+#     the net?  Exact name first, then the bus base, since a conn line carries
+#     A[3] while a module's port list carries A.  Returns 1 for yes, 0 for no
+#     and -1 for "cannot tell", which is not the same thing: an unknown cell has
+#     to be reported, not quietly counted as an input. -->
+sub dbfTstgenHierPinDrives {
+
+my ($cellref, $pin) = @_;
+unless ( defined $cellref && $cellref ne "" && defined $pin && $pin ne "" ) {
+  return (-1);
+}
+my $base = $pin;
+$base =~ s/\[.*$//;
+
+if ( exists $PLDB{$cellref} ) {
+  foreach my $p ( $pin, $base ) {
+    if ( $PLDB{$cellref}->dbMdbDoesPinExist($p) ) {
+      return ( $PLDB{$cellref}->dbMdbGetPinDir($p) == 1 ? 1 : 0 );
+    }
+  }
+  return (-1);
+}
+if ( exists $PSEUDO_MODULE_ALREADY{$cellref} ) {
+  my %out = map { $_ => 1 } $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetOutput;
+  if ( exists $out{$pin} || exists $out{$base} ) {
+    return (1);
+  }
+  my %in = map { $_ => 1 } ( $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetInput,
+                             $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetBidi );
+  if ( exists $in{$pin} || exists $in{$base} ) {
+    return (0);
+  }
+  return (-1);
+}
+if ( exists $MODULE_ALREADY{$cellref} ) {
+  my %out = map { $_ => 1 } $MODULE_ALREADY{$cellref}->dbVNOMGetOutput;
+  if ( exists $out{$pin} || exists $out{$base} ) {
+    return (1);
+  }
+  return (0);
+}
+return (-1);
+
+}# sub dbfTstgenHierPinDrives
+
+
+#<!-- How big a child of the module being edited is, in microns, when the
+#     instance itself carries no box.
+#
+#     dbfTstgenCalcInstSizeFromChildFlplan is what normally fills the instance
+#     bbox in during edit_module, but it gives up on three conditions: the child
+#     must be in the pseudo database, the instance must resolve to a floorplan,
+#     and that floorplan must be the child module's own.  A child that has never
+#     been floorplanned fails all three, and the instance is then left with an
+#     empty bbox -- which is a zero size in the nodefile, and a placer given a
+#     design of zero area nodes has no density to spread.
+#
+#     So ask the child what size it is: its pseudo size first, then its VNOM
+#     floorplan, then the library if it turned out to be a leaf cell after all. -->
+sub dbfTstgenHierChildSize {
+
+my $cellref = $_[0];
+unless ( defined $cellref && $cellref ne "" ) {
+  return (0, 0);
+}
+
+if ( exists $PSEUDO_MODULE_ALREADY{$cellref} ) {
+  #<!-- already microns, the accessor divides by the dbu -->
+  my @size = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetSize;
+  if ( @size >= 4 && defined $size[3] &&
+       $size[2] > $size[0] && $size[3] > $size[1] ) {
+    return ($size[2] - $size[0], $size[3] - $size[1]);
+  }
+}
+
+my $flplanID = 0;
+if ( exists $MODULE_ALREADY{$cellref} ) {
+  $flplanID = $MODULE_ALREADY{$cellref}->dbVNOMGetFloorplanID;
+}
+if ( (! $flplanID) && exists $FLOORPLAN_LOOKUP{"$cellref/_self_"} ) {
+  $flplanID = $FLOORPLAN_LOOKUP{"$cellref/_self_"};
+}
+if ( $flplanID && exists $FLOORPLAN_ALREADY{$flplanID} ) {
+  my $dbu = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetDBUnit;
+  $dbu = 1 unless ( defined $dbu && $dbu > 0 );
+  my @size = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
+  if ( @size >= 4 && defined $size[3] &&
+       $size[2] > $size[0] && $size[3] > $size[1] ) {
+    return ( ($size[2] - $size[0]) / $dbu, ($size[3] - $size[1]) / $dbu );
+  }
+}
+
+if ( exists $PLDB{$cellref} ) {
+  #<!-- LEF sizes are microns already -->
+  my @cs = $PLDB{$cellref}->dbMdbGetSize;
+  if ( @cs >= 2 && defined $cs[1] ) {
+    return ($cs[0], $cs[1]);
+  }
+}
+
+return (0, 0);
+
+}# sub dbfTstgenHierChildSize
+
+
+#****f* /write_pseudo_graph
+#  write_pseudo_graph
+# FUNCTION
+#  The hierarchical counterpart of write_flat_graph: the same nodefile and the
+#  same two column edge list, but over the hierarchical instances of a module
+#  rather than over the flat components of the design.  That makes the flat
+#  placement suite -- flat_graph_placer, eplacer, mincut_placer and seedPlace --
+#  usable on a module that is checked out with edit_module, without committing
+#  it first.
+#
+#  Edges come from the VNOM conn lines, through dbfTstgenHierNetToInst, which is
+#  what hier_connectivity uses.  That is deliberate: it needs no net objects, so
+#  it works after edit_module --physical_only, where PSEUDO_VNET_ALREADY is
+#  empty and a net based writer would produce a graph with no edges at all.
+#
+#  A net there is a set of instances with no direction, while the edge list
+#  wants "<driver> <sink>".  Each net is written as a star out of one member.
+#  The centre is a real driver when the child cell says so -- an output pin on
+#  that net -- and otherwise the first member in sorted order, which is
+#  synthetic and counted as such.  All three consumers treat the direction as
+#  carrying no information (mincut says so outright, eplace builds an
+#  undirected adjacency), so a synthetic centre costs nothing there; it only
+#  matters to anchor_hypergraph's loop breaking.
+#****
+sub write_pseudo_graph {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $module = $TOP_MODULE;
+my $nodeFile;
+my $graphFile;
+my $fanoutLimit = 0;
+my $nodeFileOnly = 0;
+my $hierOnly = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : write_pseudo_graph -module <module name>\n";
+  print "                           -nodefile <file name>\n";
+  print "                           -graph <file name>\n";
+  print "                           -fanout_limit <high fan out threshold>\n";
+  print "                           --hier_only\n";
+  print "                                 only hierarchical instances, no leaf cells\n";
+  print "                           --nodefile_only\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-module")        { $module = $_[$i+1]; }
+  elsif ($_[$i] eq "-nodefile")      { $nodeFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-graph")         { $graphFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--hier_only")    { $hierOnly = 1; }
+  elsif ($_[$i] eq "--nodefile_only"){ $nodeFileOnly = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-WR_PS_GRPH : 001 : invalid option $_[$i]\n"; }
+}
+
+unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$module} ) {
+  print "ERR-TST-WR_PS_GRPH : 002 : module $module is not being edited, run edit_module first\n";
+  return;
+}
+unless ( defined $nodeFile && $nodeFile ne "" ) { $nodeFile = "$module.pseudo.nodefile"; }
+unless ( defined $graphFile && $graphFile ne "" ) { $graphFile = "$module.pseudo.txt"; }
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) { $dbu = 1; }
+my $rowHeight = $GLOBAL->dbGlobalGetRowHeight;
+unless ( defined $rowHeight && $rowHeight > 0 ) { $rowHeight = 0; }
+
+#<!-- dbaTstgenGetSize returns microns already, unlike the flat floorplan -->
+my @size = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetSize;
+unless ( @size >= 4 && defined $size[3] ) {
+  print "ERR-TST-WR_PS_GRPH : 003 : module $module has no floorplan size, nothing to write\n";
+  return;
+}
+if ( $size[2] <= $size[0] || $size[3] <= $size[1] ) {
+  my $w = $size[2] - $size[0];
+  my $h = $size[3] - $size[1];
+  print "ERR-TST-WR_PS_GRPH : 004 : module $module has no area (width $w, height $h)\n";
+  return;
+}
+
+#-------------------------------- collect the nodes -------------------------------#
+#<!-- Ports first then instances, the numbering the flat writer uses, so the
+#     files are interchangeable as far as every consumer is concerned. -->
+my %PSEUDO_NODE_NUM = ();
+my @nodeLines = ();
+my %typeCnt = ();
+my $nodeCnt = 0;
+my $noSizeCnt = 0;
+
+#<!-- Ports.
+#
+#     dbaTstgenGetPins is the FLOORPLAN's pin list: it only holds pins that have
+#     a shape.  A module that has never had pin placement done has logical ports
+#     and no floorplan pins at all, so taking that list alone wrote no port
+#     nodes.  That is most visible under --hier_only, where the ports are much
+#     of what is left after the leaf cells go.
+#
+#     Take the union instead.  The logical port lists say what exists, the
+#     floorplan says where it is.  Buses are blasted to bits, since a net in the
+#     conn lines is data[3] while a logical port list carries data, and a base
+#     name would match no net and connect to nothing. -->
+my %portSeen = ();
+my @ports = ();
+foreach my $pin ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPins ) {
+  next if ( ! defined $pin || $pin eq "" || exists $portSeen{$pin} );
+  $portSeen{$pin} = 1;
+  push(@ports, $pin);
+}
+foreach my $port ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetInput,
+                   $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetOutput,
+                   $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetBidi ) {
+  next if ( ! defined $port || $port eq "" );
+  my @bits = &dbfTstgenBlastModuleBusPins($module, $port);
+  unless ( @bits ) {
+    @bits = ($port);   #<!-- not a bus, or its width is not recorded -->
+  }
+  foreach my $bit ( @bits ) {
+    next if ( ! defined $bit || $bit eq "" || exists $portSeen{$bit} );
+    $portSeen{$bit} = 1;
+    push(@ports, $bit);
+  }
+}
+
+my $portLocCnt = 0;
+foreach my $pin ( sort @ports ) {
+  $PSEUDO_NODE_NUM{$pin} = $nodeCnt;
+  my $line = "$nodeCnt $pin PORT 0 0 ";
+  #<!-- the pseudo pin status is a number: 3 FIXED, 2 PLACED, 1 GUIDED -->
+  my $st = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinStatus($pin);
+  my @shapes = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinRect($pin);
+  my ($px, $py);
+  if ( @shapes > 0 ) {
+    #<!-- "<layer> x1 y1 x2 y2" in microns, take the shape's lower left -->
+    my @v = split(/\s+/, $shapes[0]);
+    if ( @v >= 4 ) {
+      $px = $v[$#v - 3];
+      $py = $v[$#v - 2];
+    }
+  }
+  if ( defined $px && defined $py && $st >= 2 ) {
+    $line .= ( $st == 3 ? "FIXED" : "PLACED" ) . " $px $py";
+    $portLocCnt++;
+  }
+  else {
+    $line .= "UNPLACED";
+  }
+  $line .= " TYPE=port";
+  $typeCnt{port}++;
+  push(@nodeLines, $line);
+  $nodeCnt++;
+}
+
+foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+  if ( $inst eq "PIN" ) {
+    next;  #<!-- the port pseudo instance, already written above -->
+  }
+  my $cellref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+  if ( $hierOnly && ! exists $PSEUDO_MODULE_ALREADY{$cellref} &&
+       ! exists $MODULE_ALREADY{$cellref} ) {
+    next;
+  }
+
+  #<!-- RelBbox is in microns: dbfTstgenLoadVNOMFlplan divides by the dbu on
+  #     the way in.  Location comes from it and only from it. -->
+  my @bbox = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox;
+  my ($w, $h) = (0, 0);
+  my ($x, $y);
+  if ( @bbox >= 4 && defined $bbox[3] ) {
+    $w = $bbox[2] - $bbox[0];
+    $h = $bbox[3] - $bbox[1];
+    ($x, $y) = ($bbox[0], $bbox[1]);
+  }
+  #<!-- Size is a separate question from location, and has a separate answer.
+  #
+  #     An instance whose bbox was never filled in still has a size, and the
+  #     Hier-View already works it out: return_pseudo_vinst_size, which falls
+  #     back through the LEF, the child's own pseudo size, and finally an
+  #     estimate from the child's cell area at 70% utilization.  edit_module
+  #     never writes that back -- dbfTstgenLoadVNOMInsts sets no bbox and
+  #     dbfTstgenCalcInstSizeFromChildFlplan only fills one in for a child that
+  #     has its own floorplan -- so the database really is empty here while the
+  #     GUI shows a box.
+  #
+  #     Call the same function rather than a second opinion: a placement built
+  #     on sizes that disagree with what is on screen is not debuggable. -->
+  if ( $w <= 0 || $h <= 0 ) {
+    my @guiBox = &return_pseudo_vinst_size($module, $inst);
+    if ( @guiBox >= 4 && defined $guiBox[3] ) {
+      my $gw = $guiBox[2] - $guiBox[0];
+      my $gh = $guiBox[3] - $guiBox[1];
+      $w = $gw if ( $gw > 0 );
+      $h = $gh if ( $gh > 0 );
+    }
+  }
+  #<!-- and one more source it does not know about, the child's flat floorplan
+  #     reached through FLOORPLAN_LOOKUP -->
+  if ( $w <= 0 || $h <= 0 ) {
+    my ($cw, $ch) = &dbfTstgenHierChildSize($cellref);
+    $w = $cw if ( $cw > 0 );
+    $h = $ch if ( $ch > 0 );
+  }
+  if ( $w < 0 ) { $w = 0; }
+  if ( $h < 0 ) { $h = 0; }
+  if ( $w <= 0 || $h <= 0 ) { $noSizeCnt++; }
+
+  my $status = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstStatus;
+  $PSEUDO_NODE_NUM{$inst} = $nodeCnt;
+  my $line = "$nodeCnt $inst INST $w $h ";
+  if ( defined $x && defined $y &&
+       ($status eq "FIXED" || $status eq "PLACED") ) {
+    $line .= "$status $x $y";
+  }
+  else {
+    $line .= "UNPLACED";
+  }
+  my $nodeType = &dbfFlatNodeType($cellref);
+  $line .= " TYPE=$nodeType";
+  $typeCnt{$nodeType}++;
+  push(@nodeLines, $line);
+  $nodeCnt++;
+}
+
+unless ( $nodeCnt > 0 ) {
+  print "ERR-TST-WR_PS_GRPH : 005 : module $module has no instances or pins, nothing to write\n";
+  return;
+}
+
+#-------------------------------- write the nodefile ------------------------------#
+unless ( open(WRITE_PSEUDO_NODE, ">$nodeFile") ) {
+  print "ERR-TST-WR_PS_GRPH : 006 : cannot open $nodeFile for writing\n";
+  return;
+}
+print WRITE_PSEUDO_NODE "# hierarchical placement nodes for $module, written by proton\n";
+print WRITE_PSEUDO_NODE "# all coordinates and dimensions are in microns\n";
+print WRITE_PSEUDO_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<node type>\n";
+print WRITE_PSEUDO_NODE "# a status of FIXED means the placer must not move the node\n";
+print WRITE_PSEUDO_NODE "# node type is one of combi seq mem block phys port, or und when nothing\n";
+print WRITE_PSEUDO_NODE "#   described the cell -- read a liberty or a cell function map to fill it in\n";
+print WRITE_PSEUDO_NODE "DBU $dbu\n";
+print WRITE_PSEUDO_NODE "DIEAREA $size[0] $size[1] $size[2] $size[3]\n";
+print WRITE_PSEUDO_NODE "ROWHEIGHT $rowHeight\n";
+print WRITE_PSEUDO_NODE "NODES $nodeCnt\n";
+foreach my $line ( @nodeLines ) {
+  print WRITE_PSEUDO_NODE "$line\n";
+}
+close(WRITE_PSEUDO_NODE);
+print "INFO-TST-WR_PS_GRPH : 007 : wrote $nodeCnt nodes of $module to $nodeFile\n";
+my @typeSummary = ();
+foreach my $t ( sort keys %typeCnt ) {
+  push(@typeSummary, "$t $typeCnt{$t}");
+}
+print "INFO-TST-WR_PS_GRPH : 008 : node types: ", join(", ", @typeSummary), "\n";
+if ( exists $typeCnt{port} && $portLocCnt < $typeCnt{port} ) {
+  my $noLoc = $typeCnt{port} - $portLocCnt;
+  print "INFO-TST-WR_PS_GRPH : 019 : $noLoc of $typeCnt{port} port(s) have no location and are written UNPLACED\n";
+}
+if ( $noSizeCnt > 0 ) {
+  print "WARN-TST-WR_PS_GRPH : 015 : $noSizeCnt instance(s) have no size: neither the\n";
+  print "WARN-TST-WR_PS_GRPH : 016 : instance nor its cell knows how big it is.  A placer\n";
+  print "WARN-TST-WR_PS_GRPH : 017 : sees them as zero area, so they exert no density.\n";
+  print "WARN-TST-WR_PS_GRPH : 018 : floorplan the child modules, or read a LEF for the leaf cells.\n";
+}
+
+if ( $nodeFileOnly ) {
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "Command write_pseudo_graph took:",timestr($td),"\n";
+  return;
+}
+
+#-------------------------------- write the graph ---------------------------------#
+my ($netToInst, $netToPin) =
+    &dbfTstgenHierNetToInst($module, $hierOnly, 1);
+
+unless ( open(WRITE_PSEUDO_GRAPH, ">$graphFile") ) {
+  print "ERR-TST-WR_PS_GRPH : 009 : cannot open $graphFile for writing\n";
+  return;
+}
+
+my $defaultFanout = $GLOBAL->dbfGlobalGetFanoutLimit;
+if ( $fanoutLimit == 0 && defined $defaultFanout && $defaultFanout > 0 ) {
+  $fanoutLimit = $defaultFanout;
+}
+
+#<!-- the module's own inputs, for the port case in the centre pick below -->
+my %modInput = map { $_ => 1 }
+    ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetInput,
+      $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetBidi );
+
+my ($netCnt, $edgeCnt, $skipCnt, $noNodeCnt, $synthCnt, $unknownCnt) = (0,0,0,0,0,0);
+foreach my $net ( sort keys %$netToInst ) {
+  #<!-- only members that made it into the nodefile: --hier_only drops leaf
+  #     cells from the nodes, so their connections have nowhere to land -->
+  my @members = ();
+  foreach my $inst ( sort keys %{$netToInst->{$net}} ) {
+    if ( exists $PSEUDO_NODE_NUM{$inst} ) {
+      push(@members, $inst);
+    }
+    elsif ( $inst eq "PIN" ) {
+      #<!-- the net is tied to a port of this module, and the port carries the
+      #     net's own name in the nodefile -->
+      if ( exists $PSEUDO_NODE_NUM{$net} ) {
+        push(@members, $net);
+      }
+    }
+    else {
+      $noNodeCnt++;
+    }
+  }
+  #<!-- one instance twice on a net is one node, and one node is no edge -->
+  my %uniq = map { $PSEUDO_NODE_NUM{$_} => $_ } @members;
+  my @nodes = sort { $a <=> $b } keys %uniq;
+  if ( @nodes < 2 ) {
+    next;
+  }
+  if ( $fanoutLimit > 0 && @nodes >= $fanoutLimit ) {
+    $skipCnt++;
+    next;
+  }
+
+  #<!-- Pick the star centre: a member whose pin on this net is an output.
+  #
+  #     A port of the module being edited is its own case, and the sense is
+  #     inverted from the outside view: an INPUT port is what drives the net
+  #     inside the module, and an output port is driven by it. -->
+  my $centre;
+  my $sawUnknown = 0;
+  foreach my $node ( @nodes ) {
+    my $inst = $uniq{$node};
+    unless ( exists $PSEUDO_VINST_ALREADY{$module}{$inst} ) {
+      #<!-- the port node is a bit, data[0], while the input list holds data -->
+      my $portBase = $inst;
+      $portBase =~ s/\[.*$//;
+      if ( exists $modInput{$inst} || exists $modInput{$portBase} ) {
+        $centre = $node;
+        last;
+      }
+      next;
+    }
+    my $cellref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+    foreach my $pin ( sort keys %{$netToPin->{$net}{$inst}} ) {
+      my $drives = &dbfTstgenHierPinDrives($cellref, $pin);
+      if ( $drives == 1 ) { $centre = $node; last; }
+      if ( $drives < 0 )  { $sawUnknown = 1; }
+    }
+    last if ( defined $centre );
+  }
+  unless ( defined $centre ) {
+    $centre = $nodes[0];
+    $synthCnt++;
+    $unknownCnt++ if ( $sawUnknown );
+  }
+
+  $netCnt++;
+  foreach my $node ( @nodes ) {
+    next if ( $node == $centre );
+    print WRITE_PSEUDO_GRAPH "$centre $node\n";
+    $edgeCnt++;
+  }
+}
+close(WRITE_PSEUDO_GRAPH);
+
+print "INFO-TST-WR_PS_GRPH : 010 : wrote $edgeCnt edges from $netCnt nets of $module to $graphFile\n";
+if ( $synthCnt > 0 ) {
+  print "INFO-TST-WR_PS_GRPH : 011 : $synthCnt net(s) had no identifiable driver, ",
+        "the first member was used as the star centre\n";
+}
+if ( $unknownCnt > 0 ) {
+  print "WARN-TST-WR_PS_GRPH : 012 : $unknownCnt of those had a pin on a cell that is ",
+        "not in the library or the pseudo database, so no direction could be read\n";
+}
+if ( $skipCnt > 0 ) {
+  print "INFO-TST-WR_PS_GRPH : 013 : $skipCnt high fan out nets skipped\n";
+}
+if ( $noNodeCnt > 0 ) {
+  print "INFO-TST-WR_PS_GRPH : 014 : $noNodeCnt connection(s) are to instances not in the nodefile\n";
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command write_pseudo_graph took:",timestr($td),"\n";
+
+}# sub write_pseudo_graph
+
+
 sub write_hier_place_graph {
 use Benchmark;
 my $t0 = new Benchmark;
@@ -1476,7 +2189,14 @@ sub return_pseudo_vinst_size
         $return_org_bbox[1] = 0 ; 
         $return_org_bbox[2] = 0 ; 
         $return_org_bbox[3] = 0 ; 
-        my $area = $MODULE_ALREADY{$cellref}->dbVNOMGetArea;
+        #<!-- A cell in the pseudo database need not be in VNOM: a module
+        #     created with edit_module and never committed is exactly that, and
+        #     the unguarded call died on it with "Can't call method
+        #     dbVNOMGetArea on an undefined value".  Hier-View reaches here for
+        #     any unplaced child, so this was a crash waiting on the display
+        #     path as much as on this one. -->
+        my $area = ( exists $MODULE_ALREADY{$cellref} )
+                   ? $MODULE_ALREADY{$cellref}->dbVNOMGetArea : 0;
         if ( $area != 0 ) {
           my $defaultUtil = 70;
           my $util = $defaultUtil;
@@ -1492,7 +2212,8 @@ sub return_pseudo_vinst_size
       $return_org_bbox[1] = 0 ; 
       $return_org_bbox[2] = 0 ; 
       $return_org_bbox[3] = 0 ; 
-      my $area = $MODULE_ALREADY{$cellref}->dbVNOMGetArea;
+      my $area = ( exists $MODULE_ALREADY{$cellref} )
+                 ? $MODULE_ALREADY{$cellref}->dbVNOMGetArea : 0;
       if ( $area != 0 ) {
         my $defaultUtil = 70;
         my $util = $defaultUtil;
