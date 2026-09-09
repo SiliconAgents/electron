@@ -49,7 +49,17 @@
 sub dbfFlatNodeType {
 
 my $cellref = $_[0];
-unless ( defined $cellref && exists $PLDB{$cellref} ) {
+unless ( defined $cellref && $cellref ne "" ) {
+  return ("und");
+}
+unless ( exists $PLDB{$cellref} ) {
+  #<!-- Not a library cell.  If it names a module it is a hierarchical block,
+  #     which is what write_pseudo_graph hands us for every child of an edited
+  #     module, and calling those und would lose the one thing a placer most
+  #     needs to know about them. -->
+  if ( exists $PSEUDO_MODULE_ALREADY{$cellref} || exists $MODULE_ALREADY{$cellref} ) {
+    return ("block");
+  }
   return ("und");
 }
 
@@ -1365,13 +1375,15 @@ return (1, $known, $und, $stateful);
 #****f* /seedPlace
 #  seedPlace
 # FUNCTION
-#  Seed placement through an anchor hypergraph, in two stages.
+#  Seed placement through an anchor hypergraph, in three stages.
 #
 #  Stage one collapses the flat netlist onto the things whose position actually
 #  matters -- sequential cells, memories, hard blocks and I/O -- and turns every
 #  cone of combinational logic between them into one hyperedge, charging its
-#  area to the anchors it feeds.  Stage two places that much smaller hypergraph
-#  electrostatically.
+#  area to the anchors it feeds.  Stage two bisects that hypergraph to get the
+#  anchors spread out.  Stage three places it electrostatically, starting from
+#  the bisection rather than from the die centre, which is what keeps the
+#  density penalty's lambda ramp well behaved.  --no_mincut drops stage two.
 #
 #  What comes back is a seed and not a placement: combinational cells are not
 #  nodes in the hypergraph, so they keep the positions they already had.  Run
@@ -1387,7 +1399,9 @@ my $noOfArguments = @_;
 my $placer;
 my ($split, $maxEdge, $minEdge, $blockArea, $seqRegex, $memRegex, $breakLoops,
     $maxCone, $portArea);
-my ($iters, $targetDensity, $fix, $margin, $maxDegree, $grid, $workers);
+my ($iters, $targetDensity, $fix, $margin, $maxDegree, $grid, $workers, $ports);
+my ($mcLeaf, $mcPasses, $mcTolerance, $mcPartitioner, $mcJobs, $mcMacroArea);
+my $noMincut = 0;
 my $noPortAnchors = 0;
 my $noFillers = 0;
 my $trust = -1;   #<!-- -1 means decide from the database -->
@@ -1409,12 +1423,23 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                  --no_port_anchors\n";
   print "                  --trust_types | --ignore_types\n";
   print "                        default is decided from the database, see below\n";
+  print "        bisection seed stage:\n";
+  print "                  --no_mincut\n";
+  print "                        skip it, and let the solver start from the die centre\n";
+  print "                  -mc_leaf <movable anchors left in a region before it stops splitting>\n";
+  print "                  -mc_passes <Fiduccia-Mattheyses passes, 0 cuts on coordinates alone>\n";
+  print "                  -mc_tolerance <area tolerance per side, as a fraction>\n";
+  print "                  -mc_partitioner <auto|metis|fm|none>\n";
+  print "                  -mc_jobs <parallel jobs>\n";
+  print "                  -mc_macro_area <um2 above which an anchor counts as a macro>\n";
   print "        placement stage:\n";
   print "                  -iters <iterations>   -target_density <fraction>\n";
   print "                  -fix <block+port|block|port|status|none>\n";
   print "                  -margin <fraction of the die kept clear at the edge>\n";
   print "                  -max_degree <hyperedge pins, 0 keeps all>\n";
   print "                  -grid <GXxGY|auto>    -workers <threads>\n";
+  print "                  -ports <require|free|perimeter>\n";
+  print "                        what to do with ports that have no location yet\n";
   print "                  --no_fillers\n";
   print "        both:\n";
   print "                  -fanout_limit <high fan out threshold for the graph>\n";
@@ -1435,6 +1460,14 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--no_port_anchors") { $noPortAnchors = 1; }
   elsif ($_[$i] eq "--trust_types")     { $trust = 1; }
   elsif ($_[$i] eq "--ignore_types")    { $trust = 0; }
+  elsif ($_[$i] eq "--no_mincut")       { $noMincut = 1; }
+  elsif ($_[$i] eq "-mc_leaf")          { $mcLeaf = $_[$i+1]; }
+  elsif ($_[$i] eq "-mc_passes")        { $mcPasses = $_[$i+1]; }
+  elsif ($_[$i] eq "-mc_tolerance")     { $mcTolerance = $_[$i+1]; }
+  elsif ($_[$i] eq "-mc_partitioner")   { $mcPartitioner = $_[$i+1]; }
+  elsif ($_[$i] eq "-mc_jobs")          { $mcJobs = $_[$i+1]; }
+  elsif ($_[$i] eq "-mc_macro_area")    { $mcMacroArea = $_[$i+1]; }
+  elsif ($_[$i] eq "-ports")            { $ports = $_[$i+1]; }
   elsif ($_[$i] eq "-iters")            { $iters = $_[$i+1]; }
   elsif ($_[$i] eq "-target_density")   { $targetDensity = $_[$i+1]; }
   elsif ($_[$i] eq "-fix")              { $fix = $_[$i+1]; }
@@ -1524,6 +1557,14 @@ if ( defined $memRegex && $memRegex ne "" )           { $cmd .= " --mem-regex $m
 if ( defined $breakLoops && $breakLoops ne "" )       { $cmd .= " --break-loops $breakLoops"; }
 if ( defined $portArea && $portArea ne "" )           { $cmd .= " --port-area $portArea"; }
 if ( $noPortAnchors )                                 { $cmd .= " --no-port-anchors"; }
+#<!-- bisection seed stage -->
+if ( $noMincut )                                      { $cmd .= " --no-mincut"; }
+if ( defined $mcLeaf && $mcLeaf ne "" )               { $cmd .= " --mc-leaf $mcLeaf"; }
+if ( defined $mcPasses && $mcPasses ne "" )           { $cmd .= " --mc-passes $mcPasses"; }
+if ( defined $mcTolerance && $mcTolerance ne "" )     { $cmd .= " --mc-tolerance $mcTolerance"; }
+if ( defined $mcPartitioner && $mcPartitioner ne "" ) { $cmd .= " --mc-partitioner $mcPartitioner"; }
+if ( defined $mcJobs && $mcJobs ne "" )               { $cmd .= " --mc-jobs $mcJobs"; }
+if ( defined $mcMacroArea && $mcMacroArea ne "" )     { $cmd .= " --mc-macro-area $mcMacroArea"; }
 #<!-- placement stage -->
 if ( defined $iters && $iters ne "" )                 { $cmd .= " --iters $iters"; }
 if ( defined $targetDensity && $targetDensity ne "" ) { $cmd .= " --target-density $targetDensity"; }
@@ -1532,6 +1573,7 @@ if ( defined $margin && $margin ne "" )               { $cmd .= " --margin $marg
 if ( defined $maxDegree && $maxDegree ne "" )         { $cmd .= " --max-degree $maxDegree"; }
 if ( defined $grid && $grid ne "" )                   { $cmd .= " --grid $grid"; }
 if ( defined $workers && $workers ne "" )             { $cmd .= " --workers $workers"; }
+if ( defined $ports && $ports ne "" )                 { $cmd .= " --ports $ports"; }
 if ( $noFillers )                                     { $cmd .= " --no-fillers"; }
 
 print "INFO-PL_SEED : 014 : seed placing $TOP_MODULE with $placer\n";
@@ -1556,6 +1598,9 @@ unless ( $keepFiles ) {
   unlink($anchorNodeFile);
   unlink("$prefix.graph.txt");
   unlink("$prefix.hgr");
+  unlink("$prefix.area.csv");
+  unlink("$prefix.seed.csv");
+  unlink("$prefix.seed.movable.csv");
   unlink("$prefix.placement.csv");
 }
 

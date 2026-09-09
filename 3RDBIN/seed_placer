@@ -5,7 +5,7 @@ Called as
 
     seed_placer <graph> <nodefile> <xyout> [--prefix P] [options...]
 
-Two stages, both from pyspark_cad:
+Three stages, all from pyspark_cad:
 
   1. anchor_hypergraph.py <graph> <nodefile> -o <prefix>
        Collapses the gate level DAG onto an anchor-only hypergraph.  Anchors are
@@ -14,11 +14,35 @@ Two stages, both from pyspark_cad:
        becomes one hyperedge, its area charged to the anchors it feeds.  Writes
        <prefix>.nodefile, <prefix>.graph.txt and <prefix>.hgr.
 
-  2. AnkorPlace.py <prefix>.hgr <prefix>.nodefile -o <csv>
+  2. mincut.py <prefix>.graph.txt <prefix>.nodefile -o <prefix>.seed.csv
+       Recursive bisection over the anchors, to get them spread out before the
+       analytical solver starts.  Skip it with --no-mincut.
+
+  3. AnkorPlace.py <prefix>.hgr <prefix>.nodefile --seed-csv ... -o <csv>
        Electrostatic global placement of that hypergraph.
 
 then turns the CSV into the "<node> <x> <y>" file read_flat_graph_placement
 expects.
+
+Why the middle stage
+--------------------
+anchor_hypergraph writes an anchor UNPLACED when the input had no location, and
+AnkorPlace then seeds every unplaced movable node at the die centre with a tiny
+jitter.  Starting with the whole design collapsed on one point makes the initial
+density gradient enormous, and AnkorPlace's own --seed-csv documentation is
+explicit that starting spread out "keeps the initial gradient balance sane,
+which is most of what makes the lambda ramp behave".  Bisection is cheap and
+gives exactly that.  On a design whose anchors already have sensible locations
+the stage buys much less, which is what --no-mincut is for.
+
+Only movable anchors are seeded
+-------------------------------
+The seed CSV is filtered before AnkorPlace sees it, to rows that AnkorPlace will
+treat as movable.  This is not tidiness.  AnkorPlace applies the seed to pos0
+for every node the seed covers, fixed ones included, and then restores fixed
+nodes from that same pos0 at the end -- so a port or a macro that the bisection
+moved would come back as its "fixed" location, silently relocated.  Dropping
+those rows leaves their pos0 as the anchor nodefile wrote it.
 
 Which nodefile to read it back against
 --------------------------------------
@@ -39,7 +63,8 @@ the logic around the seeded anchors.
 Coordinates are lower left corners throughout, as in every other nodefile in
 this flow, so nothing is translated here.
 
-Either program can be pointed elsewhere with ANCHOR_HYPERGRAPH and ANKOR_PLACE.
+Each program can be pointed elsewhere with ANCHOR_HYPERGRAPH, MINCUT and
+ANKOR_PLACE.
 """
 
 import os
@@ -48,16 +73,34 @@ import sys
 
 PY_DIR = "/proj_pd/user_dev/rsrivastava/pyspark_cad/python"
 DEFAULT_ANCHOR = os.path.join(PY_DIR, "anchor_hypergraph.py")
+DEFAULT_MINCUT = os.path.join(PY_DIR, "mincut.py")
 DEFAULT_PLACE = os.path.join(PY_DIR, "AnkorPlace.py")
 
-#<!-- Which stage each option belongs to.  The two programs' option names are
-#     disjoint apart from -o, so one flat table is enough and the caller does
-#     not have to know which program owns what. -->
+#<!-- Which stage each option belongs to.
+#
+#     The anchor stage's names are disjoint from the other two, and AnkorPlace
+#     keeps its own names because it is the placer proper.  mincut and
+#     AnkorPlace, though, share --fix, --grid, --max-bins, --target-density,
+#     --plot, --seed and -o, so the bisection stage's options are exposed with an
+#     --mc- prefix and translated on the way out.  A flat table would have to
+#     pick one owner for each of those and would silently send the caller's
+#     value to the wrong program. -->
 ANCHOR_OPTS_VAL = ("--seq-regex", "--mem-regex", "--block-area", "--split",
                    "--port-area", "--max-cone", "--min-edge", "--max-edge",
                    "--break-loops", "--engine", "--graphml")
 ANCHOR_OPTS_FLAG = ("--no-port-anchors", "--trust-types", "--ignore-types")
-PLACE_OPTS_VAL = ("--fix", "--grid", "--max-bins", "--iters",
+
+#<!-- exposed name -> the name mincut.py actually takes -->
+MINCUT_OPTS_VAL = {"--mc-leaf": "--leaf",
+                   "--mc-passes": "--passes",
+                   "--mc-tolerance": "--tolerance",
+                   "--mc-partitioner": "--partitioner",
+                   "--mc-jobs": "-j",
+                   "--mc-macro-area": "--macro-area",
+                   "--mc-seed": "--seed",
+                   "--mc-metis-lib": "--metis-lib"}
+
+PLACE_OPTS_VAL = ("--fix", "--ports", "--grid", "--max-bins", "--iters",
                   "--target-density", "--stop-overflow", "--gamma",
                   "--gamma-min", "--lambda-growth", "--margin",
                   "--max-degree", "--workers", "--seed")
@@ -70,8 +113,8 @@ def die(msg):
 
 
 def route(args):
-    """Split the tail of the command line into the two stages' option lists."""
-    anchor, place = [], []
+    """Split the tail of the command line into the three stages' option lists."""
+    anchor, mincut, place = [], [], []
     i = 0
     while i < len(args):
         a = args[i]
@@ -81,18 +124,86 @@ def route(args):
         elif a in PLACE_OPTS_FLAG:
             place.append(a)
             i += 1
-        elif a in ANCHOR_OPTS_VAL or a in PLACE_OPTS_VAL:
+        elif a in ANCHOR_OPTS_VAL or a in PLACE_OPTS_VAL or a in MINCUT_OPTS_VAL:
             if i + 1 >= len(args):
                 die("%s needs a value" % a)
-            (anchor if a in ANCHOR_OPTS_VAL else place).extend([a, args[i + 1]])
+            if a in ANCHOR_OPTS_VAL:
+                anchor.extend([a, args[i + 1]])
+            elif a in MINCUT_OPTS_VAL:
+                mincut.extend([MINCUT_OPTS_VAL[a], args[i + 1]])
+            else:
+                place.extend([a, args[i + 1]])
             i += 2
         else:
             die("unknown option %s\n"
                 "                  anchor stage: %s %s\n"
+                "                  mincut stage: %s\n"
                 "                  place stage : %s %s"
                 % (a, " ".join(ANCHOR_OPTS_VAL), " ".join(ANCHOR_OPTS_FLAG),
+                   " ".join(sorted(MINCUT_OPTS_VAL)),
                    " ".join(PLACE_OPTS_VAL), " ".join(PLACE_OPTS_FLAG)))
-    return anchor, place
+    return anchor, mincut, place
+
+
+def anchor_fixed_set(path, fixmode):
+    """Which anchor ids AnkorPlace will hold, mirroring its --fix handling.
+
+    Returns a set of ids.  Used only to keep those rows out of the seed, so
+    being conservative here is safe: a movable node wrongly listed just misses
+    its seed and starts from the nodefile instead.
+    """
+    fixed = set()
+    want_block = fixmode in ("block+port", "block")
+    want_port = fixmode in ("block+port", "port")
+    try:
+        with open(path) as fh:
+            for line in fh:
+                if line.startswith("#") or not line.strip():
+                    continue
+                f = line.split()
+                if f[0] in ("DBU", "DIEAREA", "ROWHEIGHT", "NODES"):
+                    continue
+                if len(f) < 6:
+                    continue
+                t = ""
+                for tok in f[6:]:
+                    if tok.startswith("TYPE="):
+                        t = tok[5:]
+                if f[5] == "FIXED":
+                    fixed.add(f[0])
+                elif want_block and t in ("block", "mem"):
+                    fixed.add(f[0])
+                elif want_port and (t == "port" or f[2] == "PORT"):
+                    fixed.add(f[0])
+    except IOError as exc:
+        die("cannot read %s: %s" % (path, exc))
+    return fixed
+
+
+def filter_seed(src, dst, skip):
+    """Copy the seed CSV, dropping rows for anchors AnkorPlace holds fixed.
+
+    csv module, not a split on commas: a merged multi-bit flop is named
+    foo_reg[5:4,1:0] and splitting would shear the row apart.
+    """
+    import csv as _csv
+    kept = dropped = 0
+    with open(src, newline="") as fin, open(dst, "w", newline="") as fout:
+        rd = _csv.DictReader(fin)
+        if rd.fieldnames is None:
+            die("%s is empty" % src)
+        key = "id" if "id" in rd.fieldnames else "node"
+        if key not in rd.fieldnames:
+            die("%s has no id or node column, found %s" % (src, rd.fieldnames))
+        wr = _csv.DictWriter(fout, fieldnames=rd.fieldnames)
+        wr.writeheader()
+        for row in rd:
+            if row[key] in skip:
+                dropped += 1
+                continue
+            wr.writerow(row)
+            kept += 1
+    return kept, dropped
 
 
 def run(cmd):
@@ -111,23 +222,31 @@ def main(argv):
             die("--prefix needs a value")
         prefix = args[i + 1]
         args = args[:i] + args[i + 2:]
+    doMincut = True
+    if "--no-mincut" in args:
+        doMincut = False
+        args = [a for a in args if a != "--no-mincut"]
 
     if len(args) < 3:
         sys.stderr.write(__doc__)
         sys.stderr.write("\nusage: seed_placer <graph> <nodefile> <xyout> "
-                         "[--prefix P] [options]\n")
+                         "[--prefix P] [--no-mincut] [options]\n")
         return 1
 
     graph, nodefile, xyout = args[0], args[1], args[2]
-    anchorOpts, placeOpts = route(args[3:])
+    anchorOpts, mincutOpts, placeOpts = route(args[3:])
 
     for f in (graph, nodefile):
         if not os.path.exists(f):
             die("%s does not exist" % f)
 
     anchorProg = os.environ.get("ANCHOR_HYPERGRAPH", DEFAULT_ANCHOR)
+    mincutProg = os.environ.get("MINCUT", DEFAULT_MINCUT)
     placeProg = os.environ.get("ANKOR_PLACE", DEFAULT_PLACE)
-    for p, env in ((anchorProg, "ANCHOR_HYPERGRAPH"), (placeProg, "ANKOR_PLACE")):
+    needed = [(anchorProg, "ANCHOR_HYPERGRAPH"), (placeProg, "ANKOR_PLACE")]
+    if doMincut:
+        needed.append((mincutProg, "MINCUT"))
+    for p, env in needed:
         if not os.path.exists(p):
             die("%s not found\n"
                 "                  set %s to point at it" % (p, env))
@@ -135,13 +254,16 @@ def main(argv):
     if prefix is None:
         prefix = os.path.splitext(os.path.basename(graph))[0] + ".anchors"
     hgrFile = prefix + ".hgr"
+    pairFile = prefix + ".graph.txt"
     anchorNode = prefix + ".nodefile"
+    seedCsv = prefix + ".seed.csv"
+    seedUsed = prefix + ".seed.movable.csv"
     csv = prefix + ".placement.csv"
     png = prefix + ".png"
 
     #<!-- stale outputs from an earlier run would be read back as if they were
-    #     this one, and stage 2 would happily place last night's hypergraph -->
-    for f in (hgrFile, anchorNode, csv, xyout):
+    #     this one, and a later stage would happily use last night's -->
+    for f in (hgrFile, pairFile, anchorNode, seedCsv, seedUsed, csv, xyout):
         if os.path.exists(f):
             os.unlink(f)
 
@@ -150,8 +272,41 @@ def main(argv):
         if not os.path.exists(f):
             die("%s produced no %s" % (os.path.basename(anchorProg), f))
 
+    #<!-- Bisection over the anchors, to hand AnkorPlace a spread out start.
+    #
+    #     mincut reads a two column edge list, so it gets .graph.txt, the star
+    #     expansion of the hyperedges, while AnkorPlace gets the .hgr and its
+    #     native hyperedges.  --fix status holds whatever the anchor nodefile
+    #     marked FIXED, which is the ports, so the partition has correct
+    #     boundary conditions to work against. -->
+    seedArg = []
+    if doMincut:
+        if not os.path.exists(pairFile):
+            die("%s produced no %s, needed by the bisection stage"
+                % (os.path.basename(anchorProg), pairFile))
+        mcCmd = ["python3", mincutProg, pairFile, anchorNode,
+                 "--format", "full", "-o", seedCsv]
+        if not any(a == "--fix" for a in mincutOpts):
+            mcCmd += ["--fix", "status"]
+        run(mcCmd + mincutOpts)
+        if not os.path.exists(seedCsv):
+            die("%s produced no %s" % (os.path.basename(mincutProg), seedCsv))
+
+        fixmode = "block+port"
+        if "--fix" in placeOpts:
+            fixmode = placeOpts[placeOpts.index("--fix") + 1]
+        skip = anchor_fixed_set(anchorNode, fixmode)
+        kept, dropped = filter_seed(seedCsv, seedUsed, skip)
+        sys.stderr.write("INFO-SEED_PLACE : seeding %d movable anchor(s) from the "
+                         "bisection, %d held ones dropped\n" % (kept, dropped))
+        if kept == 0:
+            sys.stderr.write("WARN-SEED_PLACE : the bisection seeded nothing "
+                             "movable, running without a seed\n")
+        else:
+            seedArg = ["--seed-csv", seedUsed]
+
     run(["python3", placeProg, hgrFile, anchorNode, "-o", csv,
-         "--plot", png] + placeOpts)
+         "--plot", png] + seedArg + placeOpts)
     if not os.path.exists(csv):
         die("%s produced no %s" % (os.path.basename(placeProg), csv))
 

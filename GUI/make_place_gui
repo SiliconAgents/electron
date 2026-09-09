@@ -255,10 +255,14 @@ sub mincut_placer_popup {
 sub seed_place_popup {
   my $subWin = MainWindow->new();
   $subWin->title ("Seed Placer");
-  $subWin->geometry("360x400+0+0");
+  $subWin->geometry("380x560+0+0");
 
   my ($minEdge, $maxEdge, $maxCone, $blockArea, $seqRegex) = ("", "", "", "", "");
   my ($iters, $density, $margin, $maxDegree, $fanout) = ("", "", "", "", "");
+  my ($mcPasses, $mcLeaf, $mcTolerance, $mcJobs) = ("", "", "", "");
+  my $mcPartitioner = "auto";
+  my $noMincut = "";
+  my $ports = "require";
   my $split = "equal";
   my $breakLoops = "greedy";
   my $trust = "auto";
@@ -276,6 +280,28 @@ sub seed_place_popup {
   my $trustFrame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
   my $anchOptFrame= $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
 
+  #<!-- stage two: bisect the anchors so stage three does not start with the
+  #     whole design collapsed on the die centre -->
+  $subWin->Label(-text => "bisection seed", -font=>"Times 10 bold",
+                 -foreground=>"navy")->pack(-side=>'top', -anchor=>'w');
+  my $mcSkipFrame = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $mcPassFrame = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $mcLeafFrame = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $mcPartFrame = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+
+  $mcSkipFrame->Checkbutton(-text => "skip the bisection", -variable => \$noMincut,
+                         -onvalue => "--no_mincut", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $mcPassFrame->Label(-text  => "FM passes      ")->pack(-side=>'left');
+  $mcPassFrame->Entry(-textvariable => \$mcPasses, -width=>8)->pack(-side=>'left');
+  $mcLeafFrame->Label(-text  => "Leaf anchors   ")->pack(-side=>'left');
+  $mcLeafFrame->Entry(-textvariable => \$mcLeaf, -width=>8)->pack(-side=>'left');
+  $mcPartFrame->Label(-text  => "Partitioner    ")->pack(-side=>'left');
+  $mcPartFrame->Optionmenu(-variable => \$mcPartitioner,
+                           -options => [qw/auto metis fm none/])->pack(-side=>'left');
+  $mcPartFrame->Label(-text  => " jobs ")->pack(-side=>'left');
+  $mcPartFrame->Entry(-textvariable => \$mcJobs, -width=>4)->pack(-side=>'left');
+
   $subWin->Label(-text => "placement", -font=>"Times 10 bold",
                  -foreground=>"navy")->pack(-side=>'top', -anchor=>'w');
   my $iterFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
@@ -283,6 +309,7 @@ sub seed_place_popup {
   my $margFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
   my $degFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
   my $fixFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $portFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
   my $fanFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
   my $optFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
   my $noteFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
@@ -322,6 +349,11 @@ sub seed_place_popup {
   $fixFrame->Optionmenu(-variable => \$fix,
                         -options => ["block+port", "block", "port", "status", "none"],
                         )->pack(-side=>'left');
+  #<!-- ports with no location yet: require errors out, free hands them to the
+  #     solver, perimeter invents evenly spaced edge locations -->
+  $portFrame->Label(-text => "Unplaced ports ")->pack(-side=>'left');
+  $portFrame->Optionmenu(-variable => \$ports,
+                         -options => [qw/require free perimeter/])->pack(-side=>'left');
   $fanFrame->Label(-text  => "Fanout limit   ")->pack(-side=>'left');
   $fanFrame->Entry(-textvariable => \$fanout, -width=>8)->pack(-side=>'left');
 
@@ -350,6 +382,14 @@ sub seed_place_popup {
                          if ( $trust eq "trust" )                     { push(@args, "--trust_types"); }
                          elsif ( $trust eq "ignore" )                 { push(@args, "--ignore_types"); }
                          if ( $noPortAnchors ne "" ) { push(@args, $noPortAnchors); }
+                         if ( $noMincut ne "" ) { push(@args, $noMincut); }
+                         #<!-- 0 is a real value for passes, so test the string -->
+                         if ( $mcPasses    =~ m/^\d+$/ )              { push(@args, "-mc_passes", $mcPasses); }
+                         if ( $mcLeaf      =~ m/^\d+$/ && $mcLeaf > 0 ) { push(@args, "-mc_leaf", $mcLeaf); }
+                         if ( $mcTolerance =~ m/^\d*\.?\d+$/ )         { push(@args, "-mc_tolerance", $mcTolerance); }
+                         if ( $mcJobs      =~ m/^\d+$/ )              { push(@args, "-mc_jobs", $mcJobs); }
+                         if ( $mcPartitioner ne "" && $mcPartitioner ne "auto" ) { push(@args, "-mc_partitioner", $mcPartitioner); }
+                         if ( defined $ports && $ports ne "" )        { push(@args, "-ports", $ports); }
                          if ( $iters     =~ m/^\d+$/ )                { push(@args, "-iters", $iters); }
                          if ( $density   =~ m/^\d*\.?\d+$/ )          { push(@args, "-target_density", $density); }
                          if ( $margin    =~ m/^\d*\.?\d+$/ )          { push(@args, "-margin", $margin); }
