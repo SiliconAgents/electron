@@ -1,0 +1,1573 @@
+#######################################################################################################################
+################################################## Create PAD Frame ###################################################
+#######################################################################################################################
+# this subroutine create padframe from minimial inputs from the user, 
+# the goal is to use default cell names , chip size etc from the system and create a padframe for the chip
+# we can use the hierarchical methodology to create padring in 4 parts and then assemble it on the chip
+# this routine will write a command file that wil be sourced inside proton to create the padframe
+# we can also use graywolf to place the padframe to make it more automated
+
+sub create_padframe {
+  use Benchmark;
+  my $t0 = new Benchmark;
+  
+  my $noOfArguments = @_;
+  
+  if($noOfArguments < 2 || $_[0] eq '-h'){ 
+     print "Usage : create_padframe \n";
+     print "                  -dins <integer> \n";
+     print "                  -douts <integer> \n";
+     print "                  -ains <integer> \n";
+     print "                  -aouts <integer> \n";
+     print "                  --addFillers\n";
+     print "                  --addPGConnections\n";
+  }else{ # if correct no. of inputs
+     my $numOfDigitalInputs = 0 ;
+     my $numOfDigitalOutputs = 0;
+     my $numOfAnalogInputs = 0 ;
+     my $numOfAnalogOutputs = 0;
+     
+     for(my $i = 0; $i < $noOfArguments; $i++){
+         if($_[$i] eq "-dins"){$numOfDigInputs = $_[$i+1];}
+         if($_[$i] eq "-douts"){$numOfDigitalOutputs = $_[$i+1];}
+         if($_[$i] eq "-ains"){$numOfAnalogInputs = $_[$i+1];}
+         if($_[$i] eq "-aouts"){$numOfAnalogOutputs = $_[$i+1];}
+     }#for
+     
+     my $totalNum = $numOfDigitalInputs + $numOfDigitalOutputs + $numOfAnalogInputs + $numOfAnalogOutputs ;
+  } # if correct no. of inputs
+}#sub create_padframe
+
+#######################################################################################################################
+########################################## Create PAD Ring (Legacy) ##################################################
+#######################################################################################################################
+sub create_pad_ring_old {
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $noOfArg = @_;
+  if($noOfArg < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: create_pad_ring_old -f <json file>\n";
+     return;
+  }else{
+     my $jsonFile = "";
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-f")       {$jsonFile = $_[$i+1]; }
+     }
+
+     if(!-e $jsonFile){
+        print "\nWARN-PAD-FRM : 001 : file $jsonFile does not exists !\n";
+        return;
+     }
+
+     my $data;
+     if(open (my $json_str, $jsonFile)){
+       local $/ = undef;
+       my $json = JSON->new;
+       $data = $json->decode(<$json_str>);
+       close($json_str);
+     }
+     #print Dumper($data);
+     #print Dumper($data->{"pins"}[0]);
+
+     my $dbu = $GLOBAL->dbfGlobalGetDBU;
+     if(exists $DIE_ALREADY{dieArea}){
+        my $diellx = $DIE_ALREADY{dieArea}[0];
+        my $dielly = $DIE_ALREADY{dieArea}[1];
+        my $dieurx = $DIE_ALREADY{dieArea}[2];
+        my $dieury = $DIE_ALREADY{dieArea}[3];
+        #print "dieArea is:@{$DIE_ALREADY{dieArea}} \n";
+     
+        my $dieWidth = abs($dieurx - $diellx)/$dbu ;
+        my $dieHeight = abs($dieury - $dielly)/$dbu ;
+        #print "die:$dieWidth,$dieHeight\n";
+     
+        my $cornerCell = $data->{"pins"}->[0]->{"pin"}->[0]->{"cell"};
+        if(!exists $PLDB{$cornerCell}){
+           print "\nWARN-PAD-FRM : 002 : cell $cornerCell does not found !\n";
+           return;
+        }
+        my @cornerSize = $PLDB{$cornerCell}->dbMdbGetSize;
+        #print "corner_size:@cornerSize\n";
+
+        
+        my %fillers = ();
+        foreach my $cell (keys %PLDB){
+           my $class = $PLDB{$cell}->dbMdbGetClass;
+           if($class eq "PAD SPACER"){
+              my @size = $PLDB{$cell}->dbMdbGetSize;
+              $fillers{$cell} = $size[0];
+           } 
+        }
+        my @fillerCells = sort{$fillers{$a}<=>$fillers{$b}} keys %fillers;
+        #print "fillers:@fillerCells\n";
+        
+        my @lPadList = ();
+        my @rPadList = ();
+        my @tPadList = ();
+        my @bPadList = ();
+        my ($numLPads, $numRPads, $numTPads, $numBPads) = (0, 0, 0, 0);
+        my ($lPadsTotalW, $rPadsTotalW, $tPadsTotalW, $bPadsTotalW) = (0, 0, 0, 0);
+        foreach my $element (@{$data->{"pins"}}){
+           my $side = $element->{"side"};
+           my @pins = @{$element->{"pin"}};
+
+           if   ($side eq "W"){$numLPads = @pins;}
+           elsif($side eq "E"){$numRPads = @pins;}
+           elsif($side eq "N"){$numTPads = @pins;}
+           elsif($side eq "S"){$numBPads = @pins;}
+           else {next;}
+
+           foreach my $pinEle (@{$element->{"pin"}}){
+              my $cellName = $pinEle->{"cell"};
+              if(!exists $PLDB{$cellName}){
+                 print "WARN-PAD-FRM : 003 : cell $cornerCell does not found !\n";
+                 return;
+              }
+              my @size = $PLDB{$cellName}->dbMdbGetSize;
+              if   ($side eq "W"){$lPadsTotalW += $size[0]; push(@lPadList, $cellName);}
+              elsif($side eq "E"){$rPadsTotalW += $size[0]; push(@rPadList, $cellName);}
+              elsif($side eq "N"){$tPadsTotalW += $size[0]; push(@tPadList, $cellName);}
+              elsif($side eq "S"){$bPadsTotalW += $size[0]; push(@bPadList, $cellName);}
+           }#foreach pin
+        }#foreach pins
+
+        my $lFillersW = $dieHeight - ($lPadsTotalW + 2*$cornerSize[0]);
+        my $rFillersW = $dieHeight - ($rPadsTotalW + 2*$cornerSize[0]);
+        my $tFillersW = $dieWidth  - ($tPadsTotalW + 2*$cornerSize[0]);
+        my $bFillersW = $dieWidth  - ($bPadsTotalW + 2*$cornerSize[0]);
+    
+        my $thinnestFillerW = $fillers{$fillerCells[0]};
+
+        #################################### Adding bottom-left corner pads ################################
+        my $startX = $diellx;
+        my $startY = $dielly;
+        &add_pad_in_db("bl_corner_pad", $cornerCell, "FIXED", $startX, $startY, "N");
+
+        ####################################### Adding Left Pads ###########################################
+        my $numFillers = int($lFillersW/ $thinnestFillerW);
+        my $numFillersInEachGap = int($numFillers/($numLPads+1));
+        my $extraFillerNum = $numFillers - ($numFillersInEachGap * ($numLPads+1)); 
+        my $fillerCnt = 0;
+  
+        $startY = $dielly + $cornerSize[0]*$dbu;
+
+        for(my $j=0; $j<$numFillersInEachGap; $j++){
+            &add_pad_in_db("l_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "FW");
+            $startY += $thinnestFillerW*$dbu;  
+            $fillerCnt++; 
+        }
+        for(my $i=0; $i< @lPadList; $i++){
+            &add_pad_in_db("l_pad".$i, $lPadList[$i], "FIXED", $startX, $startY, "FW");
+            my @cellSize = $PLDB{$lPadList[$i]}->dbMdbGetSize;
+            $startY += $cellSize[0]*$dbu; 
+            for(my $j=0; $j< $numFillersInEachGap; $j++){
+                &add_pad_in_db("l_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "FW");
+                $startY += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+            }
+            if($extraFillerNum > 0){
+                &add_pad_in_db("l_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "FW");
+                $startY += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+                $extraFillerNum--;
+            }
+        }
+
+        ##################################### Adding top-left corner pads ##################################
+        &add_pad_in_db("tl_corner_pad", $cornerCell, "FIXED", $startX, $startY, "E");
+
+        ######################################## Adding Top Pads ###########################################
+        $numFillers = int($tFillersW/ $thinnestFillerW);
+        $numFillersInEachGap = int($numFillers/($numTPads+1));
+        $extraFillerNum = $numFillers - ($numFillersInEachGap * ($numTPads+1)); 
+        $fillerCnt = 0;
+  
+        $startX += $cornerSize[0]*$dbu;
+
+        for(my $j=0; $j<$numFillersInEachGap; $j++){
+            &add_pad_in_db("t_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "S");
+            $startX += $thinnestFillerW*$dbu;  
+            $fillerCnt++; 
+        }
+        for(my $i=0; $i< @tPadList; $i++){
+            &add_pad_in_db("t_pad".$i, $tPadList[$i], "FIXED", $startX, $startY, "S");
+            my @cellSize = $PLDB{$tPadList[$i]}->dbMdbGetSize;
+            $startX += $cellSize[0]*$dbu; 
+            for(my $j=0; $j<$numFillersInEachGap; $j++){
+                &add_pad_in_db("t_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "S");
+                $startX += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+            }
+            if($extraFillerNum > 0){
+                &add_pad_in_db("t_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "S");
+                $startX += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+                $extraFillerNum--;
+            }
+        }
+
+        ####################################### Adding Bottom Pads #########################################
+        $numFillers = int($bFillersW/ $thinnestFillerW);
+        $numFillersInEachGap = int($numFillers/($numBPads+1));
+        $extraFillerNum = $numFillers - ($numFillersInEachGap * ($numBPads+1)); 
+        $fillerCnt = 0;
+  
+        $startX = $diellx + $cornerSize[0]*$dbu;
+        $startY = $dielly;
+
+        for(my $j=0; $j<$numFillersInEachGap; $j++){
+            &add_pad_in_db("b_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "N");
+            $startX += $thinnestFillerW*$dbu;  
+            $fillerCnt++; 
+        }
+        for(my $i=0; $i< @bPadList; $i++){
+            &add_pad_in_db("b_pad".$i, $bPadList[$i], "FIXED", $startX, $startY, "N");
+            my @cellSize = $PLDB{$bPadList[$i]}->dbMdbGetSize;
+            $startX += $cellSize[0]*$dbu; 
+            for(my $j=0; $j<$numFillersInEachGap; $j++){
+                &add_pad_in_db("b_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "N");
+                $startX += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+            }
+            if($extraFillerNum > 0){
+                &add_pad_in_db("b_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "N");
+                $startX += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+                $extraFillerNum--;
+            }
+        }
+
+        ################################## Adding bottom-right corner pads ##################################
+        &add_pad_in_db("br_corner_pad", $cornerCell, "FIXED", $startX, $startY, "W");
+
+        ####################################### Adding Right Pads ###########################################
+        $numFillers = int($rFillersW/ $thinnestFillerW);
+        $numFillersInEachGap = int($numFillers/($numRPads+1));
+        $extraFillerNum = $numFillers - ($numFillersInEachGap * ($numRPads+1)); 
+        $fillerCnt = 0;
+  
+        $startY += $cornerSize[0]*$dbu;
+
+        for(my $j=0; $j<$numFillersInEachGap; $j++){
+            &add_pad_in_db("r_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "FE");
+            $startY += $thinnestFillerW*$dbu;  
+            $fillerCnt++; 
+        }
+        for(my $i=0; $i< @rPadList; $i++){
+            &add_pad_in_db("r_pad".$i, $rPadList[$i], "FIXED", $startX, $startY, "FE");
+            my @cellSize = $PLDB{$rPadList[$i]}->dbMdbGetSize;
+            $startY += $cellSize[0]*$dbu; 
+            for(my $j=0; $j<$numFillersInEachGap; $j++){
+                &add_pad_in_db("r_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "FE");
+                $startY += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+            }
+            if($extraFillerNum > 0){
+                &add_pad_in_db("r_filler_pad".$fillerCnt, $fillerCells[0], "FIXED", $startX, $startY, "FE");
+                $startY += $thinnestFillerW*$dbu;  
+                $fillerCnt++; 
+                $extraFillerNum--;
+            }
+        }
+
+        ################################### Adding top-right corner pads ####################################
+        &add_pad_in_db("tr_corner_pad", $cornerCell, "FIXED", $startX, $startY, "S");
+
+        ################################## changing dieArea to fit pad ring #################################
+        $DIE_ALREADY{dieArea}[2] = $startX + $cornerSize[0]*$dbu;
+        $DIE_ALREADY{dieArea}[3] = $startY + $cornerSize[0]*$dbu;
+        #print "Updated dieArea is:@{$DIE_ALREADY{dieArea}} \n";
+
+        #####################################################################################################
+     }#if die area exists
+  }#if correct num of arg
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command create_pad_ring_old took:",timestr($td),"\n";
+}#sub create_pad_ring_old
+
+#######################################################################################################################
+############################################### Create PAD Ring #######################################################
+#######################################################################################################################
+sub create_pad_ring {
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $noOfArg = @_;
+  if($noOfArg < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print "Usage: create_pad_ring -f <json file> [--add_filler]\n";
+     print "       create_pad_ring -template <output_file>\n";
+     print "\n";
+     print "Options:\n";
+     print "  -f <json file>     : JSON file specifying padring configuration\n";
+     print "  --add_filler       : Fill 'space' gaps with filler cells instead of empty space\n";
+     print "  -template <file>   : Generate JSON template file\n";
+     print "\n";
+     return;
+  }else{
+     my ($jsonFile, $addFillers, $fillerCnt, $templateFile) = ("", 0, 0, "");
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-f" )            {$jsonFile = $_[$i+1]; }
+         if($_[$i] eq "--add_filler" )  {$addFillers = 1; print "DEBUG: --add_filler flag detected, addFillers = $addFillers\n";}
+         if($_[$i] eq "-template" )     {$templateFile = $_[$i+1]; }
+     }
+     print "DEBUG: Final addFillers value: $addFillers\n";
+
+     # Generate template if requested
+     if($templateFile ne ""){
+        &generate_padring_template($templateFile);
+        return;
+     }
+
+     if(!-e $jsonFile){
+        print "\nWARN-PAD-FRM : 001 : file $jsonFile does not exists !\n";
+        return;
+     }
+
+     my $data;
+     if(open (my $json_str, $jsonFile)){
+       local $/ = undef;
+       my $json = JSON->new;
+       $data = $json->decode(<$json_str>);
+       close($json_str);
+     }
+     #print Dumper($data);
+     #print Dumper($data->{"pins"}[0]);
+
+     my $dbu = $GLOBAL->dbfGlobalGetDBU;
+     if(exists $DIE_ALREADY{dieArea}){
+        my $diellx = $DIE_ALREADY{dieArea}[0];
+        my $dielly = $DIE_ALREADY{dieArea}[1];
+        my $dieurx = $DIE_ALREADY{dieArea}[2];
+        my $dieury = $DIE_ALREADY{dieArea}[3];
+        print "INFO: Die area coordinates: ($diellx, $dielly) to ($dieurx, $dieury) [DBU]\n";
+
+        my $dieWidth = abs($dieurx - $diellx)/$dbu ;
+        my $dieHeight = abs($dieury - $dielly)/$dbu ;
+        print "INFO: Die dimensions: ${dieWidth} x ${dieHeight} microns\n";
+
+
+        ######################## Making hash of filler cells ########################
+        my %FILLERS = ();           # All fillers (legacy compatibility)
+        my %H_FILLERS = ();         # Horizontal fillers (for east/west sides)
+        my %V_FILLERS = ();         # Vertical fillers (for north/south sides)
+        my @fillersWidthArr = ();
+        my @fillerCells = ();
+        my @hFillersWidthArr = ();
+        my @hFillerCells = ();
+
+        # Check if user specified filler cells in JSON
+        if(exists $data->{"filler_cells"} && @{$data->{"filler_cells"}} > 0){
+            print "INFO: Using user-specified filler cells from JSON\n";
+            foreach my $fillerCell (@{$data->{"filler_cells"}}){
+                if(exists $PLDB{$fillerCell}){
+                    my @size = $PLDB{$fillerCell}->dbMdbGetSize;
+                    my $width_dbu = $size[0]*$dbu;
+
+                    # Add to main FILLERS hash for compatibility
+                    $FILLERS{$width_dbu} = $fillerCell;
+
+                    # Separate horizontal and vertical fillers
+                    if($fillerCell =~ /_H/i){
+                        $H_FILLERS{$width_dbu} = $fillerCell;
+                        print "INFO: Added horizontal filler: $fillerCell (width: $size[0] microns)\n";
+                    } else {
+                        $V_FILLERS{$width_dbu} = $fillerCell;
+                        print "INFO: Added vertical filler: $fillerCell (width: $size[0] microns)\n";
+                    }
+                } else {
+                    print "WARN: User-specified filler cell '$fillerCell' not found in PLDB\n";
+                }
+            }
+        } else {
+            print "INFO: Auto-detecting filler cells (class = PAD SPACER)\n";
+            foreach my $cell (keys %PLDB){
+               my $class = $PLDB{$cell}->dbMdbGetClass;
+               if($class eq "PAD SPACER" && $cell !~ /A$/){
+                  my @size = $PLDB{$cell}->dbMdbGetSize;
+                  my $width_dbu = $size[0]*$dbu;
+
+                  # Add to main FILLERS hash for compatibility
+                  $FILLERS{$width_dbu} = $cell;
+
+                  # Separate horizontal and vertical fillers
+                  if($cell =~ /_H/i){
+                      $H_FILLERS{$width_dbu} = $cell;
+                  } else {
+                      $V_FILLERS{$width_dbu} = $cell;
+                  }
+               }
+            }
+        }
+
+        @fillersWidthArr = sort{$b<=>$a} keys %FILLERS;
+        @fillerCells = @FILLERS{@fillersWidthArr};
+
+        # Create separate arrays for horizontal fillers (east/west sides)
+        @hFillersWidthArr = sort{$b<=>$a} keys %H_FILLERS;
+        @hFillerCells = @H_FILLERS{@hFillersWidthArr};
+
+        if(@fillerCells == 0){
+            if($addFillers == 1){
+                print "ERROR: --add_filler requested but no filler cells found! Either:\n";
+                print "  1. Specify filler_cells in JSON, or\n";
+                print "  2. Load LEF files with PAD SPACER class cells\n";
+                return;
+            } else {
+                print "INFO: No filler cells found - continuing without fillers (--add_filler not requested)\n";
+            }
+        }
+
+        print "DEBUG: Found " . scalar(@fillerCells) . " total filler cells\n";
+        print "  - Horizontal fillers (_H): " . scalar(@hFillerCells) . " cells\n";
+        print "  - Vertical fillers: " . scalar(keys %V_FILLERS) . " cells\n";
+        print "Available horizontal fillers (for east/west): @hFillerCells\n";
+        print "Available vertical fillers (for north/south): " . join(", ", values %V_FILLERS) . "\n";
+        print "Horizontal filler widths (microns): " . join(", ", map { $_/$dbu } @hFillersWidthArr) . "\n";
+
+        if(@hFillerCells == 0 && @fillerCells > 0){
+            print "WARN: No horizontal filler cells (_H) found for east/west sides\n";
+            print "      Will use vertical fillers as fallback for all sides\n";
+            @hFillersWidthArr = @fillersWidthArr;
+            %H_FILLERS = %FILLERS;
+            @hFillerCells = @fillerCells;
+        }
+
+
+        #############################################################################
+
+        my ($lPadIndex, $rPadIndex, $tPadIndex, $bPadIndex, $tlPadIndex, $trPadIndex, $blPadIndex, $brPadIndex, $trrPadIndex) = (0, 0, 0, 0, 0, 0, 0, 0, 0);
+        my $index = 0;
+        print "DEBUG: Processing JSON sides:\n";
+        foreach my $element (@{$data->{"pins"}}){
+           my $side = $element->{"side"};
+           my $numPins = scalar(@{$element->{"pin"}});
+           print "  - Found side '$side' with $numPins pins at index $index\n";
+
+           if   ($side eq "L"){$lPadIndex = $index ; print "    -> Assigned as LEFT side\n";}
+           elsif($side eq "R"){$rPadIndex = $index ; print "    -> Assigned as RIGHT side\n";}
+           elsif($side eq "T"){$tPadIndex = $index ; print "    -> Assigned as TOP side\n";}
+           elsif($side eq "B"){$bPadIndex = $index ; print "    -> Assigned as BOTTOM side\n";}
+           elsif($side eq "TL"){$tlPadIndex = $index ; print "    -> Assigned as TOP-LEFT corner\n";}
+           elsif($side eq "TR"){$trPadIndex = $index ; print "    -> Assigned as TOP-RIGHT corner\n";}
+           elsif($side eq "BL"){$blPadIndex = $index ; print "    -> Assigned as BOTTOM-LEFT corner\n";}
+           elsif($side eq "BR"){$brPadIndex = $index ; print "    -> Assigned as BOTTOM-RIGHT corner\n";}
+           elsif($side eq "TRR"){$trrPadIndex = $index ; print "    -> Assigned as TRR special\n";}
+           else {print "    -> WARNING: Unknown side '$side'\n"; next;}
+
+           foreach my $pinEle (@{$element->{"pin"}}){
+              my $cellName = $pinEle->{"cell"};
+              if(!exists $PLDB{$cellName}){
+                 print "WARN-PAD-FRM : 002 : cell $cellName does not found !\n";
+                 return;
+              }
+           }#foreach pin
+           $index++;
+        }#foreach pins
+
+        #################################### Adding bottom-left corner pads ################################
+        my $blCornerPad = $data->{"pins"}->[$blPadIndex]->{"pin"}->[0]->{"name"};
+        my $blCornerCell = $data->{"pins"}->[$blPadIndex]->{"pin"}->[0]->{"cell"};
+        my $blCornerPadOrient = $data->{"pins"}->[$blPadIndex]->{"pin"}->[0]->{"orient"};
+
+        # BOTTOM-LEFT corner should be at actual bottom-left corner of die
+        my $blX = $diellx;
+        my $blY = $dielly;
+        print "INFO: adding BOTTOM_LEFT_PAD $blCornerPad $blCornerCell at corner ($blX, $blY)\n";
+        &add_pad_in_db($blCornerPad, $blCornerCell, "FIXED", $blX, $blY, $blCornerPadOrient);
+
+        ####################################### Adding Left Pads ###########################################
+        # Start placement after BL corner
+        my @blCornerCellSize = $PLDB{$blCornerCell}->dbMdbGetSize;
+        my $currentY = $dielly + $blCornerCellSize[1]*$dbu;  # Start after BL corner height
+
+        foreach my $pin (@{$data->{"pins"}[$lPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient, $space) = ($pin->{name}, $pin->{cell}, $pin->{orient}, $pin->{space});
+
+            print "DEBUG: LEFT pad '$name': space=$space, addFillers=$addFillers\n";
+
+            # Add space before this pad if specified - using fillers if enabled
+            if(defined($space) && $space > 0){
+                print "DEBUG: Space > 0 condition met for LEFT pad '$name'\n";
+                if($addFillers == 1){
+                    print "DEBUG: Entering filler insertion logic for LEFT pad '$name'\n";
+                    print "INFO: Adding $space microns of horizontal filler before LEFT pad '$name'\n";
+                    my @lPadFillers = get_num_fillers($space*$dbu, @hFillersWidthArr);
+                    print "DEBUG: get_num_fillers returned: @lPadFillers\n";
+                    for(my $i=0; $i<@lPadFillers; $i++){
+                        my $fillerCellName = $H_FILLERS{$lPadFillers[$i]};
+                        if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                            print "ERROR: Horizontal filler cell for width $lPadFillers[$i] not found in PLDB\n";
+                            print "       Available H_FILLERS keys: " . join(", ", keys %H_FILLERS) . "\n";
+                            next;
+                        }
+                        my $fillerLlx = $diellx;
+                        my $fillerLly = $currentY;
+                        print "INFO: adding horizontal filler IOFILLER_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                        &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "FW");
+                        $currentY += $lPadFillers[$i];  # Move position by filler height
+                        $fillerCnt++;
+                    }
+                } else {
+                    print "DEBUG: addFillers=$addFillers, using empty space instead\n";
+                    $currentY += $space*$dbu;
+                    print "INFO: Added $space microns spacing before pad '$name'\n";
+                }
+            } else {
+                print "DEBUG: No space defined for LEFT pad '$name' (space=$space)\n";
+            }
+
+            my $llx = $diellx;
+            my $lly = $currentY;
+
+            # Validate orientation before passing to add_pad_in_db
+            if(!defined($orient) || $orient eq ""){
+                $orient = "FW";
+            }
+
+            print "INFO: adding LEFT_PAD $name $cell $llx $lly\n";
+            &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+
+            # Advance by the pad's Y-extent, which is the tiling pitch on this
+            # side.  A pad is drawn once and instantiated rotated on L/R, so for
+            # FW/FE the Y-extent is the cell WIDTH, not its height.  Using the
+            # height here made $currentY overshoot by the pad's depth per pad,
+            # which pushed the column past the TL corner and drove
+            # $remainingLeftSpace negative so the remaining-space fill was
+            # skipped entirely.
+            my ($xExtent, $yExtent) = &get_pad_extents($cell, $orient);
+            print "DEBUG: LEFT_PAD '$name' orient $orient -> Y-extent (pitch): $yExtent microns\n";
+            $currentY += $yExtent*$dbu;
+
+
+        }
+
+        ################################## Fill remaining space on LEFT side ################################
+        # Calculate space between last LEFT pad and TL corner
+        my $tlCornerCellName = $data->{"pins"}->[$tlPadIndex]->{"pin"}->[0]->{"cell"};
+        if(!exists $PLDB{$tlCornerCellName}){
+            print "ERROR: TL corner cell '$tlCornerCellName' not found in PLDB\n";
+            return;
+        }
+        my @tlCornerCellSize = $PLDB{$tlCornerCellName}->dbMdbGetSize;
+        my $tlY = $dieury - $tlCornerCellSize[1]*$dbu;  # TL corner Y position
+        my $remainingLeftSpace = $tlY - $currentY;      # Space in DBU
+
+        if($addFillers == 1 && $remainingLeftSpace > 0){
+            print "INFO: Filling remaining LEFT side space: " . ($remainingLeftSpace/$dbu) . " microns\n";
+            my @leftRemainFillers = get_num_fillers($remainingLeftSpace, @hFillersWidthArr);
+            for(my $i=0; $i<@leftRemainFillers; $i++){
+                my $fillerCellName = $H_FILLERS{$leftRemainFillers[$i]};
+                if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                    print "ERROR: Horizontal filler cell for width $leftRemainFillers[$i] not found in PLDB\n";
+                    next;
+                }
+                my $fillerLlx = $diellx;
+                my $fillerLly = $currentY;
+                print "INFO: adding remaining space filler LEFTFILL_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                &add_pad_in_db("LEFTFILL_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "FW");
+                $currentY += $leftRemainFillers[$i];
+                $fillerCnt++;
+            }
+        } elsif($remainingLeftSpace > 0) {
+            print "INFO: LEFT side has " . ($remainingLeftSpace/$dbu) . " microns of unfilled space\n";
+        }
+
+        ##################################### Adding top-left corner pads ##################################
+        my $tlCornerPad = $data->{"pins"}->[$tlPadIndex]->{"pin"}->[0]->{"name"};
+        my $tlCornerCell = $data->{"pins"}->[$tlPadIndex]->{"pin"}->[0]->{"cell"};
+        my $tlCornerPadOrient = $data->{"pins"}->[$tlPadIndex]->{"pin"}->[0]->{"orient"};
+
+        # TOP-LEFT corner should be at actual top-left corner of die
+        my @tlCornerCellSize = $PLDB{$tlCornerCell}->dbMdbGetSize;
+        my $tlX = $diellx;
+        my $tlY = $dieury - $tlCornerCellSize[1]*$dbu;  # Top edge minus cell height
+        print "INFO: adding TOP_LEFT_PAD $tlCornerPad $tlCornerCell at corner ($tlX, $tlY)\n";
+        &add_pad_in_db($tlCornerPad, $tlCornerCell, "FIXED", $tlX, $tlY, $tlCornerPadOrient);
+
+        # Filler logic removed for sequential placement - can be added back if needed 
+
+        ######################################## Adding Top Pads ###########################################
+        # Start placement after TL corner
+        my @tlCornerCellSize = $PLDB{$tlCornerCell}->dbMdbGetSize;
+        my $currentX = $diellx + $tlCornerCellSize[0]*$dbu;  # Start after TL corner width
+
+        foreach my $pin (@{$data->{"pins"}[$tPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient, $space) = ($pin->{name}, $pin->{cell}, $pin->{orient}, $pin->{space});
+
+            # Add space before this pad if specified - using fillers if enabled
+            if(defined($space) && $space > 0){
+                if($addFillers == 1){
+                    print "INFO: Adding $space microns of filler before pad '$name'\n";
+                    my @tPadFillers = get_num_fillers($space*$dbu, @fillersWidthArr);
+                    for(my $i=0; $i<@tPadFillers; $i++){
+                        my $fillerCellName = $FILLERS{$tPadFillers[$i]};
+                        my @fillerSize = $PLDB{$fillerCellName}->dbMdbGetSize;
+                        my $fillerLlx = $currentX;
+                        my $fillerLly = $dieury - $fillerSize[1]*$dbu;
+                        print "INFO: adding filler IOFILLER_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                        &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "S");
+                        $currentX += $tPadFillers[$i];  # Move position by filler width
+                        $fillerCnt++;
+                    }
+                } else {
+                    $currentX += $space*$dbu;
+                    print "INFO: Added $space microns spacing before pad '$name'\n";
+                }
+            }
+
+            my @cellSize = $PLDB{$cell}->dbMdbGetSize;
+            my $llx = $currentX;
+            my $lly = $dieury - $cellSize[1]*$dbu;
+
+            # Validate orientation before passing to add_pad_in_db
+            if(!defined($orient) || $orient eq ""){
+                $orient = "S";
+            }
+
+            print "INFO: adding TOP_PAD $name $cell $llx $lly\n";
+            &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+
+            # Move to next position (add this pad's width)
+            $currentX += $cellSize[0]*$dbu;
+
+
+        }
+
+        ################################### Fill remaining space on TOP side #################################
+        # Calculate space between last TOP pad and TR corner
+        my $trCornerCellName = $data->{"pins"}->[$trPadIndex]->{"pin"}->[0]->{"cell"};
+        if(!exists $PLDB{$trCornerCellName}){
+            print "ERROR: TR corner cell '$trCornerCellName' not found in PLDB\n";
+            return;
+        }
+        my @trCornerCellSize = $PLDB{$trCornerCellName}->dbMdbGetSize;
+        my $trX = $dieurx - $trCornerCellSize[0]*$dbu;  # TR corner X position
+        my $remainingTopSpace = $trX - $currentX;       # Space in DBU
+
+        if($addFillers == 1 && $remainingTopSpace > 0){
+            print "INFO: Filling remaining TOP side space: " . ($remainingTopSpace/$dbu) . " microns\n";
+            my @topRemainFillers = get_num_fillers($remainingTopSpace, @fillersWidthArr);
+            for(my $i=0; $i<@topRemainFillers; $i++){
+                my $fillerCellName = $FILLERS{$topRemainFillers[$i]};
+                if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                    print "ERROR: Vertical filler cell for width $topRemainFillers[$i] not found in PLDB\n";
+                    next;
+                }
+                my @fillerSize = $PLDB{$fillerCellName}->dbMdbGetSize;
+                my $fillerLlx = $currentX;
+                my $fillerLly = $dieury - $fillerSize[1]*$dbu;
+                print "INFO: adding remaining space filler TOPFILL_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                &add_pad_in_db("TOPFILL_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "S");
+                $currentX += $topRemainFillers[$i];
+                $fillerCnt++;
+            }
+        } elsif($remainingTopSpace > 0) {
+            print "INFO: TOP side has " . ($remainingTopSpace/$dbu) . " microns of unfilled space\n";
+        }
+
+        ################################### Adding top-right corner pads ####################################
+        my $trCornerPad = $data->{"pins"}->[$trPadIndex]->{"pin"}->[0]->{"name"};
+        my $trCornerCell = $data->{"pins"}->[$trPadIndex]->{"pin"}->[0]->{"cell"};
+        my $trCornerPadOrient = $data->{"pins"}->[$trPadIndex]->{"pin"}->[0]->{"orient"};
+        my @trCornerCellSize = $PLDB{$trCornerCell}->dbMdbGetSize;
+
+        # TOP-RIGHT corner should be at actual top-right corner of die
+        my $trX = $dieurx - $trCornerCellSize[0]*$dbu;  # Right edge minus cell width
+        my $trY = $dieury - $trCornerCellSize[1]*$dbu;  # Top edge minus cell height
+        print "INFO: adding TOP_RIGHT_PAD $trCornerPad $trCornerCell at corner ($trX, $trY)\n";
+        &add_pad_in_db($trCornerPad, $trCornerCell, "FIXED", $trX, $trY, $trCornerPadOrient);
+
+        # Filler logic removed for sequential placement - can be added back if needed 
+
+        ####################################### Adding Bottom Pads #########################################
+        # Start placement after BL corner (reuse the BL corner size)
+        my $currentXBottom = $diellx + $blCornerCellSize[0]*$dbu;  # Start after BL corner width
+
+        foreach my $pin (@{$data->{"pins"}[$bPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient, $space) = ($pin->{name}, $pin->{cell}, $pin->{orient}, $pin->{space});
+
+            # Add space before this pad if specified - using fillers if enabled
+            if(defined($space) && $space > 0){
+                if($addFillers == 1){
+                    print "INFO: Adding $space microns of filler before pad '$name'\n";
+                    my @bPadFillers = get_num_fillers($space*$dbu, @fillersWidthArr);
+                    for(my $i=0; $i<@bPadFillers; $i++){
+                        my $fillerCellName = $FILLERS{$bPadFillers[$i]};
+                        my $fillerLlx = $currentXBottom;
+                        my $fillerLly = $dielly;
+                        print "INFO: adding filler IOFILLER_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                        &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "N");
+                        $currentXBottom += $bPadFillers[$i];  # Move position by filler width
+                        $fillerCnt++;
+                    }
+                } else {
+                    $currentXBottom += $space*$dbu;
+                    print "INFO: Added $space microns spacing before pad '$name'\n";
+                }
+            }
+
+            my $llx = $currentXBottom;
+            my $lly = $dielly;
+
+            # Validate orientation before passing to add_pad_in_db
+            if(!defined($orient) || $orient eq ""){
+                $orient = "N";
+            }
+
+            print "INFO: adding BOTTOM_PAD $name $cell $llx $lly\n";
+            &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+
+            # Move to next position (add this pad's width)
+            my @cellSize = $PLDB{$cell}->dbMdbGetSize;
+            $currentXBottom += $cellSize[0]*$dbu;
+
+
+        }
+
+        ################################## Fill remaining space on BOTTOM side ###############################
+        # Calculate space between last BOTTOM pad and BR corner
+        my $brCornerCellName = $data->{"pins"}->[$brPadIndex]->{"pin"}->[0]->{"cell"};
+        if(!exists $PLDB{$brCornerCellName}){
+            print "ERROR: BR corner cell '$brCornerCellName' not found in PLDB\n";
+            return;
+        }
+        my @brCornerCellSize = $PLDB{$brCornerCellName}->dbMdbGetSize;
+        my $brX = $dieurx - $brCornerCellSize[0]*$dbu;  # BR corner X position
+        my $remainingBottomSpace = $brX - $currentXBottom;  # Space in DBU
+
+        if($addFillers == 1 && $remainingBottomSpace > 0){
+            print "INFO: Filling remaining BOTTOM side space: " . ($remainingBottomSpace/$dbu) . " microns\n";
+            my @bottomRemainFillers = get_num_fillers($remainingBottomSpace, @fillersWidthArr);
+            for(my $i=0; $i<@bottomRemainFillers; $i++){
+                my $fillerCellName = $FILLERS{$bottomRemainFillers[$i]};
+                if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                    print "ERROR: Vertical filler cell for width $bottomRemainFillers[$i] not found in PLDB\n";
+                    next;
+                }
+                my $fillerLlx = $currentXBottom;
+                my $fillerLly = $dielly;
+                print "INFO: adding remaining space filler BOTTOMFILL_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                &add_pad_in_db("BOTTOMFILL_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "N");
+                $currentXBottom += $bottomRemainFillers[$i];
+                $fillerCnt++;
+            }
+        } elsif($remainingBottomSpace > 0) {
+            print "INFO: BOTTOM side has " . ($remainingBottomSpace/$dbu) . " microns of unfilled space\n";
+        }
+
+        ################################## Adding bottom-right corner pads ##################################
+        my $brCornerPad = $data->{"pins"}->[$brPadIndex]->{"pin"}->[0]->{"name"};
+        my $brCornerCell = $data->{"pins"}->[$brPadIndex]->{"pin"}->[0]->{"cell"};
+        my $brCornerPadOrient = $data->{"pins"}->[$brPadIndex]->{"pin"}->[0]->{"orient"};
+        my @brCornerCellSize = $PLDB{$brCornerCell}->dbMdbGetSize;
+
+        # BOTTOM-RIGHT corner should be at actual bottom-right corner of die
+        my $brX = $dieurx - $brCornerCellSize[0]*$dbu;  # Right edge minus cell width
+        my $brY = $dielly;                              # Bottom edge
+        print "INFO: adding BOTTOM_RIGHT_PAD $brCornerPad $brCornerCell at corner ($brX, $brY)\n";
+        &add_pad_in_db($brCornerPad, $brCornerCell, "FIXED", $brX, $brY, $brCornerPadOrient);
+
+        # Filler logic removed for sequential placement - can be added back if needed 
+
+        ####################################### Adding Right Pads ###########################################
+        # Start placement after BR corner
+        my @brCornerCellSize = $PLDB{$brCornerCell}->dbMdbGetSize;
+        my $currentYRight = $dielly + $brCornerCellSize[1]*$dbu;  # Start after BR corner height
+
+        foreach my $pin (@{$data->{"pins"}[$rPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient, $space) = ($pin->{name}, $pin->{cell}, $pin->{orient}, $pin->{space});
+
+            # Add space before this pad if specified - using fillers if enabled
+            if(defined($space) && $space > 0){
+                if($addFillers == 1){
+                    print "INFO: Adding $space microns of horizontal filler before RIGHT pad '$name'\n";
+                    my @rPadFillers = get_num_fillers($space*$dbu, @hFillersWidthArr);
+                    for(my $i=0; $i<@rPadFillers; $i++){
+                        my $fillerCellName = $H_FILLERS{$rPadFillers[$i]};
+                        if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                            print "ERROR: Horizontal filler cell for width $rPadFillers[$i] not found in PLDB\n";
+                            print "       Available H_FILLERS keys: " . join(", ", keys %H_FILLERS) . "\n";
+                            next;
+                        }
+                        my @fillerSize = $PLDB{$fillerCellName}->dbMdbGetSize;
+                        my $fillerLlx = $dieurx - $fillerSize[1]*$dbu;  # Use filler height for X positioning
+                        my $fillerLly = $currentYRight;
+                        print "INFO: adding horizontal filler IOFILLER_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                        &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "FE");
+                        $currentYRight += $rPadFillers[$i];  # Move position by filler height
+                        $fillerCnt++;
+                    }
+                } else {
+                    $currentYRight += $space*$dbu;
+                    print "INFO: Added $space microns spacing before pad '$name'\n";
+                }
+            }
+
+            my @cellSize = $PLDB{$cell}->dbMdbGetSize;
+
+            # Validate orientation before calculating position
+            if(!defined($orient) || $orient eq ""){
+                $orient = "FE";
+            }
+
+            # Footprint extents of the pad as placed, so the outer (right) edge
+            # lines up with the die and the column advances by the tiling pitch.
+            my ($xExtent, $yExtent) = &get_pad_extents($cell, $orient);
+
+            # For RIGHT side: align outer edge with die -> X = die_right_edge - X-extent
+            my $llx = $dieurx - $xExtent*$dbu;
+            my $lly = $currentYRight;
+
+            print "DEBUG: RIGHT_PAD '$name' placement:\n";
+            print "  - Cell size: $cellSize[0] x $cellSize[1] microns (W x H)\n";
+            print "  - Orientation: $orient -> X-extent: $xExtent, Y-extent (pitch): $yExtent microns\n";
+            print "  - RIGHT side placement: X = die_right_edge - X-extent\n";
+            print "  - Die right edge: $dieurx DBU\n";
+            print "  - Pad X-extent: " . ($xExtent*$dbu) . " DBU\n";
+            print "  - Calculated llx: $dieurx - " . ($xExtent*$dbu) . " = $llx DBU\n";
+
+            print "INFO: adding RIGHT_PAD $name $cell $llx $lly\n";
+            &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+
+            # Advance by the Y-extent (tiling pitch), not the height -- see the
+            # matching comment on the LEFT side.
+            $currentYRight += $yExtent*$dbu;
+
+
+        }
+
+        ################################## Fill remaining space on RIGHT side ################################
+        # Calculate space between last RIGHT pad and TR corner
+        # Reuse the TR corner info from TOP side calculation above
+        my $trY = $dieury - $trCornerCellSize[1]*$dbu;  # TR corner Y position
+        my $remainingRightSpace = $trY - $currentYRight;    # Space in DBU
+
+        if($addFillers == 1 && $remainingRightSpace > 0){
+            print "INFO: Filling remaining RIGHT side space: " . ($remainingRightSpace/$dbu) . " microns\n";
+            my @rightRemainFillers = get_num_fillers($remainingRightSpace, @hFillersWidthArr);
+            for(my $i=0; $i<@rightRemainFillers; $i++){
+                my $fillerCellName = $H_FILLERS{$rightRemainFillers[$i]};
+                if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                    print "ERROR: Horizontal filler cell for width $rightRemainFillers[$i] not found in PLDB\n";
+                    next;
+                }
+                my @fillerSize = $PLDB{$fillerCellName}->dbMdbGetSize;
+                my $fillerLlx = $dieurx - $fillerSize[1]*$dbu;  # Use filler height for X positioning
+                my $fillerLly = $currentYRight;
+                print "INFO: adding remaining space filler RIGHTFILL_" .$fillerCnt. " $fillerCellName $fillerLlx $fillerLly\n";
+                &add_pad_in_db("RIGHTFILL_".$fillerCnt, $fillerCellName, "FIXED", $fillerLlx, $fillerLly, "FE");
+                $currentYRight += $rightRemainFillers[$i];
+                $fillerCnt++;
+            }
+        } elsif($remainingRightSpace > 0) {
+            print "INFO: RIGHT side has " . ($remainingRightSpace/$dbu) . " microns of unfilled space\n";
+        }
+
+        # TRR filler logic removed for sequential placement - can be added back if needed 
+
+        ################################## changing dieArea to fit pad ring #################################
+        #$DIE_ALREADY{dieArea}[2] = $startX + $cornerSize[0]*$dbu;
+        #$DIE_ALREADY{dieArea}[3] = $startY + $cornerSize[0]*$dbu;
+        ##print "Updated dieArea is:@{$DIE_ALREADY{dieArea}} \n";
+
+        #####################################################################################################
+     }#if die area exists
+  }#if correct num of arg
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command create_pad_ring took:",timestr($td),"\n";
+}#sub create_pad_ring
+
+sub add_pad_in_db{
+  my $instance = $_[0];
+  my $cellref = $_[1];
+  my $status = $_[2];
+  my $locX = $_[3];
+  my $locY = $_[4];
+  my $orient = $_[5];
+  #print "Adding in DB inst:$instance cell:$cellref status:$status loc:$locX,$locY orient:$orient\n";
+
+  my $dbu = $GLOBAL->dbfGlobalGetDBU;
+  %{$instance} = ();
+  $CADB{$instance} = CompAttDB::new();
+  $CADB{$instance}->dbCadbSetCellref($cellref);
+  $COMP_ALREADY{$instance} = \%{$instance};
+
+  $CADB{$instance}->dbCadbSetStatus($status);
+  $CADB{$instance}->dbCadbSetLoc($locX, $locY); 
+  $CADB{$instance}->dbCadbSetOrient($orient);
+
+  my @cellSize = $PLDB{$cellref}->dbMdbGetSize;
+  my $width = $cellSize[0]*$dbu;
+  my $height = $cellSize[1]*$dbu;
+  my ($llx,$lly,$urx,$ury) = &utilLocToBbox($locX, $locY, $orient, $width, $height);
+  $CADB{$instance}->dbCadbSetbBox($llx,$lly,$urx,$ury);
+
+  return($llx,$lly,$urx,$ury);
+}#sub add_pad_in_db
+
+#######################################################################################################################
+# Footprint extents of a cell as placed, in microns, returned as ($xExtent, $yExtent).
+#
+# A pad cell is drawn once and instantiated unrotated on the T/B sides but
+# rotated 90 degrees on L/R -- generate_padring_template() uses the same cells
+# on all four sides (PDUW is S on top, FW on left, FE on right, N on bottom).
+# So which cell dimension lands on which axis depends on the orientation:
+#   N/S/FN/FS (unrotated)  : X = width,  Y = height
+#   E/W/FE/FW (rotated 90) : X = height, Y = width
+#
+# This deliberately mirrors utilLocToBbox() in UTILS/make_inst_box, which
+# add_pad_in_db() already uses to compute each pad's bbox, so the extents used
+# for stepping along a side and the bbox stored in the DB cannot drift apart.
+#######################################################################################################################
+sub get_pad_extents {
+  my $cellref = $_[0];
+  my $orient  = $_[1];
+
+  my @cellSize = $PLDB{$cellref}->dbMdbGetSize;
+  $orient = "N" unless(defined $orient && $orient ne "");
+
+  if($orient =~ /^(N|S|FN|FS)$/){
+     return ($cellSize[0], $cellSize[1]);
+  }elsif($orient =~ /^(E|W|FE|FW)$/){
+     return ($cellSize[1], $cellSize[0]);
+  }else{
+     print "WARN-PAD-FRM : 003 : illegal orientation '$orient' for cell $cellref, assuming unrotated\n";
+     return ($cellSize[0], $cellSize[1]);
+  }
+}#sub get_pad_extents
+
+sub get_num_fillers {
+  my $space = shift;
+  my @fWidth = @_ ;#sort {$b <=> $a} @_;
+
+  my @change = ([]);
+
+  for(my $q=1; $q <= $space; $q++){
+      my ($count, $denom) = ($q+1);
+
+      foreach my $coin (@fWidth){
+          my $rest = $q-$coin;
+
+          if($rest >= 0){
+              my $restcount = scalar(@{ $change[$rest]});
+              if($restcount + 1 < $count){
+                  $denom = $coin;
+                  $count = $restcount + 1;
+              }
+          }
+      }
+
+      my $bestchange = [@{ $change[$q-$denom] }, $denom];
+      push @change, $bestchange;
+  }
+
+  #print "best:". join (',', @{$change[$space]}) ."\n"; 
+
+  return  @{$change[$space]} ;
+}#sub get_num_fillers
+
+#######################################################################################################################
+####################################### Create PAD's label file for Ambiq #############################################
+#######################################################################################################################
+sub generate_pads_label_file {
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $noOfArg = @_;
+  if($noOfArg < 4 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print "Usage: generate_pads_label_file -json <json file>\n";
+     print "                                -cb2_centre_file <cb2 layer polygons centre file>\n";
+     print "                                -out <pads label file (default value is pads_label.txt)>\n";
+     return;
+  }else{
+     my ($jsonFile, $centreFile, $outFile) = ("", "", "pads_label.txt");
+     my %pad_vs_label = ();
+     my %points = ();
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-json" )            {$jsonFile = $_[$i+1]; }
+         if($_[$i] eq "-cb2_centre_file" ) {$centreFile = $_[$i+1]; }
+         if($_[$i] eq "-out" )             {$outFile = $_[$i+1]; }
+     }
+
+     if(!-e $jsonFile){
+        print "\nWARN-PAD-FRM : 001 : file $jsonFile does not exists !\n";
+        return;
+     }
+     if(!-e $centreFile){
+        print "\nWARN-PAD-FRM : 002 : file $centreFile does not exists !\n";
+        return;
+     }
+
+     my $data;
+     if(open (my $json_str, $jsonFile)){
+       local $/ = undef;
+       my $json = JSON->new;
+       $data = $json->decode(<$json_str>);
+       close($json_str);
+     }
+     #print Dumper($data);
+     #print Dumper($data->{"pins"}[0]);
+
+     my $dbu = $GLOBAL->dbfGlobalGetDBU;
+     open(READ, "$centreFile");
+     while(<READ>){
+        chomp();
+        my ($x, $y) = split(/\s+/, $_);
+        $x = $x*$dbu;
+        $y = $y*$dbu;
+        $points{"$x,$y"} = 1;
+        #print "centre:$x,$y\n";
+     }
+     close(READ);
+
+     foreach my $element (@{$data->{"pins"}}){
+        my $side = $element->{"side"};
+        if($side eq "TL" || $side eq "BL" || $side eq "TR" || $side eq "BR" || $side eq "TRR"){next;}
+        foreach my $pinEle (@{$element->{"pin"}}){
+           my $padName = $pinEle->{"name"};
+           my $label = $pinEle->{"label"};
+           $pad_vs_label{$padName} = $label;
+        }#foreach pin
+     }#foreach element
+
+     open(WRITE, ">$outFile");
+     foreach my $pad (keys %pad_vs_label){
+        my $label = $pad_vs_label{$pad};
+        #print "$pad=>$label\n";
+        if(exists $CADB{$pad}){
+           my @bbox = $CADB{$pad}->dbCadbGetbBox;
+           my @new_poly = ([$bbox[0], $bbox[1]], [$bbox[2], $bbox[1]], [$bbox[2], $bbox[3]], [$bbox[0], $bbox[3]], [$bbox[0], $bbox[1]]); #making array in the form of Math:Polygon
+           my $poly = Math::Polygon->new(points => \@new_poly);
+           foreach my $p (keys %points){
+              my @point = split(/\,/, $p);
+              my $isInside = $poly->contains(\@point);
+              if($isInside == 1){
+                 $_ /= $dbu for @point;
+                 print WRITE "layout_text $label @point\n";
+                 delete $points{$p};
+                 last;
+              }
+           }
+
+        }
+     }
+     close(WRITE);
+  }#if correct num of arg
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command generate_pads_label_file took:",timestr($td),"\n";
+}#sub generate_pads_label_file     
+
+#######################################################################################################################
+########################################## Create PAD Ring for Cobalt #################################################
+#######################################################################################################################
+sub create_pad_ring_cobalt {
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $noOfArg = @_;
+  if($noOfArg < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print "Usage: create_pad_ring_cobalt -f <json file>\n";
+     print "                              --add_filler\n";
+     return;
+  }else{
+     my ($jsonFile, $addFillers, $fillerCnt) = ("", 0, 0);
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-f" )            {$jsonFile = $_[$i+1]; }
+         if($_[$i] eq "--add_filler" )  {$addFillers = 1; }
+     }
+
+     if(!-e $jsonFile){
+        print "\nWARN-PAD-FRM : 001 : file $jsonFile does not exists !\n";
+        return;
+     }
+
+     my $data;
+     if(open (my $json_str, $jsonFile)){
+       local $/ = undef;
+       my $json = JSON->new;
+       $data = $json->decode(<$json_str>);
+       close($json_str);
+     }
+     #print Dumper($data);
+     #print Dumper($data->{"pins"}[0]);
+
+     my $dbu = $GLOBAL->dbfGlobalGetDBU;
+     if(exists $DIE_ALREADY{dieArea}){
+        my $diellx = $DIE_ALREADY{dieArea}[0];
+        my $dielly = $DIE_ALREADY{dieArea}[1];
+        my $dieurx = $DIE_ALREADY{dieArea}[2];
+        my $dieury = $DIE_ALREADY{dieArea}[3];
+        #print "dieArea is:@{$DIE_ALREADY{dieArea}} \n";
+     
+        my $dieWidth = abs($dieurx - $diellx)/$dbu ;
+        my $dieHeight = abs($dieury - $dielly)/$dbu ;
+        #print "die:$dieWidth,$dieHeight\n";
+
+        ######################## Making hash of filler cells ########################
+        my %FILLERS = ();
+        foreach my $cell (keys %PLDB){
+           my $class = $PLDB{$cell}->dbMdbGetClass;
+           if($class eq "PAD SPACER" && $cell !~ /A$/){
+              my @size = $PLDB{$cell}->dbMdbGetSize;
+              $FILLERS{$size[0]*$dbu} = $cell;
+           } 
+        }
+        my @fillersWidthArr = sort{$b<=>$a} keys %FILLERS;
+        my @fillerCells = @FILLERS{@fillersWidthArr};
+        #print "fillers:@fillerCells Width:@fillersWidthArr\n";
+
+        
+        #############################################################################
+        my ($lPadIndex, $rPadIndex, $tPadIndex, $bPadIndex, $tlPadIndex, $trPadIndex, $blPadIndex, $brPadIndex, $trrPadIndex) = (0, 0, 0, 0, 0, 0, 0, 0, 0);
+        my $index = 0;
+        foreach my $element (@{$data->{"pins"}}){
+           my $side = $element->{"side"};
+
+           if   ($side eq "L"){$lPadIndex = $index ;}
+           elsif($side eq "R"){$rPadIndex = $index ;}
+           elsif($side eq "T"){$tPadIndex = $index ;}
+           elsif($side eq "B"){$bPadIndex = $index ;}
+           elsif($side eq "TL"){$tlPadIndex = $index ;}
+           elsif($side eq "TR"){$trPadIndex = $index ;}
+           elsif($side eq "BL"){$blPadIndex = $index ;}
+           elsif($side eq "BR"){$brPadIndex = $index ;}
+           elsif($side eq "TRR"){$trrPadIndex = $index ;}
+           else {next;}
+
+           foreach my $pinEle (@{$element->{"pin"}}){
+              my $cellName = $pinEle->{"cell"};
+              if(!exists $PLDB{$cellName}){
+                 print "WARN-PAD-FRM : 002 : cell $cellName does not found !\n";
+                 return;
+              }
+           }#foreach pin
+           $index++;
+        }#foreach pins
+
+        my $llx = $diellx;
+        my $lly = $dielly;
+        #################################### Adding bottom-left corner pads ################################
+        my $tlSpace = $dieHeight*$dbu;
+        my $brSpace = $dieWidth*$dbu;
+        my $blCornerPad = $data->{"pins"}->[$blPadIndex]->{"pin"}->[0]->{"name"};
+        my $blCornerCell = $data->{"pins"}->[$blPadIndex]->{"pin"}->[0]->{"cell"};
+        my $blCornerPadOrient = $data->{"pins"}->[$blPadIndex]->{"pin"}->[0]->{"orient"};
+
+        print "INFO: adding BOTTOM_LEFT_PAD $blCornerPad $blCornerCell ". ($llx,  $lly) ."\n";
+        my ($blx1, $bly1, $blx2, $bly2) = &add_pad_in_db($blCornerPad, $blCornerCell, "FIXED", $llx, $lly, $blCornerPadOrient);
+        $lly = $bly2;
+        $tlSpace -= ($bly2 - $bly1);
+        $brSpace -= ($blx2 - $blx1);
+
+        ####################################### Adding Left Pads ###########################################
+        foreach my $pin (@{$data->{"pins"}[$lPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient) = ($pin->{name}, $pin->{cell}, $pin->{orient});
+            print "INFO: adding LEFT_PAD $name $cell $llx $lly\n";
+            my ($x1,$y1,$x2,$y2) = &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+            $lly = $y2;
+            $tlSpace -= ($y2 - $y1);
+        }
+
+        my $tlCornerPad = $data->{"pins"}->[$tlPadIndex]->{"pin"}->[0]->{"name"};
+        my $tlCornerCell = $data->{"pins"}->[$tlPadIndex]->{"pin"}->[0]->{"cell"};
+        my $tlCornerPadOrient = $data->{"pins"}->[$tlPadIndex]->{"pin"}->[0]->{"orient"};
+
+        my @tlCornerCelliSize = $PLDB{$tlCornerCell}->dbMdbGetSize;
+        $tlSpace -= ($tlCornerCelliSize[0]*$dbu);
+        if($addFillers == 1){
+           ################### adding horizontal fillers before each pad if space is given #################
+           my @lPadFillers = get_num_fillers($tlSpace, @hFillersWidthArr);
+           #print "name:$name lS: $tlSpace lFill:@lPadFillers\n";
+           for(my $i=0; $i<@lPadFillers; $i++){
+               my $fillerCellName = $H_FILLERS{$lPadFillers[$i]};
+               if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                   print "ERROR: Horizontal filler cell for width $lPadFillers[$i] not found in PLDB\n";
+                   print "       Available H_FILLERS keys: " . join(", ", keys %H_FILLERS) . "\n";
+                   next;
+               }
+               print "INFO: adding filler IOFILLER_" .$fillerCnt. " $fillerCellName $llx $lly\n";
+               my ($x1,$y1,$x2,$y2) = &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $llx, $lly, "FW");
+               $lly = $y2;
+               $fillerCnt++;
+           } 
+        } 
+
+        ###################################### Adding top-left corner pads ##################################
+        my $trSpace = $dieWidth*$dbu;
+        print "INFO: adding TOP_LEFT_PAD $tlCornerPad $tlCornerCell ". ($lly , $lly) ."\n";
+        my ($tlx1, $tly1, $tlx2, $tly2) = &add_pad_in_db($tlCornerPad, $tlCornerCell, "FIXED", $llx, $lly, $tlCornerPadOrient);
+        $llx = $tlx2; 
+        $trSpace -= ($tlx2 - $tlx1);
+
+        ######################################## Adding Top Pads ###########################################
+        foreach my $pin (@{$data->{"pins"}[$tPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient) = ($pin->{name}, $pin->{cell}, $pin->{orient});
+            my @cellSize = $PLDB{$cell}->dbMdbGetSize;
+            $lly = $dieury - $cellSize[1]*$dbu; 
+            print "INFO: adding TOP_PAD $name $cell $llx $lly\n";
+            my ($x1,$y1,$x2,$y2) = &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+            $trSpace -= ($x2 - $x1);
+            $llx = $x2;
+        }
+
+        my $trCornerPad = $data->{"pins"}->[$trPadIndex]->{"pin"}->[0]->{"name"};
+        my $trCornerCell = $data->{"pins"}->[$trPadIndex]->{"pin"}->[0]->{"cell"};
+        my $trCornerPadOrient = $data->{"pins"}->[$trPadIndex]->{"pin"}->[0]->{"orient"};
+
+        my @trCornerCelliSize = $PLDB{$trCornerCell}->dbMdbGetSize;
+        $trSpace -= ($trCornerCelliSize[0]*$dbu);
+        if($addFillers == 1){
+           ################### adding fillers after each pad if space is given ################# 
+           my @tPadFillers = get_num_fillers($trSpace, @fillersWidthArr);
+           #print "name:$name tS: $trSpace tFill:@tPadFillers\n";
+           for(my $i=0; $i<@tPadFillers; $i++){
+               my $fillerCellName = $FILLERS{$tPadFillers[$i]};
+               print "INFO: adding filler IOFILLER_" .$fillerCnt. " $fillerCellName $llx $lly\n";
+               my ($x1,$y1,$x2,$y2) = &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $llx, $lly, "S");
+               $llx = $x2;
+               $fillerCnt++;
+           } 
+        } 
+
+        #################################### Adding top-right corner pads ####################################
+        my $trrSpace = $dieHeight*$dbu;
+        print "INFO: adding TOP_RIGHT_PAD $trCornerPad $trCornerCell ".($llx , $lly). "\n";
+        my ($trx1, $try1, $trx2, $try2) = &add_pad_in_db($trCornerPad, $trCornerCell, "FIXED", $llx, $lly, $trCornerPadOrient);
+        $trrSpace -= ($try2 - $try1);
+
+        ####################################### Adding Bottom Pads #########################################
+        $llx = $blx2;
+        $lly = $diellx; 
+        foreach my $pin (@{$data->{"pins"}[$bPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient) = ($pin->{name}, $pin->{cell}, $pin->{orient});
+            print "INFO: adding BOTTOM_PAD $name $cell $llx $lly\n";
+            my ($x1,$y1,$x2,$y2) = &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+            $brSpace -= ($x2 - $x1);
+            $llx = $x2;
+        }
+
+        my $brCornerPad = $data->{"pins"}->[$brPadIndex]->{"pin"}->[0]->{"name"};
+        my $brCornerCell = $data->{"pins"}->[$brPadIndex]->{"pin"}->[0]->{"cell"};
+        my $brCornerPadOrient = $data->{"pins"}->[$brPadIndex]->{"pin"}->[0]->{"orient"};
+
+        my @brCornerCelliSize = $PLDB{$brCornerCell}->dbMdbGetSize;
+        $brSpace -= ($brCornerCelliSize[0]*$dbu);
+        if($addFillers == 1){
+           ################### adding fillers before each pad if space is given ################# 
+           my @bPadFillers = get_num_fillers($brSpace, @fillersWidthArr);
+           #print "name:$name bS: $brSpace bFill:@bPadFillers\n";
+           for(my $i=0; $i<@bPadFillers; $i++){
+               my $fillerCellName = $FILLERS{$bPadFillers[$i]};
+               print "INFO: adding filler IOFILLER_" .$fillerCnt. " $fillerCellName $llx $lly\n";
+               my ($x1,$y1,$x2,$y2) = &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $llx, $lly, "N");
+               $llx = $x2;
+               $fillerCnt++;
+           } 
+        } 
+
+        ################################### Adding bottom-right corner pads ##################################
+        print "INFO: adding BOTTOM_RIGHT_PAD $brCornerPad $brCornerCell ".($llx , $lly). "\n";
+        my ($brx1, $bry1, $brx2, $bry2) = &add_pad_in_db($brCornerPad, $brCornerCell, "FIXED", $llx, $lly, $brCornerPadOrient);
+        $lly = $bry2;
+        $trrSpace -= ($bry2 - $bry1);
+
+        ######################################## Adding Right Pads ###########################################
+        foreach my $pin (@{$data->{"pins"}[$rPadIndex]->{"pin"}}){
+            my ($name, $cell, $orient) = ($pin->{name}, $pin->{cell}, $pin->{orient});
+            my @cellSize = $PLDB{$cell}->dbMdbGetSize;
+            $llx = $dieurx - $cellSize[1]*$dbu; 
+            print "INFO: adding RIGHT_PAD $name $cell $llx $lly\n";
+            my ($x1,$y1,$x2,$y2) = &add_pad_in_db($name, $cell, "FIXED", $llx, $lly, $orient);
+            $trrSpace -= ($y2 - $y1);
+            $lly = $y2;
+        }
+
+        if($addFillers == 1){
+           ################### adding horizontal fillers after each pad if space is given #################
+           my @rPadFillers = get_num_fillers($trrSpace, @hFillersWidthArr);
+           #print "name:$name rS: $trrSpace rFill:@rPadFillers\n";
+           for(my $i=0; $i<@rPadFillers; $i++){
+               my $fillerCellName = $H_FILLERS{$rPadFillers[$i]};
+               if(!defined($fillerCellName) || !exists $PLDB{$fillerCellName}){
+                   print "ERROR: Horizontal filler cell for width $rPadFillers[$i] not found in PLDB\n";
+                   print "       Available H_FILLERS keys: " . join(", ", keys %H_FILLERS) . "\n";
+                   next;
+               }
+               print "INFO: adding filler IOFILLER_" .$fillerCnt. " $fillerCellName $llx $lly\n";
+               my ($x1,$y1,$x2,$y2) = &add_pad_in_db("IOFILLER_".$fillerCnt, $fillerCellName, "FIXED", $llx, $lly, "FE");
+               $lly = $y2;
+               $fillerCnt++;
+           } 
+        } 
+
+        ################################### changing dieArea to fit pad ring #################################
+        ##$DIE_ALREADY{dieArea}[2] = $startX + $cornerSize[0]*$dbu;
+        ##$DIE_ALREADY{dieArea}[3] = $startY + $cornerSize[0]*$dbu;
+        ###print "Updated dieArea is:@{$DIE_ALREADY{dieArea}} \n";
+
+        ######################################################################################################
+     }#if die area exists
+  }#if correct num of arg
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command create_pad_ring_cobalt took:",timestr($td),"\n";
+}#sub create_pad_ring_cobalt
+
+#######################################################################################################################
+################################## Generate Padring JSON Template ###################################################
+#######################################################################################################################
+sub generate_padring_template {
+  my $templateFile = $_[0];
+
+  open(my $fh, '>', $templateFile) or die "Cannot create template file '$templateFile': $!\n";
+
+  print $fh <<'EOF';
+{
+  "_comment": "Sequential padring placement template - pads placed one after another starting from corners",
+
+  "filler_cells": [
+    "PFILLER_1_H",
+    "PFILLER_2_H",
+    "PFILLER_5_H",
+    "PFILLER_10_H",
+    "PFILLER_1",
+    "PFILLER_2",
+    "PFILLER_5",
+    "PFILLER_10"
+  ],
+
+  "pins": [
+    {
+      "side": "BL",
+      "pin": [
+        {
+          "name": "bottom_left_corner",
+          "cell": "CORNER_LL",
+          "orient": "N",
+          "space": 0
+        }
+      ]
+    },
+    {
+      "_comment": "LEFT side: Placed sequentially starting after BL corner, going up",
+      "side": "L",
+      "pin": [
+        {
+          "name": "left_power_vdd",
+          "cell": "PVDD2POC",
+          "orient": "FW",
+          "space": 50
+        },
+        {
+          "name": "left_io_data_0",
+          "cell": "PDUW",
+          "orient": "FW",
+          "space": 0
+        },
+        {
+          "name": "left_io_data_1",
+          "cell": "PDUW",
+          "orient": "FW",
+          "space": 30
+        }
+      ]
+    },
+    {
+      "side": "TL",
+      "pin": [
+        {
+          "name": "top_left_corner",
+          "cell": "CORNER_UL",
+          "orient": "E",
+          "space": 0
+        }
+      ]
+    },
+    {
+      "_comment": "TOP side: Placed sequentially starting after TL corner, going right",
+      "side": "T",
+      "pin": [
+        {
+          "name": "top_io_out_0",
+          "cell": "PDW",
+          "orient": "S",
+          "space": 20
+        },
+        {
+          "name": "top_io_out_1",
+          "cell": "PDW",
+          "orient": "S",
+          "space": 0
+        },
+        {
+          "name": "top_power_vdd",
+          "cell": "PVDD2POC",
+          "orient": "S",
+          "space": 40
+        },
+        {
+          "name": "top_io_enable",
+          "cell": "PDUW",
+          "orient": "S",
+          "space": 0
+        }
+      ]
+    },
+    {
+      "side": "TR",
+      "pin": [
+        {
+          "name": "top_right_corner",
+          "cell": "CORNER_UR",
+          "orient": "W",
+          "space": 0
+        }
+      ]
+    },
+    {
+      "_comment": "RIGHT side: Placed sequentially starting after BR corner, going up",
+      "side": "R",
+      "pin": [
+        {
+          "name": "right_io_clk",
+          "cell": "PCLKUW",
+          "orient": "FE",
+          "space": 60
+        },
+        {
+          "name": "right_io_reset",
+          "cell": "PDUW",
+          "orient": "FE",
+          "space": 0
+        },
+        {
+          "name": "right_power_vss",
+          "cell": "PVSS2POC",
+          "orient": "FE",
+          "space": 25
+        },
+        {
+          "name": "right_io_data_out",
+          "cell": "PDW",
+          "orient": "FE",
+          "space": 0
+        }
+      ]
+    },
+    {
+      "side": "BR",
+      "pin": [
+        {
+          "name": "bottom_right_corner",
+          "cell": "CORNER_LR",
+          "orient": "S",
+          "space": 0
+        }
+      ]
+    },
+    {
+      "_comment": "BOTTOM side: Placed sequentially starting after BL corner, going right",
+      "side": "B",
+      "pin": [
+        {
+          "name": "bottom_power_vss",
+          "cell": "PVSS2POC",
+          "orient": "N",
+          "space": 35
+        },
+        {
+          "name": "bottom_test_scan",
+          "cell": "PTEST",
+          "orient": "N",
+          "space": 0
+        },
+        {
+          "name": "bottom_io_addr_0",
+          "cell": "PDUW",
+          "orient": "N",
+          "space": 15
+        },
+        {
+          "name": "bottom_io_addr_1",
+          "cell": "PDUW",
+          "orient": "N",
+          "space": 0
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  close($fh);
+
+  print "Generated padring JSON template: $templateFile\n\n";
+  print "Positioning Modes:\n";
+  print "=================\n";
+  print "NOTE: Pads are placed sequentially starting from corners\n\n";
+  print "Field Descriptions:\n";
+  print "==================\n";
+  print "filler_cells : Array of filler cell names to use - OPTIONAL (auto-detected if omitted)\n";
+  print "side         : Chip side - BL/TL/TR/BR (corners), L/R/T/B (sides), TRR (special)\n";
+  print "name         : Instance name (will be used exactly as specified)\n";
+  print "cell         : Cell reference (must exist in loaded LEF files)\n";
+  print "orient       : Cell orientation (N/S/E/W/FN/FS/FE/FW) - OPTIONAL (auto-assigned)\n";
+  print "space        : Gap before this pad (microns) - OPTIONAL (default: 0)\n\n";
+  print "Placement Flow:\n";
+  print "===============\n";
+  print "1. Corners placed at actual die boundaries\n";
+  print "2. Side pads placed sequentially starting from corners:\n";
+  print "   - LEFT  : Start after BL corner, go up towards TL\n";
+  print "   - RIGHT : Start after BR corner, go up towards TR\n";
+  print "   - TOP   : Start after TL corner, go right towards TR\n";
+  print "   - BOTTOM: Start after BL corner, go right towards BR\n";
+  print "3. Optional 'space' adds gap before each pad:\n";
+  print "   - Without --add_filler: Creates empty space\n";
+  print "   - With --add_filler: Fills space with filler cells\n";
+  print "4. Remaining space between last pad and corner on each side:\n";
+  print "   - Without --add_filler: Left as empty space\n";
+  print "   - With --add_filler: Automatically filled with appropriate fillers\n";
+  print "   - Uses horizontal fillers (_H) for east/west sides\n";
+  print "   - Uses vertical fillers for north/south sides\n\n";
+  print "Filler Cell Configuration:\n";
+  print "==========================\n";
+  print "• Specify filler_cells array to manually control which filler cells to use\n";
+  print "• Omit filler_cells to auto-detect cells with class 'PAD SPACER'\n";
+  print "• Tool automatically separates horizontal and vertical fillers:\n";
+  print "  - Cells with '_H' suffix → Used for EAST/WEST sides (horizontal orientation)\n";
+  print "  - Cells without '_H' suffix → Used for NORTH/SOUTH sides (vertical orientation)\n";
+  print "• Tool will automatically select optimal combination to fill gaps\n";
+  print "• List cells from smallest to largest width for best results\n";
+  print "• If no '_H' cells found, vertical fillers used as fallback for all sides\n\n";
+  print "Common Cell Types:\n";
+  print "=================\n";
+  print "Corners : CORNER_LL, CORNER_UL, CORNER_UR, CORNER_LR\n";
+  print "Power   : PVDD2POC, PVSS2POC, PVDD1POC, PVSS1POC\n";
+  print "Digital : PDUW (input), PDW (output), PDTW (tristate)\n";
+  print "Clock   : PCLKUW, PCLKW\n";
+  print "Analog  : PAD, PADD\n";
+  print "Test    : PTEST\n";
+  print "Fillers : PFILLER_1_H (horizontal), PFILLER_2_H, PFILLER_5_H, PFILLER_10_H\n";
+  print "        : PFILLER_1 (vertical), PFILLER_2, PFILLER_5, PFILLER_10\n";
+  print "        : IOFILLER_* (auto-generated instances)\n\n";
+  print "Usage Examples:\n";
+  print "===============\n";
+  print "create_pad_ring -f $templateFile                 # Empty space gaps and sides\n";
+  print "create_pad_ring -f $templateFile --add_filler    # Fill ALL gaps with fillers\n";
+  print "                                                 # (includes space + remaining areas)\n";
+}#sub generate_padring_template
+
+
+#######################################################################################################################
+
+
+
+1;

@@ -1,0 +1,394 @@
+####################################################################################################
+###########  subrouting to write graywolf's placement.cell file for hierachical placement ##########
+####################################################################################################
+sub write_hier_graywolf_cel_file {
+  my $dbu = $GLOBAL->dbfGlobalGetDBU;
+  my $module = $TOP_MODULE;
+  #-------------------- try to guess the cell pitch --------#
+  my $cellPitch = 100.0 ;
+  foreach $layer(keys %PTDB){
+      if($PTDB{$layer}->dbTechGetLayerType eq "ROUTING" ){
+         if($PTDB{$layer}->dbTechGetLayerDir eq "VERTICAL"){
+            if($PTDB{$layer}->dbTechGetLayerPitch < $cellPitch){
+               $cellPitch = $PTDB{$layer}->dbTechGetLayerPitch 
+            }
+         }
+      }
+  }
+  print "min cell pitch is $cellPitch\n" if ($DEBUG);
+  
+  if(exists $PSEUDO_MODULE_ALREADY{$module}){
+     my @dieArea = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetSize;
+     $_ *= $dbu for @dieArea;
+     my $stdCellArea = $MODULE_ALREADY{$module}->dbVNOMGetArea;
+     my $row_height = $GLOBAL->dbGlobalGetRowHeight;
+     print "calculating the gap factor that can be used for the placement to fit in the given floorplan area ..\n";
+     print "DIE : $dieArea[0], $dieArea[1] $dieArea[2], $dieArea[3]\n" if ($DEBUG);
+     print "STD CELL AREA : $stdCellArea\n" if ($DEBUG);
+     print "ROW HEIGHT : $row_height\n" if ($DEBUG);
+     my $dieWidth = ($dieArea[2]-$dieArea[0])/$dbu ;
+     my $dieHeight = ($dieArea[3]-$dieArea[1])/$dbu ;
+     my $emptyArea = ($dieWidth*$dieHeight) - $stdCellArea ;
+     print "empty area = $emptyArea\n" if ($DEBUG);
+     my $componentCount = keys %{$PSEUDO_VINST_ALREADY{$module}};
+     $placeGapFactor = int($emptyArea/(2*$cellPitch*$row_height*$componentCount));
+     if($placeGapFactor < 0){$placeGapFactor = 0;}
+     print "gapFactor $placeGapFactor\n" if ($DEBUG);
+  }
+  open(WRITE,">placement.cel");
+  my %temp_inst_pin_conn = ();
+  foreach my $netName (keys %{$PSEUDO_VNET_ALREADY{$module}}){
+     my $type = $PSEUDO_VNET_ALREADY{$module}->{$netName}->dbaTstgenGetPseudoNetType;
+     my @srcFanIn = $PSEUDO_VNET_ALREADY{$module}->{$netName}->dbaTstgenGetPseudoNetSourceFanInList;
+     my @sinkFanOutList = $PSEUDO_VNET_ALREADY{$module}->{$netName}->dbaTstgenGetPseudoNetSinkFanOutList;
+     #print "src:@srcFanIn sink:@sinkFanOutList\n";
+     push(@sinkFanOutList, @srcFanIn);
+     #print "src-sink:@sinkFanOutList\"\n";
+
+     for(my $i = 0; $i <= $#sinkFanOutList; $i += 2){
+         my ($inst,$pinName) = ($sinkFanOutList[$i], $sinkFanOutList[$i + 1]);
+         if($inst =~ /^'b0/ || $inst eq "" || $inst eq "PIN"){next;}
+         if(exists $temp_inst_pin_conn{$inst}){
+            push (@{$temp_inst_pin_conn{$inst}},[$pinName, $netName]);
+         }else{
+            $temp_inst_pin_conn{$inst} = [[$pinName, $netName]];
+         }
+     }
+  }#foreach net
+  foreach my $inst (keys %temp_inst_pin_conn){
+     if(exists $PSEUDO_VINST_ALREADY{$module}{$inst}){
+        my $cellref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+        if(exists $PSEUDO_MODULE_ALREADY{$cellref}){
+           my $status = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstStatus;
+           my @loc = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox;  
+           if($status eq 'UNPLACED'){
+              @loc = &return_pseudo_vinst_size($module,$inst);
+           }
+           $_ = round($_) for @loc;
+           $_ *= $dbu for @loc;
+
+           my $left = $loc[0] + ($loc[2] - $loc[0])/2;
+           my $bottom = $loc[1] + ($loc[3] - $loc[1])/2;
+
+           print WRITE "hardcell $cellref name $inst\n";
+           #print WRITE "fixed at $left from L $bottom from B\n";
+           print WRITE "corners 4 $loc[0] $loc[1] $loc[1] $loc[3] $loc[2] $loc[3] $loc[2] $loc[1]\n";
+           print WRITE "class 0\n";
+           print WRITE "orientations 0\n";
+           foreach my $pinNetPair (@{$temp_inst_pin_conn{$inst}}){
+              my ($pinName, $netName) = @$pinNetPair;
+              my $status = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetPinStatus($pinName);
+              if(($status == 3) || ($status == 4) || ($status ==2)){
+                  my @shapes = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetPinRect($pinName);
+                  my ($layer, $pinllx, $pinlly,$pinurx,$pinury) = (split(/\s+/,$shapes[0])) [0,1,2,3,4];
+                  my $layerNum = 0;
+                  if($layer ne ""){
+                     $layerNum = $PTDB{$layer}->dbTechGetLayerNum;
+                  }
+                  my $llx = $loc[0] + round(($pinllx + $pinurx)/2)*$dbu;
+                  my $lly = $loc[1] + round(($pinlly + $pinury)/2)*$dbu;
+                  print WRITE "pin name $pinName signal $netName layer $layerNum $llx $lly\n";
+              }elsif($status == 0){
+                  #print WRITE "pin name $pinName signal $netName layer 1 $loc[0] $loc[1]\n";
+                  print WRITE "pin name $pinName signal $netName layer 0 $loc[0] $loc[1]\n";
+              }
+           }
+           print WRITE "\n";
+        }elsif(exists $PLDB{$cellref}){
+           print WRITE "cell $cellref $inst\n";
+           my @size = $PLDB{$cellref}->dbMdbGetSize;
+           my $half_width = round(($size[0]/2)*$dbu + ($placeGapFactor*$cellPitch*$dbu));
+           my $half_height = round(($size[1]/2)*$dbu);
+           print WRITE "left -$half_width right $half_width bottom -$half_height top $half_height\n";
+           foreach my $pinNetPair (@{$temp_inst_pin_conn{$inst}}){
+              my ($pinName, $netName) = @$pinNetPair;
+              my @rects = $PLDB{$cellref}->dbMdbGetPinRect($pinName);
+              my $len = @rects;
+              if($len == 0){
+                 my @polygons = $PLDB{$cellref}->dbMdbGetPinPolygon($pinName);
+                 my $l =shift  @polygons ;
+                 $l =~ s/ POLYGON//;
+                 my @L  = split(/\s+/,$l);
+                 my $layerName = $L[0];
+                 print "cell $cellref pin $pinName $layerName \n" if($DEBUG);
+                 my $layerNum = $PTDB{$layerName}->dbTechGetLayerNum;
+                 my $llx = round(($L[1]*$dbu) -$half_width);
+                 my $lly = round(($L[2]*$dbu) -$half_height);
+                 print WRITE "pin name $pinName signal $netName layer $layerNum $llx $lly\n";
+              }else{
+                 my $l =shift  @rects ;
+                 $l =~ s/ RECT//;
+                 my @L  = split(/\s+/,$l);
+                 my $layerName = $L[0];
+                 print "cell $cellref pin $pinName $layerName \n" if($DEBUG);
+                 my $layerNum = $PTDB{$layerName}->dbTechGetLayerNum;
+                 my $llx = round(($L[1]*$dbu) -$half_width);
+                 my $lly = round(($L[2]*$dbu) -$half_height);
+                 print WRITE "pin name $pinName signal $netName layer $layerNum $llx $lly\n";
+              }
+           }
+           print WRITE"\n";
+        }#if cell exists in PLDB
+     }#if instance exists in VINST
+  }#foreach instance
+
+  my %PORT_HASH = %{&get_port_hash($module)};
+  foreach my $pin ( keys %PORT_HASH) {
+     my $status = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinStatus($pin);
+     #print "PORT:$pin status:$status\n";
+     #if(( $status == 3) || ($status == 4) || ($status ==2)){
+        my @shapes = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinRect($pin);
+        my ($layer, $pinllx, $pinlly, $pinurx, $pinury) = (split(/\s+/,$shapes[0])) [0,1,2,3,4];
+        print WRITE "pad tw$pin name $pin \n";
+        print WRITE "corners 4 -1 -1 -1 1 1 1 1 -1\n";
+        print WRITE "pin name $pin signal $pin layer 1 0 0\n";
+        print WRITE "\n";
+     #}
+  }#foreach port
+ 
+  close(WRITE);
+}#sub write_hier_graywolf_cel_file
+
+####################################################################################################
+###########  subrouting to write graywolf's placement.par file for hierachical placement ###########
+####################################################################################################
+sub write_hier_placement_par_file {
+  my $dbu = $GLOBAL->dbfGlobalGetDBU;
+  my $module = $TOP_MODULE;
+  open (WRITE,">placement.par");
+  print WRITE "RULES\n";
+  my %layer_order = ();
+  foreach my $layer (keys %PTDB){
+     my $LN = $PTDB{$layer}->dbTechGetLayerName;
+     my $Ln = $PTDB{$layer}->dbTechGetLayerNum;
+     $layer_order{$LN}=$Ln;
+  }#foreach
+  my @key = sort hash_Value_AscendingNum (keys(%layer_order));
+  for(my $i=0;$i<=$#key;$i++){
+      my $layer = $key[$i];
+      my $routing_layer = $PTDB{$layer}->dbTechGetLayerType;
+      if($routing_layer =~/^ROUTING$/i){
+         my $direction = lc $PTDB{$layer}->dbTechGetLayerDir ;
+         my $resistance = $PTDB{$layer}->dbTechGetLayerResistance;
+         my $capaciatence = ${$layer}{'CAPACITANCE'};
+         my $capaciatence_fF = $capaciatence*1000;
+         print WRITE "layer $layer $resistance $capaciatence_fF $direction\n";
+      }
+  }#for
+  for(my $i=0;$i<=$#key;$i++){
+      my $layer = $key[$i];
+      my $routing_layer = $PTDB{$layer}->dbTechGetLayerType;
+      if($routing_layer =~/^ROUTING$/i){
+         my $via_name = &return_via_between_two_given_layers ($key[$i],$key[$i+2]);
+         if($via_name ne "NONE"){
+            print WRITE "via $via_name $key[$i] $key[$i+2]\n";
+         }
+      }
+  }#for
+  for(my $i=0;$i<=$#key;$i++){
+      my $layer = $key[$i];
+      my $routing_layer = $PTDB{$layer}->dbTechGetLayerType;
+      if($routing_layer =~/^ROUTING$/i){
+         my $metal_width = $PTDB{$layer}->dbTechGetLayerWidth;
+         my $new_metal_width = $metal_width*100;
+         print WRITE "width $layer $new_metal_width\n";
+      }
+  }#for
+  for(my $i=0;$i<=$#key;$i++){
+      my $layer = $key[$i];
+      my $routing_layer = $PTDB{$layer}->dbTechGetLayerType;
+      if($routing_layer =~/^ROUTING$/i){
+         my $metal_width = $PTDB{$layer}->dbTechGetLayerWidth;
+         my $pitch = $PTDB{$layer}->dbTechGetLayerPitch;
+         my $spacing = $pitch - $metal_width;
+         print WRITE "spacing $layer $layer $spacing\n";
+      }
+  }#for
+
+  foreach my $viaruleName (keys%VRDB){
+     my $VRN = $VRDB{$viaruleName}->dbGetViaRuleName;
+     my $VRn = $VRDB{$viaruleName}->dbGetViaRuleNum;
+     $vdr{$VRN}=$VRn;
+  }#foreach
+  my @vr = sort hash_AscendingNumber(keys(%vdr));
+  for(my $i=0;$i<=$#vr;$i++){
+      my $viaruleName = $vr[$i];
+      my @via_rule_layer = $VRDB{$viaruleName}->dbGetViaRuleLayer;
+      foreach $layerInstance (@via_rule_layer){
+         my $layerName = $layerInstance->dbGetViaRuleLayerName;
+         my $routing_layer = $PTDB{$layerName}->dbTechGetLayerType;
+         if($routing_layer =~/^ROUTING$/i){
+            my @enclosure = $layerInstance->dbGetViaRuleEnclosure;
+         }
+      }
+      #print WRITE "overhang $viaruleName  $layerName @enclosure\n";
+  }
+  
+  print WRITE "ENDRULES\n";
+  print WRITE "*vertical_wire_weight : 1.0\n";
+  print WRITE "*vertical_path_weight : 1.0\n";
+  print WRITE "*padspacing           : variable\n";
+  print WRITE "*rowSep               : 0.0   0\n";
+  print WRITE "*row_to_tile_spacing               : 140\n";
+  print WRITE "*track.pitch          : 140\n";
+  print WRITE "*graphics.wait        : off\n";
+  print WRITE "*last_chance.wait     : off\n";
+  print WRITE "*random.seed          : 12345\n";
+  print WRITE "# TODO: proper track.pitch number above, plus feedThruWidth below\n";
+  
+  print WRITE "TWMC*chip.aspect.ratio : 1.0\n";
+  
+  print WRITE "TWSC*feedThruWidth    : 140 layer 1\n";
+  print WRITE "TWSC*do.global.route  : off\n";
+  print WRITE "TWSC*ignore_feeds     : true\n";
+  print WRITE "TWSC*call_row_evener    : true\n";
+  print WRITE "TWSC*even_rows_maximally : true\n";
+  print WRITE "# TWSC*no.graphics    : on\n";
+  
+  print WRITE "GENR*row_to_tile_spacing: 1\n";
+
+  my @size = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetSize;
+  my $row_height = $GLOBAL->dbGlobalGetRowHeight;
+  my $numberOfRows = int(($size[3]-$size[1])/$row_height) ;
+
+  print "rows available for placement $numberOfRows\n";
+  print "adjust the number of rows to allow space for power routing, so number of rows for placer is 4 less \n";
+  
+  print WRITE "GENR*numrows          : $numberOfRows\n";
+  print WRITE "GENR*flip_alternate_rows : 1 \n";
+  
+  close(WRITE);
+}#sub write_hier_placement_par_file
+
+
+####################################################################################################
+#################  subrouting to read output of graywolf for hierachical placement #################
+####################################################################################################
+sub read_hier_graywolf_placement_result {
+  my $dbu = $GLOBAL->dbfGlobalGetDBU;
+  my $module = $TOP_MODULE;
+  my %PORT_HASH = %{&get_port_hash($module)};
+  #--------------- find minX and minY -----------------#
+  my $minX = 10000000000;
+  my $minY = 10000000000;
+  open (READ,"placement.pl1");
+  while(<READ>){
+    chomp();
+    my @pl = split(/\s+/,$_);
+    my $instance = $pl[0];
+    my $x = $pl[1];
+    my $y = $pl[2];
+    if($x < $minX) { $minX = $x; }
+    if($y < $minY) { $minY = $y; }
+  }
+  print "graywolf placement offset is $minX and $minY \n" if ($DEBUG);
+  close(READ);
+  
+  my $row_height = $GLOBAL->dbGlobalGetRowHeight;
+  open (READ,"placement.pl1");
+  print "PLA : updating the placement results \n";
+  while(<READ>){
+    chomp();
+    my @pl = split(/\s+/,$_);
+    my $instance = $pl[0];
+    my $x = $pl[1];
+    my $y = $pl[2];
+    # Add the Graywolfoffset of 0.03 0.03
+    $x = ($x - $minX)/$dbu ;# + 2*$row_height ;
+    $y = ($y - $minY)/$dbu ;# + 2*$row_height ;
+    if(exists $PSEUDO_VINST_ALREADY{$module}{$instance}){
+       if($PSEUDO_VINST_ALREADY{$module}{$instance}->dbPimDBGetInstStatus() eq "FIXED"){next;};
+       print "PLA : setting placement of $instance to $x $y in Database\n" if($DEBUG);
+       my @org_bbox = &return_pseudo_vinst_size($module,$instance);
+       my $width = $org_bbox[2] - $org_bbox[0];
+       my $height = $org_bbox[3] - $org_bbox[1];
+       $cur_bbox[0] = $x; 
+       $cur_bbox[1] = $y; 
+       $cur_bbox[2] = $x + $width; 
+       $cur_bbox[3] = $y + $height; 
+       $PSEUDO_VINST_ALREADY{$module}{$instance}->dbPimDBSetInstRelBbox(@cur_bbox);
+       #$PSEUDO_VINST_ALREADY{$module}{$instance}->dbPimDBSetInstRelLoc($x, $y);
+       $PSEUDO_VINST_ALREADY{$module}{$instance}->dbPimDBSetInstStatus(PLACED);
+       $PSEUDO_VINST_ALREADY{$module}{$instance}->dbPimDBSetInstOrient(N);
+    #}elsif($PSEUDO_MODULE_ALREADY{$module}->dbaTstgenHasPin($instance)){ 
+    }elsif(exists $PORT_HASH{$instance}){ 
+       print "PLA : setting the port $instance at $x $y\n" if($DEBUG);
+       my $status = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinStatus($instance);
+       #print "port:$instance status:$status\n";
+       if(($status != 3) && ($status != 4)){
+           my $pin_layer = $GLOBAL->dbfGlobalGetPinlayer;
+           my @shapes = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinRect($instance);
+           if(@shapes > 0){
+              my $first_shape = $shapes[0];
+              my @xy = split(/\s+/, $first_shape);
+              if(@xy == 5){
+                 $pin_layer = $xy[0];
+              }
+           }
+           $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenWipePinRect($instance);
+           my @bbox = ($x, $y, $x, $y);
+           my $shape = join(" ", $pin_layer, @bbox);
+           $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenAddPinRect($instance, $shape);
+           $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenSetPinStatus($instance, "PLACED");
+       }#if the port of the block
+     }
+  }#while
+  close(READ);
+}#sub read_hier_graywolf_placement_output
+
+####################################################################################################
+########################## subrouting to get port hash for pseudo module ###########################
+####################################################################################################
+sub get_port_hash{
+  my $module = $_[0];
+  my %portHash = ();
+  my @output_pins = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetOutput;
+  foreach my $out (@output_pins) {
+     if($PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetOutputType($out) == 0){
+        $portHash{$out} = 1;
+     }else{
+        my $bits = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetOutputBits($out);
+        my $pin = $out . $bits;
+        my @portList = utilSplitBusBits($pin);
+        foreach my $port (@portList){
+           $portHash{$port} = 1;
+        }
+    }
+  }#foreach out
+
+  my @input_pins = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetInput;
+  foreach my $in (@input_pins){
+     if($PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetInputType($in) == 0){
+        $portHash{$in} = 1;
+     }else{
+        my $bits = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetInputBits($in);
+        my $pin = $in . $bits;
+        my @portList = utilSplitBusBits($pin);
+        foreach my $port ( @portList ) {
+           $portHash{$port} = 1;
+        }
+     }
+  }#foreach in
+
+  my @bidi_pins = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetBidi;
+  foreach my $bidi (@bidi_pins){
+     if($PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetBidiType($bidi) == 0){
+        $portHash{$bidi} = 1;
+     }else {
+        my $bits = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetBidiBits($bidi);
+        my $pin = $bidi . $bits;
+        my @portList = utilSplitBusBits($pin);
+        foreach my $port ( @portList ) {
+           $portHash{$port} = 1;
+        }
+     }
+  }#foreach bidi
+  return (\%portHash);
+}#sub get_port_hash 
+
+####################################################################################################
+####################################################################################################
+
+1;
+
+

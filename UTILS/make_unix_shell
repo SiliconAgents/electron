@@ -1,0 +1,199 @@
+#######################################################################################################################
+# Running unix commands from the proton prompt.
+#
+# Dispatch order at the prompt (see the prompt loop in UTILS/*.nopath and sub source in ./executables):
+#
+#   1. a name in commandsFile          -> the proton command, always wins
+#   2. "sys <cmd>"                     -> always the unix shell
+#   3. "peval <perl code>"             -> always perl eval
+#   4. <cmd> where <cmd> is executable  -> the unix shell
+#      in $PATH
+#   5. anything else                   -> perl eval, the historical behaviour
+#
+# Rule 4 is the convenience case: "ls -l", "make", "grep FOO file" just work.  Rule 5 has to stay because the prompt
+# has always doubled as a perl escape for poking at the databases, and rules 3 and 5 keep that usable.
+#
+# The reason "peval" exists rather than "perl": "perl" is itself an executable in $PATH, so reserving that word would
+# stop you from running the real interpreter.  "peval" cannot collide.
+#
+# Why a force-perl escape is needed at all: several perl keywords are also real binaries -- open, sort, printf, test
+# are all in $PATH on a normal Linux box -- so a perl one-liner starting with one of those would otherwise be handed
+# to the shell.  Prefix it with "peval" and it is unambiguous.
+#######################################################################################################################
+
+use Cwd;
+
+#<!-- token -> 1/0, so we do not re-stat $PATH for every command.  If $PATH changes mid-session, this cache goes
+#     stale; call dbfResetShellCommandCache() in that case. -->
+my %UNIX_CMD_IN_PATH = ();
+
+#######################################################################################################################
+# Is $cmd something the unix shell can run?  True for an executable file found in $PATH, or for an explicit path that
+# is executable.  Deliberately conservative: anything that does not look like a plain command name (so anything with
+# perl sigils, operators, quotes and so on) is rejected and left for perl.
+#######################################################################################################################
+sub dbfShellCommandExists {
+  my $cmd = $_[0];
+
+  unless(defined $cmd && $cmd ne ""){
+    return 0;
+  }
+
+  #<!-- an explicit path: ./script, /bin/ls, ../foo/bar -->
+  if($cmd =~ m:/:){
+    return (-x $cmd && ! -d $cmd) ? 1 : 0;
+  }
+
+  #<!-- only bare command names are looked up.  This is what keeps "$x = 1", "@list = ..." and friends out of the
+  #     shell: they do not match, so they fall through to perl. -->
+  unless($cmd =~ /^[\w.+-]+$/){
+    return 0;
+  }
+
+  if(exists $UNIX_CMD_IN_PATH{$cmd}){
+    return $UNIX_CMD_IN_PATH{$cmd};
+  }
+
+  my $found = 0;
+  foreach my $dir (split(/\:/, (defined $ENV{PATH} ? $ENV{PATH} : ""))){
+    if($dir eq ""){
+      next;
+    }
+    if(-x "$dir/$cmd" && ! -d "$dir/$cmd"){
+      $found = 1;
+      last;
+    }
+  }
+  $UNIX_CMD_IN_PATH{$cmd} = $found;
+  return $found;
+}#sub dbfShellCommandExists
+
+#######################################################################################################################
+# Drop the $PATH lookup cache, for when $PATH is changed during a session.
+#######################################################################################################################
+sub dbfResetShellCommandCache {
+  %UNIX_CMD_IN_PATH = ();
+  print "INFO-UNIX-SHELL : 001 : unix command lookup cache cleared\n";
+}#sub dbfResetShellCommandCache
+
+#######################################################################################################################
+# Run $cmdLine in the unix shell.  The whole line is handed to system() as a single string so the shell interprets
+# pipes, redirection, globs and quoting exactly as the user typed them.  stdout/stderr are inherited, so output lands
+# on the terminal directly rather than being captured and reprinted.
+#
+# The command is echoed to the proton command log as "sys <cmd>" so a replayed log does the same thing regardless of
+# what happens to be in $PATH on the machine replaying it.
+#######################################################################################################################
+sub dbfRunShellCommand {
+  my $cmdLine = $_[0];
+
+  unless(defined $cmdLine){
+    return 1;
+  }
+  $cmdLine =~ s/^\s+|\s+$//g;
+  if($cmdLine eq ""){
+    return 1;
+  }
+
+  #<!-- "cd" has to be done in-process.  system("cd /tmp") changes the directory of the subshell and then that
+  #     subshell exits, so it would look like it silently did nothing. -->
+  if($cmdLine =~ /^cd(?:\s+(.*))?$/){
+    my $dir = $1;
+    unless(defined $dir && $dir !~ /^\s*$/){
+      $dir = $ENV{HOME};
+    }
+    $dir =~ s/^\s+|\s+$//g;
+    $dir =~ s/^\~/$ENV{HOME}/;
+    if(chdir($dir)){
+      print getcwd()."\n";
+      return 0;
+    }else{
+      print "ERR-UNIX-SHELL : 002 : cd $dir : $!\n";
+      return 1;
+    }
+  }
+
+  &dbfLogShellCommand($cmdLine);
+
+  my $status = system($cmdLine);
+
+  if($status == -1){
+    print "ERR-UNIX-SHELL : 003 : could not execute \"$cmdLine\" : $!\n";
+  }elsif($status & 127){
+    printf("ERR-UNIX-SHELL : 004 : \"%s\" died with signal %d\n", $cmdLine, ($status & 127));
+  }elsif($status >> 8){
+    printf("INFO-UNIX-SHELL : 005 : \"%s\" exited with status %d\n", $cmdLine, ($status >> 8));
+  }
+
+  return ($status == 0) ? 0 : 1;
+}#sub dbfRunShellCommand
+
+#######################################################################################################################
+# Append a shell command to the proton command log, if one is in use.
+#######################################################################################################################
+sub dbfLogShellCommand {
+  my $cmdLine = $_[0];
+
+  unless(defined $cmdfileName && $cmdfileName ne ""){
+    return;
+  }
+  if(open(my $cmdLog, ">>", $cmdfileName)){
+    print $cmdLog "sys $cmdLine\n";
+    close($cmdLog);
+  }
+}#sub dbfLogShellCommand
+
+#######################################################################################################################
+# The shared fallback for a command that is not in commandsFile.  Returns 1 if it handled the line, 0 if the caller
+# should deal with it (which only happens when $runPerl is off and the line is not a unix command).
+#
+#   $line    : the whole line as typed
+#   $cmd     : its first token
+#   $runPerl : whether to fall back to perl eval -- on at the interactive prompt, off for sourced scripts, which
+#              historically just reported "no such command"
+#######################################################################################################################
+sub dbfHandleUnknownCommand {
+  my $line    = $_[0];
+  my $cmd     = $_[1];
+  my $runPerl = $_[2];
+
+  unless(defined $line){
+    return 1;
+  }
+
+  #<!-- explicit shell escape -->
+  if($line =~ /^\s*sys\s+(.*)/){
+    &dbfRunShellCommand($1);
+    return 1;
+  }
+
+  #<!-- explicit perl escape, for lines whose first word is also a binary name -->
+  if($line =~ /^\s*peval\s+(.*)/){
+    my $perlcmd = "{".$1."}";
+    eval($perlcmd);
+    if($@){
+      print "ERR-UNIX-SHELL : 006 : $@";
+    }
+    return 1;
+  }
+
+  #<!-- a real unix command -->
+  if(&dbfShellCommandExists($cmd)){
+    &dbfRunShellCommand($line);
+    return 1;
+  }
+
+  if(defined $runPerl && $runPerl){
+    my $perlcmd = "{".$line."}";
+    eval($perlcmd);
+    if($@){
+      print "ERR-UNIX-SHELL : 007 : $cmd : no such proton command, not found in \$PATH, and not valid perl\n";
+      print "ERR-UNIX-SHELL : 007 : $@";
+    }
+    return 1;
+  }
+
+  return 0;
+}#sub dbfHandleUnknownCommand
+
+1;

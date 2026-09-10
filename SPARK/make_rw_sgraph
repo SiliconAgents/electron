@@ -1,0 +1,87 @@
+
+sub write_sgraph {
+ use Benchmark;
+ my $t0 = new Benchmark;
+ my $noOfArguments = @_;
+ if($noOfArguments < 0 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){ 
+    print "Usage : write_sgraph\n";
+    print "        -output <output file name (default value is TOP.sgraph)\n";  
+ }else {
+    my $outFile = $TOP_MODULE.".sgraph";
+    for(my $i=0; $i<$noOfArguments; $i++){
+        if($_[$i] =~ /-output/){$outFile = $_[$i+1];}
+    }#for
+
+    print "Writing graph connectivity for $TOP_MODULE\n";
+    open(WRITE,">$outFile");
+
+    if(exists $DIE_ALREADY{dieArea} ) {
+       my @die_coords = @{$DIE_ALREADY{dieArea}};
+       print WRITE "DIEAREA @die_coords \n";
+    }
+
+    #------------------------------------------------NETS SECTION---------------------------------------------#
+    foreach my $net (keys %NETS_ALREADY){
+      if(exists $NADB{$net}){
+         my $netType = $NADB{$net}->dbNadbGetNetType;
+         if($netType == 0){
+            my @driverInst = &getNetDriver($net);
+            my @sinkInst = &getNetSink($net);
+            if(@driverInst > 1){
+               my $drv = $driverInst[0];
+	       my $drvPin = $driverInst[1];
+               my $drvCellref = "PIN";
+               my @drvLoc = (0,0);
+               if(exists $COMP_ALREADY{$drv}){
+                  $drvCellref = $CADB{$drv}->dbCadbGetCellref;
+		  if(exists $PLDB{$drvCellref}){
+		     my $cellFunc = $PLDB{$drvCellref}->dbMdbGetFunction;
+	             if($cellFunc eq "flop"){
+		        my $isClock = $PLDB{$drvCellref}->dbMdbGetPinIsClock($drvPin);
+		        if($isClock == 1 || $drvPin eq "SI" || $drvPin eq "SE"){
+		           print "drv:$drv func:$cellFunc pin:$drvPin\n";
+		           next;
+		        }
+		     }
+		  }
+                  @drvLoc = $CADB{$drv}->dbCadbGetLoc;
+               }elsif(exists $PORTS_ALREADY{$TOP_MODULE}{$drv}){
+                  @drvLoc = $PORTS_ALREADY{$TOP_MODULE}{$drv}->dbPortGetLoc;
+               }    
+               for(my $i=0; $i<$#sinkInst; $i=$i+2){
+                   my $sink = $sinkInst[$i];
+		   my $sinkPin = $sinkInst[$i+1];
+                   my $sinkCellref = "PIN";
+                   my @sinkLoc = (0,0);
+                   if(exists $COMP_ALREADY{$sink}){
+                      $sinkCellref = $CADB{$sink}->dbCadbGetCellref;
+		      if(exists $PLDB{$sinkCellref}){
+		         my $cellFunc = $PLDB{$sinkCellref}->dbMdbGetFunction;
+			 if($cellFunc eq "flop"){
+			    my $isClock = $PLDB{$sinkCellref}->dbMdbGetPinIsClock($sinkPin);
+			    if($isClock == 1 || $sinkPin eq "SI" || $sinkPin eq "SE"){
+		               print "sink:$sink func:$cellFunc pin:$sinkPin\n";
+			       next;
+			    }
+			 }
+		      }
+                      @sinkLoc = $CADB{$sink}->dbCadbGetLoc;
+                   }elsif(exists $PORTS_ALREADY{$TOP_MODULE}{$sink}){
+                      @sinkLoc = $PORTS_ALREADY{$TOP_MODULE}{$sink}->dbPortGetLoc;
+                   }    
+                   print WRITE "NETS $net $drv $drvCellref @drvLoc $sink $sinkCellref @sinkLoc\n"; 
+                   #print "NETS $net drv:$drv sink:$sink\n"; 
+               }
+            }
+         }
+      }
+    }
+    close(WRITE);
+    my $t1 = new Benchmark;
+    my $td = timediff($t1, $t0);
+    print "Command write_sgraph took:",timestr($td),"\n";
+ }
+}#write_sgraph 
+
+#------------------------------------------------------------------------------------------------#
+1;

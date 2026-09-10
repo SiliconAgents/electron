@@ -1,0 +1,69 @@
+package CdlDB;
+
+####  explanation of database ####
+##    PIN is a multilevel hash to store pin data 
+##    PIN { A => [dir]
+
+sub new {
+    
+my $Cellref = {
+                  PIN => CdlPinDB::createEmpty(),
+
+               };
+bless $Cellref, 'CdlDB';
+return $Cellref;
+}#sub new
+
+#------------------------------------------------------------------#
+
+sub dbCdldbSetPinDir {
+  my ($self,$pinName,$direction) = @_;
+  my $dir = "B";
+  if    ( $direction eq "B" ) { $dir = "inout";}
+  elsif ( $direction eq "I" ) { $dir = "input";}
+  elsif ( $direction eq "O" ) { $dir = "output";}
+  else  { print "unknown direction\n"; }
+  ${$self->{PIN}}{$pinName}->{D} = $dir;
+}#sub dbCdldbSetPinDir
+
+sub dbCdldbGetPinDir {
+  my ($self,$pinName) = @_;
+  my $direction = "";
+  if(exists ${$self->{PIN}}{$pinName} ) {
+     $direction = ${$self->{PIN}}{$pinName}->{D};
+  }
+  return($direction);
+}#sub dbCdldbGetPinDir
+
+
+sub dbgCdldbGetPinDir {
+  my ($self,$pinName) = @_;
+  my $direction = ${$self->{PIN}}{$pinName}->{D};
+  print "Pin $pinName direction is $direction\n";
+}#sub dbgCdldbGetPinDir
+
+#-------------------------------------------------------------#
+sub dbCdldbAddPin {
+  my ($self,$pinName) = @_;
+  ${$self->{PIN}}{$pinName} = CdlPinDB::new();
+}#sub dbCdldbAddPin
+
+sub dbCdldbGetPins {
+  my ($self) = @_;
+  my @pins = ();
+  foreach my $pinName (keys %{$self->{PIN}}){ 
+     push(@pins,$pinName); 
+  }
+  return(@pins);
+}#sub dbCdldbGetPins
+
+sub dbgCdldbGetPins {
+  my ($self) = @_;
+  foreach my $pinName (keys %{$self->{PIN}}){
+     print "$pinName\n"; 
+  }
+}#sub dbgCdldbGetPins
+
+#-------------------------------------------------------------#
+
+1;

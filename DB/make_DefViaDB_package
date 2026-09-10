@@ -1,0 +1,70 @@
+package defViaDB;
+########explanation of database##########
+
+sub new {
+
+my $via = {
+            Vname => "UND",
+            Vnum => "UND",
+            Vresistance => "UND",
+            @VLayer => (),
+          };
+bless $via, 'defViaDB';
+return $via;
+}#sub new
+
+#---------------------------------------------------------------------------------#
+sub dbViaSetViaName {
+my ($self,$name) = @_;
+$self->{Vname} = $name;
+}#sub dbViaSetViaName
+
+sub dbViaGetViaName {
+my ($self) = @_;
+my $name = $self->{Vname};
+return($name);
+}#sub dbViaGetViaName
+
+#---------------------------------------------------------------------------------#
+
+sub dbViaSetViaNum {
+my ($self,$num) = @_;
+$self->{Vnum} = $num;
+}#sub dbViaSetViaNum
+
+sub dbViaGetViaNum {
+my ($self) = @_;
+my $num = $self->{Vnum};
+return($num);
+}#sub dbViaGetViaNum
+
+#--------------------------------------------------------------------------------#
+
+sub dbAddViaCutBox {
+my($self,$vl) = @_;
+push (@{$self->{VLayer}},$vl);
+}#sub dbAddViaCutBox
+
+sub dbGetViaCutBox {
+my($self) = @_;
+@vl = @{$self->{VLayer}};
+return(@vl) ;
+}#sub dbGetViaCutBox
+
+#--------------------------------------------------------------------------------#
+
+sub dbSetViaResistance {
+my($self,$vr) = @_;
+$self->{Vresistance} = $vr;
+}#sub dbSetViaResistance
+
+sub dbGetViaResistance {
+my ($self) = @_;
+my $vr = $self->{Vresistance};
+return($vr);
+}#sub dbGetViaResistance
+
+
+
+
+1;

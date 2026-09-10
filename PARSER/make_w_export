@@ -1,0 +1,17 @@
+
+sub export_all {
+
+my $moduleName = $TOP_MODULE ;
+
+&write_def("-output","${TOP_MODULE}.def", "--overwrite");
+&def2lef("-output"," ${TOP_MODULE}.lef");
+my $gds = "/home/ubuntu/ef-xfab-xh035/EFXH035A/libs.ref/gds/D_CELLS/xh035_D_CELLS.gds";
+my $layerMapFile = "/ef/tech/XFAB/EFXH035A/libs.ref/gds/rtl2gds_layer_map.xml";
+&def2gds (qw/--pin --inst --include_cell --net --spnet --inst --add_lvs_label -userUnits 1e-3 -dbUnit 1e-9 --include_gds_cells -gds_file_path $gds -layer_map_file $layerMapFile  -boundary_layer BOUNDARYLAYER -boundary_data_type BOUNDARYDATATYPE/);
+
+
+
+
+}# sub export_all
+
+1;

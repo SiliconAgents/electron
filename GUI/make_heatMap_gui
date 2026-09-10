@@ -1,0 +1,843 @@
+##################################################################################################
+#################################### Plot pin activity heatmap ###################################
+##################################################################################################
+#sub plot_heat_map {
+#  #%PIN2ACTIVITY = ();
+#  #&read_tcf("-tcf", "/projects3/falcon/work/dcermak/falcon_revB2_sprint_28_81a/digital/tb/mcu_top/.gatesim_dsp/validation/power/coremark_cache_directmap/xmsim.tcf");
+#  &create_heat_map_gcells;
+#
+#  my @heat_map_colors = ("#000000", "#303030", "#302E9B", "#000082", "#0001FC", "#2B67FD", "#99CDFC", "#2DD1CA", "#008001", "#9AD000", "#FED000", "#756264", "#9B5B59", "#FE6700", "#FD0002", "#DAB711", "#E3E103");
+#
+#  my $t0 = new Benchmark;
+#  ## the canvas area reamain the same : always  500 by 500
+#  my $box = [0,0,540,540];
+#  my $guiCanvasWidth = 540;
+#  my $guiCanvasHeight = 540;
+#  # a margin of 20 units is given on each side ..
+#  my $DBSCALEFACTOR = $DEF_DATABASE_UNIT;
+#  my $dieIsCentre = 0;
+#  my ($bllx,$blly,$burx,$bury);
+#  
+#  if(exists $DIE_ALREADY{dieArea}){
+#     my $guiDiellx = $DIE_ALREADY{dieArea}[0];
+#     my $guiDielly = $DIE_ALREADY{dieArea}[1];
+#     my $guiDieurx = $DIE_ALREADY{dieArea}[2];
+#     my $guiDieury = $DIE_ALREADY{dieArea}[3];
+#     
+#     my $guiMuDiellx = $guiDiellx/$DBSCALEFACTOR;
+#     my $guiMuDielly = $guiDielly/$DBSCALEFACTOR;
+#     my $guiMuDieurx = $guiDieurx/$DBSCALEFACTOR;
+#     my $guiMuDieury = $guiDieury/$DBSCALEFACTOR;
+#     
+#     if($guiDiellx == 0 && $guiDielly == 0 ){
+#        $dieIsCentre = 0; 
+#     }elsif($guiDiellx+$guiDieurx == 0 && $guiDieury+$guiDielly == 0){
+#        $dieIsCentre = 1;
+#     }else {
+#        $dieIsCentre = 2;
+#     }
+#     
+#     my $guiWidth = abs($guiMuDieurx - $guiMuDiellx) ;
+#     my $guiHeight = abs($guiMuDieury - $guiMuDielly) ;
+#     my $dieHMultFact  = 500/$guiHeight;
+#     my $dieWMultFact  = 500/$guiWidth;
+#     
+#     if($dieHMultFact < $dieWMultFact){
+#        $MICRONFACTOR = $dieHMultFact;
+#     }else{
+#        $MICRONFACTOR =  $dieWMultFact; 
+#     }
+#     
+#     $GLOBAL->dbGlobalSetMicronFactor($MICRONFACTOR);
+#     my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
+#     
+#     my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+#     $top->title (" Proton (".$moduleName.")");
+#     #####   display the die area boundary  ###
+#     if($dieIsCentre == 0 || $dieIsCentre == 2 ) {
+#        $blly = $guiMuDielly*$MICRONFACTOR + 20;
+#        $bury = $guiMuDieury*$MICRONFACTOR + 20;
+#        $bllx = $guiMuDiellx*$MICRONFACTOR + 20;
+#        $burx = $guiMuDieurx*$MICRONFACTOR + 20;
+#        $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
+#        print "aditya:$bllx,$blly,$burx,$bury\n";
+#        my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline,"green");
+#        $design_worldcanvas->itemconfigure($chip_bound, -tag =>'TOP_MOD');
+#        $design_worldcanvas->addtag($moduleName , "withtag", $chip_bound);
+#     }else {
+#        $blly = $guiMuDielly*$MICRONFACTOR + 270;
+#        $bury = $guiMuDieury*$MICRONFACTOR + 270;
+#        $bllx = $guiMuDiellx*$MICRONFACTOR + 270;
+#        $burx = $guiMuDieurx*$MICRONFACTOR + 270;
+#        $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
+#        my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline,"green");
+#        $design_worldcanvas->itemconfigure($chip_bound, -tag =>'TOP_MOD');
+#        $design_worldcanvas->addtag($moduleName , "withtag", $chip_bound);
+#     }
+#     
+#     my $max_activity = 0;
+#     for(my $i=0; $i<=$#GCellArray ; $i++) {
+#        for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
+#             my $activity = $GCellArray[$i][$j]->dbgGcellGetPinActivity; 
+#             print "activity is :$activity\n";
+#             if($activity > $max_activity){$max_activity = $activity;}   
+#        }
+#     }
+#     my $activity_range = int($max_activity/17);
+#     print "max_act:$max_activity act_range:$activity_range\n";
+#
+#     ########  dispay the Instances  #######
+#     for(my $i=0; $i<=$#GCellArray ; $i++) {
+#        for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
+#             my @gcell_bbox = $GCellArray[$i][$j]->dbgGcellGetBBox;
+#             my $activity = $GCellArray[$i][$j]->dbgGcellGetPinActivity; 
+#             #my @instList = $GCellArray[$i][$j]->dbgGcellGetInst; 
+#             my $llx = $gcell_bbox[0]*$MulFactor;
+#             my $lly = $gcell_bbox[1]*$MulFactor;
+#             my $urx = $gcell_bbox[2]*$MulFactor;
+#             my $ury = $gcell_bbox[3]*$MulFactor;
+#             if($dieIsCentre == 1) {
+#                $lly = $lly + 270;
+#                $ury = $ury + 270;
+#                $llx = $llx + 270;
+#                $urx = $urx + 270;
+#             }else {
+#                $lly = $lly + 20;
+#                $ury = $ury + 20;
+#                $llx = $llx + 20;
+#                $urx = $urx + 20;
+#             }
+#             my $fill_color = $heat_map_colors[int($activity/$activity_range)];
+#             print "$i,$j=>$llx,$lly,$urx,$ury $activity=>$fill_color\n";
+#
+#             #$design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -fill =>$fill_color, -stipple => "gray12");
+#             $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -fill =>$fill_color);
+#        }
+#     }
+#  }#if dieArea exists
+#  #----------------------------------------------#
+#  $t1 = new Benchmark;
+#  my $td = timediff($t1, $t0);
+#  print "heat map display took:",timestr($td),"\n";
+#  #$design_worldcanvas->viewArea(@$box, -border => 0);
+#  $design_worldcanvas->viewAll;
+#  @box_org = $design_worldcanvas->getView();
+#  &design_ZoomIn_ZoomOut_new($design_worldcanvas,\@box_org);
+#  &activate_flatViewTab;
+#}#sub plot_heat_map
+#
+#sub create_heat_map_gcells {
+#  ############################# creating gcell database ##################################
+#  my $noOfArg = @_;
+#  my ($gcellSizeX,$gcellSizeY,$ngcellX,$ngcellY) = (0,0,0,0);
+#  my ($_ngcellX, $_ngcellY)       = (100,100);
+#  if($_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+#     print"Usage: create_heat_map_gcells -gx <gcell size across x>\n";
+#     print"                              -gy <gcell size across y>\n";
+#     print"                              -nx <number of gcells across x>\n";
+#     print"                              -ny <number of gcells across y>\n";
+#     return;
+#  }
+#  for(my $i=0; $i<$noOfArg; $i++){
+#      if($_[$i] eq "-gx"){$gcellSizeX = $_[$i+1];}
+#      if($_[$i] eq "-gy"){$gcellSizeY = $_[$i+1];}
+#      if($_[$i] eq "-nx"){$ngcellX = $_[$i+1];}
+#      if($_[$i] eq "-ny"){$ngcellY = $_[$i+1];}
+#  }
+#
+#  my ($llx, $lly, $urx, $ury) = @{$DIE_ALREADY{dieArea}};
+#  print "dieArea: $llx, $lly, $urx, $ury\n";
+#  ############### added because the instances outside the chip have no gcell ################
+#  foreach my $inst ( keys %CADB ) {
+#      my @loc = $CADB{$inst}->dbCadbGetLoc;
+#      if    ($loc[0] < $llx){$llx = $loc[0];} 
+#      elsif ($loc[0] > $urx){$urx = $loc[0];} 
+#      if    ($loc[1] < $lly){$lly = $loc[1];} 
+#      elsif ($loc[1] > $ury){$ury = $loc[1];} 
+#  }#foreach instance
+#  ###########################################################################################
+#  
+#  if ($gcellSizeX == 0) {
+#    if ($ngcellX == 0) {
+#      $ngcellX = $_ngcellX;
+#      $ngcellY = $_ngcellY;
+#    } 
+#    $gcellSizeX = ($urx - $llx + 1 )/$ngcellX;
+#    $gcellSizeY = ($ury - $lly + 1)/$ngcellY;
+#  } elsif ($ngcellX == 0) {
+#    $ngcellX = ceil( ($urx - $llx )/$gcellSizeX);
+#    $ngcellY = ceil( ($ury - $lly )/$gcellSizeY);
+#  }
+#
+#  print "gcellSize: $gcellSizeX,$gcellSizeY\n";
+#  print "numGcell:  $ngcellX  $ngcellY\n"; 
+#
+#  my ($x, $y) = ($llx, $lly);
+#  my ($numX, $numY) = (0,0);
+#  my ($x1, $y1);
+#  my ($pid);
+#  while ($y < $ury) {
+#      $y1 = $y + $gcellSizeY;
+#      if ($y1 > $ury) {$y1 = $ury;}
+#      while ($x < $urx) {
+#        $x1 = $x + $gcellSizeX;
+#        if ($x1 > $urx) {$x1 = $urx;}
+#        $GCellArray[$numX][$numY] = new GCell;
+#        $GCellArray[$numX][$numY]->dbgGcellSetBBox($x,$y, $x1,$y1);
+#        $pid = min($numX+1, $numY+1, $ngcellX - $numX, $ngcellY - $numY);
+#        $GCellArray[$numX][$numY]->dbgGcellSetPid($pid);
+#        $x = $x1; $numX++;
+#      } #while
+#      $y = $y1; $numY++;
+#      $x = $llx; $numX = 0;
+#  }
+#
+#  foreach my $netName ( keys %NETS_ALREADY ){
+#     my $netType = $NADB{$netName}->dbNadbGetNetType;
+#     if($netType == 0 ){
+#        foreach my $instance ( keys %{$NETS_ALREADY{$netName}}){
+#           if($instance eq "PIN"){
+#           }else{  
+#              if(exists $COMP_ALREADY{$instance}){
+#                 my $cellref = $CADB{$instance}->dbCadbGetCellref;
+#                 my $pinName = $NETS_ALREADY{$netName}{$instance};
+#                 my $pinDir = $PLDB{$cellref}->dbMdbGetPinDir($pinName);
+#                 if($pinDir == 1){          
+#                    my @instLoc = $CADB{$instance}->dbCadbGetLoc;
+#                    my $orient = $CADB{$instance}->dbCadbGetOrient;
+#                    if(exists $PLDB{$cellref} ) {
+#                       my @cellSize = $PLDB{$cellref}->dbMdbGetSize;
+#                       my @cellOrigin = $PLDB{$cellref}->dbMdbGetOrigin;
+#                       my @pinRects = $PLDB{$cellref}->dbMdbGetPinRect($pinName);
+#                       my ($layer, $rllx1, $rlly1, $rurx1, $rury1)=(split(/\s+/,$pinRects[0]))[0,2,3,4,5];
+#                       my @rectCoords = &xformCellPinToInstPin($instLoc[0],$instLoc[1],$cellOrigin[0],$cellOrigin[1],$orient,$cellSize[0],$cellSize[1],$rllx1,$rlly1,$rurx1,$rury1);
+#                       my $midX = ($rectCoords[0] + $rectCoords[2])/2;
+#                       my $midY = ($rectCoords[1] + $rectCoords[3])/2;
+#
+#                       my $gcellX = int ($midX/$gcellSizeX);
+#                       my $gcellY = int ($midY/$gcellSizeY);
+#          
+#                       my $activity = $PIN2ACTIVITY{"$instance/$pinName"};
+#                       if($activity eq ""){$activity = 0;}
+#                       #$GCellArray[$gcellX][$gcellY]->dbgGcellAddInst("$instance/$pinName") if($gcellX < $ngcellX && $gcellY < $ngcellY);
+#                       $GCellArray[$gcellX][$gcellY]->dbgGcellAddInst("$netName=$instance/$pinName=$activity") if($gcellX < $ngcellX && $gcellY < $ngcellY);
+#                       if($activity > 0){
+#                          $GCellArray[$gcellX][$gcellY]->dbgGcellAddPinActivity($activity) if($gcellX < $ngcellX && $gcellY < $ngcellY);
+#                          print "net:$netName\n";
+#                          print "  gcell:$gcellX,$gcellY\n";
+#                          print "  pin:$instance/$pinName  activity=$activity\n";
+#                       }
+#                    }
+#                 }
+#              }
+#           }
+#        }
+#     }
+#  }
+#
+#}# sub create_heat_map_gcells
+#
+#sub read_tcf {
+#  %PIN2ACTIVITY = ();
+#  my $noOfArg = @_;
+#  if($noOfArg < 2 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP') {
+#     print "\nUsage : read_tcf -tcf < TCF file >\n";
+#  }else {
+#     my $tcfFile = "";
+#     for(my $i=0 ; $i<$noOfArg; $i++){
+#         if($_[$i] eq "-tcf"){$tcfFile = $_[$i+1];} 
+#     }#for correct no.of Arguments
+#  
+#     if(-e $tcfFile){
+#        my $t0 = new Benchmark;
+#        print "INFO-PAR-PIN : 001 : File $tcfFile exists .....\n";
+#        open(READ, "$tcfFile");
+#        print "INFO-PAR-PIN : 002 : Begin reading pin activity from file $tcfFile .....\n";
+#        my $START_PIN_SECTION = 0;
+#        while(<READ>){
+#           chomp($_);
+#           $_ =~ s/^\s+//g;
+#           if($_ =~ /^\s*#/){next;}
+#           if($_ =~ /^$/){next;}
+#           if($_ =~ /^\s*pin\s*\(\)\s+\{/){
+#              $START_PIN_SECTION = 1; 
+#              next;   
+#           }elsif($_ =~ /^\s*\}/){  
+#              $START_PIN_SECTION = 0;
+#           }
+#           if($START_PIN_SECTION == 1){
+#              $_ =~ s/\"|\;//g;
+#              #my ($pinName, $actStr) = split(/\:/, $_);
+#              my ($pinName, $actStr) = split(/\s+\:\s+/, $_);
+#              $pinName =~ s/\s+//g;
+#              $pinName =~ s/\\//g;
+#              $pinName =~ s/\:/\//g;
+#              $actStr =~ s/^\s+//;
+#              $pinName =~ s/tb\/u_mcu_top_gasket\/u_mcu_top\///g;
+#              
+#              my $activity = (split(/\s+/, $actStr))[1];
+#              if($activity == 0){next;}
+#              $PIN2ACTIVITY{$pinName} = $activity;
+#           }  
+#        }
+#        print "INFO-PAR-PIN : 003 : End reading pin activity .....\n";
+#        close(READ);
+#  
+#        my $tfinal = new Benchmark;
+#        my $tdfinal = timediff($tfinal, $t0);
+#        print "script parse_tcf.pl took:",timestr($tdfinal),"\n";
+#     }else{
+#       print "WARN: File $tcfFile does not exists ! \n";
+#     }
+#  }
+#
+#}#sub read_tcf
+
+sub plot_activity_heat_map {
+  #my @heat_map_colors = ("#000000", "#303030", "#302E9B", "#000082", "#0001FC", "#2B67FD", "#99CDFC", "#2DD1CA", "#008001", "#9AD000", "#FED000", "#756264", "#9B5B59", "#FE6700", "#FD0002", "#DAB711", "#E3E103");
+  my @heat_map_colors = ("#000000", "#303030","#302E9B", "#000082", "#0001FC", "#2B67FD", "#99CDFC", "#2DD1CA", "#008001", "#9AD000", "#FED000", "#756264", "#9B5B59", "#FE6700", "#FD0002");
+
+  my $t0 = new Benchmark;
+  ## the canvas area reamain the same : always  500 by 500
+  #my $box = [0,0,540,540];
+  my $box = [0,0,700,700];
+  my $guiCanvasWidth = 540;
+  my $guiCanvasHeight = 540;
+  # a margin of 20 units is given on each side ..
+     
+  my ($chip_llx, $chip_lly, $chip_urx, $chip_ury) = (0, 0, 4566, 4566);
+  
+  my $guiWidth = abs($chip_urx - $chip_llx) ;
+  my $guiHeight = abs($chip_ury - $chip_lly) ;
+  my $hMultFact  = 500/$guiHeight;
+  my $wMultFact  = 500/$guiWidth;
+  
+  if($hMultFact < $wMultFact){
+     $MulFactor = $hMultFact;
+  }else{
+     $MulFactor =  $wMultFact; 
+  }
+  
+  my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+  $top->title (" Proton (mcu_top)");
+  my $bllx = $chip_llx*$MulFactor + 20;
+  my $blly = $chip_lly*$MulFactor + 20;
+  my $burx = $chip_urx*$MulFactor + 20;
+  my $bury = $chip_ury*$MulFactor + 20;
+  $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
+  #$design_worldcanvas->createRectangle($bllx,$blly-2,$burx+2,$bury, -outline,"green", -width=>2);
+  $design_worldcanvas->createRectangle($bllx,$blly-1,$burx+1,$bury, -outline,"green", -width=>2);
+
+  my $max_activity = 0;
+  for(my $i=0; $i<=$#GCellArray ; $i++) {
+     for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
+          my $activity = $GCellArray[$i][$j]->dbgGcellGetPinActivity; 
+          #print "activity is :$activity\n";
+          if($activity > $max_activity){$max_activity = $activity;}   
+     }
+  }
+  my $activity_range = int($max_activity/@heat_map_colors) + 1;
+  print "max_act:$max_activity act_range:$activity_range\n";
+
+  ########  dispay the activity  #######
+  for(my $i=0; $i<=$#GCellArray ; $i++) {
+     for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
+          my @gcell_bbox = $GCellArray[$i][$j]->dbgGcellGetBBox;
+          my $activity = $GCellArray[$i][$j]->dbgGcellGetPinActivity; 
+          #my @instList = $GCellArray[$i][$j]->dbgGcellGetInst; 
+          my $llx = $gcell_bbox[0]*$MulFactor + 20;
+          my $lly = $gcell_bbox[1]*$MulFactor + 20;
+          my $urx = $gcell_bbox[2]*$MulFactor + 20;
+          my $ury = $gcell_bbox[3]*$MulFactor + 20;
+
+          my $fill_color = $heat_map_colors[int($activity/$activity_range)];
+          #print "$i,$j=>$llx,$lly,$urx,$ury $activity=>$fill_color\n";
+
+          $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -fill =>$fill_color, -tags=>$activity);
+     }
+  }
+
+  my $refX = 560;
+  my $refY = 20;
+  foreach my $color (@heat_map_colors){
+     $design_worldcanvas->createRectangle($refX,$refY,$refX+10,$refY+15, -fill=>$color, -outline=>"white");
+     $refY +=15; 
+  }
+  #----------------------------------------------#
+  $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "heat map display took:",timestr($td),"\n";
+  #$design_worldcanvas->viewArea(@$box, -border => 0);
+  $design_worldcanvas->viewAll;
+  @box_org = $design_worldcanvas->getView();
+  &design_ZoomIn_ZoomOut_new($design_worldcanvas,\@box_org);
+  &activate_flatViewTab;
+}#sub plot_activity_heat_map
+
+sub create_activity_heat_map_gcells {
+  my $t0 = new Benchmark;
+
+  ############################# creating gcell database ##################################
+  my $noOfArg = @_;
+  my ($gcellSizeX,$gcellSizeY,$ngcellX,$ngcellY) = (100,100,0,0);
+  my ($_ngcellX, $_ngcellY)       = (10,10);
+  my ($pinsLocFile, $tcfFile);
+  if($noOfArg < 4 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: create_activity_heat_map_gcells -gx <gcell size across x>\n";
+     print"                                       -gy <gcell size across y>\n";
+     print"                                       -nx <number of gcells across x>\n";
+     print"                                       -ny <number of gcells across y>\n";
+     print"                                       -pins_file < pins location file>\n";
+     print"                                       -tcf_file < TCF file>\n";
+     return;
+  }
+  for(my $i=0; $i<$noOfArg; $i++){
+      if($_[$i] eq "-gx"){$gcellSizeX = $_[$i+1];}
+      if($_[$i] eq "-gy"){$gcellSizeY = $_[$i+1];}
+      if($_[$i] eq "-nx"){$ngcellX = $_[$i+1];}
+      if($_[$i] eq "-ny"){$ngcellY = $_[$i+1];}
+      if($_[$i] eq "-pins_file"){$pinsLocFile = $_[$i+1];}
+      if($_[$i] eq "-tcf_file") {$tcfFile = $_[$i+1];}
+  }
+
+  my ($llx, $lly, $urx, $ury) = (0, 0, 4566, 4566);
+  
+  if ($gcellSizeX == 0) {
+    if ($ngcellX == 0) {
+      $ngcellX = $_ngcellX;
+      $ngcellY = $_ngcellY;
+    } 
+    $gcellSizeX = ($urx - $llx + 1 )/$ngcellX;
+    $gcellSizeY = ($ury - $lly + 1)/$ngcellY;
+  } elsif ($ngcellX == 0) {
+    $ngcellX = ceil( ($urx - $llx )/$gcellSizeX);
+    $ngcellY = ceil( ($ury - $lly )/$gcellSizeY);
+  }
+
+  print "gcellSize: $gcellSizeX,$gcellSizeY\n";
+  print "numGcell:  $ngcellX  $ngcellY\n"; 
+
+  my ($x, $y) = ($llx, $lly);
+  my ($numX, $numY) = (0,0);
+  my ($x1, $y1);
+  my ($pid);
+  while ($y < $ury) {
+      $y1 = $y + $gcellSizeY;
+      if ($y1 > $ury) {$y1 = $ury;}
+      while ($x < $urx) {
+        $x1 = $x + $gcellSizeX;
+        if ($x1 > $urx) {$x1 = $urx;}
+        $GCellArray[$numX][$numY] = new GCell;
+        $GCellArray[$numX][$numY]->dbgGcellSetBBox($x,$y, $x1,$y1);
+        $pid = min($numX+1, $numY+1, $ngcellX - $numX, $ngcellY - $numY);
+        $GCellArray[$numX][$numY]->dbgGcellSetPid($pid);
+        $x = $x1; $numX++;
+      } #while
+      $y = $y1; $numY++;
+      $x = $llx; $numX = 0;
+  }
+
+  %PIN2ACTIVITY = ();
+  &read_tcf("-tcf", $tcfFile);
+  open(READ, "$pinsLocFile");
+  while(<READ>){
+     chomp($_);
+     $_ =~ s/^\s+//g;
+     if($_ =~ /^\s*#/){next;}
+     if($_ =~ /^$/){next;}
+     my ($pinName, $locX, $locY) = (split(/\,/, $_))[0,2,3];
+     my $activity = $PIN2ACTIVITY{$pinName};
+     #print "pin:$pinName, $locX, $locY, $activity\n";
+     my $gcellX = int ($locX/$gcellSizeX);
+     my $gcellY = int ($locY/$gcellSizeY);
+     #$GCellArray[$gcellX][$gcellY]->dbgGcellAddInst("$pinName=$activity") if($gcellX < $ngcellX && $gcellY < $ngcellY);
+     if($activity > 0){
+        $GCellArray[$gcellX][$gcellY]->dbgGcellAddPinActivity($activity) if($gcellX < $ngcellX && $gcellY < $ngcellY);
+        #print "  pin:$pinName activity:$activity\n";
+        #print "  gcell:$gcellX,$gcellY\n";
+     }
+          
+  }
+  close(READ);
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command create_activity_heat_map_gcells took:",timestr($td),"\n";
+}# sub create_activity_heat_map_gcells
+
+
+
+sub read_tcf {
+  %PIN2ACTIVITY = ();
+  my $noOfArg = @_;
+  if($noOfArg < 2 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP') {
+     print "\nUsage : read_tcf -tcf < TCF file >\n";
+  }else {
+     my $tcfFile = "";
+     for(my $i=0 ; $i<$noOfArg; $i++){
+         if($_[$i] eq "-tcf"){$tcfFile = $_[$i+1];} 
+     }#for correct no.of Arguments
+  
+     if(-e $tcfFile){
+        my $t0 = new Benchmark;
+        print "INFO-PAR-PIN : 001 : File $tcfFile exists .....\n";
+        open(READ, "$tcfFile");
+        print "INFO-PAR-PIN : 002 : Begin reading pin activity from file $tcfFile .....\n";
+        my $START_PIN_SECTION = 0;
+        while(<READ>){
+           chomp($_);
+           $_ =~ s/^\s+//g;
+           if($_ =~ /^\s*#/){next;}
+           if($_ =~ /^$/){next;}
+           if($_ =~ /^\s*pin\s*\(\)\s+\{/){
+              $START_PIN_SECTION = 1; 
+              next;   
+           }elsif($_ =~ /^\s*\}/){  
+              $START_PIN_SECTION = 0;
+           }
+           if($START_PIN_SECTION == 1){
+              $_ =~ s/\"|\;//g;
+              #my ($pinName, $actStr) = split(/\:/, $_);
+              my ($pinName, $actStr) = split(/\s+\:\s+/, $_);
+              $pinName =~ s/\s+//g;
+              $pinName =~ s/\\//g;
+              $pinName =~ s/\:/\//g;
+              $actStr =~ s/^\s+//;
+              $pinName =~ s/tb\/u_mcu_top_gasket\/u_mcu_top\///g;
+              
+              my $activity = (split(/\s+/, $actStr))[1];
+              if($activity == 0){next;}
+              $PIN2ACTIVITY{$pinName} = $activity;
+           }  
+        }
+        print "INFO-PAR-PIN : 003 : End reading pin activity .....\n";
+        close(READ);
+  
+        my $tfinal = new Benchmark;
+        my $tdfinal = timediff($tfinal, $t0);
+        print "command parse_tcf.pl took:",timestr($tdfinal),"\n";
+     }else{
+       print "WARN: File $tcfFile does not exists ! \n";
+     }
+  }
+}#sub read_tcf
+
+##################################################################################################
+################################### Plot leakage power heatmap ###################################
+##################################################################################################
+sub plot_leakage_power_heat_map {
+  #my @heat_map_colors = ("#000000", "#303030", "#302E9B", "#000082", "#0001FC", "#2B67FD", "#99CDFC", "#2DD1CA", "#008001", "#9AD000", "#FED000", "#756264", "#9B5B59", "#FE6700", "#FD0002", "#DAB711", "#E3E103");
+  my @heat_map_colors = ("#000000", "#303030","#302E9B", "#000082", "#0001FC", "#2B67FD", "#99CDFC", "#2DD1CA", "#008001", "#9AD000", "#FED000", "#756264", "#9B5B59", "#FE6700", "#FD0002");
+
+  my $t0 = new Benchmark;
+  ## the canvas area reamain the same : always  500 by 500
+  #my $box = [0,0,540,540];
+  my $box = [0,0,700,700];
+  my $guiCanvasWidth = 540;
+  my $guiCanvasHeight = 540;
+  # a margin of 20 units is given on each side ..
+  
+  my ($chip_llx, $chip_lly, $chip_urx, $chip_ury) = (0, 0, 4566, 4566);
+  
+  my $guiWidth = abs($chip_urx - $chip_llx) ;
+  my $guiHeight = abs($chip_ury - $chip_lly) ;
+  my $hMultFact  = 500/$guiHeight;
+  my $wMultFact  = 500/$guiWidth;
+  
+  if($hMultFact < $wMultFact){
+     $MulFactor = $hMultFact;
+  }else{
+     $MulFactor =  $wMultFact; 
+  }
+  
+  my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+  $top->title (" Proton (mcu_top)");
+  my $bllx = $chip_llx*$MulFactor + 20;
+  my $blly = $chip_lly*$MulFactor + 20;
+  my $burx = $chip_urx*$MulFactor + 20;
+  my $bury = $chip_ury*$MulFactor + 20;
+  $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
+  #$design_worldcanvas->createRectangle($bllx,$blly-2,$burx+2,$bury, -outline,"green", -width=>2);
+  $design_worldcanvas->createRectangle($bllx,$blly-1,$burx+1,$bury, -outline,"green", -width=>2);
+  
+  my $max_leakage_power = 0;
+  for(my $i=0; $i<=$#GCellArray ; $i++) {
+     for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
+          my $leakage_power = $GCellArray[$i][$j]->dbgGcellGetLeakagePower; 
+          #print "leakage_power is :$leakage_power\n";
+          if($leakage_power > $max_leakage_power){$max_leakage_power = $leakage_power;}   
+     }
+  }
+  my $leakage_power_range = int($max_leakage_power/@heat_map_colors) + 1;
+  print "max_leakage_power:$max_leakage_power leakage_power_range:$leakage_power_range\n";
+
+  ########  dispay the leakage power  #######
+  for(my $i=0; $i<=$#GCellArray ; $i++){
+      for(my $j=0; $j<=$#{@GCellArray[0]} ; $j++){
+          my @gcell_bbox = $GCellArray[$i][$j]->dbgGcellGetBBox;
+          my $leakage_power = $GCellArray[$i][$j]->dbgGcellGetLeakagePower; 
+          #my @instList = $GCellArray[$i][$j]->dbgGcellGetInst; 
+          my $llx = $gcell_bbox[0]*$MulFactor + 20;
+          my $lly = $gcell_bbox[1]*$MulFactor + 20;
+          my $urx = $gcell_bbox[2]*$MulFactor + 20;
+          my $ury = $gcell_bbox[3]*$MulFactor + 20;
+
+          my $fill_color = $heat_map_colors[int($leakage_power/$leakage_power_range)];
+          #print "$i,$j=>$llx,$lly,$urx,$ury $leakage_power=>$fill_color\n";
+
+          $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -fill=>$fill_color, -tags=>$leakage_power);
+      }
+  }
+
+  my $refX = 560;
+  my $refY = 20;
+  foreach my $color (@heat_map_colors){
+     $design_worldcanvas->createRectangle($refX,$refY,$refX+10,$refY+15, -fill=>$color, -outline=>"white");
+     $refY +=15; 
+  }
+  #----------------------------------------------#
+  $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "heat map display took:",timestr($td),"\n";
+  #$design_worldcanvas->viewArea(@$box, -border => 0);
+  $design_worldcanvas->viewAll;
+  @box_org = $design_worldcanvas->getView();
+  &design_ZoomIn_ZoomOut_new($design_worldcanvas,\@box_org);
+  &activate_flatViewTab;
+}#sub plot_leakage_power_heat_map
+
+sub create_leakage_power_heat_map_gcells {
+  my $t0 = new Benchmark;
+
+  ############################# creating gcell database ##################################
+  my $noOfArg = @_;
+  my ($gcellSizeX,$gcellSizeY,$ngcellX,$ngcellY) = (100,100,0,0);
+  my ($_ngcellX, $_ngcellY)       = (10,10);
+  my $inFile;
+  if($noOfArg < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: create_leakage_power_heat_map_gcells -gx <gcell size across x>\n";
+     print"                                            -gy <gcell size across y>\n";
+     print"                                            -nx <number of gcells across x>\n";
+     print"                                            -ny <number of gcells across y>\n";
+     print"                                            -inst_file <instance leakage power file>\n";
+     return;
+  }
+  for(my $i=0; $i<$noOfArg; $i++){
+      if($_[$i] eq "-gx"){$gcellSizeX = $_[$i+1];}
+      if($_[$i] eq "-gy"){$gcellSizeY = $_[$i+1];}
+      if($_[$i] eq "-nx"){$ngcellX = $_[$i+1];}
+      if($_[$i] eq "-ny"){$ngcellY = $_[$i+1];}
+      if($_[$i] eq "-inst_file"){$inFile = $_[$i+1];}
+  }
+  
+  my ($llx, $lly, $urx, $ury) = (0, 0, 4566, 4566);
+  
+  if ($gcellSizeX == 0) {
+    if ($ngcellX == 0) {
+      $ngcellX = $_ngcellX;
+      $ngcellY = $_ngcellY;
+    } 
+    $gcellSizeX = ($urx - $llx + 1 )/$ngcellX;
+    $gcellSizeY = ($ury - $lly + 1)/$ngcellY;
+  } elsif ($ngcellX == 0) {
+    $ngcellX = ceil( ($urx - $llx )/$gcellSizeX);
+    $ngcellY = ceil( ($ury - $lly )/$gcellSizeY);
+  }
+
+  print "gcellSize: $gcellSizeX,$gcellSizeY\n";
+  print "numGcell:  $ngcellX  $ngcellY\n"; 
+
+  my ($x, $y) = ($llx, $lly);
+  my ($numX, $numY) = (0,0);
+  my ($x1, $y1);
+  my ($pid);
+  while ($y < $ury) {
+      $y1 = $y + $gcellSizeY;
+      if ($y1 > $ury) {$y1 = $ury;}
+      while ($x < $urx) {
+        $x1 = $x + $gcellSizeX;
+        if ($x1 > $urx) {$x1 = $urx;}
+        $GCellArray[$numX][$numY] = new GCell;
+        $GCellArray[$numX][$numY]->dbgGcellSetBBox($x,$y, $x1,$y1);
+        $pid = min($numX+1, $numY+1, $ngcellX - $numX, $ngcellY - $numY);
+        $GCellArray[$numX][$numY]->dbgGcellSetPid($pid);
+        $x = $x1; $numX++;
+      } #while
+      $y = $y1; $numY++;
+      $x = $llx; $numX = 0;
+  }
+
+  open(READ, "$inFile");
+  while(<READ>){
+     chomp($_);
+     $_ =~ s/^\s+//g;
+     if($_ =~ /^\s*#/){next;}
+     if($_ =~ /^$/){next;}
+     my ($instName, $locX, $locY, $leakage_power) = (split(/\,/, $_))[0,1,2,7];
+     $leakage_power *= 10**9;
+     #print "inst:$instName, $locX, $locY, $leakage_power\n";
+     my $gcellX = int ($locX/$gcellSizeX);
+     my $gcellY = int ($locY/$gcellSizeY);
+     #$GCellArray[$gcellX][$gcellY]->dbgGcellAddInst("$instName=$leakage_power") if($gcellX < $ngcellX && $gcellY < $ngcellY);
+     if($leakage_power > 0){
+        $GCellArray[$gcellX][$gcellY]->dbgGcellAddLeakagePower($leakage_power) if($gcellX < $ngcellX && $gcellY < $ngcellY);
+        #print "instance:$instName leakage_power:$leakage_power\n";
+        #print "  gcell:$gcellX,$gcellY\n";
+     }
+          
+  }
+  close(READ);
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command create_leakage_power_heat_map_gcells took:",timestr($td),"\n";
+}# sub create_leakage_power_heat_map_gcells
+
+##################################################################################################
+################################### Plot time vs activity ###################################
+##################################################################################################
+sub plot_time_vs_activity {
+  my $fileName = $_[0]; #time vs activity csv file
+  my $t0 = new Benchmark;
+
+  ## the canvas area reamain the same : always  500 by 500
+  my $box = [0,0,540,540];
+  my $guiCanvasWidth = 540;
+  my $guiCanvasHeight = 540;
+  my $canvasWidth = 500;
+  my $canvasHeight = 500;
+
+  # a margin of 20 units is given on each side ..
+  $design_worldcanvas->createRectangle(@$box, -outline,"black");
+
+  my $baseName = basename($fileName); 
+  $baseName =~ s/activityPer|\.csv//g;
+  my ($number, $unit) = (split(/(\d+)/, $baseName))[1,2];
+
+  my $mfact = 1;
+  if($unit eq "ps"){
+     $mfact = $number; 
+  }elsif($unit eq "ns"){
+     $mfact = $number*1000; 
+  }
+  #print "mfact:$mfact\n";
+
+  my %TIME_VS_ACTIVITY = (); 
+  open(READ, "$fileName");
+  while(<READ>){
+     chomp($_);
+     $_ =~ s/^\s+//g;
+     if($_ =~ /^\s*#/){next;}
+     if($_ =~ /^$/){next;}
+     $_ =~ s/\(|\)//g;
+     my ($time, $activity) = split(/\,/, $_);
+     $time *= $mfact;
+     $TIME_VS_ACTIVITY{$time} = $activity;     
+  }
+  close(READ);
+  #my @timeS = sort {$a<=>$b} keys %TIME_VS_ACTIVITY;
+  print "time_range: $timeS[0] - $timeS[-1]\n";
+  my @actS = sort {$a<=>$b} values %TIME_VS_ACTIVITY;
+  #print "act_range: $actS[0] - $actS[-1]\n";
+  
+  my $xdis = 20;
+  my $ydis = 20;
+  my $dNum = 50;
+  my $llx = $xdis;
+  my $lly = $ydis; 
+  my $urx = $llx + $canvasWidth;
+  my $ury = $lly + $canvasHeight;
+
+  #----------- Horizontal and Vertical Axis --------------#
+  $design_worldcanvas->createLine($llx,$lly,$urx,$lly, -fill=> 'red');
+  $design_worldcanvas->createLine($llx,$lly,$llx,$ury, -fill=> 'red');
+
+  #-------------------- Marks with Text on Y-axis --------------------#   
+  $design_worldcanvas->createText($llx-1,$lly-1, -text=>"($timeS[0], $actS[0])",-fill,"yellow");
+
+  my $yStep = ($actS[-1] - $actS[0])/$dNum;
+  my $intYstep = int($yStep);
+  if ($yStep > $intYstep){$yStep = $intYstep + 1;}
+  
+  for(my $i=1; $i <= $dNum; $i++) {
+      my $llx1 = $llx - 1;
+      my $lly1 = $lly + ($canvasHeight*$i)/$dNum;
+      my $urx1 = $llx;                               
+      my $ury1 = $lly1;
+      my $yText = $actS[0] + $yStep*$i;
+      
+      $design_worldcanvas->createLine($llx1,$lly1,$urx1,$ury1, -fill,"yellow");
+      $design_worldcanvas->createText($llx1-15,$lly1, -text=>$yText,-fill,"yellow");
+  }#for y axis
+
+  #-------------------- Marks with Text on X-axis --------------------#   
+  my $xStep = ($timeS[-1] - $timeS[0])/$dNum;
+  my $intXstep = int($xStep);
+  if ($xStep > $intXstep){$xStep = $intXstep + 1;}
+  
+  for(my $i=1; $i <= $dNum; $i++){
+      my $llx1 = $llx + ($canvasWidth*$i)/$dNum; 
+      my $lly1 = $lly;
+      my $urx1 = $llx1;
+      my $ury1 = $lly - 1;
+      my $xText = $timeS[0] + $xStep*$i;
+      
+      $design_worldcanvas->createLine($llx1,$lly1,$urx1,$ury1, -fill,"yellow");
+      $design_worldcanvas->createText($llx1,$lly1-2, -text=>$xText,-fill,"yellow");
+  }
+  
+  my $count = 0;
+  foreach my $t (keys %TIME_VS_ACTIVITY){
+     #if($count > 5){last;} 
+     my $activity = $TIME_VS_ACTIVITY{$t};
+     my $xx = $llx + ($t - $timeS[0])*($canvasWidth/($xStep*$dNum));
+     my $yy = $lly + ($activity - $actS[0])*($canvasHeight/($yStep*$dNum));
+     #print "t,a=> $t, $activity\n";
+     #print "x,y=> $xx, $yy\n";
+     my $tag = "($t,$activity)";
+     $design_worldcanvas->createOval($xx-1,$yy+1,$xx+1,$yy-1, -fill=>"green", -tags=>$tag);
+
+     #$design_worldcanvas->bind($tag,"<Enter>"=> sub{$design_worldcanvas->itemconfigure($tag,-fill=>'white'); 
+     #                                               my $x = $design_worldcanvas->canvasx($Tk::event->x);
+     #                                               my $y = $design_worldcanvas->canvasy($Tk::event->y);
+     #                                               print "$x,$y\n";
+     #                                               $design_worldcanvas->createText($x,$y, -text=>$tag, -tags=>"TEMP_TEXT");
+     #                                            });
+     #$design_worldcanvas->bind($tag,"<Leave>"=> sub{$design_worldcanvas->itemconfigure($tag,-fill=>'green');$design_worldcanvas->delete(TEMP_TEXT);});
+     
+     $count++;
+  }
+
+  $design_worldcanvas->CanvasBind("<1>"=> [sub {&display_point($design_worldcanvas,$canvasWidth,$canvasHeight,$llx,$lly,$timeS[0],$timeS[-1],$actS[0],$actS[-1]); }]);
+  $design_worldcanvas->CanvasBind("<B1-ButtonRelease>"=> [sub{$design_worldcanvas->delete(POINT_TEMP);}]);
+
+  #----------------------------------------------#
+  $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "plot_time_vs_activity took:",timestr($td),"\n";
+  #$design_worldcanvas->viewArea(@$box, -border => 0);
+  $design_worldcanvas->viewAll;
+  @box_org = $design_worldcanvas->getView();
+  &design_ZoomIn_ZoomOut_new($design_worldcanvas,\@box_org);
+  &activate_flatViewTab;
+}#sub plot_time_vs_activity
+
+sub display_point {
+  my ($canvas, $canW, $canH, $refX, $refY, $minT, $maxT, $minA, $maxA) = @_;
+  
+  my @xy = $canvas->eventLocation();
+  my $x = $xy[0];
+  my $y = $xy[1];
+  #print "x,y=>$x,$y\n";
+  
+  my $time = int($minT + (($x - $refX)*($maxT - $minT))/$canW);
+  my $activity = int($minA + (($y - $refY)*($maxA - $minA))/$canH);
+  #print "$time $activity\n";
+
+  $canvas->createText($x,$y, -text=>"($time, $activity)" ,-anchor=>"sw",-tags=>"POINT_TEMP",-fill=>"white",-font=>"Times 14");
+}#sub display_point
+##################################################################################################
+##################################################################################################
+##################################################################################################
+
+1;

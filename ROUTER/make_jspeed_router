@@ -1,0 +1,209 @@
+########################################################################################
+#################################### run jrouter #######################################
+########################################################################################
+sub run_jroute {
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  &write_lef(qw/-tech also -output all.lef --simple/);
+  #&write_def(qw/-output jroute_in.def --overwrite -max_net_degree 20 -debug 5/);
+  &write_def(qw/-output jroute_in.def --overwrite -max_net_degree 99/);
+  system("$BEEHOME/3RDBIN/jr_u_1404_100816 -lef all.lef -def_in jroute_in.def");
+  &read_jspeed_def(qw/-def design_out.def/);
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "jrouter took:",timestr($td),"\n";
+}#sub run_jroute
+
+
+sub read_jspeed_def {
+  my $READ_COMPONENTS = 0;
+  my $READ_NETS = 1;
+  my $READ_FILLS = 0;
+  my $READ_SPNETS = 0;
+  my $READ_PINS = 0;
+  my $READ_FLPLAN = 0;
+  my $READ_VIAS = 0;
+  my $READ_ROUTES = 0;
+  my $READ_BLKGS = 0;
+  
+  open(READ,"design_out.def");
+  while(<READ>){
+    chomp();
+    if(/^\s*NETS / ... /^\s*END NETS/){
+       if($READ_NETS == 0 ){ 
+          next; 
+       }else{ 
+          chomp();
+          $_ =~ s/^\s+//;
+          #$_ =~ s/$\s+//;
+          if ($_ =~/^$/ ) { next; }
+          if( $_ =~ /^NETS/) { my $noOfNets = (split(/\s+/,$_))[1]; print "INFO-PAR-DEF : 009 : reading $noOfNets Nets \n"; next;}
+          if( $_ =~ /^END NETS/) { print "INFO-PAR-DEF : 010 : end Nets \n"; next;}
+          if($_ =~ /^\-/){
+             $net_data_start = 1;
+             print "DBG-PAR-DEF : 011 : $_\n" if ($DEBUG);
+             @net_data = ();
+             ###########################################################
+             ####    insert the code                                ####
+             ###########################################################
+             $netName = (split(/\s+/, $_))[1];
+             print "DBG-PAR-DEF : 012 : $netName\n"if ($DEBUG) ;
+             if(!defined $NETS_ALREADY{$netName} ){
+                print " something is wrong .. why is the net name not found in db\n";
+             }else{
+                my $currType = $NADB{$netName}->dbNadbGetNetType if(exists $NADB{$netName});
+                if($currType == 1){ $NADB{$netName}->dbNadbSetNetType(2); }
+                $NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
+             }
+             ###########################################################
+             ####    stop inserting the code                        ####
+             ###########################################################
+          }
+          if(($net_data_start == 1) && ($_ =~ /\;\s*$/)){
+              my $abort_current_net = 0;
+              my $process_routes = 1;
+              print "DBG-PAR-DEF : 013 : $_\n" if ($DEBUG);
+              push(@net_data, $_);
+              my $num = @net_data;
+              print "DBG-PAR-DEF : 014 : lines in net data are $num \n" if ($DEBUG);
+              while(defined ($line = shift @net_data)){
+                if ($abort_current_net == 1 ) { last; }
+                if ($process_routes == 1 ) {
+                    #----------------------------------------------------------------#
+                    # process routing of the net                                     #
+                    if ($line =~ /ROUTED/) { 
+                        $route_type = R; 
+                        print "DBG-PAR-DEF : 015 : $line\n" if ($DEBUG);  
+                        $line =~ s/\+*\s+ROUTED\s+//;
+                        #$NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetRegularRoute($line);
+                        my $new_line = ""; 
+                        if( $line =~/e\+|e\-/){
+                          $new_line = &replace_exponential_with_value($line);
+                        }else {
+                          $new_line = $line;
+                        }
+                        my @list_of_lines = &simplify_routing_segments($new_line);
+                        foreach my $line_str (@list_of_lines){
+                          print "setting simple segments for $netName $line_str\n" if($DEBUG);
+                          $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetRegularRoute($line_str);
+                        }
+                    }elsif ($line =~ /FIXED/) { 
+                        $route_type = F;
+                        $line =~ s/\+*\s+FIXED\s+//;
+                        $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetFixedRoute($line);
+                        print "DBG-PAR-DEF : 016 : $line\n" if ($DEBUG);  
+                    }elsif ($line =~ /COVER/) { 
+                        $route_type = C; 
+                        print "DBG-PAR-DEF : 017 : $line\n" if ($DEBUG);  
+                    }elsif ($line =~ /NEW/) { 
+                        print "DBG-PAR-DEF : 018 : $line\n" if ($DEBUG); 
+                        $line =~ s/NEW\s+//;
+                        my $new_line = "";
+                        if( $line =~/e\+|e\-/){
+                          $new_line = &replace_exponential_with_value($line);
+                        }else {
+                          $new_line = $line;
+                        }
+                        print "reading routes for $netName\n" if ($DEBUG);
+                        my @list_of_lines = &simplify_routing_segments($new_line);
+                        foreach my $line_str (@list_of_lines){
+                          print "setting simple segments for $netName : $line_str\n" if($DEBUG);
+                          if($route_type eq "R"){ 
+                            $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetRegularRoute($line_str);
+                          }elsif($route_type eq "F"){
+                            $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetFixedRoute($line_str);
+                          }
+                        }
+                    }
+                    #----------------------------------------------------------------#
+                }
+              }#while
+          }else {
+              print "DBG-PAR-DEF : 025 : $_\n" if ($DEBUG);
+              push(@net_data,$_);
+          }
+       }# if READ_NETS is equal to 1
+    }# NETS section
+  }#while
+}#sub read_jspeed_def
+
+
+sub simplify_routing_segments {
+  #my $DEBUG = 1;
+  my $segmentLayer = (split(/\s+/,$_[0]))[0];
+  my $netSeg = $_[0];
+  my @retArr = ();
+  
+  if ($netSeg =~ m/\( (\d+) (\d+) \) \( (\d+) (\d+) \)\s*$/ ) {
+         print "DBG-DES : 015 : jspeed : matched without extn without via  $1,$2,$3,$4 \n" if ($DEBUG);
+         #my $retStr = $segmentLayer." ".$netSeg;
+         my $retStr = $netSeg;
+         return($retStr);
+                                               }# if segment without extn without via
+  elsif ($netSeg =~ m/\w+ \( (\d+) (\d+) \) (\w+) (\w+)\s*$/ ) {
+         print "DBG-DES : 016 : jspeed : matched two via $3,$4 at $1,$2 \n" if ($DEBUG);
+         my $retStr = $segmentLayer." ( ".$1." ".$2." ) ".$3;
+         push(@retArr,$retStr);
+         print "splified to $retStr\n" if ($DEBUG);
+         $retStr = $segmentLayer." ( ".$1." ".$2." ) ".$4;
+         push(@retArr,$retStr);
+         print "splified to $retStr\n" if ($DEBUG);
+         return(@retArr);
+                                               }# if segment without extn without via
+  elsif ($netSeg =~ m/\w+ \( (\d+) (\d+) \) (\w+)\s*$/ ) {
+         print "DBG-DES : 016 : jspeed : matched A  via $3 at $1,$2 \n" if ($DEBUG);
+         my $retStr = $segmentLayer." ( ".$1." ".$2." ) ".$3;
+         print "splified to $retStr\n" if ($DEBUG);
+         push(@retArr,$retStr);
+         return(@retArr);
+                                               }# if segment without extn without via
+  elsif ($netSeg =~ m/\( (\d+) (\d+) \) \( (\d+) (\d+) \) (\w+)\s*$/ ) {
+         print "DBG-DES : 017 : jspeed : matched without extn with via  $1,$2,$3,$4 via $5 \n" if ($DEBUG);
+         my $retStr = $segmentLayer." ( ".$1." ".$2." ) ( ".$3." ".$4." )";
+         push(@retArr,$retStr);
+         $retStr = $segmentLayer." ( ".$3." ".$4." ) ".$5;
+         push(@retArr,$retStr);
+         return(@retArr);
+                                               }# if segment without extn with 1 via
+  elsif ($netSeg =~ m/\( (\d+) (\d+) \) \( (\d+) (\d+) \) (\w+) (\w+)/ ) {
+         print "DBG-DES : 018 : jspeed : matched without extn with via  $1,$2,$3,$4 via $5 and via $6 \n" if ($DEBUG);
+         my $retStr = $segmentLayer." ( ".$1." ".$2." ) ( ".$3." ".$4." )";
+         push(@retArr,$retStr);
+         my $retStr = $segmentLayer." ( ".$3." ".$4." ) ".$5;
+         push(@retArr,$retStr);
+         my $retStr = $segmentLayer." ( ".$3." ".$4." ) ".$6;
+         push(@retArr,$retStr);
+         return(@retArr);
+                                               }# if segment without extn with 2 via
+  elsif ($netSeg =~ m/\( (\d+) (\d+) (\d+) \) \( (\d+) (\d+) (\d+) \)/ ) {
+         if($1 == $4){
+           print "DBG-DES : 012 : matched verical B-extn and T-extn without via $1,$2,$3,$4,$5,$6 and W\=$W $defaultWidth $dbu\n" if ($DEBUG);
+         }elsif($3 == $6){
+           print "DBG-DES : 012 : matched horizontal L-extn and R-extn without via $1,$2,$3,$4,$5,$6 and W\=$W $defaultWidth $dbu\n" if ($DEBUG);
+         }
+                                               }# if verical B-extn and T-extn with via
+  elsif ($netSeg =~ m/\( (\d+) (\d+) (\d+) \) \( (\d+) (\d+) (\d+) \) (\w+)/ ) {
+         if($1 == $4){
+           print "DBG-DES : 012 : matched verical B-extn and T-extn with via $1,$2,$3,$4,$5,$6 and W\=$W $defaultWidth $dbu\n" if ($DEBUG);
+         }elsif($3 == $6){
+           print "DBG-DES : 012 : matched horizontal L-extn and R-extn with via $1,$2,$3,$4,$5,$6 and W\=$W $defaultWidth $dbu\n" if ($DEBUG);
+         }
+                                               }# if verical B-extn and T-extn with via
+  
+}#sub simplify_routing_segments
+
+########################################################################################
+#################################### run jrouter #######################################
+########################################################################################
+# rest_call_jroute was removed.  It POSTed all.lef and jroute_in.def to a hard-coded AWS
+# EC2 endpoint (http://52.53.238.154:8090/jroute) over plain HTTP and pulled the routed
+# DEF and log back.  The service is gone, and shipping a design to a fixed public IP is
+# not something the tool should do.  Use sub run_jroute at the top of this file, which
+# runs 3RDBIN/jr_u_1404_100816 locally.
+########################################################################################
+
+########################################################################################
+
+1;

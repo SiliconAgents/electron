@@ -1,0 +1,84 @@
+sub read_cdl {
+
+#****f* /read_cdl 
+# NAME
+#   read_lef
+# FUNCTION
+#    reads a CDL file .
+#    read_cdl has the following command line options and switches.
+# SYNOPSIS
+# read_cdl -cdl <fileName>
+# INPUTS
+#      options :
+#      	-cdl <fileName> : cdl file name which absolute or relative path
+#      switches :
+# OUTPUTS
+#      none
+#****
+
+  use Benchmark;
+  my $t0 = new Benchmark;
+  
+  my $noOfArg = @_;
+  
+  if($noOfArg < 2 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP'){ 
+     print "Usage : read_cdl -cdl <input_lef> \n";
+  }else{
+     my $INPUT_CDL;
+     for(my $i = 0; $i < $noOfArg; $i++){
+         if($_[$i] eq "-cdl"){$INPUT_CDL = $_[$i+1];}
+     }#for
+  
+     $GLOBAL->dbfGlobalSetFileName($INPUT_CDL);
+     if((-e $INPUT_CDL) && (-r $INPUT_CDL)){
+         my ($cellName, $read_sbkt) = ("", 0); 
+         print "INFO-PAR-LEF : 001 : $INPUT_LEF FILE EXISTS AND IS READABLE!\n";
+         open(READ_CDL, "$INPUT_CDL");
+         while(<READ_CDL>){
+           chomp;
+           $_ =~ s/^\s+//;
+           if($_ =~ /^\s*#/ ) { next ; }
+           if($_ =~ /\#/ ) { $_ =~ s/\s+#.*$//; }
+           $_ =~ s/\s+/ /g;
+           $_=~ s/\s+$//g;
+           if($_ =~ /^\s*\.SUBCKT/){
+              $cellName = (split(/\s+/,$_))[1];
+              $CDLDB{$cellName} = CdlDB::new();
+              $read_sbkt = 1;
+           }elsif($_ =~ /^\s*\*\.PININFO/){
+              if($read_sbkt == 1){
+                 $_ =~ s/^\s*\*\.PININFO\s+//; 
+                 my @pinLine = split(/\s+/, $_);
+                 foreach my $line (@pinLine){ 
+                    my ($pinName, $dir) = split(/\:/, $line);    
+                    #print "cell:$cellName pin:$pinName dir:$dir\n";
+                    $CDLDB{$cellName}->dbCdldbAddPin($pinName);
+                    $CDLDB{$cellName}->dbCdldbSetPinDir($pinName,$dir); 
+                 }   
+              }   
+           }elsif($_ =~ /^\s*\.ENDS/){
+              $read_sbkt = 0;
+           }else{
+              next;
+           }
+         }
+     }else{ 
+         print "WARN-PAR-CDL : 016 : $INPUT_CDL FILE DOES NOT EXISTS OR IS NOT READABLE.\n";
+         return;
+     }
+     my $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "Command read_cdl took:",timestr($td),"\n";
+  }# if 2 arguments or more
+  
+}# sub read_cdl
+
+####################################################################################################################
+############################################## write cdl command ###################################################
+####################################################################################################################
+sub write_cdl {
+}#sub write_cdl
+
+####################################################################################################################
+
+1;

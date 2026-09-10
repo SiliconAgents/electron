@@ -1,0 +1,21 @@
+package CdlPinDB;
+
+
+sub createEmpty {
+my $pin = {
+          };
+bless $pin, 'CdlPinDB';
+return $pin;
+}# sub createEmpty
+
+
+
+sub new {
+my $pinRef = {
+             D => "B",
+             };
+bless $pinRef, 'CdlPinDB';
+return $pinRef;
+}#sub new
+
+1;

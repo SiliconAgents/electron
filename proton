@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 ######### set BEEHOME to cwd ##########
-$BEEHOME = "/efdev/apps/proton";
+$BEEHOME = "/proj_pd/user_dev/rsrivastava/electron";
 
 ######### Now appending ./UTILS/tool.nopath ########
 
@@ -197,7 +197,7 @@ use Graphics::ColorNames 2.10;
 use Graphics::ColorNames::X;
 use Module::Load ;
 use Module::Loaded ;
-#use liberty;
+use liberty;
 
 use Spreadsheet::ParseExcel;
 use Data::Dumper;
@@ -212,7 +212,7 @@ use XML::SAX::PurePerl ;
 ################################################################################################
 #     for log file                                                         
 ################################################################################################
-#use Local::TeeOutput;
+use Local::TeeOutput;
 use POSIX;
 use List::Util qw[min max];
 
@@ -270,6 +270,7 @@ require "$BEEHOME/UTILS/make_spice_place";
 require "$BEEHOME/UTILS/make_run_gtkwave";
 
 ###### PARSERS #####
+require "$BEEHOME/PARSER/make_rw_config";
 require "$BEEHOME/PARSER/make_rw_verilog";
 require "$BEEHOME/PARSER/make_flatten_hier";
 require "$BEEHOME/PARSER/make_elaborate";
@@ -548,6 +549,7 @@ require "$BEEHOME/KNOWLEDGEBASE/make_write_excel";
 require "$BEEHOME/LIBANALYSIS/make_pinAccess";
 require "$BEEHOME/LIBANALYSIS/make_pinAccessII";
 require "$BEEHOME/LIBANALYSIS/make_cell_footprint";
+require "$BEEHOME/LIBANALYSIS/make_cell_func_map";
 #require "$BEEHOME/LIBANALYSIS/make_overlapAcess";
 require "$BEEHOME/LIBANALYSIS/make_report_pin_access";
 require "$BEEHOME/LIBANALYSIS/make_report_inst_and_net";
@@ -590,6 +592,7 @@ require "$BEEHOME/LVS/make_LVS";
 
 ######## PLACER #########
 require "$BEEHOME/PLACER/DATAPREP/make_read_graph_files";
+require "$BEEHOME/PLACER/DATAPREP/make_rw_flat_graph";
 require "$BEEHOME/PLACER/DATAPREP/make_write_graph_files";
 require "$BEEHOME/PLACER/DATAPREP/make_run_placement_file";
 require "$BEEHOME/PLACER/DATAPREP/smatrix_placement/make_run_smatrix_placement";
@@ -896,7 +899,7 @@ if($LOG_FILE eq ""){
     }
     open (TEST, ">$logFileName");
     open (LOG, ">$cmdfileName");
-#    openTee(*STDOUT, *STDOUT, *TEST);
+    openTee(*STDOUT, *STDOUT, *TEST);
   }
   if( $overwritelog == 1 ) {
     for (my $i = 0 ; 1;$i++){
@@ -913,12 +916,12 @@ if($LOG_FILE eq ""){
     }
        open (TEST, ">$logFileName");
        open (LOG, ">$cmdfileName");
-#       openTee(*STDOUT, *STDOUT, *TEST);
+       openTee(*STDOUT, *STDOUT, *TEST);
   }
 } else {
   open (TEST, ">$LOG_FILE");
   #open (LOG, ">$LOG_FILE.cmd");
-#  openTee(*STDOUT, *STDOUT, *TEST);
+  openTee(*STDOUT, *STDOUT, *TEST);
 }
      
 #my $ver = $GLOBAL->dbfGlobalGetVersion;
@@ -980,7 +983,7 @@ print "\t#                                       #\n";
 print "\t#     Thank you for using Proton!       #\n";
 print "\t#                                       #\n";
 print "\t#########################################\n\n\n";
-#closeTee(*STDOUT);
+closeTee(*STDOUT);
 }
 
 
