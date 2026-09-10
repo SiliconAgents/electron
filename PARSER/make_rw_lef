@@ -84,8 +84,24 @@ my $polygon_start = 0;
 my $polygon_data = "";
 my $obs_polygon_start = 0;
 my $obs_polygon_data = "";
+my $in_property_definitions = 0;
+my $property_section_logged = 0;
 while(<READ_TECH>){
 chomp();
+# Enhanced PROPERTYDEFINITIONS skipping with case insensitive matching and logging
+if ($_ =~ /^\s*PROPERTYDEFINITIONS\s*$/i) {
+    $in_property_definitions = 1;
+    if (!$property_section_logged) {
+        print "INFO-PAR-LEF : 004 : Skipping PROPERTYDEFINITIONS section in $INPUT_LEF\n";
+        $property_section_logged = 1;
+    }
+    next;
+}
+if ($in_property_definitions && $_ =~ /^\s*END\s+PROPERTYDEFINITIONS\s*$/i) {
+    $in_property_definitions = 0;
+    next;
+}
+next if ($in_property_definitions);
 if($_ =~ /^\s*#/ ) { next ; }
 if($_ =~ /\#/ ) { $_ =~ s/\s+#.*$//; }
 $_ =~ s/\s+/ /g;
@@ -240,7 +256,7 @@ if($stop_reading_tech_lef == 0 && $start_reading_tech_layers == 1){
                      }
                      elsif($_ =~ /\bSPACING\b/) { ($layerSpacing)=(split(/\s+/,$_))[2];
                        if ( exists ${$layerName}{'SPACING'} ) { 
-                         print "INFO-PAR-LEF : 007 : proton does not use Variable spacing rule .. ignoring data\n";
+                         print "INFO-PAR-LEF : 007 : electron does not use Variable spacing rule .. ignoring data\n";
                        }else {
                          ${$layerName}{'SPACING'} = $layerSpacing;
                          $PTDB{$layerName}->dbTechSetLayerSpacing($layerSpacing);
@@ -387,16 +403,57 @@ my $macroName = "";
 if($READ_TECHNOLOGY eq "dont" || $READ_TECHNOLOGY eq "also"){
 print "INFO-PAR-LEF : 008 : reading macro section from $INPUT_LEF\n";
 open(READ_LEF, "$INPUT_LEF");
+
+# Initialize SITE extraction variables
+my $sites_file_opened = 0;
+my $in_site_section = 0;
+my $current_site_name = "";
+my $macro_processing_started = 0;
+
+my $lef_line_number = 0;
 while(<READ_LEF>){
+$lef_line_number++;
 chomp;
+my $original_line = $_;
 $_ =~ s/^\s+//;
 if($_ =~ /^\s*#/ ) { next ; }
 if($_ =~ /\#/ ) { $_ =~ s/\s+#.*$//; }
 $_ =~ s/\s+/ /g;
 $_=~ s/\s+$//g;
 
+# Handle SITE sections extraction - only process SITE sections before MACRO processing starts
+if(!$macro_processing_started) {
+    if($_ =~ /^\s*SITE\s+(\S+)/) {
+        $current_site_name = $1;
+        $in_site_section = 1;
+        if(!$sites_file_opened) {
+            open(SITES_LEF, ">sites.lef") or die "ERROR: Cannot create sites.lef: $!";
+            print "INFO-PAR-LEF : 009 : Creating sites.lef to store SITE definitions from macro LEFs\n";
+            $sites_file_opened = 1;
+        }
+        print SITES_LEF "$original_line\n";
+        next;
+    }
+
+    if($in_site_section) {
+        print SITES_LEF "$original_line\n";
+        if($_ =~ /^\s*END\s+$current_site_name\s*$/) {
+            print "INFO-PAR-LEF : 010 : Extracted SITE '$current_site_name' definition to sites.lef\n";
+            $in_site_section = 0;
+            $current_site_name = "";
+        }
+        next;
+    }
+}
 
 if($_ =~ /^MACRO/){ ($macroName)=(split(/\s+/, $_))[1];
+                                  # Set flag to stop SITE extraction once MACRO processing begins
+                                  if(!$macro_processing_started) {
+                                      $macro_processing_started = 1;
+                                      if($sites_file_opened && $in_site_section) {
+                                          print "INFO-PAR-LEF : 012 : Stopping SITE extraction - MACRO processing started\n";
+                                      }
+                                  }
                                   $polygon_start = 0;
                                   $polygon_data = "";
                                   $obs_polygon_start = 0;
@@ -422,9 +479,14 @@ if($_ =~ /^MACRO/){ ($macroName)=(split(/\s+/, $_))[1];
                                   $Name = "SHIVA_PIN_IS_UNSET";
                   }# if MACRO
 if(/^MACRO $macroName/ ... /^END $macroName\s*$/){
-          if($_ =~ /^SIZE/){($width,$height)=(split(/\s+/, $_))[1,3]; 
+          if($_ =~ /^SIZE/){($width,$height)=(split(/\s+/, $_))[1,3];
                              # $area = $width*$height;
                              # ${$macroName}{'area'} = $area;
+                             if (!exists $PLDB{$macroName}) {
+                                 print "WARN-PAR-LEF : 010 : PLDB object does not exist for macro '$macroName' at line $lef_line_number - likely unsupported LEF format\n";
+                                 print "DEBUG-PAR-LEF : SIZE line $lef_line_number: $_\n";
+                                 next;
+                             }
                              $PLDB{$macroName}->dbMdbSetSize($width,$height);
 
                              $MACROS_ATTRIBUTE_ALREADY{$macroName}{size} = "$width $height";
@@ -436,15 +498,30 @@ if(/^MACRO $macroName/ ... /^END $macroName\s*$/){
                              if ($len == 3) { $class=$c[1]; }
                              elsif ($len == 4) { $class=$c[1]." ".$c[2]; }
                              else {print "WARN-PAR-LEF : 009 : CLASS statement for $macroName has syntax problem\n";}
+                             if (!exists $PLDB{$macroName}) {
+                                 print "WARN-PAR-LEF : 011 : PLDB object does not exist for macro '$macroName' at line $lef_line_number - likely unsupported LEF format\n";
+                                 print "DEBUG-PAR-LEF : CLASS line $lef_line_number: $_\n";
+                                 next;
+                             }
                              $PLDB{$macroName}->dbMdbSetClass($class);
                            }# if CLASS
   #-----------------------------------------------------------Added by Mansi-----------------------------------------------#
           if($_ =~/\bFOREIGN\b/i){my ($foreignCellName,$foreign_x,$foreign_y,$foreign_orient) = (split(/\s+/,$_))[1,2,3,4];
+                                  if (!exists $PLDB{$macroName}) {
+                                      print "WARN-PAR-LEF : 012 : PLDB object does not exist for macro '$macroName' at line $lef_line_number - likely unsupported LEF format\n";
+                                      print "DEBUG-PAR-LEF : FOREIGN line $lef_line_number: $_\n";
+                                      next;
+                                  }
                                   $PLDB{$macroName}->dbMdbSetForeignCoords($foreign_x,$foreign_y);
                                  }
   #------------------------------------------------------------------------------------------------------------------------#
           if($_ =~ /^ORIGIN/){
                              ($xOrig,$yOrig)=(split(/\s+/, $_))[1,2];
+                             if (!exists $PLDB{$macroName}) {
+                                 print "WARN-PAR-LEF : 013 : PLDB object does not exist for macro '$macroName' at line $lef_line_number - likely unsupported LEF format\n";
+                                 print "DEBUG-PAR-LEF : ORIGIN line $lef_line_number: $_\n";
+                                 next;
+                             }
                              $PLDB{$macroName}->dbMdbSetOrigin($xOrig,$yOrig);
                            }# if ORIGIN
           if($_ =~ /^PIN/){($Name)=(split(/\s+/,$_))[1];
@@ -458,6 +535,11 @@ if(/^MACRO $macroName/ ... /^END $macroName\s*$/){
                                         ${$pinHash}{'type'} = "BUS";
                                         ${$pinHash}{'footprint'} = $busName;
                                         ${$pinHash}{'bit'} = $busBit;
+                               if (!exists $PLDB{$macroName}) {
+                                   print "WARN-PAR-LEF : 014 : PLDB object does not exist for macro '$macroName' at line $lef_line_number - likely unsupported LEF format\n";
+                                   print "DEBUG-PAR-LEF : PIN (bus) line $lef_line_number: $_\n";
+                                   next;
+                               }
                                $PLDB{$macroName}->dbMdbAddPin($pinName);
                                $PLDB{$macroName}->dbMdbAddPinBusBaseName($pinName,$busName);
                                $PLDB{$macroName}->dbMdbAddPinBusBit($pinName,$busBit);
@@ -466,6 +548,11 @@ if(/^MACRO $macroName/ ... /^END $macroName\s*$/){
                                    else { $pinName = $Name; $pinHash = $macroName.$pinName;
                                         ${$macroName}{$pinName} = \%{$pinHash};
                                         ${$pinHash}{'type'} = "SINGLE";
+                               if (!exists $PLDB{$macroName}) {
+                                   print "WARN-PAR-LEF : 015 : PLDB object does not exist for macro '$macroName' at line $lef_line_number - likely unsupported LEF format\n";
+                                   print "DEBUG-PAR-LEF : PIN (single) line $lef_line_number: $_\n";
+                                   next;
+                               }
                                $PLDB{$macroName}->dbMdbAddPin($pinName);
                                $PLDB{$macroName}->dbMdbAddPinBusWidth($pinName,0);
                                         } # if NOT BUS
@@ -687,7 +774,15 @@ format TEST =
 @<<<<<<<<   @##       @<<<<<<<<<<    @<<<<<<<<<<   @##.###   @##.###   @##.###
 $layerName,  $Ln1,        $LD,         $LT,       $LP,       $LW,     $LS
 .
-&print_pldb_summary;}
+&print_pldb_summary;
+
+# Close SITES_LEF file if it was opened
+if($sites_file_opened) {
+    print SITES_LEF "\n";
+    close(SITES_LEF);
+    print "INFO-PAR-LEF : 011 : Closed sites.lef file\n";
+}
+}
 #-------------------------------------------------------------------------#
 }
 else { 
@@ -714,232 +809,150 @@ return($direction);
 
 }# sub get_direction
 
-#------------------------------------------------------------------------------------------------------------------#
-
+####################################################################################################################
+############################################## write lef command ###################################################
+####################################################################################################################
 sub write_lef {
-
-use Benchmark;
-my $t0 = new Benchmark;
-
-my $noOfArguments = @_;
-
-if( $noOfArguments < 2 || $_[0] eq '-h') { print "Usage : write_lef -output <output_lef> \n";
-                           print "                  -tech   < only / also / dont > \n";
-                           print "                  -macros <list of macros> \n";
-                           print "                          note : by defaul all macros written \n";
-                         }
-else { # if correct no. of inputs
-
-# setting the default variable values
-
-my $OUTPUT_TECH_LEF = "dont";
-my @OUTPUT_MACRO_LIST = ();
-
-
-my $noOfMacrosInDatabase = keys %PLDB;
-print "INFO-PAR-LEF : 001 : There are $noOfMacrosInDatabase cells in the system\n";
-
-for(my $i = 0; $i < $noOfArguments; $i++){
-if($_[$i] eq "-output"){$OUTPUT_LEF = $_[$i+1];}
-if($_[$i] eq "-tech"){$OUTPUT_TECH_LEF = $_[$i+1];}
-if($_[$i] eq "-macros"){my $line = $_[$i+1]; $line =~ s/\{//; $line =~ s/\}//; @OUTPUT_MACRO_LIST = split(/\,/,$line); }
-                                         } # for
-
-open ( WRITE_LEF, ">$OUTPUT_LEF");
-print WRITE_LEF "#LEF written from proton verion-$TOOL_VERSION\n";
-if ( $OUTPUT_TECH_LEF eq "only" || $OUTPUT_TECH_LEF eq "also") {
-   &write_tech_lef_call("WRITE_LEF");
-   foreach $layerName ( keys %TECHNOLOGY_PHYSICAL ) {
-           print "INFO-PAR-LEF : 002 : $layerName\n";
+  use Benchmark;
+  my $t0 = new Benchmark;
+  
+  my $noOfArguments = @_;
+  if($noOfArguments < 2 || $_[0] eq '-h'){ 
+     print "Usage : write_lef -output <output_lef> \n";
+     print "                  -tech   < only / also / dont > \n";
+     print "                  -macros <list of macros> \n";
+     print "                  --simple \n";
+     print "                          note : by defaul all macros written \n";
+  }else{ # if correct no. of inputs
+  
+     #setting the default variable values
+     my $OUTPUT_TECH_LEF = "dont";
+     my @OUTPUT_MACRO_LIST = ();
+     my $SIMPLE = 0 ;
+     
+     my $noOfMacrosInDatabase = keys %PLDB;
+     print "INFO-PAR-LEF : 001 : There are $noOfMacrosInDatabase cells in the system\n";
+     for(my $i = 0; $i < $noOfArguments; $i++){
+         if($_[$i] eq "-output"){$OUTPUT_LEF = $_[$i+1];}
+         if($_[$i] eq "-tech"){$OUTPUT_TECH_LEF = $_[$i+1];}
+         if($_[$i] eq "--simple"){$SIMPLE = 1;}
+         if($_[$i] eq "-macros"){my $line = $_[$i+1]; $line =~ s/\{//; $line =~ s/\}//; @OUTPUT_MACRO_LIST = split(/\,/,$line); }
+     } # for
+     
+     open ( WRITE_LEF, ">$OUTPUT_LEF");
+     print WRITE_LEF "#LEF written from electron verion-$TOOL_VERSION\n";
+     if($OUTPUT_TECH_LEF eq "only" || $OUTPUT_TECH_LEF eq "also"){
+        &write_tech_lef_call("WRITE_LEF");
+        foreach $layerName ( keys %TECHNOLOGY_PHYSICAL ) {
+           print "INFO-PAR-LEF : 002 : $layerName\n" if ($DEBUG);
            foreach $tag ( keys %{$TECHNOLOGY_PHYSICAL{$layerName}} ){
-           print "INFO-PAR-LEF : 003 : $tag $TECHNOLOGY_PHYSICAL{$layerName}{$tag}\n";
-                                                                   }#foreach
-                                                    }# foreach
-&via_write("WRITE_LEF");
-&via_rule_write("WRITE_LEF");
-                                }
+              print "INFO-PAR-LEF : 003 : $tag $TECHNOLOGY_PHYSICAL{$layerName}{$tag}\n" if ($DEBUG);
+           }#foreach
+        }# foreach
+        &via_write("WRITE_LEF");
+        if($SIMPLE == 0){
+           &via_rule_write("WRITE_LEF");
+        }
+     }
+     
+     print "INFO-PAR-LEF : 004 : $OUTPUT_MACRO_LIST , $OUTPUT_TECH_LEF\n";
+     if(@OUTPUT_MACRO_LIST == 0){
+        @OUTPUT_MACRO_LIST = keys %PLDB;
+     }
+     
+     foreach $macroName ( @OUTPUT_MACRO_LIST){
+        print "INFO-PAR-LEF : 006 : processing $macroName\n";
+        my $cellContainsObs = 0;
+        if(exists $PLDB{$macroName}){
+           print WRITE_LEF "MACRO $macroName\n";
+           my @size = $PLDB{$macroName}->dbMdbGetSize;
+           my $class = $PLDB{$macroName}->dbMdbGetClass;
+           print WRITE_LEF "CLASS $class \;\n";
+           if($class eq 'BLOCK'){ 
+               print WRITE_LEF "SYMMETRY X Y R90 \;\n";
+           }else{
+               print WRITE_LEF "SYMMETRY X Y \;\n";
+           }
+           print WRITE_LEF "ORIGIN 0 0 \;\n";
+           print WRITE_LEF "SIZE $size[0] BY $size[1] \;\n";
+           print WRITE_LEF "\n";
+           my @pins = $PLDB{$macroName}->dbMdbGetPins;
+           foreach $pinName (@pins) {
+              print "DBG-PAR-LEF : 007 : $pinName\n" if ($DEBUG);
+              my $dir = $PLDB{$macroName}->dbMdbGetPinDir($pinName);
+                 if ( $dir == 0 ) { $pinDir = 'INPUT'; } 
+              elsif ( $dir == 1 ) { $pinDir = 'OUTPUT'; }
+              elsif ( $dir == 2 ) { $pinDir = 'INOUT'; }
+              my $type = $PLDB{$macroName}->dbMdbGetPinType($pinName);
+                 if ( $type == 0 ) { $pinType = 'SIGNAL'; }
+              elsif ( $type == 1 ) { $pinType = 'POWER'; }
+              elsif ( $type == 2 ) { $pinType = 'GROUND'; }
+              elsif ( $type == 3 ) { $pinType = 'CLOCK'; }
+              print WRITE_LEF "\tPIN $pinName\n";
+              print WRITE_LEF "\t   DIRECTION $pinDir \;\n";
+              print WRITE_LEF "\t   USE $pinType \;\n" if($type == 1 || $type == 2);
+              #------------------------ FOR RECTS ------------------------#
+              my @rects = $PLDB{$macroName}->dbMdbGetPinRect($pinName);
+              foreach my $l ( @rects ) {
+                 $l =~ s/ RECT//;
+                 my @L  = split(/\s+/,$l);
+                 print WRITE_LEF "\t   PORT\n";
+                 print WRITE_LEF "\t    LAYER $L[0] \;\n";
+                 print WRITE_LEF "\t     RECT $L[1] $L[2] $L[3] $L[4] \;\n";
+                 print WRITE_LEF "\t   END\n";
+              }
+              #------------------------- FOR POLY ------------------------#
+              my @polygon = $PLDB{$macroName}->dbMdbGetPinPolygon($pinName);
+              foreach my $plgn ( @polygon){
+                 $plgn =~ s/POLYGON//;
+                 my @pl_data = split(/\s+/,$plgn);
+                 my $pl_layer_Name = shift (@pl_data);
+                 my $poly_co_ords = join" ",@pl_data;
+                 print WRITE_LEF "\t   PORT\n";
+                 print WRITE_LEF "\t   LAYER $pl_layer_Name \;\n";
+                 print WRITE_LEF "\t    POLYGON $poly_co_ords \;\n";
+                 print WRITE_LEF "\t   END\n"; 
+              }#foreach
+              #-----------------------------------------------------------#
+              print WRITE_LEF "\tEND $pinName\n";
+              print WRITE_LEF "\n";
+           }#foreach pins within MACRO
 
-print "INFO-PAR-LEF : 004 : $OUTPUT_MACRO_LIST , $OUTPUT_TECH_LEF\n";
-if ( @OUTPUT_MACRO_LIST == 0 ) {
-foreach $macroName ( keys %PLDB ) {
-#print "processing $macroName\n";
-my $cellContainsObs = 0;
-#---------------------------------------------------------------------------------------------------------------------#             
-            print WRITE_LEF "MACRO $macroName\n";
-            my @size = $PLDB{$macroName}->dbMdbGetSize;
-            my $class = $PLDB{$macroName}->dbMdbGetClass;
-            print WRITE_LEF "CLASS $class \;\n";
-            if ( $class eq 'BLOCK' ) { 
-            print WRITE_LEF "SYMMETRY X Y R90 \;\n";
-                                     }
-            elsif ( $class eq 'PAD' ) { 
-            print WRITE_LEF "SYMMETRY X Y R90 \;\n";
-                                     }
-            else {
-            print WRITE_LEF "SYMMETRY X Y \;\n";
-                                              }
-            print WRITE_LEF "ORIGIN 0 0 \;\n";
-            print WRITE_LEF "SIZE $size[0] BY $size[1] \;\n";
-            print WRITE_LEF "\n";
-            my @pins = $PLDB{$macroName}->dbMdbGetPins;
-            foreach $pinName (@pins) {
-                         print "DBG-PAR-LEF : 005 : $pinName\n" if ($DEBUG);
-                         my $dir = $PLDB{$macroName}->dbMdbGetPinDir($pinName);
-                            if ( $dir == 0 ) { $pinDir = 'INPUT'; } 
-                         elsif ( $dir == 1 ) { $pinDir = 'OUTPUT'; }
-                         elsif ( $dir == 2 ) { $pinDir = 'INOUT'; }
-                         my $type = $PLDB{$macroName}->dbMdbGetPinType($pinName);
-                            if ( $type == 0 ) { $pinType = 'SIGNAL'; }
-                         elsif ( $type == 1 ) { $pinType = 'POWER'; }
-                         elsif ( $type == 2 ) { $pinType = 'GROUND'; }
-                         elsif ( $type == 3 ) { $pinType = 'CLOCK'; }
-                         print WRITE_LEF "\tPIN $pinName\n";
-                         print WRITE_LEF "\t   DIRECTION $pinDir \;\n";
-                         print WRITE_LEF "\t   USE $pinType \;\n";
-                         #---------------------------- RECTS ------------------------#
-                         my @rects = $PLDB{$macroName}->dbMdbGetPinRect($pinName);
-                            foreach $l ( @rects ) {
-                                     $l =~ s/ RECT//;
-                                     my @L  = split(/\s+/,$l);
-                                     print WRITE_LEF "\t   PORT\n";
-                                     print WRITE_LEF "\t    LAYER $L[0] \;\n";
-                                     print WRITE_LEF "\t     RECT $L[1] $L[2] $L[3] $L[4] \;\n";
-                                     print WRITE_LEF "\t   END\n";
-                                                  }
-#----------------------------------------------Added by Mansi---------------------------------------------------------------#
-                         my @polygon = $PLDB{$macroName}->dbMdbGetPinPolygon($pinName);
-                            foreach  $plgn ( @polygon){
-                                     $plgn =~ s/POLYGON//;
-                                     my @pl_data = split(/\s+/,$plgn);
-                                     my $pl_layer_Name = shift (@pl_data);
-                                my $poly_co_ords = join" ",@pl_data;
-                                print WRITE_LEF "\t   PORT\n";
-                                print WRITE_LEF "\t   LAYER $pl_layer_Name \;\n";
-                                print WRITE_LEF "\t    POLYGON $poly_co_ords \;\n";
-                                print WRITE_LEF "\t   END\n"; 
-                            }#foreach
-#----------------------------------------------------------------------------------------------------------------------------#
-                         print WRITE_LEF "\tEND $pinName\n";
-                         print WRITE_LEF "\n";
-                                     }#foreach pins within MACRO
-#-------------------------------------------------OBS RECT-------------------------------------------------------------------#
-                        my @obs_rect = $PLDB{$macroName}->dbMdbGetObs; 
-                        my @obs_poly = $PLDB{$macroName}->dbMdbGetObsPolygon;
-                        print WRITE_LEF "\tOBS\n"if(@obs_rect != "" || @obs_poly != "");
-                        foreach my $obs_r (@obs_rect){
-                          $obs_r =~ s/RECT//;
-                          my @L  = split(/\s+/,$obs_r);
-                          print WRITE_LEF "\t    LAYER $L[0] \;\n";
-                          print WRITE_LEF "\t     RECT $L[1] $L[2] $L[3] $L[4] \;\n";
-                        }#foreach obs rect
-#-------------------------------------------------OBS POLYGON-------------------------------------------------------------------#
-                        foreach my $obs_ply (@obs_poly){
-                          $obs_ply =~ s/POLYGON//;
-                          my @pl_data = split(/\s+/,$obs_ply);
-                          my $pl_layer_Name = shift (@pl_data);
-                          my $poly_co_ords = join" ",@pl_data;
-                          print WRITE_LEF "\t   LAYER $pl_layer_Name \;\n";
-                          print WRITE_LEF "\t    POLYGON $poly_co_ords \;\n";
-                        }#foreach
-                        print WRITE_LEF "\t   END\n"if(@obs_rect != "" || @obs_poly != ""); 
-            print WRITE_LEF "END $macroName\n";
-            print WRITE_LEF "\n";
-                                            }#foreach
-                               }# if all macros to be written
-
-elsif ( @OUTPUT_MACRO_LIST > 0 ) {
-foreach $macroName ( @OUTPUT_MACRO_LIST) {
-print "INFO-PAR-LEF : 006 : processing $macroName\n";
-my $cellContainsObs = 0;
-            if ( exists $PLDB{$macroName} ) {
-            print WRITE_LEF "MACRO $macroName\n";
-            my @size = $PLDB{$macroName}->dbMdbGetSize;
-            my $class = $PLDB{$macroName}->dbMdbGetClass;
-            print WRITE_LEF "CLASS $class \;\n";
-            if ( $class eq 'BLOCK' ) { 
-            print WRITE_LEF "SYMMETRY X Y R90 \;\n";
-                                     } else {
-            print WRITE_LEF "SYMMETRY X Y \;\n";
-                                              }
-            print WRITE_LEF "ORIGIN 0 0 \;\n";
-            print WRITE_LEF "SIZE $size[0] BY $size[1] \;\n";
-            print WRITE_LEF "\n";
-            my @pins = $PLDB{$macroName}->dbMdbGetPins;
-            foreach $pinName (@pins) {
-                         print "DBG-PAR-LEF : 007 : $pinName\n" if ($DEBUG);
-                         my $dir = $PLDB{$macroName}->dbMdbGetPinDir($pinName);
-                            if ( $dir == 0 ) { $pinDir = 'INPUT'; } 
-                         elsif ( $dir == 1 ) { $pinDir = 'OUTPUT'; }
-                         elsif ( $dir == 2 ) { $pinDir = 'INOUT'; }
-                         my $type = $PLDB{$macroName}->dbMdbGetPinType($pinName);
-                            if ( $type == 0 ) { $pinType = 'SIGNAL'; }
-                         elsif ( $type == 1 ) { $pinType = 'POWER'; }
-                         elsif ( $type == 2 ) { $pinType = 'GROUND'; }
-                         elsif ( $type == 3 ) { $pinType = 'CLOCK'; }
-                         print WRITE_LEF "\tPIN $pinName\n";
-                         print WRITE_LEF "\t   DIRECTION $pinDir \;\n";
-                         print WRITE_LEF "\t   USE $pinType \;\n";
-                         #---------------------------- RECTS ------------------------#
-                         my @rects = $PLDB{$macroName}->dbMdbGetPinRect($pinName);
-                            foreach $l ( @rects ) {
-                                     $l =~ s/ RECT//;
-                                     my @L  = split(/\s+/,$l);
-                                     print WRITE_LEF "\t   PORT\n";
-                                     print WRITE_LEF "\t    LAYER $L[0] \;\n";
-                                     print WRITE_LEF "\t     RECT $L[1] $L[2] $L[3] $L[4] \;\n";
-                                     print WRITE_LEF "\t   END\n";
-                                                  }
-#------------------------------------------------Added by Mansi-----------------------------------------------------------------------------------------#
-                         my @polygon = $PLDB{$macroName}->dbMdbGetPinPolygon($pinName);
-                             foreach  $plgn ( @polygon){
-                                      $plgn =~ s/POLYGON//;
-                                      my @pl_data = split(/\s+/,$plgn);
-                                      my $pl_layer_Name = shift (@pl_data);
-                                my $poly_co_ords = join" ",@pl_data;
-                                print WRITE_LEF "\t   PORT\n";
-                                print WRITE_LEF "\t   LAYER $pl_layer_Name \;\n";
-                                print WRITE_LEF "\t    POLYGON $poly_co_ords \;\n";
-                                print WRITE_LEF "\t   END\n"; 
-                             }#foreach
-#-------------------------------------------------------------------------------------------------------------------------------------------------------#
-                         print WRITE_LEF "\tEND $pinName\n";
-                         print WRITE_LEF "\n";
-                                     }#foreach pins within MACRO
-#-------------------------------------------------OBS RECT-------------------------------------------------------------------#
-                        my @obs_rect = $PLDB{$macroName}->dbMdbGetObs; 
-                        my @obs_poly = $PLDB{$macroName}->dbMdbGetObsPolygon;
-                        print WRITE_LEF "\tOBS\n"if(@obs_rect != "" || @obs_poly != "");
-                        foreach my $obs_r (@obs_rect){
-                          $obs_r =~ s/RECT//;
-                          my @L  = split(/\s+/,$obs_r);
-                          print WRITE_LEF "\t    LAYER $L[0] \;\n";
-                          print WRITE_LEF "\t     RECT $L[1] $L[2] $L[3] $L[4] \;\n";
-                        }#foreach obs rect
-#-------------------------------------------------OBS POLYGON-------------------------------------------------------------------#
-                        foreach my $obs_ply (@obs_poly){
-                          $obs_ply =~ s/POLYGON//;
-                          my @pl_data = split(/\s+/,$obs_ply);
-                          my $pl_layer_Name = shift (@pl_data);
-                          my $poly_co_ords = join" ",@pl_data;
-                          print WRITE_LEF "\t   LAYER $pl_layer_Name \;\n";
-                          print WRITE_LEF "\t    POLYGON $poly_co_ords \;\n";
-                        }#foreach
-                        print WRITE_LEF "\t   END\n"if(@obs_rect != "" || @obs_poly != ""); 
-            print WRITE_LEF "END $macroName\n";
-            print WRITE_LEF "\n";
-                                    }#if macro exists in the PLDB database
-           else { print "WARN-PAR-LEF : 008 : the macro $macroName does not exist in the database\n"; }
-                                            }#foreach
-                               }# if all macros to be written
-            print WRITE_LEF "END LIBRARY\n";
-close(WRITE_LEF);
-                         }# if correct no. of inputs
-
-my $t1 = new Benchmark;
-my $td = timediff($t1, $t0);
-print "Command write_lef took:",timestr($td),"\n";
-
+           #--------------------------OBS RECT----------------------------#
+           my @obs_rect = $PLDB{$macroName}->dbMdbGetObs; 
+           my @obs_poly = $PLDB{$macroName}->dbMdbGetObsPolygon;
+           print WRITE_LEF "\tOBS\n"if(@obs_rect != "" || @obs_poly != "");
+           foreach my $obs_r (@obs_rect){
+              $obs_r =~ s/RECT//;
+              my @L  = split(/\s+/,$obs_r);
+              print WRITE_LEF "\t    LAYER $L[0] \;\n";
+              print WRITE_LEF "\t     RECT $L[1] $L[2] $L[3] $L[4] \;\n";
+           }#foreach obs rect
+           #-----------------------OBS POLYGON----------------------------#
+           foreach my $obs_ply (@obs_poly){
+              $obs_ply =~ s/POLYGON//;
+              my @pl_data = split(/\s+/,$obs_ply);
+              my $pl_layer_Name = shift (@pl_data);
+              my $poly_co_ords = join" ",@pl_data;
+              print WRITE_LEF "\t   LAYER $pl_layer_Name \;\n";
+              print WRITE_LEF "\t    POLYGON $poly_co_ords \;\n";
+           }#foreach
+           print WRITE_LEF "\t   END\n"if(@obs_rect != "" || @obs_poly != ""); 
+           print WRITE_LEF "END $macroName\n";
+           print WRITE_LEF "\n";
+        }#if macro exists in the PLDB database
+        else { print "WARN-PAR-LEF : 008 : the macro $macroName does not exist in the database\n"; }
+     }#foreach
+     print WRITE_LEF "END LIBRARY\n";
+     close(WRITE_LEF);
+  }# if correct no. of inputs
+  
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "Command write_lef took:",timestr($td),"\n";
 }#sub write_lef
+
+####################################################################################################################
 
 sub hash_Value_AscendingNum {
    $bd{$a} <=> $bd{$b};
@@ -966,6 +979,15 @@ foreach my $layerName ( keys %PTDB ) {
                 $LW = $PTDB{$layerName}->dbTechGetLayerWidth;
                 $LS = $PTDB{$layerName}->dbTechGetLayerSpacing;
                 $LD = $PTDB{$layerName}->dbTechGetLayerDir;
+                ### added by aditya to set MIN & MAX Routing layers ###
+                if($LT eq 'ROUTING'){
+                   if($GLOBAL->dbGlobalGetMinRoutingLayer eq ""){
+                      $GLOBAL->dbGlobalSetMinRoutingLayer($layerName); 
+                   }else{
+                      $GLOBAL->dbGlobalSetMaxRoutingLayer($layerName); 
+                   }
+                }
+                #######################################################
 if ($NOLOG == 0) {
  write TEST;}
  select (STDOUT);
@@ -1819,6 +1841,7 @@ my $td = timediff($t1,$t0);
 print "Command lefCombiner took:" ,timestr($td),"\n";
 }#sub lefCombiner_old
 ############################################################################################
+
 sub lefCombiner {
 use Benchmark;
 my $t0 = new Benchmark;
@@ -2027,7 +2050,7 @@ sub def2lef{
   my $noOfArguments = @_;
   if($_[0] eq "-h" || $_[0] eq "-H" || $_[0] eq "-help" || $_[0] eq "-HELP"){ 
      print "Usage : def2lef -output <output lef file> \n";
-     print "Usage : def2lef --detailed \n";
+     print "Usage :         --detailed \n";
      return;   
   }
   my $outLef = '';
@@ -2043,6 +2066,10 @@ sub def2lef{
      $outLef = $top.'.lef';
   }
   open(WRITE_LEF, ">$outLef");
+  print WRITE_LEF "VERSION 5.8 \;\n";
+  print WRITE_LEF "BUSBITCHARS \"\[\]\" \;\n";
+  print WRITE_LEF "DIVIDERCHAR \"\/\" \;\n";
+  print WRITE_LEF "\n";
   print WRITE_LEF "MACRO $top\n";
   print WRITE_LEF "\tCLASS BLOCK \;\n";
   print WRITE_LEF "\tFOREIGN $top 0.0 0.0 \;\n";
@@ -2058,6 +2085,7 @@ sub def2lef{
         print WRITE_LEF "\n";
 
         my @pins = keys %{$PORTS_ALREADY{$top}};
+        my @portPinShapeCollection = ();
         foreach $pinName (@pins) {
            my $dir = $PORTS_ALREADY{$top}{$pinName}->dbPortGetDir;
            my $type = $PORTS_ALREADY{$top}{$pinName}->dbPortGetSignal;
@@ -2067,14 +2095,18 @@ sub def2lef{
 
            #---------------------------- RECTS ------------------------#
            my $layer = $PORTS_ALREADY{$top}{$pinName}->dbPortGetLayer;
+           my $orient = $PORTS_ALREADY{$top}{$pinName}->dbPortGetSide;
            my @loc = $PORTS_ALREADY{$top}{$pinName}->dbPortGetLoc;
            my @size = $PORTS_ALREADY{$top}{$pinName}->dbPortGetSize;
            $_ /= $dbu for @loc;
            $_ /= $dbu for @size;
+           my @pinRect = dbCreatePinRect($loc[0],$loc[1],$orient,$size[0],$size[1]);
+
 
            print WRITE_LEF "\t   PORT\n";
            print WRITE_LEF "\t    LAYER $layer \;\n";
-           print WRITE_LEF "\t     RECT $loc[0] $loc[1] ".($loc[0]+$size[0])." ".($loc[1]+$size[1])." \;\n";
+           #print WRITE_LEF "\t     RECT $loc[0] $loc[1] ".($loc[0]+$size[0])." ".($loc[1]+$size[1])." \;\n";
+           print WRITE_LEF "\t     RECT $pinRect[0] $pinRect[1] $pinRect[2] $pinRect[3] \;\n";
            print WRITE_LEF "\t   END\n";
            print WRITE_LEF "\tEND $pinName\n";
            print WRITE_LEF "\n";
@@ -2112,6 +2144,8 @@ sub def2lef{
      }
   }
   print WRITE_LEF "END $top\n";
+  print WRITE_LEF "\n";
+  print WRITE_LEF "END LIBRARY\n";
   close(WRITE_LEF);
 
   if((keys %PTDB)<= 0){
@@ -2123,6 +2157,44 @@ sub def2lef{
   print "Command def2lef took:",timestr($td),"\n";
 }#sub def2lef 
 
+########################################################################################
+
+sub dbCreatePinRect {
+my $originX = $_[0];
+my $originY = $_[1];
+my $orient = $_[2];
+my $width = $_[3];
+my $height = $_[4];
+
+my ($llx,$lly,$urx,$ury);
+
+     if ( $orient eq "E" ) {
+          $llx = $originX -$height ;
+          $urx = $originX ;   
+          $lly = $originY -$width/2;
+          $ury = $originY +$width/2;
+                           }
+     elsif ( $orient eq "W" ) {
+          $llx = $originX ;
+          $urx = $originX + $height ;   
+          $lly = $originY -$width/2;
+          $ury = $originY +$width/2;
+                           }
+     elsif ( $orient eq "S" ) {
+          $llx = $originX - $width/2 ;
+          $urx = $originX + $width/2 ;   
+          $lly = $originY ;
+          $ury = $originY + $height ;
+                           }
+     elsif ( $orient eq "N" ) {
+          $llx = $originX -$width/2 ;
+          $urx = $originX + $width/2 ;   
+          $lly = $originY - $height ;
+          $ury = $originY ;
+                           }
+
+return($llx,$lly,$urx,$ury);
+}# sub dbCreatePinRect
 ########################################################################################
 sub return_via_between_two_given_layers 
 {
@@ -2161,5 +2233,31 @@ sub return_via_between_two_given_layers
   return "NONE";
 }#sub return_via_between_two_given_layers 
 ########################################################################################
+
+
+
+sub update_macro_pin_prop {
+foreach $macroName (keys %PLDB ) {
+print "$macroName \n";
+    @pins = $PLDB{$macroName}->dbMdbGetPins;
+      foreach $pinName (@pins) {
+          if( $pinName =~ /VDD/ ) {
+                 print "\t$pinName\n";
+                 $PLDB{$macroName}->dbMdbSetPinDir($pinName,"inout");
+                 $PLDB{$macroName}->dbMdbSetPinIsPower($pinName);
+                                  } 
+          elsif ($pinName =~ /VSS/) {
+                 print "\t$pinName\n";
+                 $PLDB{$macroName}->dbMdbSetPinDir($pinName,"inout");
+                 $PLDB{$macroName}->dbMdbSetPinIsGround($pinName);
+                                  }
+         elsif ($pinName =~ /GND/) {
+                 print "\t$pinName\n";
+                 $PLDB{$macroName}->dbMdbSetPinDir($pinName,"inout");
+                 $PLDB{$macroName}->dbMdbSetPinIsGround($pinName);
+                                  }
+                               }
+}
+}#sub update_macro_pin_prop
 
 1;

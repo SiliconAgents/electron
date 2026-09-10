@@ -1,4 +1,4 @@
-##!/bin/perl
+#!/usr/bin/perl
 use Switch;
 
 sub write_def {
@@ -25,6 +25,7 @@ if( $noOfArguments < 2 || $_[0] eq '-h') { print "Usage : write_def -output <out
                            print "                  --norows\n";
                            print "                  --regular_net_conn_route\n";
                            print "                  -max_net_degree <net degree> \n";
+                           print "                  -debug <DebugNetCount> \n";
                            print "                  note : by defaul all sections are written out\n";
                          }
 else { # if correct no. of inputs
@@ -42,6 +43,7 @@ my $write_unconnected_instances = 0;
 my $norows = 0;
 my $regular_net_conn_route = 0;
 my $max_net_degree = -1;
+my $DebugNetCount = -1;
 
 for(my $i = 0; $i < $noOfArguments; $i++){
 if($_[$i] eq "-output"){$OUTPUT_DEF = $_[$i+1];}
@@ -60,6 +62,7 @@ if($_[$i] eq "--write_unconnected_instances"){$write_unconnected_instances = 1;}
 if($_[$i] eq "--regular_net_conn_route"){$regular_net_conn_route = 1; $no_special_net_connectivity = 1;}
 if($_[$i] eq "--norows"){$norows = 1;}
 if($_[$i] eq "-max_net_degree"){$max_net_degree = $_[$i+1];}
+if($_[$i] eq "-debug"){$DebugNetCount = $_[$i+1];}
                                          } # for
 
 if ( -e $OUTPUT_DEF ) {
@@ -74,9 +77,9 @@ return;
 #my $TOOL_VERSION = $GLOBAL->dbfGlobalGetVersion;
 open (WRITE, ">$OUTPUT_DEF");#|| die("Cannot open file for writing");
 if ( -w $OUTPUT_DEF ){
-print WRITE "#DEF written from proton verion-$TOOL_VERSION\n"; 
+print WRITE "#DEF written from electron verion-$TOOL_VERSION\n"; 
 print WRITE "\n";
-print WRITE "VERSION 5.5 \;\n";
+print WRITE "VERSION 5.7 \;\n";
 print WRITE "NAMESCASESENSITIVE ON \;\n";
 print WRITE "DIVIDERCHAR \"\/\" \;\n";
 print WRITE "BUSBITCHARS \"\[\]\" \;\n";
@@ -169,13 +172,6 @@ if(%DEF_TRACKS_ALREADY){
 print WRITE "\n\n";
                      }
 #-------------------------------------------------------------------------#
-if ( $OUTPUT_PORTS == 1 || $DEFAULT == 1) {
-my $temp = keys %{$PORTS_ALREADY{$TOP_MODULE}};
-print WRITE "PINS $temp \;\n";
-&dbgGetPortsDB($TOP_MODULE);
-print WRITE "END PINS\n";
-                        }# if pins have to be output
-#-------------------------------------------------------------------------#
 
 if ( $OUTPUT_COMP == 1 || $DEFAULT == 1) {
 if($write_unconnected_instances == 1){
@@ -207,6 +203,30 @@ print WRITE "END COMPONENTS\n";
 #  print WRITE "END FILL\n";
 #}
 #--------------------------------------------------------------------------#
+if ( $OUTPUT_PORTS == 1 || $DEFAULT == 1) {
+my $temp = keys %{$PORTS_ALREADY{$TOP_MODULE}};
+print WRITE "PINS $temp \;\n";
+&dbgGetPortsDB($TOP_MODULE);
+print WRITE "END PINS\n";
+                        }# if pins have to be output
+#-------------------------------------------------------------------------#
+if ( $OUTPUT_SPNETS == 1 || $DEFAULT == 1 ) {
+my $spnetCnt = 0;
+        foreach my $netName ( keys %NETS_ALREADY ) { 
+        if ( exists $NADB{$netName} ) { $netType = $NADB{$netName}->dbNadbGetNetType; }
+        if ( $netType >= 1 ) { $spnetCnt++ }
+                                             }
+if ( $spnetCnt > 0 ) {
+print WRITE "SPECIALNETS $spnetCnt \;\n";
+if($no_special_net_connectivity == 1){
+  &get_list_spnets_new($TOP_MODULE,$max_net_degree);
+}else {
+  &get_list_spnets($TOP_MODULE,$max_net_degree);
+}
+print WRITE "END SPECIALNETS\n";
+                     }
+                            }# if special nets have to be output
+#--------------------------------------------------------#
 if ( $OUTPUT_NETLIST == 1 || $DEFAULT == 1 ) {
 my $spnetCnt = 0;
 my $temp = keys %NETS_ALREADY;
@@ -224,26 +244,11 @@ if($no_special_net_connectivity == 1){
     if ( $netType >= 1 ) { $spnetCnt++ }
   }
   my $netCnt = $temp - $spnetCnt;
-  print WRITE "NETS $netCnt \;\n";
-  &get_list_nets($TOP_MODULE,$max_net_degree);
+  if ( $DebugNetCount > -1 && $DebugNetCount < $netCnt ) {print WRITE "NETS $DebugNetCount \;\n";  } else { print WRITE "NETS $netCnt \;\n"; }
+  &get_list_nets($TOP_MODULE,$max_net_degree,$DebugNetCount);
 }
 print WRITE "END NETS\n";
                             }# if nets have to be output
-#--------------------------------------------------------#
-if ( $OUTPUT_SPNETS == 1 || $DEFAULT == 1 ) {
-my $spnetCnt = 0;
-        foreach my $netName ( keys %NETS_ALREADY ) { 
-        if ( exists $NADB{$netName} ) { $netType = $NADB{$netName}->dbNadbGetNetType; }
-        if ( $netType >= 1 ) { $spnetCnt++ }
-                                             }
-print WRITE "SPECIALNETS $spnetCnt \;\n";
-if($no_special_net_connectivity == 1){
-  &get_list_spnets_new($TOP_MODULE,$max_net_degree);
-}else {
-  &get_list_spnets($TOP_MODULE,$max_net_degree);
-}
-print WRITE "END SPECIALNETS\n";
-                            }# if special nets have to be output
 #--------------------------------------------------------#
 if ( $OUTPUT_BLKG == 1 || $DEFAULT == 1 ) {
 $temp = keys %{$PSEUDO_BLKG_ALREADY{$TOP_MODULE}};
@@ -317,9 +322,9 @@ foreach $pinName ( keys %{$PORTS_ALREADY{$moduleName}} ) {
         if($size[1] > 0){     
            $y1 = $size[1];
         }
-        $x1 *= $dbu;
-        $x2 *= $dbu;
-        $y1 *= $dbu;
+#        $x1 *= $dbu;
+#        $x2 *= $dbu;
+#        $y1 *= $dbu;
         print "DBG-PAR-DEF : 002 :\t\t$orient \n" if ($DEBUG == 300);
         if( $status == 2 ) {
           print WRITE " \+ PLACED \( $loc[0] $loc[1] \) $orient + LAYER $layer \( $x1 0 \) \( $x2 $y1 \) \;\n";
@@ -380,7 +385,11 @@ foreach(keys %COMP_ALREADY){ if($COMP_ALREADY{$_}{master} eq $current_module) {
 
 sub get_list_nets {
 my $max_net_degree = $_[1];
+my $debug_net_count = $_[2];
+my $count = 0 ;
 foreach my $netName (keys %NETS_ALREADY){
+        last if ( $count >= $debug_net_count && $debug_net_count != -1 );
+        $count++;
         if($max_net_degree != -1){
           my $temp_net_degree = &get_net_degree($netName);
           if($temp_net_degree >  $max_net_degree){
@@ -587,7 +596,7 @@ my $t0 = new Benchmark;
 my $noOfArguments = @_;
 @COMPONENTS = (\%COMP_ALREADY, \%COMP_NEW_ADDED, \%COMP_NEW_NO_LOGIC);
 
-if($noOfArguments < 1 || $_[0] eq '-h'){ print "Usage : read_def -def <input_def_file>\n";
+if($noOfArguments < 1 || $_[0] eq '-h'){ print "Usage : read_def -def <input_def_file> [.gz supported]\n";
                         print "                 [--rows < also / only > ]\n";
                         print "                 [--tracks < also / only > ]\n";
                         print "                 [--pins < also / only > ]\n";
@@ -611,9 +620,30 @@ $referToTechnologyLef = %TECHNOLOGY_PHYSICAL;
 %DIE_ALREADY = ();
 #share(%COMP_ATTRIBUTE_ALREADY);
 
-open(READ_DEF_FILE, "$INPUT_DEF_FILE");
-print "INFO-PAR-DEF : 001 : Begin reading the def file\n";
-my $progBarMax = `wc -l $INPUT_DEF_FILE`;
+# Add file existence check
+unless (-e $INPUT_DEF_FILE && -r $INPUT_DEF_FILE) {
+    die "ERROR: DEF file '$INPUT_DEF_FILE' does not exist or is not readable\n";
+}
+
+# Smart file opening based on extension
+my $filehandle_cmd;
+if ($INPUT_DEF_FILE =~ /\.gz$/i) {
+    $filehandle_cmd = "zcat '$INPUT_DEF_FILE' |";
+    print "INFO-PAR-DEF : 001 : Begin reading the compressed DEF file (gzipped)\n";
+} else {
+    $filehandle_cmd = "$INPUT_DEF_FILE";
+    print "INFO-PAR-DEF : 001 : Begin reading the def file\n";
+}
+
+open(READ_DEF_FILE, $filehandle_cmd) or die "ERROR: Cannot open DEF file '$INPUT_DEF_FILE': $!\n";
+
+# Update progress bar line counting for gzipped files
+my $progBarMax;
+if ($INPUT_DEF_FILE =~ /\.gz$/i) {
+    $progBarMax = `zcat '$INPUT_DEF_FILE' | wc -l`;
+} else {
+    $progBarMax = `wc -l '$INPUT_DEF_FILE'`;
+}
 #print "progBarMax = $progBarMax\n";
 #my $progress = Term::ProgressBar->new($progBarMax);
 
@@ -943,7 +973,7 @@ my $READ_VIAS = 0;
 my $READ_ROUTES = 0;
 my $READ_BLKGS = 0;
 
-if($noOfArguments < 1 || $_[0] eq '-h'){ print "Usage : read_def -def <input_def_file>\n";
+if($noOfArguments < 1 || $_[0] eq '-h'){ print "Usage : read_def -def <input_def_file> [.gz supported]\n";
                         print "                 [--floorplan]\n";
                         print "                 [--pins]\n";
                         print "                 [--components]\n";
@@ -998,14 +1028,36 @@ $referToTechnologyLef = %TECHNOLOGY_PHYSICAL;
 %FLOORPLAN_LOOKUP = ();
 %FLOORPLAN_ALREADY = ();
 %BLOCKAGES_ALREADY = ();
+%DEFVIAS_ALREADY = ();
 my $reading_spnets = 0;
 my $reading_vias = 0;
 my $reading_blkgs = 0;
 my $net_data_start = 0;
 my $fill_data_start = 0;
-open(READ_DEF_FILE, "$INPUT_DEF_FILE");
-print "INFO-PAR-DEF : 001 : Begin reading the def file\n";
-my $progBarMax = `wc -l $INPUT_DEF_FILE`;
+# Add file existence check
+unless (-e $INPUT_DEF_FILE && -r $INPUT_DEF_FILE) {
+    die "ERROR: DEF file '$INPUT_DEF_FILE' does not exist or is not readable\n";
+}
+
+# Smart file opening based on extension
+my $filehandle_cmd;
+if ($INPUT_DEF_FILE =~ /\.gz$/i) {
+    $filehandle_cmd = "zcat '$INPUT_DEF_FILE' |";
+    print "INFO-PAR-DEF : 001 : Begin reading the compressed DEF file (gzipped)\n";
+} else {
+    $filehandle_cmd = "$INPUT_DEF_FILE";
+    print "INFO-PAR-DEF : 001 : Begin reading the def file\n";
+}
+
+open(READ_DEF_FILE, $filehandle_cmd) or die "ERROR: Cannot open DEF file '$INPUT_DEF_FILE': $!\n";
+
+# Update progress bar line counting for gzipped files
+my $progBarMax;
+if ($INPUT_DEF_FILE =~ /\.gz$/i) {
+    $progBarMax = `zcat '$INPUT_DEF_FILE' | wc -l`;
+} else {
+    $progBarMax = `wc -l '$INPUT_DEF_FILE'`;
+}
 #print "progBarMax = $progBarMax\n";
 #my $progress = Term::ProgressBar->new($progBarMax);
 
@@ -1333,6 +1385,7 @@ print "DBG-PAR-DEF : 014 : lines in net data are $num \n" if ($DEBUG == 20);
                                          my @list_of_lines = &modified_net_coord($new_line);
                                          foreach my $line_str (@list_of_lines){
                                            if($route_type eq "R"){ 
+                                             #print "DEBUG ROUTING: $line ==> $line_str\n";
                                              $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetRegularRoute($line_str);
                                              #$NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetRegularRoute($line);
                                            }elsif($route_type eq "F"){
@@ -1634,7 +1687,21 @@ push(@net_data,$_);
      }
 
                                                  }#if reading spnets
-elsif ($reading_vias == 1 && $READ_VIAS == 1 ) { next; }
+elsif ($reading_vias == 1 && $READ_VIAS == 1 ) {
+                                               #print "$_ \n";
+                                               if ( $_ =~ /^\s*\- /) { $line = "";  $viaName = (split(/\s+/,$_))[1]; 
+                                               print "adding via $viaName to the Db\n" if ( $DEBUG >= 24 );
+                                               $DEFVIAS_ALREADY{$viaName} = defViaDB::new();
+                                                                 }
+                                               if ( $_ =~ /\;$/) { 
+                                               $line = $line." ".$_;
+                                               #print "processing via @via_data \n";
+                                               $DEFVIAS_ALREADY{$viaName}->dbAddViaCutBox($line);
+                                                                 } else { $line = $line." ".$_; 
+                                               #print "processing via @via_data \n";
+                                                                        }
+                                               next ;
+                                               }
 elsif ($reading_vias == 1 && $READ_VIAS == 0 ) { next; }
 elsif ($reading_blkgs == 1 && $READ_BLKGS == 1 ) {
 ######## Shobhits blockage pasing code #########
@@ -1809,8 +1876,9 @@ if( $line =~ /-/){
                                      if ( $COMPAREDEF == 1 ) {
                                      my @origLoc = $CADB{$instance}->dbCadbGetLoc;
                                      my @newLoc = split(/\s+/,$location);
-                                     my $xdisp = abs ( int ($origLoc[0] - $newLoc[0])/2000 ); 
-                                     my $ydisp = abs( int ($origLoc[1] - $newLoc[1])/2000 ); 
+                                     my $dbu = $GLOBAL->dbfGlobalGetDBU();
+                                     my $xdisp = abs ( int ($origLoc[0] - $newLoc[0])/$dbu );
+                                     my $ydisp = abs( int ($origLoc[1] - $newLoc[1])/$dbu ); 
                                      if ( ($xdisp > 10) || (ydisp > 10) ) {
                                      print WRITE "$instance, $cellref, $xdisp, $ydisp\n";
                                                                       }
@@ -1884,12 +1952,13 @@ my $READ_PINS = 0;
 my $READ_FLPLAN = 0;
 
 if($noOfArguments < 1 || $_[0] eq '-h' ){ print "Usage : defIn -def <input_def_file>\n";
-                        print "                 [--floorplan]\n";
-                        print "                 [--pins]\n";
-                        print "                 [--components]\n";
-                        print "                 [--nets]\n";
-                        print "                 [--specialNets]\n";
                         print "                 [--all]\n";
+                        print "                 [--add_phys_only]\n";
+                        print "                 [--components]\n";
+                        print "                 [--floorplan]\n";
+                        print "                 [--nets]\n";
+                        print "                 [--pins]\n";
+                        print "                 [--specialNets]\n";
 print "INFO-PAR-DEFIN : 001 : Explanation : defIn command is used when already existing design has to be updated with the def file. It does not build a new database\n";
                       }
 else{
@@ -1902,6 +1971,7 @@ if($_[$x] eq "--pins"){$READ_PINS = 1;}
 if($_[$x] eq "--nets"){$READ_NETS = 1;}
 if($_[$x] eq "--specialNets"){$READ_SPNETS = 1;}
 if($_[$x] eq "--floorplan"){$READ_FLPLAN = 1;}
+if($_[$x] eq "--add_phys_only"){$ADD_PHYSICAL_INST = 1;}
 if($_[$x] eq "--all"){
                     $READ_COMPONENTS = 1;
                     $READ_PINS = 1;
@@ -2038,16 +2108,29 @@ else {
                                                                    shift @xx; 
 								   $side = shift @xx;
                                                                 }
+                     if ( $tag eq "LAYER" ) { $portLayer = shift @xx;
+                                         shift @port_data; # shift out open bracket
+                                         my $x1 = shift @port_data;
+                                         my $y1 = shift @port_data;
+                                         shift @port_data;
+                                         shift @port_data;
+                                         my $x2 = shift @port_data;
+                                         my $y2 = shift @port_data;
+                                         $portW = $x2 - $x1;
+                                         $portH = $y2 - $y1;
+                                            }
 
                                          }#while
                                          }#while
                 if ( exists $PORTS_ALREADY{$TOP_MODULE}{$portName} ) {
                      if ( $portStatus eq "PLACED" || $portStatus eq "FIXED" ) {
-                     print "INFO-PAR-DEFIN : 011 : port $portName is found .. updating placement with $portLocX,$portLocY,$portStatus,$side \n";
+                     print "INFO-PAR-DEFIN : 011 : port $portName is found .. updating placement with $portLocX,$portLocY,$portStatus,$side $portLayer $portW $portH\n";
                      $PORTS_ALREADY{$TOP_MODULE}{$portName}->dbPortSetStatus($portStatus);
                      $PORTS_ALREADY{$TOP_MODULE}{$portName}->dbPortSetLoc($portLocX,$portLocY);
                      $PORTS_ALREADY{$TOP_MODULE}{$portName}->dbPortSetStatus(PLACED);
                      $PORTS_ALREADY{$TOP_MODULE}{$portName}->dbPortSetSide($side);
+                     $PORTS_ALREADY{$TOP_MODULE}{$portName}->dbPortSetLayer($portLayer);
+                     $PORTS_ALREADY{$TOP_MODULE}{$portName}->dbPortSetSize($W,$H);
                                                                               }
                                                                      } 
                     else { print "WARN-PAR-DEFIN : 012 : defIn : $portName not found in the design ... ignoring physical data\n"; }
@@ -2075,11 +2158,22 @@ else {
      if ( exists $COMP_ALREADY{$instance} ) 
                         {
 #                        print "instance  $instance is found .. updating placement with $status $location_x $location_y $orientation   \n";
+                        if ($status eq "PLACED" || $status eq "FIXED") {
         		$CADB{$instance}->dbCadbSetStatus($status);
 		        $CADB{$instance}->dbCadbSetLoc($location_x,$location_y);
 		        $CADB{$instance}->dbCadbSetOrient($orientation);
+                                                                       }
                         }# if instance is found and has matching cellref
     else { 
+               if ($ADD_PHYSICAL_INST == 1 ) {
+                        $CADB{$instance} = CompAttDB::new();
+                        $CADB{$instance}->dbCadbSetCellref($cellref);
+                        if ($status eq "PLACED" || $status eq "FIXED") {
+        		$CADB{$instance}->dbCadbSetStatus($status);
+		        $CADB{$instance}->dbCadbSetLoc($location_x,$location_y);
+		        $CADB{$instance}->dbCadbSetOrient($orientation);
+                                                                       }
+                  } else {
                         print "DBG-PAR-DEFIN : 013 : Try softmaching $instance with " if ($DEBUG == 100 );
                         if ( $instance =~ /\\\[/ ) { $instance =~ s/(\w+)\\\[/\\$1\[/ ;
                                                      $instance =~ s/\\\[/\[/g; 
@@ -2097,7 +2191,8 @@ else {
                         print "INFO-PAR-DEFIN : 016 : failed\n" if ($DEBUG == 100 );
                         print "WARN-PAR-DEFIN : 017 : -defIn : instance $instance not found in the design ... ignoring physical data\n" if ($DEBUG == 100 ); 
                              }
-          }# if softmatching
+                        }# if softmatching
+         }# if instance does not exist it may be physical instance or try softmatching
          
                                       } #if inside COMPONENT section
          elsif ( $section eq "REGIONS" ) {
@@ -2218,8 +2313,8 @@ else {
 print "INFO-PAR-DEFIN : 018 : End reading the def file\n";
 
 
-    }# if correct no of arguments
 &set_inst_box;
+    }# if correct no of arguments
 
 }#sub defIn
 
@@ -2326,7 +2421,7 @@ sub write_def_for_router {
 use Benchmark;
 my $t0 = new Benchmark;
 my $noOfArguments = @_; 
-if($noOfArguments < 2 || $_[0] eq '-h'){print "Usage : write_def -output <output def file> \n";
+if($noOfArguments < 2 || $_[0] eq '-h'){print "Usage : write_def_for_router -output <output def file> \n";
                                         print "                  --flplan \n";
                                         print "                  --comp \n";
                                         print "                  --nets \n";
@@ -2368,7 +2463,7 @@ else {
   }#if output def file exists
   open (WRITE, ">$OUTPUT_DEF");
   if ( -w $OUTPUT_DEF ){
-    print WRITE "VERSION 5.5 \;\n";
+    print WRITE "VERSION 5.7 \;\n";
     print WRITE "NAMESCASESENSITIVE ON \;\n";
     print WRITE "DIVIDERCHAR \"\/\" \;\n";
     print WRITE "BUSBITCHARS \"\[\]\" \;\n";
@@ -2576,45 +2671,6 @@ foreach my $netName (keys %NETS_ALREADY){
       print WRITE "\n";
     }# if the net is signal net 
   }#foreach
-   my %TEMP_HASH_FOR_DUMMY_NET = ();
-   my $inst_cnt_for_dummy_net = 0;
-   foreach my $instance (keys %COMP_ALREADY){
-    if(exists $CADB{$instance}){
-      my $cellref = $CADB{$instance}->dbCadbGetCellref;
-      if(exists $PLDB{$cellref}){
-        my @pins = $PLDB{$cellref}->dbMdbGetPins;
-        foreach my $pinName (@pins){
-          if(!exists $TEMP_PIN_HASH{$pinName}){
-            $inst_cnt_for_dummy_net++;
-          }#if !exists 
-        }#foreach pin
-      }
-    }#if exists
-  }#foreach inst
-  $TEMP_HASH_FOR_DUMMY_NET{"Silverline_dummy_conn_net"} = $inst_cnt_for_dummy_net;
-   if(%TEMP_HASH_FOR_DUMMY_NET){
-    print WRITE "- Silverline_dummy_conn_net\n";
-    my $temp_inst_cnt_for_dummy_net = 0;
-     foreach my $instance (keys %COMP_ALREADY){
-      my $total_inst_cnt_for_dummy_net = $TEMP_HASH_FOR_DUMMY_NET{"Silverline_dummy_conn_net"};
-      if(exists $CADB{$instance}){
-        my $cellref = $CADB{$instance}->dbCadbGetCellref;
-        if(exists $PLDB{$cellref}){
-          my @pins = $PLDB{$cellref}->dbMdbGetPins;
-          foreach my $pinName (@pins){
-            if(!exists $TEMP_PIN_HASH{$pinName}){
-              $temp_inst_cnt_for_dummy_net++;
-              if($temp_inst_cnt_for_dummy_net >= $total_inst_cnt_for_dummy_net){
-                print WRITE "( $instance $pinName \) \;\n";
-              }else {
-                print WRITE "( $instance $pinName \)\n";
-              }
-            }#if !exists 
-          }#foreach pin
-        }
-      }#if exists
-    }
-  }
 print WRITE "END NETS\n";
 }# if nets have to be output
 #-----------------------------------------------------------------------------------------------------------------------------#
@@ -3616,8 +3672,8 @@ elsif ( $nT > 1 ) { print "WARN-PAR-VERI : 016 : there are more than 1 possible 
 else { print "ERROR-PAR-VERI : 017 : something is wrong with the def file\n"; }
 #---------------------------------------------------------------------------#
 
-}#else
 &update_hier_bbox_for_floorplan;
+}#else
 
 my $t1 = new Benchmark;
 my $td = timediff($t1, $t0);
@@ -7174,6 +7230,335 @@ sub replace_exponential_with_value {
   }
 return($new_string_with_layer);
 }#sub replace_exponential_with_value
-#############################################################
+
+####################################################################################
+################################ export io ports ###################################
+####################################################################################
+sub export_io_ports {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h"){
+     print "Usage : -output <json fileName (default is io_ports.json)>\n";
+  }else{
+     my $outputFile = $TOP_MODULE."_io_ports.json";
+     for(my $i=0; $i < $noOfArguments;$i++){
+         if($_[$i] eq "-output"){$outputFile = $_[$i+1];}
+     }#for
+     open (WRITE_JSON,">$outputFile");
+     my $json_out_str = $json."{\n\"pins\": [\n" ;
+     my $json_nside_str = "{\n\"side\":\"N\",\n\"pin\":[\n"; 
+     my $json_sside_str = "{\n\"side\":\"S\",\n\"pin\":[\n"; 
+     my $json_eside_str = "{\n\"side\":\"E\",\n\"pin\":[\n"; 
+     my $json_wside_str = "{\n\"side\":\"W\",\n\"pin\":[\n"; 
+     my $json_unassign_str = "{\n\"side\":\"UND\",\n\"pin\":[\n"; 
+     my $topModule = $GLOBAL->dbfGlobalGetTOP;
+     foreach my $port ( keys %{$PORTS_ALREADY{$topModule}} ) {
+        my $status = $PORTS_ALREADY{$topModule}{$port}->dbPortGetStatus;
+        my $orient = $PORTS_ALREADY{$topModule}{$port}->dbPortGetSide;
+        my $layer =  $PORTS_ALREADY{$topModule}{$port}->dbPortGetLayer;
+        my $dir = $PORTS_ALREADY{$topModule}{$port}->dbPortGetDir;
+
+        if($status == 0){
+           $status = "FLOATING";
+        }elsif($status == 1){
+           $status = "UNPLACED";
+        }elsif($status == 2){
+           $status = "PLACED";
+        }elsif($status == 3){
+           $status = "FIXED";
+        }
+        #print "PORT $port, $orient, $status, $layer, $dir\n";
+        if($orient eq "N"){
+           if($layer == 0 || $layer eq ""){
+              $json_nside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\"},\n"; 
+           }else{
+              $json_nside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\", \"layer\":\"$layer\"},\n"; 
+           }
+        }elsif($orient eq "S"){
+           if($layer == 0 || $layer eq ""){
+              $json_sside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\"},\n"; 
+           }else{
+              $json_sside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\", \"layer\":\"$layer\"},\n"; 
+           }
+        }elsif($orient eq "E"){
+           if($layer == 0 || $layer eq ""){
+              $json_eside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\"},\n"; 
+           }else{
+              $json_eside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\", \"layer\":\"$layer\"},\n"; 
+           }
+        }elsif($orient eq "W"){
+           if($layer == 0 || $layer eq ""){
+              $json_wside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\"},\n"; 
+           }else{
+              $json_wside_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\", \"layer\":\"$layer\"},\n"; 
+           }
+        }else{
+           #print "I AM IN\n";
+           if($layer == 0 || $layer eq ""){
+              $json_unassign_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\"},\n"; 
+           }else{
+              $json_unassign_str .= "{\"name\":\"$port\", \"dir\":\"$dir\", \"status\":\"$status\", \"layer\":\"$layer\"},\n"; 
+           }
+        }
+     }
+     $json_nside_str =~s/\,$//;
+     $json_sside_str =~s/\,$//;
+     $json_eside_str =~s/\,$//;
+     $json_wside_str =~s/\,$//;
+     $json_unassign_str =~s/\,$//;
+
+     $json_nside_str .= "]\n\},\n";
+     $json_sside_str .= "]\n\},\n";
+     $json_eside_str .= "]\n\},\n";
+     $json_wside_str .= "]\n\}\n";
+     $json_unassign_str .= "]\n\}\n";
+
+     $json_out_str .= $json_nside_str.$json_sside_str.$json_eside_str.$json_wside_str.$json_unassign_str ;
+     $json_out_str .= "]\n}";
+
+     print WRITE_JSON "$json_out_str";
+
+     close(WRITE_JSON);
+  }
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command export_io_ports took:",timestr($td),"\n";
+}#sub export_io_ports
+
+####################################################################################
+############################## export instance bbox ################################
+####################################################################################
+sub export_inst_loc {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h"){
+     print "Usage : -output <fileName (default is inst_loc.txt)>\n";
+  }else{
+     my $outputFile = "inst_loc.txt";
+     for(my $i=0; $i < $noOfArguments;$i++){
+         if($_[$i] eq "-output"){$outputFile = $_[$i+1];}
+     }#for
+     open (WRITE_LOC,">$outputFile");
+     foreach my $instance ( keys %CADB ) {
+        my $status =  $CADB{$instance}->dbCadbGetStatus;
+        my @bbox = $CADB{$instance}->dbCadbGetbBox;
+        if($status eq "PLACED" || $status eq "FIXED"){
+           print WRITE_LOC "$instance @bbox\n";
+        }
+     }
+     close(WRITE_LOC);
+  }
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command export_inst_loc took:",timestr($td),"\n";
+}#sub export_inst_loc
+
+####################################################################################
+############################## up size instance cell ###############################
+####################################################################################
+sub upSize {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h"){
+     print "Usage: up_size -inst <{inst1,inst2,....}>\n";
+     print "               -level <1/2/3...>\n";
+  }else{
+     my @instList = ();
+     my $level = 1;
+     for(my $i=0; $i < $noOfArguments;$i++){
+         if($_[$i] eq "-inst"){
+            my $instList_str = $_[$i+1];
+            $instList_str =~ s/\{|\}//g;
+            @instList = split(/\,/,$instList_str);
+         }
+         if($_[$i] eq "-level"){$level = $_[$i+1];}
+     }#for
+     foreach my $inst (@instList ) {
+        if(exists $CADB{$inst}){
+           my $cellref =  $CADB{$inst}->dbCadbGetCellref;
+           #print "cellref:$cellref\n";
+           if($cellref =~ m/.*X(\d+).*/){
+              my $oldSize = $1;
+              my $newSize = $oldSize + $level;
+              my $newCellref = $cellref;
+              #print "oldSize:$oldSize newSize:$newSize newCell:$newCellref\n";
+              $newCellref =~ s/X$oldSize/X$newSize/; 
+              if(exists $PLDB{$newCellref}){
+                 $CADB{$inst}->dbCadbSetCellref($newCellref);
+                 print "INFO-UP-SIZE : 001 : Updating cell of $inst from $cellref to $newCellref\n";
+              }else{
+                 print "WARN-UP-SIZE : 001 : No up size cell found for $cellref\n";
+              }
+           }
+ 
+        } 
+     }
+  }
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command up_size took:",timestr($td),"\n";
+}#sub upSize
+
+####################################################################################
+############################# down size instance cell ##############################
+####################################################################################
+sub downSize {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h"){
+     print "Usage: down_size -inst <{inst1,inst2,....}>\n";
+     print "               -level <1/2/3...>\n";
+  }else{
+     my @instList = ();
+     my $level = 1;
+     for(my $i=0; $i < $noOfArguments;$i++){
+         if($_[$i] eq "-inst"){
+            my $instList_str = $_[$i+1];
+            $instList_str =~ s/\{|\}//g;
+            @instList = split(/\,/,$instList_str);
+         }
+         if($_[$i] eq "-level"){$level = $_[$i+1];}
+     }#for
+     foreach my $inst (@instList ) {
+        if(exists $CADB{$inst}){
+           my $cellref =  $CADB{$inst}->dbCadbGetCellref;
+           if($cellref =~ m/.*X(\d+).*/){
+              my $oldSize = $1;
+              my $newSize = $oldSize - $level;
+              my $newCellref = $cellref;
+              $newCellref =~ s/X$oldSize/X$newSize/; 
+              if(exists $PLDB{$newCellref}){
+                 $CADB{$inst}->dbCadbSetCellref($newCellref);
+                 print "INFO-DOWN-SIZE : 001 : Updating cell of $inst from $cellref to $newCellref\n";
+              }else{
+                 print "WARN-DOWN-SIZE : 001 : No down size cell found for $cellref\n";
+              }
+           }
+ 
+        } 
+     }
+  }
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command down_size took:",timestr($td),"\n";
+}#sub downSize
+
+####################################################################################
+################################ write flat fpdef ##################################
+####################################################################################
+sub write_flat_floorplan {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h"){
+     print "Usage: write_flat_floorplan -output <output filename (default topModule.fpdef>\n";
+  }else{
+     my $outputFile = "";
+     for(my $i=0; $i < $noOfArguments;$i++){
+         if($_[$i] eq "-output"){$outputFile = $_[$i+1];}
+     }#for
+
+     #my $moduleName = $TOP_MODULE;
+     my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+
+     if($outputFile eq ""){$outputFile = "$moduleName.fpdef";}
+
+     if(exists $FLOORPLAN_LOOKUP{"$moduleName/_self_"}){
+        print "INFO-TST-WR_FLT_FLP : 001 : writing floorplan for module \"$moduleName\" ... in $outputFile file\n";
+        open(WRITE,">$outputFile");
+
+        my $flplanID = $FLOORPLAN_LOOKUP{"$moduleName/_self_"} ;
+        if(exists $FLOORPLAN_ALREADY{$flplanID}){
+           print WRITE "DESIGN $moduleName \;\n";
+
+           my $fpUnit = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetDBUnit;
+           my $dbu = $GLOBAL->dbfGlobalGetDBU;
+           print WRITE "UNITS DISTANCE MICRONS $dbu \;\n";
+           my $mulFactor = $dbu / $fpUnit ;
+           my @bBox = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
+           my $llx = $bBox[0]*$mulFactor; 
+           my $lly = $bBox[1]*$mulFactor; 
+           my $urx = $bBox[2]*$mulFactor; 
+           my $ury = $bBox[3]*$mulFactor; 
+           print WRITE "DIEAREA ( $llx $lly ) ( $urx $ury ) \;\n\n";
+
+           #------------------------------ start writing Pins -----------------------------#
+           print WRITE "PINS \n";
+           foreach $pinName (keys %{$PORTS_ALREADY{$moduleName}}){
+              my @netName = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetConn;
+              my $dir = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetDir;
+              my $signal = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetSignal;
+              print WRITE "\- $pinName \+ NET $netName[0] \+ DIRECTION $dir \+ USE $signal \n";
+              my $status = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetStatus;
+              if($status == 0 || $status == 1){ 
+                 print WRITE " \;\n";
+              }elsif(($status == 2) || ($status == 3)){            
+                 my @loc = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetLoc;
+                 my $orient = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetSide;
+                 my $layer  = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetLayer;
+                 my @size = $PORTS_ALREADY{$moduleName}{$pinName}->dbPortGetSize;
+                 my ($x1, $x2, $y1) = (0, 0, 0); 
+                 if($size[0] > 0){     
+                    $x1 = -$size[0]/2;
+                    $x2 = $size[0]/2;
+                 }
+                 if($size[1] > 0){     
+                    $y1 = $size[1];
+                 }
+                 if($status == 2){
+                   print WRITE " \+ LAYER $layer \( $x1 0 \) \( $x2 $y1 \)\n";
+                   print WRITE " \+ PLACED \( $loc[0] $loc[1] \) $orient \;\n";
+                 }elsif($status == 3){
+                   print WRITE " \+ LAYER $layer \( $x1 0 \) \( $x2 $y1 \)\n";
+                   print WRITE " \+ FIXED \( $loc[0] $loc[1] \) $orient \;\n";
+                 }
+              }
+           }#foreach
+           print WRITE "END PINS \n\n";
+           #------------------------------- end writing Pins ------------------------------#
+
+           #---------------------- start writing components -------------------------------#
+           print WRITE "COMPONENTS\n";
+           foreach my $instance ( keys %CADB ){
+             my $cellref =  $CADB{$instance}->dbCadbGetCellref;
+             my @instBbox = $CADB{$instance}->dbCadbGetbBox; 
+             my $status = $CADB{$instance}->dbCadbGetStatus; 
+             my $orient = $CADB{$instance}->dbCadbGetOrient; 
+             if($status eq "PLACED" || $status eq "FIXED"){ 
+                my $llx = $instBbox[0]; 
+                my $lly = $instBbox[1]; 
+                my $urx = $instBbox[2]; 
+                my $ury = $instBbox[3]; 
+                #print WRITE "$instance $cellref + $status ( $llx $lly ) ( $urx $ury )  $orient \;\n";
+                #print WRITE "$instance $cellref + $status ( $llx $lly ) $orient \;\n";
+                print WRITE "$instance ( $llx $lly ) ( $urx $ury ) \;\n";
+             }
+           }
+           print WRITE "END COMPONENTS\n\n";
+           #---------------------- end writing components ----------------------------------#
+
+           print WRITE "END DESIGN\n";
+           close(WRITE);
+        }#if the floorplan entry exists
+     }else{
+       print "WARN-WR_FLT_FLP : 001 : the floorplan for module \"$moduleName\" does not exist ....\n";
+     }
+  }
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command write_flat_floorplan took:",timestr($td),"\n";
+}#sub write_flat_floorplan
+
+####################################################################################
+
 
 1;
