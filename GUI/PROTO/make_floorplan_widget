@@ -602,15 +602,21 @@ $canvas->CanvasBind('<Double-1>', => sub{
                            if($proceed == 1 && $stretch_rect ne ""){
                               my @coords = $canvas->coords($instance);
                               $canvas->configure(-cursor => 'top_left_arrow');
-                              if($moving_start == 1){
+                              if($moving_start == 1 && $stretch_rect eq $instance){
                                   my @poly_coords = ();
                                   for(my $i=0; $i<=$#coords; $i=$i+2){
                                       my @xy = dbfWGuiWGui2Micron($coords[$i],$coords[$i+1]);
                                       push(@poly_coords, @xy);
                                   }
-                                  &create_popup_toSetStatusIfMoving($instance, \@poly_coords);
+                                  ######################### removing popup to set status ########################
+                                  #&create_popup_toSetStatusIfMoving($instance, \@poly_coords);
+                                  &movePseudoHierInst("-inst", $instance, "-status", "PLACED", "-coords", "{@poly_coords}");
+                                  my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstCellref;
+                                  &update_specifyTable_ifResizeOrMove_hierInst($instance, $cellref,\@poly_coords,"move");
+                                  ###############################################################################
+
                                   $moving_start = 0;
-                              }else{ 
+                              }elsif($stretch_rect eq "L" || $stretch_rect eq "R" || $stretch_rect eq "T" || $stretch_rect eq "B" || $stretch_rect eq "TL" || $stretch_rect eq "TR" || $stretch_rect eq "BL" || $stretch_rect eq "BR"){ 
                                  my @x_coords = ();
                                  my @y_coords = ();
                                  for(my $i=0; $i<=$#coords; $i=$i+2){
@@ -1067,7 +1073,7 @@ $frame1->Radiobutton(-variable => \$status,-text => "FIXED",-value => "FIXED")->
 $frame1->Radiobutton(-variable => \$status,-text => "FIRM",-value => "FIRM")->pack(-side => 'top');
 $frame1->Radiobutton(-variable => \$status,-text => "PLACED",-value => "PLACED")->pack(-side => 'top');
 
-$frame2->Button(-text=>"Ok", -command=>sub{&movePseudoHierInst("-inst", $inst, -status=>$status, "-coords", "{@coords}");
+$frame2->Button(-text=>"Ok", -command=>sub{&movePseudoHierInst("-inst", $inst, "-status" , "$status", "-coords", "{@coords}");
                                            &update_specifyTable_ifResizeOrMove_hierInst($inst, $cellref,\@coords,"move");
                                            #&resetCanvasBinding($hier_canvas);
                                            $popWin->destroy;})->pack(-side=>"left");

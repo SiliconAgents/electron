@@ -9,33 +9,46 @@ $design_worldcanvas->configure(-confine => 1);
 $design_worldcanvas->CanvasBind('<Motion>', sub {&dbfGuiShowWorldCanvasCoords($design_worldcanvas);});
 
 my $rightFrame = $tab11->Frame()->pack(-side => 'left',-anchor=>'n');
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
-my $cut_image = $rightFrame->Photo(-file=> "$path2eq/ETC/1477687219_BT_cut.png");
-my $cutButton = $rightFrame->Button(-image=> $cut_image,-command=>sub{})->pack(-side=>'top');
-my $cut_baloon = $rightFrame->Balloon();
-   $cut_baloon->attach($cutButton, -balloonmsg => 'rectilinear cut');
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
-my $move_image = $rightFrame->Photo(-file       => "$path2eq/ETC/1477687356_move.png");               
+##my $cut_image = $rightFrame->Photo(-file=> "$path2eq/ETC/cut.gif");
+#my $cut_image = $rightFrame->Photo(-file=> "$path2eq/PNG/cut_32_1.png");
+#my $cutButton = $rightFrame->Button(-image=> $cut_image,-command=>sub{})->pack(-side=>'top');
+#my $cut_baloon = $rightFrame->Balloon();
+#   $cut_baloon->attach($cutButton, -balloonmsg => 'rectilinear cut');
+
+#my $move_image = $rightFrame->Photo(-file       => "$path2eq/ETC/move.gif");               
+my $move_image = $rightFrame->Photo(-file       => "$path2eq/PNG/move_32.png");               
 my $moveButton = $rightFrame->Button(-image=> $move_image,-command=>sub{&move_flat_inst($design_worldcanvas);})->pack(-side=>'top');
 my $move_baloon = $rightFrame->Balloon();
-   $move_baloon->attach($moveButton, -balloonmsg => 'move/resize');
+   $move_baloon->attach($moveButton, -balloonmsg => 'move');
 
-my $undo_image = $rightFrame->Photo(-file       => "$path2eq/ETC/1477687390_Undo.png");               
-my $undoButton = $rightFrame->Button(-image=> $undo_image,-command=>sub{})->pack(-side=>'top');
-my $undo_baloon = $rightFrame->Balloon();
-   $undo_baloon->attach($undoButton, -balloonmsg => 'Undo');
+##my $undo_image = $rightFrame->Photo(-file       => "$path2eq/ETC/undo.gif");               
+#my $undo_image = $rightFrame->Photo(-file       => "$path2eq/PNG/undo_32_1.png");               
+#my $undoButton = $rightFrame->Button(-image=> $undo_image,-command=>sub{})->pack(-side=>'top');
+#my $undo_baloon = $rightFrame->Balloon();
+#   $undo_baloon->attach($undoButton, -balloonmsg => 'Undo');
+#
+##my $redo_image = $rightFrame->Photo(-file       => "$path2eq/ETC/redo.gif");               
+#my $redo_image = $rightFrame->Photo(-file       => "$path2eq/PNG/redo_32_1.png");               
+#my $redoButton = $rightFrame->Button(-image=> $redo_image,-command=>sub{})->pack(-side=>'top');
+#my $redo_baloon = $rightFrame->Balloon();
+#   $redo_baloon->attach($redoButton, -balloonmsg => 'Redo');
 
-my $redo_image = $rightFrame->Photo(-file       => "$path2eq/ETC/1477687377_Redo.png");               
-my $redoButton = $rightFrame->Button(-image=> $redo_image,-command=>sub{})->pack(-side=>'top');
-my $redo_baloon = $rightFrame->Balloon();
-   $redo_baloon->attach($redoButton, -balloonmsg => 'Redo');
-
-my $hilite_image = $rightFrame->Photo(-file       => "$path2eq/ETC/1477694388_highlight.png");               
+#my $hilite_image = $rightFrame->Photo(-file       => "$path2eq/ETC/hilite.gif");               
+my $hilite_image = $rightFrame->Photo(-file       => "$path2eq/PNG/highlighter_32.png");               
 my $hiliteButton = $rightFrame->Button(-image=> $hilite_image,-command=>sub{&selectMode_toHilightConnection})->pack(-side=>'top');
 my $hilite_baloon = $rightFrame->Balloon();
    $hilite_baloon->attach($hiliteButton, -balloonmsg => 'HighlightConnections');
+
+my $ruler_image = $rightFrame->Photo(-file       => "$path2eq/PNG/ruler_32.png");               
+my $rulerButton = $rightFrame->Button(-image=> $ruler_image,-command=>sub{&create_ruler_popup})->pack(-side=>'top');
+my $ruler_baloon = $rightFrame->Balloon();
+   $ruler_baloon->attach($rulerButton, -balloonmsg => 'Ruler');
 #----------------------------------------------------------------------#
-my $refresh_gui = $rightFrame->Photo(-file       => "$path2eq/ETC/1477687416_free-38.png");
+#my $refresh_gui = $rightFrame->Photo(-file       => "$path2eq/ETC/action_refresh.gif");
+#my $refresh_gui = $rightFrame->Photo(-file       => "$path2eq/ETC/redraw.gif");
+my $refresh_gui = $rightFrame->Photo(-file       => "$path2eq/PNG/redraw_32_1.png");
 my $refreshButton = $rightFrame->Button(-text=>"Refresh GUI", -image=> $refresh_gui,-command=> sub{$design_worldcanvas->delete('all');&design_display; })->pack(-side=>"top");
 my $refresh_balloon = $rightFrame->Balloon();
    $refresh_balloon->attach($refreshButton, -balloonmsg => 'Redraw Design');
@@ -47,6 +60,8 @@ sub activate_flatViewTab{
     $design_worldcanvas->CanvasFocus;
     #$design_worldcanvas->focusFollowsMouse;
     $GLOBAL->dbGlobalSetActiveCanvas("flat_view");
+    my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+    $top->title (" Electron (".$moduleName.")");
 }#sub activate_flatViewTab
 
 #####################################################################################################################
@@ -151,6 +166,8 @@ if($dieHMultFact < $dieWMultFact){
 $GLOBAL->dbGlobalSetMicronFactor($MICRONFACTOR);
 my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
 
+my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+$top->title (" Electron (".$moduleName.")");
 #####   display the die area boundary  ###
    if($dieIsCentre == 0 || $dieIsCentre == 2 ) {
       $blly = $guiMuDielly*$MICRONFACTOR + 20;
@@ -160,7 +177,7 @@ my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
       $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
       my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline,"green");
       $design_worldcanvas->itemconfigure($chip_bound, -tag =>'TOP_MOD');
-      $design_worldcanvas->addtag($TOP_MODULE , "withtag", $chip_bound);
+      $design_worldcanvas->addtag($moduleName , "withtag", $chip_bound);
    }else {
       $blly = $guiMuDielly*$MICRONFACTOR + 270;
       $bury = $guiMuDieury*$MICRONFACTOR + 270;
@@ -169,11 +186,11 @@ my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
       $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
       my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline,"green");
       $design_worldcanvas->itemconfigure($chip_bound, -tag =>'TOP_MOD');
-      $design_worldcanvas->addtag($TOP_MODULE , "withtag", $chip_bound);
+      $design_worldcanvas->addtag($moduleName , "withtag", $chip_bound);
    }
 ######   display the ROWS   #####
-   if (exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}){
-       my @rows = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetRows;
+   if (exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$moduleName/_self_"}}){
+       my @rows = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$moduleName/_self_"}}->dbFlplanGetRows;
        foreach my $tag ( @rows ) {
                my ($x,$y) = (split(/\s+/, $tag))[2,3];
                my $Row_llx = 20 + $x*$MulFactor;    
@@ -183,7 +200,7 @@ my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
        }# foreach
    }
 #####   display the ports of the top module  ###
-   my $moduleName = $TOP_MODULE;
+   my @portsNoLayer = ();
    foreach my $port ( keys %{$PORTS_ALREADY{$moduleName}} ) {
            #<!-- one hash walk for the port object instead of seven -->
            my $portObj = $PORTS_ALREADY{$moduleName}{$port};
@@ -232,6 +249,13 @@ my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
               #-------------------------------------------------------------------------------------------------------#
            } #if status is placed or fixed
    }# foreach
+   #<!-- reported once rather than per port, a design can easily have thousands -->
+   if ( @portsNoLayer > 0 ) {
+      my $shown = join(" ", @portsNoLayer[0 .. ($#portsNoLayer > 4 ? 4 : $#portsNoLayer)]);
+      print "WARN-GUI-DEF_DISP : 001 : ", scalar(@portsNoLayer), " port(s) have no usable layer or size, metal box not drawn: $shown";
+      print " ..." if ( @portsNoLayer > 5 );
+      print "\n";
+   }
 ########  dispay the Instances  #######
 my $pix_size = $design_worldcanvas->pixelSize();
 #<!-- isDisplayTrue divides both extents by the pixel size and compares against
@@ -881,7 +905,7 @@ sub design_nets_display {
  my $MulFactor = $MICRONFACTOR/$DEF_DATABASE_UNIT;
  foreach my $net ( keys %NETS_ALREADY ) {
    my $netType = $NADB{$net}->dbNadbGetNetType;
-   if($netType >= 0){
+      if ($netType == 0 ) {
       if(exists $NETS_ROUTING_ALREADY{$net}) {
          my @data = $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBGetRegularRoute;
          my @RRdefDiffState = $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBGetRRCompareDefState; 
@@ -947,11 +971,17 @@ sub SpecialNets_display{
                    my $lly = 20 + $routeBox[1]*$MulFactor;
                    my $urx = 20 + $routeBox[2]*$MulFactor;
                    my $ury = 20 + $routeBox[3]*$MulFactor;
+                   if(@routeBox > 4){$seg[0] = $routeBox[4];} #added if via layer found
                    if (exists $PTDB{$seg[0]} ) {
+                      my $type = $PTDB{$seg[0]}->dbTechGetLayerType;
                       my $color = $PTDB{$seg[0]}->dbTechGetLayerColor;
                       my $defDiffState = shift @SRdefDiffState;
                       if($defDiffState == 1){$color = "white";}
-                      $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>$color, -tags=>"SPNETTAG", -state =>"normal", -fill =>$color, -stipple => "gray12");
+                      if($type eq "CUT"){
+                         $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>$color, -tags=>"SPVIATAG", -state =>"normal", -fill =>$color);
+                      }else{
+                         $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>$color, -tags=>"SPNETTAG", -state =>"normal", -fill =>$color, -stipple => "gray12");
+                      }
                    }
               }
               foreach my $segment ( @fixed_route_data ) {
@@ -961,6 +991,7 @@ sub SpecialNets_display{
                    my $lly = 20 + $routeBox[1]*$MulFactor;
                    my $urx = 20 + $routeBox[2]*$MulFactor;
                    my $ury = 20 + $routeBox[3]*$MulFactor;
+                   my $len = @routeBox;
                    if (exists $PTDB{$seg[0]} ) {
                       my $color = $PTDB{$seg[0]}->dbTechGetLayerColor;
                       my $defDiffState = shift @FRdefDiffState;
@@ -1110,7 +1141,7 @@ if ($dir eq "OUTPUT" || $dir eq "output" ) {
           $x2 = $originX;   
           $x3 = $originX + 1;   
           $y1 = $originY;
-          $y2 = $originY + 2;
+          $y2 = $originY - 2;
           $y3 = $originY;
                            }
      elsif ( $orient eq "N" ) {
@@ -1118,7 +1149,7 @@ if ($dir eq "OUTPUT" || $dir eq "output" ) {
           $x2 = $originX;     
           $x3 = $originX + 1;
           $y1 = $originY;
-          $y2 = $originY - 2;
+          $y2 = $originY + 2;
           $y3 = $originY;
                            }
                         }
@@ -1143,17 +1174,17 @@ elsif ( $dir eq "INPUT" || $dir eq "input" ) {
           $x1 = $originX -1;
           $x2 = $originX;
           $x3 = $originX + 1;
-          $y1 = $originY - 2;
+          $y1 = $originY + 2;
           $y2 = $originY;
-          $y3 = $originY -2;
+          $y3 = $originY + 2;
                            }
      elsif ( $orient eq "S" ) {
           $x1 = $originX -1;
           $x2 = $originX;
           $x3 = $originX + 1;
-          $y1 = $originY + 2;
+          $y1 = $originY - 2;
           $y2 = $originY;
-          $y3 = $originY + 2;
+          $y3 = $originY - 2;
                            }
 
                           }
@@ -1286,13 +1317,23 @@ if(exists $CADB{$InstanceName}){
              }
              $design_worldcanvas->createPolygon(@polygon,-outline,$color, -tags,"PTEMP", -fill,$color,-stipple,"gray12");
            }
-           my ($layer, $llx2, $lly2, $urx2, $ury2)=(split(/\s+/,$RECTS[0]))[0,2,3,4,5];
-           my @TextRect = &xformCellPinToInstPin($location[0],$location[1],$cellOrigin[0],$cellOrigin[1],$orient,$cellSize[0],$cellSize[1],$llx2,$lly2,$urx2,$ury2);
-           my $midx = ($TextRect[0] + $TextRect[2])/2;
-           my $midy = ($TextRect[1] + $TextRect[3])/2;
-           $midx = 20 + $midx*$MulFactor;
-           $midy = 20 + $midy*$MulFactor;
-           $design_worldcanvas->createText($midx,$midy, -fill=>"yellow", -text=>$pinName,-tags=>"PTEMP");
+           if(@RECTS > 0){
+              my ($layer, $llx2, $lly2, $urx2, $ury2)=(split(/\s+/,$RECTS[0]))[0,2,3,4,5];
+              my @TextRect = &xformCellPinToInstPin($location[0],$location[1],$cellOrigin[0],$cellOrigin[1],$orient,$cellSize[0],$cellSize[1],$llx2,$lly2,$urx2,$ury2);
+              my $midx = ($TextRect[0] + $TextRect[2])/2;
+              my $midy = ($TextRect[1] + $TextRect[3])/2;
+              $midx = 20 + $midx*$MulFactor;
+              $midy = 20 + $midy*$MulFactor;
+              $design_worldcanvas->createText($midx,$midy, -fill=>"yellow", -text=>$pinName,-tags=>"PTEMP");
+           }else{
+              my @polyline = split(/\s+/,$POLY[0]);
+              my $layer = shift @polyline;
+              shift @polyline;
+              my @poly = &xformCellPinPolyToInstPin($location[0],$location[1],$cellOrigin[0],$cellOrigin[1],$orient,$cellSize[0],$cellSize[1],@polyline);
+              my $midx = 20 + $poly[0]*$MulFactor;
+              my $midy = 20 + $poly[1]*$MulFactor;
+              $design_worldcanvas->createText($midx,$midy, -fill=>"yellow", -text=>$pinName,-tags=>"PTEMP");
+           }
          }#for pins
  }#if instance exists in db
 }#sub display_InstPinRects
@@ -2286,7 +2327,11 @@ $canvas->CanvasBind('<B1-ButtonRelease>' => sub {
            my @ur = dbfWGuiWGui2Micron($coords[2],$coords[3]);
            $_ *= $DEF_DATABASE_UNIT for @ll;
            $_ *= $DEF_DATABASE_UNIT for @ur;
-           &create_popup_toSetStatusForFlatInst($inst, \@ll, \@ur);
+           #-------------------- removing status pop-up -------------------------#
+           #&create_popup_toSetStatusForFlatInst($inst, \@ll, \@ur);
+           &moveFlatInst("-inst",$inst,"-status","PLACED","-bbox", "{$ll[0],$ll[1],$ur[0],$ur[1]}");
+           &resetCanvasBinding($design_worldcanvas);
+           #---------------------------------------------------------------------#
            $moving_start = 0;
         }           
         $canvas->configure(-cursor => 'top_left_arrow');
@@ -2406,6 +2451,82 @@ if(exists $PLACE{$TOP_MODULE}){
 }#sub display_flop_levels
 
 #################################################################################################################
+############################################ subroutine to Trace CTS ############################################
+#################################################################################################################
+sub trace_clock_tree{
+  my $netName = $_[0];
+  my $topModule = $GLOBAL->dbfGlobalGetTOP;
+  foreach my $instance (keys %{$NETS_ALREADY{$netName}}){
+     my $pinName = $NETS_ALREADY{$netName}{$instance};
+     if(exists $PORTS_ALREADY{$topModule}{$instance}){
+        my $status = $PORTS_ALREADY{$topModule}{$instance}->dbPortGetStatus;
+        my @loc = $PORTS_ALREADY{$topModule}{$instance}->dbPortGetLoc;
+        my ($X,$Y) = dbWGuidatabase2WGui($loc[0],$loc[1]);
+        if($inst eq $instance) {push(@sourceInst, $X, $Y);
+        }else {push(@destinationInst, $X, $Y);}
+     }elsif(exists $COMP_ALREADY{$instance}){
+        my $cellref = $CADB{$instance}->dbCadbGetCellref;
+        my @instLoc = $CADB{$instance}->dbCadbGetLoc;
+        my $orient = $CADB{$instance}->dbCadbGetOrient;
+        if(exists $PLDB{$cellref}){
+           #---- check if the connected pin exists ----#
+           my @cellOrigin = $PLDB{$cellref}->dbMdbGetOrigin;
+           my @cellSize = $PLDB{$cellref}->dbMdbGetSize;
+           my @pinRects = $PLDB{$cellref}->dbMdbGetPinRect($pinName);
+           my $firstrect = shift @pinRects;
+           my ($layer, $llx2, $lly2, $urx2, $ury2)=(split(/\s+/,$firstrect))[0,2,3,4,5];
+           my @FirstRect = &xformCellPinToInstPin($instLoc[0],$instLoc[1],$cellOrigin[0],$cellOrigin[1],$orient,$cellSize[0],$cellSize[1],$llx2,$lly2,$urx2,$ury2);
+           my ($llx,$lly) = dbWGuidatabase2WGui($FirstRect[0],$FirstRect[1]);  # Multiplying with database#  
+           my ($urx,$ury) = dbWGuidatabase2WGui($FirstRect[2],$FirstRect[3]);            
+           my $midx = $llx + ($urx - $llx)/4;
+           my $midy = $lly + ($ury - $lly)/2;
+           if($inst eq $instance) {push(@sourceInst, $midx, $midy);
+           }else {push(@destinationInst, $midx, $midy);}
+        }#if cellref exists
+     }
+  }#foreach instance
+}#sub trace_clock_tree
+
+#################################################################################################################
+
+
+sub dbWGuiCreatePinRect {
+my $originX = $_[0];
+my $originY = $_[1];
+my $orient = $_[2];
+my $dir = $_[3];
+my $width = $_[4];
+my $height = $_[5];
+
+my ($llx,$lly,$urx,$ury);
+
+     if ( $orient eq "E" ) {
+          $llx = $originX -$height ;
+          $urx = $originX ;   
+          $lly = $originY -$width/2;
+          $ury = $originY +$width/2;
+                           }
+     elsif ( $orient eq "W" ) {
+          $llx = $originX ;
+          $urx = $originX + $height ;   
+          $lly = $originY -$width/2;
+          $ury = $originY +$width/2;
+                           }
+     elsif ( $orient eq "S" ) {
+          $llx = $originX - $width/2 ;
+          $urx = $originX + $width/2 ;   
+          $lly = $originY ;
+          $ury = $originY + $height ;
+                           }
+     elsif ( $orient eq "N" ) {
+          $llx = $originX -$width/2 ;
+          $urx = $originX + $width/2 ;   
+          $lly = $originY - $height ;
+          $ury = $originY ;
+                           }
+
+return($llx,$lly,$urx,$ury);
+}# sub dbWGuiCreatePinRect
   
 
 1;

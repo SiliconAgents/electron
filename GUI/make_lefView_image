@@ -1,5 +1,4 @@
 sub create_lef_image{
-use GD;
 use Benchmark;
 my $t0 = new Benchmark;
 
@@ -206,7 +205,7 @@ if($_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
                   #?my $im_rect_color = $im->colorAllocate($po->rgb($rect_color));
                   #?$im->rectangle($llx,$ury,$urx,$lly, $im_rect_color);
                   #$im->filledRectangle($llx,$ury,$urx,$lly, $im_rect_color);
-                  #my $path2proton = $GLOBAL->dbfGlobalGetProtonHome;
+                  #my $path2proton = $GLOBAL->dbfGlobalGetElectronHome;
                   #my $tile = newFromPng GD::Image("$path2proton/ETC/dotted_bitmap.png");
                   #$im->setTile($tile);   
                   #$im->filledRectangle($llx,$ury,$urx,$lly, gdTiled) 

@@ -249,7 +249,7 @@ sub InitColors{
 #                           if((($llx >= 0 && $llx <= $image_width) || ($urx >= 0 && $urx <= $image_width)) || (($lly >= 0 && $lly <= $image_height) || ($ury >= 0 && $ury <= $image_height))){
 #                              #my $instW = abs($urx-$llx);
 #                              #my $instH = abs($ury-$lly);
-#                              #my $path2proton = $GLOBAL->dbfGlobalGetProtonHome;
+#                              #my $path2proton = $GLOBAL->dbfGlobalGetElectronHome;
 #                              #my $tile = newFromPng GD::Image("$path2proton/ETC/dotted_bitmap.png");
 #                              #$im->setTile($tile);   
 #                              #$im->filledRectangle($llx,$ury,$urx,$lly, gdTiled) if($instW > 3 || $instH > 3);
@@ -600,7 +600,7 @@ sub create_flat_image{
                            if((($llx >= 0 && $llx <= $image_width) || ($urx >= 0 && $urx <= $image_width)) || (($lly >= 0 && $lly <= $image_height) || ($ury >= 0 && $ury <= $image_height))){
                               #my $instW = abs($urx-$llx);
                               #my $instH = abs($ury-$lly);
-                              #my $path2proton = $GLOBAL->dbfGlobalGetProtonHome;
+                              #my $path2proton = $GLOBAL->dbfGlobalGetElectronHome;
                               #my $tile = newFromPng GD::Image("$path2proton/ETC/dotted_bitmap.png");
                               #$im->setTile($tile);   
                               #$im->filledRectangle($llx,$ury,$urx,$lly, gdTiled) if($instW > 3 || $instH > 3);

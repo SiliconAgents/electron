@@ -712,5 +712,238 @@ sub get_text_size{
 }#sub get_text_size
 
 #####################################################################################
+sub sdef2svg {
+  use Benchmark;
+  my $t0 = new Benchmark;
+  my $noOfArg = @_;
+  
+  if($noOfArg < 4 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: sdef2svg -output <output filename>\n";
+     print"                -sdef <sdef file>\n";
+     print"                -slef <slef file>\n";
+     return;
+  }else{
+     %DIE_ALREADY = ();
+     %FLOORPLAN_LOOKUP = ();
+     %FLOORPLAN_ALREADY = (); 
+     my $dbu = $GLOBAL->dbfGlobalGetDBU;
+     my ($sdefFile, $slefFile, $svgFile) = ("", "", "out.svg"); 
+     for(my $xx=0; $xx<$noOfArg; $xx++){
+        if($_[$xx] eq "-sdef"){$sdefFile = $_[$xx+1];}
+        if($_[$xx] eq "-slef"){$slefFile = $_[$xx+1];}
+        if($_[$xx] eq "-output"){$svgFile = $_[$xx+1];}
+     }
+
+     if((-e $sdefFile) && (-r $sdefFile)){
+        print "INFO-PAR-SDEF : 001 : $sdefFile FILE EXISTS AND IS READABLE!\n";
+	open(READ_SDEF, "$sdefFile");
+	while(<READ_SDEF>){
+           chomp();
+           if($_ =~ /^\s*#/ ) { next ; }
+           $_ =~ s/\s+/ /g;
+           $_=~ s/\s+$//g;
+           if($_ =~ /^\s*DBU/){
+	      my $DEF_DATABASE_UNIT = (split(/\s+/, $_))[1];
+              $GLOBAL->dbfGlobalSetDBU($DEF_DATABASE_UNIT);
+              $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanSetDBUnit($DEF_DATABASE_UNIT);
+           }elsif($_ =~ /^DESIGN\b/){
+              $TOP_MODULE = (split(/\s+/, $_))[1];
+              $GLOBAL->dbfGlobalSetTOP($TOP_MODULE);
+              my $flplanID = $GLOBAL->dbfGlobalGetNextFlplanID;
+              $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"} = $flplanID;
+              $FLOORPLAN_ALREADY{$flplanID} = Floorplan::new();
+              $FLOORPLAN_ALREADY{$flplanID}->dbFlplanSetID($flplanID);
+              $FLOORPLAN_ALREADY{$flplanID}->dbFlplanSetCellref($TOP_MODULE);
+	   }elsif($_ =~ /^DIEAREA/){
+              my ($DIEAREA_llx,$DIEAREA_lly,$DIEAREA_urx,$DIEAREA_ury) = (split(/\s+/, $_))[1,2,3,4];
+              $DIEAREA[0]=$DIEAREA_llx;
+              $DIEAREA[1]=$DIEAREA_lly;
+              $DIEAREA[2]=$DIEAREA_urx;
+              $DIEAREA[3]=$DIEAREA_ury;
+              $DIE_ALREADY{dieArea}=\@DIEAREA;
+              my $llx = $DIE_ALREADY{dieArea}[0];
+              my $lly = $DIE_ALREADY{dieArea}[1];
+              my $urx = $DIE_ALREADY{dieArea}[2];
+              my $ury = $DIE_ALREADY{dieArea}[3];
+              ####################################################################
+              # set floorplan values for the partition in the FLOORPLAN_ALREADY DB
+              ####################################################################
+	      my $dieIsCentre = 0;
+              if ($llx + $urx == 0){ $dieIsCentre = 1;}
+              my $ASPECT_RATIO =  ($ury - $lly ) / ( $urx - $llx );
+              ############### hardcoding temporarily ################
+              my $UTILIZATION =  0.70;
+              $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanSetOrigin($dieIsCentre);
+              $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanSetUtilization($UTILIZATION);
+              $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanSetSize($llx, $lly, $urx, $ury);
+              $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanSetAspectRatio($ASPECT_RATIO);
+	      
+	      $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanSetSize($llx, $lly, $urx, $ury);
+	      print "DIEAREA:@DIEAREA\n";
+	   }elsif($_ =~ /^ROW\s+/){
+              my ($rowName, $sitename, $x0, $y0, $orient,$numX,$numY,$spaceX,$spaceY) = (split(/\s+/, $_))[1,2,3,4,5,7,9,11,12];
+              my $rowdata = $rowName ." $sitename ".$x0." ".$y0." ".$orient." $numX $numY $spaceX $spaceY";
+              $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanAddRows($rowdata);
+	   }elsif($_ =~ /^INST\s+/){
+	      my ($instance, $cellref, $status, $locX, $locY) = (split(/\s+/, $_))[1,2,3,4,5]; 
+              $CADB{$instance} = CompAttDB::new();
+              $CADB{$instance}->dbCadbSetCellref($cellref);
+	      $CADB{$instance}->dbCadbSetStatus($status);  
+	      $CADB{$instance}->dbCadbSetLoc($locX,$locY);
+           } 
+	}
+	close(READ_SDEF);
+     }else{
+        print "WARN-PAR-SDEF : 002 : $sdefFile FILE DOES NOT EXISTS OR IS NOT READABLE.\n";
+        return; 
+     }
+     if((-e $slefFile) && (-r $slefFile)){
+        print "INFO-PAR-SLEF : 001 : $slefFile FILE EXISTS AND IS READABLE!\n";
+	open(READ_SLEF, "$slefFile");
+	while(<READ_SLEF>){
+           chomp();
+           if($_ =~ /^\s*#/ ) { next ; }
+           $_ =~ s/\s+/ /g;
+           $_=~ s/\s+$//g;
+           if($_ =~ /^\s*Cell\b/){
+	      my ($macroName, $width, $height) = (split(/\s+/, $_))[1,2,3];
+	      $PLDB{$macroName} = MacroDB::new();
+	      $PLDB{$macroName}->dbMdbSetSize($width,$height);
+           } 
+	}
+	close(READ_SLEF);
+     }else{
+        print "WARN-PAR-SLEF : 002 : $slefFile FILE DOES NOT EXISTS OR IS NOT READABLE.\n";
+        return; 
+     }
+     ##################################### write svg ################################
+     open(WRITE_SVG, ">$svgFile");
+       my ($svgW, $svgH) = (540, 540);
+       print WRITE_SVG "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+       print WRITE_SVG "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"$svgW\" height=\"$svgH\">\n";
+       my $DBSCALEFACTOR = $GLOBAL->dbfGlobalGetDBU;
+       my $dieIsCentre = 0;
+       my ($bllx,$blly,$burx,$bury);
+       if(exists $DIE_ALREADY{dieArea}){
+          my $guiDiellx = $DIE_ALREADY{dieArea}[0];
+          my $guiDielly = $DIE_ALREADY{dieArea}[1];
+          my $guiDieurx = $DIE_ALREADY{dieArea}[2];
+          my $guiDieury = $DIE_ALREADY{dieArea}[3];
+          
+          my $guiMuDiellx = $guiDiellx/$DBSCALEFACTOR;
+          my $guiMuDielly = $guiDielly/$DBSCALEFACTOR;
+          my $guiMuDieurx = $guiDieurx/$DBSCALEFACTOR;
+          my $guiMuDieury = $guiDieury/$DBSCALEFACTOR;
+          
+          if($guiDiellx == 0 && $guiDielly == 0 ){
+             $dieIsCentre = 0; 
+          }elsif($guiDiellx+$guiDieurx == 0 && $guiDieury+$guiDielly == 0){
+             $dieIsCentre = 1;
+          }else {
+             $dieIsCentre = 2;
+          }
+          
+          my $guiWidth = abs($guiMuDieurx - $guiMuDiellx) ;
+          my $guiHeight = abs($guiMuDieury - $guiMuDielly) ;
+          my $dieHMultFact  = $svgH/$guiHeight;
+          my $dieWMultFact  = $svgW/$guiWidth;
+          
+          if($dieHMultFact < $dieWMultFact){
+             $MICRONFACTOR = $dieHMultFact;
+          }else{
+             $MICRONFACTOR =  $dieWMultFact; 
+          }
+          
+          $GLOBAL->dbGlobalSetMicronFactor($MICRONFACTOR);
+          my $MulFactor = $MICRONFACTOR/$DBSCALEFACTOR;
+          my $moduleName = $GLOBAL->dbfGlobalGetTOP;   
+          #####   display the die area boundary  ###
+          if($dieIsCentre == 0 || $dieIsCentre == 2 ) {
+             $blly = $guiMuDielly*$MICRONFACTOR + 20;
+             $bury = $guiMuDieury*$MICRONFACTOR + 20;
+             $bllx = $guiMuDiellx*$MICRONFACTOR + 20;
+             $burx = $guiMuDieurx*$MICRONFACTOR + 20;
+	     my $bWidth = $burx - $bllx;
+	     my $bHeight = $bury - $blly;
+	     print WRITE_SVG "\t<rect x=\"$bllx\" y=\"$blly\" width=\"$bWidth\" height=\"$bHeight\" stroke=\"green\" stroke-width=\"2\"/>\n";
+          }else {
+             $blly = 20 + $guiMuDielly*$MICRONFACTOR + $svgW/2;
+             $bury = 20 + $guiMuDieury*$MICRONFACTOR + $svgW/2;
+             $bllx = 20 + $guiMuDiellx*$MICRONFACTOR + $svgW/2;
+             $burx = 20 + $guiMuDieurx*$MICRONFACTOR + $svgW/2;
+	     my $bWidth = $burx - $bllx;
+	     my $bHeight = $bury - $blly;
+	     print WRITE_SVG "\t<rect x=\"$bllx\" y=\"$blly\" width=\"$bWidth\" height=\"$bHeight\" stroke=\"green\" stroke-width=\"2\"/>\n";
+          }
+          ###   display the ROWS   #####
+          if(exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$moduleName/_self_"}}){
+             my @rows = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$moduleName/_self_"}}->dbFlplanGetRows;
+             foreach my $tag ( @rows ) {
+               my ($x,$y) = (split(/\s+/, $tag))[2,3];
+               my $row_llx = 20 + $x*$MulFactor;    
+               my $row_lly = 20 + $y*$MulFactor;    
+	       print WRITE_SVG "\t<line x1=\"$row_llx\" y1=\"$row_lly\" x2=\"$burx\" y2=\"$row_lly\" style=\"stroke:grey;stroke-width:2\" />\n";
+             }# foreach
+          }
+          ########  dispay the Instances  #######
+          foreach my $instance (keys %CADB){
+            my @loc = $CADB{$instance}->dbCadbGetLoc;
+            my $orient = $CADB{$instance}->dbCadbGetOrient;
+            my $cellref = $CADB{$instance}->dbCadbGetCellref;
+            my $status = $CADB{$instance}->dbCadbGetStatus;
+            if(exists $PLDB{$cellref}){
+               my @cellSize = $PLDB{$cellref}->dbMdbGetSize;
+               if($status eq "PLACED" || $status eq "FIXED" ) {
+                  my $llx = 20 + $loc[0]*$MulFactor;
+                  my $lly = 20 + $loc[1]*$MulFactor;
+                  my $width = $cellSize[0]*$DEF_DATABASE_UNIT*$MulFactor;
+                  my $height = $cellSize[1]*$DEF_DATABASE_UNIT*$MulFactor;
+                  if($dieIsCentre == 1) {
+                     $lly = $lly + $svgW/2;
+                     $ury = $ury + $svgW/2;
+                  }
+		  print WRITE_SVG "\t<rect x=\"$llx\" y=\"$lly\" width=\"$width\" height=\"$height\" fill=\"red\" fill-opacity=\"0.5\" stroke=\"red\"/>\n";
+               }# if component status is fixed or placed
+            }else{print "WARN: cell $cellref not found in library\n";}
+          }#foreach Instance
+       }#if diearea exists 
+       print WRITE_SVG "</svg>\n";
+     close(WRITE_SVG);
+  }
+  $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "cmd:sdef2svg took:",timestr($td),"\n";
+  #&testDB;
+}#sub sdef2svg
+
+sub testDB {
+  my $flplanID = $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"};
+  my @dieArea = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
+  my $dbu = $GLOBAL->dbfGlobalGetDBU;
+  print "$TOP_MODULE fplan:$flplanID\n";
+  print "dieArea: @dieArea\n";
+  print "dbu:$dbu\n"; 
+
+  my @rows = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetRows;
+  print WRITE "\n\n";
+  foreach my $l (@rows) {
+    my @sl = split(/\s+/,$l);
+    print "ROW $sl[0] $sl[1] $sl[2] $sl[3] $sl[4] DO $sl[5] BY $sl[6] STEP $sl[7] $sl[8] \;\n";
+  }# foreach row
+  print "\n\n";
+
+  foreach my $instance (keys %CADB){
+    my $cellref = $CADB{$instance}->dbCadbGetCellref;
+    my $status = $CADB{$instance}->dbCadbGetStatus;  
+    my @loc = $CADB{$instance}->dbCadbGetLoc;
+    print "inst:$instance cell:$cellref status:$status loc:@loc\n";
+  }
+
+  foreach my $macro (keys %PLDB){
+    my @size = $PLDB{$macro}->dbMdbGetSize;
+    print "macro:$macro size:@size\n";
+  }
+}#sub testDB
+#####################################################################################
 
 1;

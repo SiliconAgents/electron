@@ -123,7 +123,7 @@ sub place_graph_plan_4_pseudo {
     $INPUT_NET_FILE = $TOP_MODULE.".txt" ;
     $NODE_FILE = "nodefile" ;
     $LIB_FILE = "libfile" ;
-    my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+    my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
     my $placeLogFileName = "plan_4_place.log";
     
     if( $NOLOG != 1 ) {
@@ -138,7 +138,7 @@ sub place_graph_plan_4_pseudo {
       print "INFO-UTS-PL_GRPH_PLAN_4_PSUDO : 001 : Placing the design $TOP_MODULE \n";
       #system( "$env_eqator_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
 #     system( "$env_eqator_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE");
-      system( "$env_proton_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE");
+      system( "$env_electron_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE");
       #system( "$env_eqator_home/plan_1 $INPUT_NET_FILE $NODE_FILE \| tee  $placeLogFileName >> $logFileName");
       print "INFO-UTS-PL_GRPH_PLAN_4_PSUDO : 002 : Placing the design $TOP_MODULE \n";
       &write_tcl_for_plan;
@@ -183,7 +183,7 @@ sub place_graph_mpl_pseudo
     $INPUT_NET_FILE = $TOP_MODULE.".txt" ;
     $NODE_FILE = "nodefile" ;
     $LIB_FILE = "libfile" ;
-    my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+    my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
     my $placeLogFileName = "mpl_place.log";
     if( $NOLOG != 1 ) {
       closeTee(*STDOUT);
@@ -196,7 +196,7 @@ sub place_graph_mpl_pseudo
     if ( -e $INPUT_NET_FILE) {
       print "INFO-UTS-PL_GRPH_MPL_PSUDO : 001 : Begin placing the design $TOP_MODULE \n";
       if($path eq ""){
-         system( "$env_proton_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE") ;
+         system( "$env_electron_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE") ;
       }else{
          system( "$path/mpl $INPUT_NET_FILE $NODE_FILE");
       }
@@ -225,7 +225,7 @@ sub place_graph_plan_4
     $INPUT_NET_FILE = $TOP_MODULE.".txt" ;
     $NODE_FILE = "nodefile" ;
     $LIB_FILE = "libfile" ;
-    my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+    my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
     my $placeLogFileName = "plan_4_place.log";
     
     if( $NOLOG != 1 ) {
@@ -239,7 +239,7 @@ sub place_graph_plan_4
     if (-e $INPUT_NET_FILE) {
       print "INFO-UTS-PL_GRPH_PLAN_4 : 001 : Placing the design $TOP_MODULE \n";
       #system( "$env_eqator_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE ");
-      system( "$env_proton_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE ");
+      system( "$env_electron_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE ");
       #system( "$env_eqator_home/plan_1 $INPUT_NET_FILE $NODE_FILE \| tee  $placeLogFileName >> $logFileName");
       print "INFO-UTS-PL_GRPH_PLAN_4 : 002 : Placed the design $TOP_MODULE \n";
       &write_tcl_for_plan;
@@ -268,7 +268,7 @@ sub place_graph_mpl
     $INPUT_NET_FILE = $TOP_MODULE.".txt" ;
     $NODE_FILE = "nodefile" ;
     $LIB_FILE = "libfile" ;
-    my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+    my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
     my $placeLogFileName = "mpl_place.log";
     
     if( $NOLOG != 1 ) {
@@ -284,7 +284,7 @@ sub place_graph_mpl
       #system( "$env_eqator_home/3RDBIN/plan_4 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
       #system( "$env_eqator_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE \|tee $placeLogFileName >> $logFileName");
       #system( "$env_eqator_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE");
-      system( "$env_proton_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE >> $logFileName");
+      system( "$env_electron_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE >> $logFileName");
       #system( "$env_eqator_home/plan_1 $INPUT_NET_FILE $NODE_FILE \| tee  $placeLogFileName >> $logFileName");
       print "INFO-UTS-PL_GRPH_MPL : 002 : Placing the design $TOP_MODULE \n";
     }
@@ -311,7 +311,7 @@ sub place_graph_plan_1_pseudo
     $INPUT_NET_FILE = $TOP_MODULE.".txt" ;
     $NODE_FILE = "nodefile" ;
     $LIB_FILE = "libfile" ;
-    my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+    my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
     my $placeLogFileName = "plan_4_place.log";
     
     if( $NOLOG != 1 ) {
@@ -326,7 +326,7 @@ sub place_graph_plan_1_pseudo
       print "INFO-UTS-PL_GRPH_PLAN_1_PSUDO : 001 : Placing the design $TOP_MODULE \n";
       #system( "$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
       #system( "$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE $LIB_FILE");
-      system( "$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE");
+      system( "$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE");
       #system( "$env_eqator_home/plan_1 $INPUT_NET_FILE $NODE_FILE \| tee  $placeLogFileName >> $logFileName");
       print "INFO-UTS-PL_GRPH_PLAN_1_PSUDO : 002 : Placing the design $TOP_MODULE \n";
       &write_tcl_for_plan;
@@ -404,7 +404,7 @@ if($noOfArguments > 3){
 sub run_placer {
 $INPUT_NET_FILE = "$TOP_MODULE.txt";
 $NODE_FILE = "nodefile";
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 my $placeLogFileName = "place.log";
 if( $NOLOG != 1 ) {
 closeTee(*STDOUT);
@@ -417,7 +417,7 @@ openTee(*STDOUT, *STDOUT, *TEST);
 print "INFO-UTS-RUN_PLCR : 001 : Placing the design $TOP_MODULE \n";
 if ( -e $INPUT_NET_FILE) {
 #system( "$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName >> $logFileName");
-system( "$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName >> $logFileName");
+system( "$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName >> $logFileName");
 #system( "$env_eqator_home/plan_1 $INPUT_NET_FILE $NODE_FILE controlfile\| tee  $placeLogFileName >> $logFileName");
       &write_tcl_for_plan;
       }
@@ -454,7 +454,7 @@ $DES_INFO_FILE = "desinfofile";
     print "Info : ignoring argument after $_[4]\n";
   }
 
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 my $placeDetailLogFileName = "place_detail.log";
 if( $NOLOG != 1 ) {
 closeTee(*STDOUT);
@@ -468,7 +468,7 @@ if ( -e $INPUT_NET_FILE) {
 print "INFO-UTS-RUN_PLCR_DTL : 001 : Detail Placing the design $TOP_MODULE \n";
 #system( "$env_eqator_home/3RDBIN/plan_2 $INPUT_NET_FILE $NODE_FILE \| tee  $placeDetailLogFileName >> $logFileName");
 #system( "$env_eqator_home/3RDBIN/plan_2 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
-system( "$env_proton_home/3RDBIN/plan_2 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
+system( "$env_electron_home/3RDBIN/plan_2 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
       &write_tcl_for_plan;
 }
 }#sub run_placer_detail
@@ -504,7 +504,7 @@ $DES_INFO_FILE = "desinfofile";
     print "Info : ignoring argument after $_[4]\n";
   }
 
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 my $placeDetailLogFileName = "plan_3.log";
 if( $NOLOG != 1 ) {
 closeTee(*STDOUT);
@@ -518,7 +518,7 @@ print "INFO-UTS-RUN_PLAN_3 : 001 : Detail Placing the design $TOP_MODULE \n";
 if ( -e $INPUT_NET_FILE) {
 #system( "$env_eqator_home/3RDBIN/plan_3 $INPUT_NET_FILE $NODE_FILE \| tee  $placeDetailLogFileName >> $logFileName");
 #system( "$env_eqator_home/3RDBIN/plan_3 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
-system( "$env_proton_home/3RDBIN/plan_3 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
+system( "$env_electron_home/3RDBIN/plan_3 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DES_INFO_FILE \| tee  $placeDetailLogFileName >> $logFileName");
       &write_tcl_for_plan;
 }
 }#sub run_plan_3
@@ -526,7 +526,7 @@ system( "$env_proton_home/3RDBIN/plan_3 $INPUT_NET_FILE $NODE_FILE $LIB_FILE $DE
 sub run_plan_5 {
 $INPUT_NET_FILE = "$TOP_MODULE.txt";
 $NODE_FILE = "nodefile";
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 my $placeLogFileName = "place_plan5.log";
 if( $NOLOG != 1 ) {
 closeTee(*STDOUT);
@@ -539,7 +539,7 @@ openTee(*STDOUT, *STDOUT, *TEST);
 print "INFO-UTS : 001 : Placing the design $TOP_MODULE \n";
 if ( -e $INPUT_NET_FILE) {
 #system( "$env_eqator_home/3RDBIN/plan_5 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName >> $logFileName");
-system( "$env_proton_home/3RDBIN/plan_5 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName >> $logFileName");
+system( "$env_electron_home/3RDBIN/plan_5 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName >> $logFileName");
       &write_tcl_for_plan;
       }
 }#sub run_plan_5
@@ -570,7 +570,7 @@ $LIB_FILE = "libfile";
     print "Info : ignoring argument after $_[4]\n";
   }
 
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 my $placeDetailLogFileName = "plan_6.log";
 if( $NOLOG != 1 ) {
 closeTee(*STDOUT);
@@ -583,7 +583,7 @@ openTee(*STDOUT, *STDOUT, *TEST);
 if ( -e $INPUT_NET_FILE) {
 print "INFO-UTS-RUN_PLAN_6 : 001 : Detail Placing the design $TOP_MODULE \n";
 #system( "$env_eqator_home/3RDBIN/plan_6 $INPUT_NET_FILE $NODE_FILE $LIB_FILE \| tee  $placeDetailLogFileName >> $logFileName");
-system( "$env_proton_home/3RDBIN/plan_6 $INPUT_NET_FILE $NODE_FILE $LIB_FILE \| tee  $placeDetailLogFileName >> $logFileName");
+system( "$env_electron_home/3RDBIN/plan_6 $INPUT_NET_FILE $NODE_FILE $LIB_FILE \| tee  $placeDetailLogFileName >> $logFileName");
       &write_tcl_for_plan;
 }
 }#sub run_plan_6
@@ -657,11 +657,11 @@ if($noOfArguments > 3){
 sub run_placer_for_sp2dia {
 my $INPUT_NET_FILE = "$TOP_MODULE.graph";
 my $NODE_FILE = "nodefile";
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 my $placeLogFileName = "place.log";
 print "INFO-UTS-RUN_PLCR : 001 : Placing the design $TOP_MODULE \n";
 if ( -e $INPUT_NET_FILE) {
-  system( "$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName");
+  system( "$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE\| tee $placeLogFileName");
 }
 
 }#sun run_placer_for_sp2dia

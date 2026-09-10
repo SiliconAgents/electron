@@ -46,17 +46,17 @@ Install all the required packages and container stuff using Makefile provided in
 You will need to install Iverilog, Yosys separately on your system. Install the perl packages needed by proton from CPAN.
 set the following environment variables
 
-	export $PROTON_HOME=/<your-install-dir>/proton
-	cd $PROTON_HOME
+	export ELECTRON_HOME=/<your-install-dir>/electron
+	cd $ELECTRON_HOME
 	./UTILS/make_tool
 
 Proton can be invoked using the following commands
-export PATH=$PROTON_HOME:$PATH
+export PATH=$ELECTRON_HOME:$PATH
 
-	: proton                    ===> launches proton in shell mode
-	: proton --nolog --win      ===> launches proton in GUI mode
-	: proton --help             ===> prints the launch help message
-	: proton -f run.tcl         ===> executes the commands in run.tcl and returns to shell prompt
+	: electron                  ===> launches electron in shell mode
+	: electron --nolog --win    ===> launches electron in GUI mode
+	: electron --help           ===> prints the launch help message
+	: electron -f run.tcl       ===> executes the commands in run.tcl and returns to shell prompt
 
 By default, proton open in non-gui mode. To open GUI from shell mode type "win" or "gui" 
 

@@ -238,7 +238,7 @@ sub rpcCmdPlaceDesign {
 ###################################################################################################
 sub allow_remote_login{
 #use lib "/home/adityap/SOFTWARE/Frontier-RPC-0.07b4/lib";
-use Frontier::Daemon;
+# use Frontier::Daemon;
 my $noOfArg = @_;
 my $host;
 my $port = 1200;

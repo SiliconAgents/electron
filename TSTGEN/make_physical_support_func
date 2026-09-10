@@ -3,6 +3,7 @@ sub dbfTstgenUpdateFlplanFromPseudo {
 
 my $module = $_[0];
 my $flplan = $_[1];
+my $physOnly = $_[2];   #<!-- leave net routing alone, transfer physical data only -->
 
 my $flplanID = 0;
 if ( defined $flplan && $flplan ne "" ) {
@@ -35,13 +36,15 @@ unless ( exists $FLOORPLAN_ALREADY{$flplanID} ) {
 
 $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenSetPhysicalDirty(0);
 print "INFO-TST : 001 : Saving floorplan $flplan from module $module\n";
-&dbfTstgenUpdateFlplanByID($module, $flplanID);
+&dbfTstgenUpdateFlplanByID($module, $flplanID, $physOnly);
 
 unless ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetIsModuleTop ) {
   return;
 }
 
-%childFlplans = ();
+# NOTE: lexical, not a package global -- this sub recurses below, and a
+# shared hash would be wiped by the callee while we still iterate it.
+my %childFlplans = ();
 foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   if ( $inst eq "PIN" ) {
     next;
@@ -55,12 +58,14 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   }
   my @flplans = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenListFloorplan;
   foreach my $fp ( @flplans ) {
-    $childFlplans{$fp} = $cellref;
+    #<!-- keep the inst name: the child floorplan path needs it below -->
+    $childFlplans{$fp} = [ $cellref, $inst ];
   }
 }#foreach inst
 
 foreach my $fp ( keys %childFlplans ) {
   #<!-- update child floorplan -->
+  my ($cellref, $inst) = @{$childFlplans{$fp}};
   my ($childFlplanID, $childFlplan);
   ($childFlplan = $fp) =~ s:/_self_$::;
   $childFlplan .= "/$inst";
@@ -68,8 +73,7 @@ foreach my $fp ( keys %childFlplans ) {
   if ( $childFlplanID == 0 ) {
     undef $childFlplan;
   }
-  my $cellref = $childFlplans{$fp};
-  &dbfTstgenUpdateFlplanFromPseudo($cellref, $childFlplan);  #<!-- recursive -->
+  &dbfTstgenUpdateFlplanFromPseudo($cellref, $childFlplan, $physOnly);  #<!-- recursive -->
 }
 
 }# sub dbfTstgenUpdateFlplanFromPseudo
@@ -79,7 +83,14 @@ sub dbfTstgenUpdateFlplanByID {
 
 my $module = $_[0];
 my $flplanID = $_[1];
-$MODULE_ALREADY{$module}->dbVNOMSetFloorplanID($flplanID);
+my $physOnly = $_[2];   #<!-- leave net routing alone, transfer physical data only -->
+
+#<!-- A module created in the pseudo DB and never committed logically has no
+#     VNOM entry.  The full commit path creates one in dbfTstgenUpdateVNOMFromPseudo,
+#     but the physical-only path does not run that, so do not assume it exists. -->
+if ( exists $MODULE_ALREADY{$module} ) {
+  $MODULE_ALREADY{$module}->dbVNOMSetFloorplanID($flplanID);
+}
 
 my $dbu = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetDBUnit;
 my @size = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetSize;
@@ -155,7 +166,7 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
       next;
     }
     my @bbox = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox;
-    for (my $i = 0; $i < 4; $i++) {
+    for (my $i = 0; $i <= $#bbox; $i++) {
       $bbox[$i] *= $dbu;
     }
     $FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddHierInst($inst, @bbox, $orient);
@@ -164,6 +175,19 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
 }#foreach inst
 
 ########################################### Net Routing ##########################################
+ my $flplan = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetFloorplan;
+ unless ( defined $flplan && $flplan ne "" &&
+          exists $PSEUDO_FLOORPLAN_ALREADY{$flplan} ) {
+   return;
+ }
+
+ #<!-- Physical-only: leave the routing alone.  The pseudo floorplan already
+ #     holds the routing it was loaded with at edit_module time, and the copy
+ #     at the bottom hands it back unchanged.  Rebuilding it from
+ #     PSEUDO_VNET_ALREADY here would wipe it, because "--physical_only" never
+ #     parsed the nets into that hash. -->
+ unless ( $physOnly ) {
+
  my %temp_layer_hash = ();
  my ($hLayer, $vLayer) = ("NONE", "NONE");
  foreach my $layer(keys %PTDB){
@@ -186,7 +210,6 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
     }
  }
 
- my $flplan = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetFloorplan;
  $PSEUDO_FLOORPLAN_ALREADY{$flplan}->dbFlplanWipeNets;
  foreach my $net (keys %{$PSEUDO_VNET_ALREADY{$module}}) {
     my $netId = $PSEUDO_VNET_ALREADY{$module}->{$net}->dbaTstgenGetPseudoNetId;
@@ -236,6 +259,8 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
        }#if created from earlyProto
     }#foreach route line
  }#for each net
+
+ }#unless physical only
 
  ###  copying flooorplan data ###
  $FLOORPLAN_ALREADY{$flplanID}->dbFlplanCopyRouting($PSEUDO_FLOORPLAN_ALREADY{$flplan});
@@ -370,8 +395,8 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   else {
     my @bbox = $PSEUDO_FLOORPLAN_ALREADY{$flplan}->dbFlplanGetHierInstBbox($inst);
     $status = "UNPLACED";
-    if ( @bbox == 4 ) {
-      for (my $i = 0; $i < 4; $i++) {
+    if ( @bbox >= 4 ) {
+      for (my $i = 0; $i <= $#bbox; $i++) {
         $bbox[$i] /= $dbu;
       }
       $status = "PLACED";
@@ -574,7 +599,14 @@ if ( $flplanID > 0 ) {
   &dbfTstgenLoadVNOMFlplan($module, $flplan);
 }
 else {
-  my @size = $PSEUDO_VINST_ALREADY{$parentName}{$instName}->dbPimDBGetInstRelBbox;
+  #<!-- An instance that has been moved or rectilinear-cut in Hier-View carries a
+  #     polygon outline (x0 y0 x1 y1 x2 y2 ...), not a 4 coordinate bbox -- see the
+  #     $no_of_cord test in display_hierarchy.  Reading coords 2 and 3 as (urx, ury)
+  #     then gives ury == lly whenever the first edge is horizontal, which is the
+  #     normal case, and the module lands here with a correct width and a height of
+  #     zero.  Take the real extents of the outline instead. -->
+  my @size = &dbfTstgenBboxFromCoords(
+               $PSEUDO_VINST_ALREADY{$parentName}{$instName}->dbPimDBGetInstRelBbox );
   $size[2] -= $size[0];  $size[3] -= $size[1];
   $size[0] = $size[1] = 0;
   $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenSetFloorplan("$module/_self_");
@@ -582,6 +614,34 @@ else {
 }
 
 }# sub dbfTstgenDownHierFlplan
+
+
+#<!-- Collapse a coordinate list to (llx, lly, urx, ury).  A 4 coordinate bbox is
+#     returned unchanged; a rectilinear outline of x/y pairs is reduced to its
+#     extents.  An odd or empty list is passed straight back for the caller to
+#     reject, rather than being turned into a plausible looking wrong box. -->
+sub dbfTstgenBboxFromCoords {
+
+my @coords = @_;
+
+if ( @coords == 4 ) {
+  return (@coords);
+}
+if ( @coords < 4 || @coords % 2 ) {
+  return (@coords);
+}
+
+my ($llx, $lly, $urx, $ury) = ($coords[0], $coords[1], $coords[0], $coords[1]);
+for (my $i = 2; $i < @coords; $i += 2) {
+  my ($x, $y) = ($coords[$i], $coords[$i + 1]);
+  if ( $x < $llx ) { $llx = $x; }
+  if ( $x > $urx ) { $urx = $x; }
+  if ( $y < $lly ) { $lly = $y; }
+  if ( $y > $ury ) { $ury = $y; }
+}
+return ($llx, $lly, $urx, $ury);
+
+}# sub dbfTstgenBboxFromCoords
 
 
 sub dbfTstgenCalcInstSizeFromChildFlplan {

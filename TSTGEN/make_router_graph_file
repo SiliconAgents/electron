@@ -902,17 +902,17 @@ if($_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
    print "Usage: route_hier\n";
    return;
 }
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 #if(-e "router_new.txt"){system("rm router_new.txt");}
 #if(-e "router_new.txt.output"){system("rm router_new.txt.output");}
 if(-e "hier_routes.grf"){system("rm hier_routes.grf");}
 if(-e "hier_routes.grf.output"){system("rm hier_routes.grf.output");}
 my $INPUT_NET_FILE = &write_hier_router_graph_new("--shrink");
 #my $INPUT_NET_FILE = &write_hier_router_graph_new("--noblkg");
-print "INFO-TST-ROUTE_HIER : 001 : PROTON_HOME is $env_proton_home\n";
+print "INFO-TST-ROUTE_HIER : 001 : ELECTRON_HOME is $env_electron_home\n";
 if ( -e $INPUT_NET_FILE) {
-  system("cp $env_proton_home/3RDBIN/._po* .");
-  system("$env_proton_home/3RDBIN/eeRouter $INPUT_NET_FILE");
+  system("cp $env_electron_home/3RDBIN/._po* .");
+  system("$env_electron_home/3RDBIN/eeRouter $INPUT_NET_FILE");
   system("rm -rf ._po*");
   &read_hier_router("-file" ,"$INPUT_NET_FILE.output");
   ##----------------------------------------------------------#
@@ -1406,7 +1406,7 @@ else {
     if ($_[$i] eq "-exclude") { $excludefile = $_[$i+1]; $exclude = 1;}
   }
 }
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 if(-e "router_new.txt"){system("rm router_new.txt");}
 if(-e "router_new.txt.output"){system("rm router_new.txt.output");}
 if($include == 1){
@@ -1419,10 +1419,10 @@ else{
   $INPUT_NET_FILE = &write_flat_router_graph();
 }
 
-print "INFO-TST-ROUTE_FLT : 001 : PROTON_HOME is $env_proton_home\n";
+print "INFO-TST-ROUTE_FLT : 001 : ELECTRON_HOME is $env_electron_home\n";
 if ( -e $INPUT_NET_FILE) {
-  system("cp $env_proton_home/3RDBIN/._po* .");
-  system("$env_proton_home/3RDBIN/eeRouter-g");
+  system("cp $env_electron_home/3RDBIN/._po* .");
+  system("$env_electron_home/3RDBIN/eeRouter-g");
   system("rm -rf ._po*");
   &read_flat_router("-file" ,"router_new.txt.output");
 } else {
@@ -1537,14 +1537,14 @@ if($_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
                      print "Usage: route_flat_for_spice\n";
    return;
 }
-my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 if(-e "router_new.txt"){system("rm router_new.txt");}
 if(-e "router_new.txt.output"){system("rm router_new.txt.output");}
 $INPUT_NET_FILE = &write_flat_router_graph_for_spice();
-print "INFO-TST-ROUTE_FLT : 001 : PROTON_HOME is $env_proton_home\n";
+print "INFO-TST-ROUTE_FLT : 001 : ELECTRON_HOME is $env_electron_home\n";
 if ( -e $INPUT_NET_FILE) {
-  system("cp $env_proton_home/3RDBIN/._po* .");
-  system("$env_proton_home/3RDBIN/eeRouter");
+  system("cp $env_electron_home/3RDBIN/._po* .");
+  system("$env_electron_home/3RDBIN/eeRouter");
   system("rm -rf ._po*");
   &read_flat_router("-file" ,"router_new.txt.output");
 } else {

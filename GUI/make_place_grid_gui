@@ -25,4 +25,77 @@ $design_canvas->delete("PCELL");
 
 }# sub dbPlaceGuiClearGrid
 
+sub dbPlaceGuiDisplayTracks {
+ my $gDBU = $GLOBAL->dbfGlobalGetDBU;
+ my $displayFactor = $GLOBAL->dbGlobalGetMicronFactor ;
+if ( exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}} ) {
+my @size = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetSize;
+$guiDiellx = $size[0];
+$guiDielly = $size[1];
+$guiDieurx = $size[2];
+$guiDieury = $size[3];
+   $width = ($guiDieurx - $guiDiellx)/ $gDBU ;
+   $height = ($guiDieury - $guiDielly)/ $gDBU ;
+   print "width : $width , height : $height \n" if ( $DEBUG == 100 );
+                                                                         }
+   my $numOfLayers = @{&serGetLefLayerList};
+   if($numOfLayers < 1){
+      print "WARN : No lef technology present ...\n";
+      print "INFO : please read the lef technology file before I can display the macros\n";
+      return;
+   }
+   my $xpitch = 0;
+   my $ypitch = 0;
+   my $nLH = 100;
+   my $nLV = 100;
+   my @layers = @{&serGetLefLayerList};
+   foreach my $layerName (@layers){
+      my $type = &serGetLefLayerAttr($layerName,"type");
+      if($type eq "ROUTING"){
+         my $dir = &serGetLefLayerAttr($layerName,"dir");
+         my $num = &serGetLefLayerAttr($layerName,"num");
+         my $pitch = &serGetLefLayerAttr($layerName,"pitch");
+         my $offset = &serGetLefLayerAttr($layerName,"offset");
+         if($dir eq "HORIZONTAL"){
+           if($nLH > $num){
+             $nLH = $num ; $ypitch = $pitch;
+             if ($offset eq "UND"){$shifty = 0.5*$ypitch;}
+             else                 {$shifty = $offset;}
+           }
+         }elsif($dir eq "VERTICAL"){
+           if($nLV > $num ){
+              $nLV = $num ; $xpitch = $pitch;
+              if ($offset eq "UND"){$shiftx = 0.5*$xpitch;}
+              else                 {$shiftx = $offset;}
+           }
+         }else{print "invalid direction on routing layer $layerName\n";}
+      } # if layer is a routing layer
+   } #search the first 2 consequtive orthgonal routing layers
+
+   print "lowest H : $nLH \= $ypitch, lowest V : $nLV \= $xpitch DBU : $gDBU\n" if ($DEBUG == 100);
+
+      my $nv = int ($width/$xpitch);
+      my $nh = int ($height/$ypitch);
+      print "T draw $nv and $nh lines \n" if ($DEBUG == 100 ) ;
+      for($i = 0; $i <= $nv; $i++) {
+          my $xx = ($xpitch*$i*$displayFactor)+20+($shiftx*$displayFactor);
+          if ($xx >(($width*$displayFactor) +20)){last;}
+          print "draw vertical line at $xx \n" if ($DEBUG == 100);
+          $design_worldcanvas->createLine($xx,20,$xx,20+$height*$displayFactor, -stipple=>'vdots', -fill=>"medium sea green", width=>1,-tags=>"GRIDTAG");
+      }#for vertical lines
+      for($j = 0; $j <=$nh; $j++) {
+          my $yy = ($ypitch*$j*$displayFactor)+ ($shifty*$displayFactor);
+          if ($yy > ($height*$displayFactor)){last;}
+          $design_worldcanvas->createLine(20,$yy+20,$width*$displayFactor+20,$yy+20, -stipple=>'hdots', -fill=>"PaleVioletRed4", width=>1,-tags=>"GRIDTAG");
+      }#for horizontal lines
+
+
+
+}#sub dbPlaceGuiDisplayTracks
+
+sub dbPlaceGuiClearTracks {
+print "Track display is OFF\n";
+$design_worldcanvas->delete("GRIDTAG");
+}#sub dbPlaceGuiClearTracks
+
 1;

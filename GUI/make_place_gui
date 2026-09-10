@@ -36,8 +36,30 @@ $design_worldcanvas->delete("flight_line");
 
 }#sub clear_gui_flight_line
 
+##############################################################################################################
+################################### popup gui to run graywolf flat Placer ####################################
+##############################################################################################################
+sub create_flat_graywolf_placer_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Graywolf Placer");
+  $subWin->geometry("400x150+0+0"); 
+  
+  my $porosity = -1; 
+  my $porosityFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  $porosityFrame->Scale(-orient=>'horizontal', -label=>"Porosity", -variable=>\$porosity, -relief=>'flat', -troughcolor=>'green', -showvalue=>1, -width=>3, -length=>100, -sliderlength=>20, -from=>-1, -to=>3, -font=>"Times 12 bold", -borderwidth=>1)->pack(-side=>'top');
+
+  $buttonFrame->Button(-text=>'Run',-command =>sub { #print "pp:$porosity\n";
+                                                     &place_graywolf("-porosity", $porosity); 
+                                                     $subWin->destroy;
+                                                    })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
+}#sub create_flat_graywolf_placer_popup
+
+
 ##########################################################################################################
-################################### Creating popup Gui to run mpl placer #################################
+############################ Creating popup Gui to run the flat graph placer #############################
 ##########################################################################################################
 #<!-- Drives place_flat_design: write_flat_graph, then 3RDBIN/flat_graph_placer,
 #     then read_flat_graph_placement.  Replaces Graywolf Placer on the Place
@@ -88,18 +110,60 @@ sub flat_place {
 
 }#sub flat_place
 
-sub create_hPlace_popup {
-my $popupgui = MainWindow->new();
-   $popupgui->title ("Hier Place ");
 
-my ($incr,$keeptempFiles) = ("","");
-my $Frame1 = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x'); 
-my $Frame2 = $popupgui->Frame()->pack(-side=>'bottom'); 
+##########################################################################################################
+############################## Creating popup Gui to run the macro arranger ##############################
+##########################################################################################################
+#<!-- Drives arrange_macros: write_flat_graph --nodefile_only, then
+#     3RDBIN/macro_arranger, then read_flat_nodefile.  Tidies macros that are
+#     already placed, it is not a from scratch macro placer, so a design with no
+#     placed macros has nothing for it to do. -->
+sub arrange_macros_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Arrange Macros");
+  $subWin->geometry("320x190+0+0");
 
-   $Frame1->Checkbutton(-text => "incr", -variable =>\$incr, -onvalue => "--incr")->pack(-side =>"left");
-   $Frame2->Button(-text=>"Ok", -padx=>0,-pady=>0,-command=>sub{&place_graph_mpl_pseudo($incr);$popupgui->destroy;})->pack(-side=>"left");
-   $Frame2->Button(-text=>"Cancel", -padx=>0,-pady=>0,-command=>sub{$popupgui->destroy;})->pack(-side=>"left");
-}#sub create_hPlace_popup 
+  my ($space, $macroArea, $margin) = ("", "", "");
+  my ($keepFiles, $writeOnly) = ("", "");
+
+  my $spaceFrame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $areaFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $marginFrame = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $optFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $noteFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $buttonFrame = $subWin->Frame()->pack(-side => 'bottom');
+
+  $spaceFrame->Label(-text  => "Spacing    (um) ")->pack(-side=>'left');
+  $spaceFrame->Entry(-textvariable => \$space, -width=>8)->pack(-side=>'left');
+  $areaFrame->Label(-text   => "Macro area (um2)")->pack(-side=>'left');
+  $areaFrame->Entry(-textvariable => \$macroArea, -width=>8)->pack(-side=>'left');
+  $marginFrame->Label(-text => "Die margin (um) ")->pack(-side=>'left');
+  $marginFrame->Entry(-textvariable => \$margin, -width=>8)->pack(-side=>'left');
+
+  $optFrame->Checkbutton(-text => "keep nodefiles", -variable => \$keepFiles,
+                         -onvalue => "--keep", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "write only", -variable => \$writeOnly,
+                         -onvalue => "--write_only", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $noteFrame->Label(-text => "arranges macros that are already placed",
+                    -font=>"Times 8")->pack(-side=>'left');
+
+  $buttonFrame->Button(-text=>'Run', -command => sub {
+                         my @args = ();
+                         if ( $space     =~ m/^\d+(\.\d+)?$/ ) { push(@args, "-space", $space); }
+                         if ( $macroArea =~ m/^\d+(\.\d+)?$/ ) { push(@args, "-macro_area", $macroArea); }
+                         if ( $margin    =~ m/^\d+(\.\d+)?$/ ) { push(@args, "-margin", $margin); }
+                         if ( $keepFiles ne "" ) { push(@args, $keepFiles); }
+                         if ( $writeOnly ne "" ) { push(@args, $writeOnly); }
+                         &arrange_macros(@args);
+                         $subWin->destroy;
+                       })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel', -command => sub {$subWin->destroy;})->pack(-side=>"left");
+
+}#sub arrange_macros_popup
+
 
 ##########################################################################################################
 ################################ Creating popup Gui to run the ePlacer ###################################
@@ -248,7 +312,7 @@ sub mincut_placer_popup {
 #     hypergraph, the bottom group places it.
 #
 #     Trust types is left on "auto" on purpose.  It decides whether the anchor
-#     stage believes proton's TYPE= column about what is a flop, and forcing it
+#     stage believes electron's TYPE= column about what is a flop, and forcing it
 #     on with an undescribed library hides every flop while forcing it off
 #     throws away a good liberty.  seedPlace works it out from the database and
 #     prints which way it went. -->
@@ -408,7 +472,7 @@ sub seed_place_popup {
 
 
 #<!-- Interactive hierarchical placement.  Unlike the rest of this menu the
-#     work happens in another program's window and proton blocks while it is
+#     work happens in another program's window and electron blocks while it is
 #     open, so the popup is short: the things worth deciding before the window
 #     appears.  Where the pins go on which edge, and over how many routing
 #     layers, is set inside hier_place itself. -->
@@ -457,7 +521,7 @@ sub hier_place_popup {
                          -onvalue => "--keep", -offvalue => "",
                          -font=>"Times 10 bold")->pack(-side=>"left");
 
-  $noteFrame->Label(-text => "proton waits for the window; press Save before closing",
+  $noteFrame->Label(-text => "electron waits for the window; press Save before closing",
                     -font=>"Times 8")->pack(-side=>'left');
 
   $buttonFrame->Button(-text=>'Run', -command => sub {
@@ -521,6 +585,28 @@ sub create_hier_graywolf_placer_popup {
   $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
 }#sub create_hier_graywolf_placer_popup
 
+
+##########################################################################################################
+########################## Creating popup Gui to run fractal placer on hierarchy #########################
+##########################################################################################################
+sub create_hier_fractal_placer_popup {
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Fractal Placer");
+  $popupgui->geometry("250x100+1000+300"); 
+
+  my ($incr,$keeptempFiles) = ("","");
+  my $Frame1 = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x'); 
+  my $Frame2 = $popupgui->Frame()->pack(-side=>'bottom'); 
+  
+  $Frame1->Checkbutton(-text => "incr", -variable =>\$incr, -onvalue => "--incr", -font=>"Times 10 bold")->pack(-side =>"left");
+  $Frame2->Button(-text=>"Ok", -font=>"Times 8 bold", -padx=>5,-pady=>5,-command=>sub{
+                    &place_hier_fractal($incr);
+                    $popupgui->destroy;
+                  })->pack(-side=>"left");
+  $Frame2->Button(-text=>"Cancel", -font=>"Times 8 bold", -padx=>5,-pady=>5,-command=>sub{$popupgui->destroy;})->pack(-side=>"left");
+}#sub create_hier_fractal_placer_popup 
+
+##########################################################################################################
 
 
 1;

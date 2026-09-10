@@ -4,14 +4,14 @@
 $BEEHOME = "/proj_pd/user_dev/rsrivastava/electron";
 use lib "/proj_pd/user_dev/rsrivastava/electron/LIBS";
 
-######### Now appending ./UTILS/hier_tool.nopath ########
+######### Now appending ./UTILS/proto_tool.nopath ########
 
 use Benchmark;
 my $t0 = new Benchmark;
 
 #****f* ModuleName/tool
 # FUNCTION
-#   tool invokes the proton QA System
+#   tool invokes the electron QA System
 #   it provides a user interactive shell which can be used as a command line interface (CLI)
 #   The GUI can be open at anytime by issuing "win" or "gui" on the CLI
 #****
@@ -86,7 +86,6 @@ sub interrupt {
 #perl2exe_include Tk::After ;
 ##perl2exe_include Tk::Widget ;
 ##perl2exe_include DynaLoader;
-##perl2exe_include DBD::mysql;
 ##perl2exe_include Tk::Scrollbar;
 
 use Benchmark;
@@ -121,16 +120,11 @@ use Tk::Optionmenu;
 
 #use utf8;
 use DBI;
-#use DBD::SQLite;
-#use DBD::mysql;
-#use DBD::mysqlPP;
 #use Carp::Heavy;
 #use GD::Graph::lines;
 use Spreadsheet::Read;
 use Spreadsheet::WriteExcel;
 #use Spreadsheet::ReadSXC;
-#use Text::CSV;
-#use Text::CSV_XS;
 use Tk::Balloon;
 use Tk::DynaTabFrame;
 use CGI;
@@ -230,7 +224,7 @@ use Verilog::VCD;
 
 ################################################################################################
 ################################################################################################
-#use Tk::Splashscreen;
+use Tk::Splashscreen;
 use JSON;
 
 
@@ -273,7 +267,6 @@ require "$BEEHOME/UTILS/make_spice_place";
 require "$BEEHOME/UTILS/make_run_gtkwave";
 
 ###### PARSERS #####
-require "$BEEHOME/PARSER/make_rw_config";
 require "$BEEHOME/PARSER/make_rw_verilog";
 require "$BEEHOME/PARSER/make_flatten_hier";
 require "$BEEHOME/PARSER/make_elaborate";
@@ -345,7 +338,7 @@ require "$BEEHOME/GUI/make_place_grid_gui";
 require "$BEEHOME/GUI/make_place_gui";
 require "$BEEHOME/GUI/make_place_gui_supportFunc";
 require "$BEEHOME/GUI/make_ruler";
-require "$BEEHOME/GUI/make_rw_gui_hier";
+require "$BEEHOME/GUI/make_rw_gui_proto";
 require "$BEEHOME/GUI/make_specify_gui";
 require "$BEEHOME/GUI/make_timing_gui";
 require "$BEEHOME/GUI/make_timingReport_browser";
@@ -598,7 +591,6 @@ require "$BEEHOME/EFARM/make_initMacDB";
 require "$BEEHOME/EFARM/make_services";
 require "$BEEHOME/EFARM/make_gui_efarm_tab";
 
-###### SCRATCH ############
 require "$BEEHOME/SCRATCH/make_LVS";
 
 ######## PLACER #########
@@ -669,11 +661,11 @@ srand(0);
 #   tools help commands
 ################################################################################################
 sub printMainHelp {
-print "Usage : proton                       : inteactive mode\n";
+print "Usage : electron_proto               : inteactive mode\n";
 print "Options available are : [--help | -h]             : print out this help\n";
 print "                        [--win]              : interactive mode with GUI\n";
 print "                        [--gui]              : interactive mode with GUI\n";
-print "                        [--version]          : print the version of proton\n";
+print "                        [--version]          : print the version of electron\n";
 print "                        [-init <fileName>]   : batch mode, tcl run file executed after tool invocation\n";
 print "                        [-f <fileName>]      : batch mode, tcl run file executed after tool invocation\n";
 print "                        [-log <fileName>]    : log fileName to be used to capture all messages from the tool\n";
@@ -733,12 +725,12 @@ $numArgs = $#ARGV;
 print "MSG : 000 : starting a fresh session\n";
 my $t1 = new Benchmark;
 my $td = timediff($t1,$t0);
-print "proton :",timestr($td),"\n";
+print "electron :",timestr($td),"\n";
 if ( $dbInitFile == 1 ) {                                     
      &source($INIT_FILE);                                     
                         }                                     
 if ( $daemonize == 1 ) {
-     print "Starting proton as a daemon on port $DAEMON_PORT\n";
+     print "Starting electron as a daemon on port $DAEMON_PORT\n";
      &allow_remote_login('-host', $hostname , '-port', $DAEMON_PORT);
                        }
 elsif ( $WINSTART == 1 ) {
@@ -874,8 +866,8 @@ sub reap_update_child_hash {
 }
 
 sub BEGIN {
-$build_version = "139";
-######buildadmin uncomment this# $build_version = "139";
+$build_version = "141";
+######buildadmin uncomment this# $build_version = "141";
 $NOLOG = 0 ;
 $HELP = 0;
 $overwritelog = 0;
@@ -890,7 +882,7 @@ for ( my $xx = -1; $xx < $numArgs ; $xx++ ) {
   }         
   elsif ( $ARGV[$xx] eq "--cleanlog" ) { 
     #$NOLOG = 1;
-    system ("rm proton.log*");
+    system ("rm electron.log*");
     #exit;
   }         
   elsif ( $ARGV[$xx] eq "--overwritelog" ) { 
@@ -905,15 +897,15 @@ $cmdfileName = "";
 if($LOG_FILE eq ""){
   if( ($NOLOG == 0) && ($overwritelog == 0) ) {
     for (my $i = 0 ; 1;$i++){
-      $logFileName ="proton.log".$i;
-      $cmdfileName ="proton.cmd".$i;
+      $logFileName ="electron.log".$i;
+      $cmdfileName ="electron.cmd".$i;
       if (-e $logFileName){
         $t= $i+1;
-        $logFileName = "proton.log".$t; 
-        $cmdfileName ="proton.cmd".$t;
+        $logFileName = "electron.log".$t; 
+        $cmdfileName ="electron.cmd".$t;
       }else {
-        $logFileName ="proton.log".$i;
-        $cmdfileName ="proton.cmd".$i;
+        $logFileName ="electron.log".$i;
+        $cmdfileName ="electron.cmd".$i;
         last;	
       }
     }
@@ -923,14 +915,14 @@ if($LOG_FILE eq ""){
   }
   if( $overwritelog == 1 ) {
     for (my $i = 0 ; 1;$i++){
-      $logFileName ="proton.log".$i;
-      $cmdfileName ="proton.cmd".$i;
+      $logFileName ="electron.log".$i;
+      $cmdfileName ="electron.cmd".$i;
       if (-e $logFileName){
       } 
       else {
         $i = $i-1;
-        $logFileName ="proton.log".$i;
-        $cmdfileName ="proton.cmd".$i;
+        $logFileName ="electron.log".$i;
+        $cmdfileName ="electron.cmd".$i;
         last;	
       }
     }
@@ -947,7 +939,7 @@ if($LOG_FILE eq ""){
 #my $ver = $GLOBAL->dbfGlobalGetVersion;
 print "\n\n\t#########################################\n";
 print "\t#                                       #\n";
-print "\t#       Welcome to Proton tool          #\n";
+print "\t#       Welcome to Electron tool        #\n";
 print "\t#          release-ID  $build_version              #\n";
 print "\t#                                       #\n";
 print "\t#########################################\n\n\n";
@@ -1000,7 +992,7 @@ print " \. done \n";
 
 print "\n\n\t#########################################\n";
 print "\t#                                       #\n";
-print "\t#     Thank you for using Proton!       #\n";
+print "\t#     Thank you for using Electron!     #\n";
 print "\t#                                       #\n";
 print "\t#########################################\n\n\n";
 closeTee(*STDOUT);

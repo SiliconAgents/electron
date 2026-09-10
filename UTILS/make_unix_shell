@@ -1,9 +1,9 @@
 #######################################################################################################################
-# Running unix commands from the proton prompt.
+# Running unix commands from the electron prompt.
 #
 # Dispatch order at the prompt (see the prompt loop in UTILS/*.nopath and sub source in ./executables):
 #
-#   1. a name in commandsFile          -> the proton command, always wins
+#   1. a name in commandsFile          -> the electron command, always wins
 #   2. "sys <cmd>"                     -> always the unix shell
 #   3. "peval <perl code>"             -> always perl eval
 #   4. <cmd> where <cmd> is executable  -> the unix shell
@@ -81,7 +81,7 @@ sub dbfResetShellCommandCache {
 # pipes, redirection, globs and quoting exactly as the user typed them.  stdout/stderr are inherited, so output lands
 # on the terminal directly rather than being captured and reprinted.
 #
-# The command is echoed to the proton command log as "sys <cmd>" so a replayed log does the same thing regardless of
+# The command is echoed to the electron command log as "sys <cmd>" so a replayed log does the same thing regardless of
 # what happens to be in $PATH on the machine replaying it.
 #######################################################################################################################
 sub dbfRunShellCommand {
@@ -129,7 +129,7 @@ sub dbfRunShellCommand {
 }#sub dbfRunShellCommand
 
 #######################################################################################################################
-# Append a shell command to the proton command log, if one is in use.
+# Append a shell command to the electron command log, if one is in use.
 #######################################################################################################################
 sub dbfLogShellCommand {
   my $cmdLine = $_[0];
@@ -187,7 +187,7 @@ sub dbfHandleUnknownCommand {
     my $perlcmd = "{".$line."}";
     eval($perlcmd);
     if($@){
-      print "ERR-UNIX-SHELL : 007 : $cmd : no such proton command, not found in \$PATH, and not valid perl\n";
+      print "ERR-UNIX-SHELL : 007 : $cmd : no such electron command, not found in \$PATH, and not valid perl\n";
       print "ERR-UNIX-SHELL : 007 : $@";
     }
     return 1;

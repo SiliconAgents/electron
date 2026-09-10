@@ -523,8 +523,8 @@ my $entry = $topFrame->Entry(-textvariable =>\$pinName)->pack(-side =>'left',-ex
                                     @SELPINS = split(/\,/,$pinName);
                                      });
 
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
-my $search_image = $popupWindow->Photo(-file=> "$path2eq/ETC/b1.png");
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
+my $search_image = $popupWindow->Photo(-file=> "$path2eq/ETC/b5_magnify2.gif");
 my $searchButton = $topFrame->Button(-image=>$search_image, -padx=>0,-pady=>0,-borderwidth=>0,-width=>22,-height=>20,-command=>sub{
                   &$refreshPinLists();
                })->pack(-side =>'right');
@@ -707,7 +707,8 @@ $canvas->CanvasBind('<3>' => sub {
 $canvas->CanvasBind('<ButtonRelease-3>' => sub {
                                                 $canvas->delete("TEMP_ON");
                                                 });
-my $generateTcl = $buttonFrame->Button(-text=>"Generate Tcl", -padx=>0,-pady=>0,-relief=>"raised", -borderwidth=>2, -command=>sub{&create_pinPlaceDB($module);$popupWindow->destroy;})->pack(-side=>'left');
+#my $generateTcl = $buttonFrame->Button(-text=>"Generate Tcl", -padx=>0,-pady=>0,-relief=>"raised", -borderwidth=>2, -command=>sub{&create_pinPlaceDB($module);$popupWindow->destroy;})->pack(-side=>'left');
+my $generateTcl = $buttonFrame->Button(-text=>"Place", -padx=>0,-pady=>0,-relief=>"raised", -borderwidth=>2, -command=>sub{&create_pinPlaceDB($module);$popupWindow->destroy;})->pack(-side=>'left');
 my $cancelButton = $buttonFrame->Button(-text=>"Cancel", -padx=>0,-pady=>0,-relief=>"raised", -borderwidth=>2, -command=>sub{$popupWindow->destroy;})->pack(-side=>'left');
 }#sub create_pinPlace_popup
 

@@ -1,5 +1,5 @@
 
-use XML::Writer;
+# use XML::Writer;
 
 sub serGetLefMacroTotalNum{
   my $totalNumOfMacros =   keys %PLDB;
@@ -74,6 +74,9 @@ my ($macroName,$pinName, $attr) = @_;
      if($attr eq "type"){
         my $pinType = $PLDB{$macroName}->dbMdbGetPinType($pinName); 
         return $pinType;
+     }elsif($attr eq "dir"){
+        my $pinDir = $PLDB{$macroName}->dbMdbGetPinDir($pinName); 
+        return $pinDir;
      }elsif($attr eq "rect"){ 
         my @RECTS = $PLDB{$macroName}->dbMdbGetPinRect($pinName);
         return \@RECTS;

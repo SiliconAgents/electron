@@ -3,7 +3,7 @@
 sub write_xml {
 
 #------- added by Rajeev ---------#
-use XML::Simple ;
+# use XML::Simple ;
 $xml = new XML::Simple (NoAttr=>1, RootName=>'data');
 $xml->XMLout(\%PLDB, OutputFile=>'mylef.xml');
 
@@ -19,7 +19,7 @@ $xml->XMLout(\%PLDB, OutputFile=>'mylef.xml');
 #-------------------------------------------------------------------------------------------------------------------------------------------------------------#
 
 sub write_xml_lef_old{
-use XML::Simple ;
+#use XML::Simple ;
 $xml = new XML::Simple (NoAttr=>1, RootName=>'data');
 
 my $noOfArguments = @_;
@@ -68,7 +68,7 @@ $xml->XMLout(\@arr, OutputFile=> $OUTPUT_FILE);
 
 #--------------------------------------------------------------------------------------------------------------------------------------------------------------#
 sub read_xml {
-use XML::Simple;
+# use XML::Simple;
 use Data::Dumper;
 $xml = new XML::Simple;
 my $noOfArguments = @_;
@@ -114,8 +114,8 @@ if(-e $INPUT_FILE ){
 
 #--------------------------------------------------------------------------------------------------------------------------------------------------------------#
 sub write_xml_def {
-use XML::Simple ;
-use XML::Writer;
+# use XML::Simple ;
+# use XML::Writer;
 use IO::File;
 
 
@@ -170,7 +170,7 @@ $output->close();
 
 #--------------------------------------------------------------------------------------------------------------------------------------------------#
 sub write_xml_lef {
-use XML::Writer;
+#use XML::Writer;
 use IO::File;
 
 my $output = new IO::File(">LEF.xml");

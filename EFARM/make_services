@@ -46,7 +46,7 @@ if (($hostname eq "") || ($username eq "") || ($passwd eq "") || ($mastername eq
                          return; 
                                                  }#if any field is empty
 
-$path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+$path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
 print "INFO-EFRM-STRT_SLV_DEMON : 001 : starting daemon on $hostname by invoking $path2eq\/d2\.exe\n";
        ##$forked_process_id = fork();
@@ -91,7 +91,7 @@ if (($hostname eq "") || ($username eq "") || ($passwd eq "") || ($mastername eq
                                                  }#if any field is empty
 
 print "INFO-EFRM : 001 : stop the slave $hostname \n";
-$path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+$path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 print "INFO-EFRM : 002 : stop the slave $hostname \n";
 system("$path2eq/d2.exe $hostname $username $passwd $path2eq/tesControld $mastername &");
 
@@ -124,7 +124,7 @@ if (($hostname eq "") || ($username eq "") || ($passwd eq "")){
                          print "                            -passwd<password> \n";
                                                  }#if any field is empty
 
-$path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+$path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 print "INFO-EFRM-STRT_MSTR_DEMON : 001 : start master daemon on $hostname\n";
 system("$path2eq/d2.exe $hostname $username $passwd $path2eq/tesControld &");
 #system("$path2eq/runDaemonsOnHosts.pl $hostname $username $passwd $path2eq/chooser_example1.pl &");
@@ -143,20 +143,20 @@ print "INFO-EFRM : 001 : stop master $master\n";
 
 
 #sub get_best_machine {
-#$path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+#$path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 #
 #
 #}#sub get_best_machine
 
 sub start_scheduler1 {
 #print " starting the scheduler daemon on the local machine\n";
-#my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+#my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 #system("$path2eq/schedulerd -sqldb \"$KB_DATABASE\" -sqluser $KB_ADMIN -sqlpasswd $KB_PASSWD -luser $Q_ADMIN -lpasswd $Q_PASSWD &");
 }#sub start_scheduler1
 
 sub start_scheduler {
 #print " starting the scheduler daemon on the local machine\n";
-#my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+#my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 #system("$path2eq/schedulerd -sqldb \"$KB_DATABASE\" -sqluser $KB_ADMIN -sqlpasswd $KB_PASSWD -luser $Q_ADMIN -lpasswd $Q_PASSWD &");
 
 use POSIX qw(setsid);
@@ -199,7 +199,7 @@ defined(my $pid = fork)   or die "Can't fork: $!";
 exit if $pid;
 setsid                    or die "Can't start a new session: $!";
 
-$path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+$path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 #while(1) {
 sleep(2);
 my $waitTime = 300;
@@ -311,7 +311,7 @@ sub get_best_machine {
 
 sub reset_testcase_everyday {
 @id_filename = 0;
-$path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+$path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 system("$path2eq/setStatus &");
 open(READ,"$path2eq/test.dat");
 while(<READ>){

@@ -12,6 +12,7 @@ $hier_canvas->delete('all');
 &createPopup_downHier_hierCanvas($hier_canvas);
 &createPopup_editMod_hierCanvas($hier_canvas);
 &createPopup_commitMod_hierCanvas($hier_canvas);
+&createPopup_physicalOnlyMod_hierCanvas($hier_canvas);
 &rectilinearCut_hierCanvas($hier_canvas);
 &create_popup_with_multipleChoice($hier_canvas);
 &call_display_pseudo_flyLines($hier_canvas);
@@ -26,12 +27,28 @@ sub display_hierarchy {
 &dbfTstGenUpdateDesignLib;
 my $box = [0, 0, 540, 540];
 @REDO_UNDO_ARRAY = ();
+%UNPLACED_HINST_HEIGHT = ();
 print "Displaying the hierarchical view of the design\n";
 if(exists $PSEUDO_MODULE_ALREADY{$TOP_MODULE} ) {
+   $top->configure(-title => " Electron (".$TOP_MODULE.")");  
    print "$TOP_MODULE is the current top module\n";
-     my @size = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetSize;   
-     my $xMulFact = 500/($size[2] - $size[0]);
-     my $yMulFact = 500/($size[3] - $size[1]);
+   my @size = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetSize;
+   #<!-- dbaTstgenGetSize reads the size out of the module's floorplan and
+   #     returns an empty list, or undef entries, when that floorplan is
+   #     missing or was never sized.  Do not divide by it blindly. -->
+   my ($modWidth, $modHeight) = (0, 0);
+   if ( @size >= 4 && defined $size[0] && defined $size[1] &&
+                      defined $size[2] && defined $size[3] ) {
+      $modWidth  = $size[2] - $size[0];
+      $modHeight = $size[3] - $size[1];
+   }
+   if ( $modWidth <= 0 || $modHeight <= 0 ) {
+      print "ERR-GUI-HIER_VIEW : 001 : module $TOP_MODULE has no valid size (width $modWidth, height $modHeight), nothing to display\n";
+      print "ERR-GUI-HIER_VIEW : 001 : give it a size first -- width/height on the top row of the Specify table, or -W/-H to createPseudoTopModule\n";
+      return;
+   }
+   my $xMulFact = 500/$modWidth;
+   my $yMulFact = 500/$modHeight;
    if($xMulFact < $yMulFact){
       $MICRONFACTOR = $xMulFact;
    }else {
@@ -42,7 +59,7 @@ if(exists $PSEUDO_MODULE_ALREADY{$TOP_MODULE} ) {
         $size[1] = 20 + $size[1]*$MICRONFACTOR;      
         $size[2] = 20 + $size[2]*$MICRONFACTOR;      
         $size[3] = 20 + $size[3]*$MICRONFACTOR;      
-     print join ",", @size;
+     #print join ",", @size;
      $hier_canvas->createRectangle($size[0]-20,$size[1]-20,$size[2]+20,$size[3]+20, -outline=>"black"); 
      my $top_rect = $hier_canvas->createRectangle($size[0],$size[1],$size[2],$size[3],-width=>3,-outline=>"green"); 
         $hier_canvas->itemconfigure($top_rect, -tags =>'HIER_TOP' );
@@ -53,7 +70,10 @@ if(exists $PSEUDO_MODULE_ALREADY{$TOP_MODULE} ) {
          my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstCellref;
          my $class = $DLDB{$cellref}->dbDldbGetClass if(exists $DLDB{$cellref});
          my $color = "red";
-         if($class == 0){$color = "orange";}# soft module 
+         if($class == 0){
+            $color = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstColor;
+            $color = "orange" if($color eq "UND"); 
+         }# soft module 
          elsif($class == 10){$color = "OliveDrab1"}#hard macro     
          my @loc = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstRelBbox;
          if((@loc == 0) || ($loc[0]==0 && $loc[1]==0 && $loc[2]==0 && $loc[3]==0)){  
@@ -251,10 +271,19 @@ my $canvas = $_[0];
                                       my $stipple = $hier_canvas->itemcget($tagList[1],-stipple);
                                       $canvas->createPolygon(@coords,-outline=>"red",-fill=>$fill_color,-stipple=>$stipple,-tags=>"TEMP_TEXT");
                                    } 
-                                   $canvas->createText($x,$y, -text=>$tagList[1] ,-anchor=>"sw",-tags=>"TEMP_TEXT",-fill=>"white",-font=>"Times 12");
+                                   ############################# to display density #######################
+                                   my $stdCellsArea = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$tagList[1]}->dbPimDBGetInstCellArea;
+                                   my $density = "UND";
+                                   if($stdCellsArea != ""){
+                                      my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$tagList[1]}->dbPimDBGetInstCellref;
+                                      my @size = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetSize;
+                                      $density = $stdCellsArea/(($size[2] - $size[0]) * ($size[3] - $size[1]));
+                                   }
+                                   ########################################################################
+                                   $canvas->createText($x,$y, -text=>$tagList[1]."(".sprintf("%.2f", $density).")" ,-anchor=>"sw",-tags=>"TEMP_TEXT",-fill=>"white",-font=>"Times 12");
                                    $canvas->CanvasBind("<B1-ButtonRelease>"=> [sub{$canvas->delete(TEMP_TEXT);}]);
                          }]);
-}#sub show_prmto_text
+}#sub show_proto_text
 
 ########################################################################################################
 ############ subroutine to resize hierarical instances in hierview via keybind {r+ lmb} ################
@@ -1090,7 +1119,10 @@ $canvas->CanvasBind('<m><B1-ButtonRelease>' => sub {
         &update_specifyTable_ifResizeOrMove_hierInst($inst, $cellref,\@poly_coords,"move");
         #-------- if assist mode floorplan os ON--- then call prachi's block placer----#
         print "compacting the block placement\n";
-        &update_hier_floorplan_loc;
+        #<!-- parentheses matter: "&sub;" passes the caller's @_ through, and a Tk
+        #     callback's @_ holds the widget, which ends up in write_hier_floorplan's
+        #     option string as "Tk::WorldCanvas=HASH(0x...)". -->
+        &update_hier_floorplan_loc();
         $canvas->delete('TEMP');
         $canvas->configure(-cursor => 'top_left_arrow');
         $moving_start = 0;
@@ -1173,6 +1205,24 @@ my $canvas = $_[0];
                   &call_popup_edit_module($cellref);  
                }}); 
 }#sub createPopup_editMod_hierCanvas
+
+########################################################################################################
+############### subroutine to edit/commit a Module, physical data only, via keyBind {P+ LMB} ###########
+########################################################################################################
+sub createPopup_physicalOnlyMod_hierCanvas {
+my $canvas = $_[0];
+   $canvas->CanvasBind('<P><1>', => sub{
+               my @xy = $canvas->eventLocation();
+               my $x = $xy[0];
+               my $y = $xy[1];
+               my @id      = $canvas->find(qw/withtag current/);
+               my @tagList = $canvas->gettags($id[0]);
+               if($TOP_MODULE eq $tagList[1]){&call_popup_physical_only_module($tagList[1]);
+               }elsif(exists $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$tagList[1]}){
+                  my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$tagList[1]}->dbPimDBGetInstCellref;
+                  &call_popup_physical_only_module($cellref);
+               }});
+}#sub createPopup_physicalOnlyMod_hierCanvas
 
 ########################################################################################################
 ######################### subroutine to open a popup window having diffrent options ####################
@@ -1666,7 +1716,7 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$TOP_MODULE}} ) {
     }
   }
 }
-}#sub
+}#sub display_hier_inst_pin
 
 sub display_hier_inst_name {
 
@@ -1674,11 +1724,17 @@ my $MICRONFACTOR = $GLOBAL->dbGlobalGetMicronFactor;
      foreach my $instance ( keys %{$PSEUDO_VINST_ALREADY{$TOP_MODULE}} ) {
        if($instance eq "PIN"){ 
        }else{ 
-         #my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstCellref;
          my @loc = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstRelBbox;
+         my $stdCellsArea = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstCellArea;
          my $llx = 20 + (($loc[0]+$loc[2])/2)*$MICRONFACTOR;
          my $lly = 20 + (($loc[1]+$loc[3])/2)*$MICRONFACTOR;
-         $hier_canvas->createText($llx,$lly,-fill=>'yellow',-text=>$instance, -tags=>"TEMP_TEXT", -anchor=>"nw");
+         my $density = "UND";
+         if($stdCellsArea != ""){
+            my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$instance}->dbPimDBGetInstCellref;
+            my @size = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetSize;
+            $density = $stdCellsArea/(($size[2] - $size[0]) * ($size[3] - $size[1]));
+         }
+         $hier_canvas->createText($llx,$lly,-fill=>'yellow',-text=>$instance."(".sprintf("%.2f", $density).")", -tags=>"TEMP_TEXT", -anchor=>"nw");
        }
      }
 }#sub display_hier_inst_name

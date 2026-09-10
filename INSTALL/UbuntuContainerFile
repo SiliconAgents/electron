@@ -3,9 +3,13 @@ FROM ubuntu:22.04
 
 # Set environment variables (optional)
 ENV DEBIAN_FRONTEND=noninteractive
+# en_US.UTF-8 is generated below; without it perl warns and falls back to the C locale
+ENV LANG=en_US.UTF-8
 
 # Update package lists and install necessary packages
 RUN apt-get update && \
+    apt-get install -y locales && \
+    locale-gen en_US.UTF-8 && \
     apt-get install -y --no-install-recommends perl-tk && \
     apt install -y cpanminus vim less xterm flex byacc bison build-essential && \
     apt-get install -y libxml-sax-expat-perl && \
@@ -49,8 +53,8 @@ RUN apt-get update && \
 # Set the working directory
 # WORKDIR /app
 #
-ENV PROTON_HOME=/proj_pd/user_dev/rsrivastava/potato
-ENV PATH=$PROTON_HOME:$PATH
+ENV ELECTRON_HOME=/proj_pd/user_dev/rsrivastava/potato
+ENV PATH=$ELECTRON_HOME:$PATH
 
 # Define the command to run when the container starts
 # CMD /home/rsrivastava/potato/proton

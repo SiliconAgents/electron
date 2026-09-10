@@ -109,7 +109,17 @@ my $referToPlef = \%MACROS_ALREADY;
 my $referToPlefInputPins = \%macroInputPins;
 my $referToPlefOutputPins = \%macroOutputPins;
 
-open (READ_INPUT_VERILOG, "$INPUT_VERILOG_FILE");
+# Smart file opening based on extension (gzip support)
+my $filehandle_cmd;
+if ($INPUT_VERILOG_FILE =~ /\.gz$/i) {
+    $filehandle_cmd = "zcat '$INPUT_VERILOG_FILE' |";
+    print "INFO-PAR-VERI : 005 : Begin reading the compressed Verilog file (gzipped)\n";
+} else {
+    $filehandle_cmd = "$INPUT_VERILOG_FILE";
+    print "INFO-PAR-VERI : 005 : Begin reading the verilog file\n";
+}
+
+open(READ_INPUT_VERILOG, $filehandle_cmd) or die "ERROR: Cannot open Verilog file '$INPUT_VERILOG_FILE': $!\n";
 open (WRITE_OUTPUT_VERILOG, ">$OUTPUT_VERILOG_FILE");
 
 my $count = 0;
@@ -126,7 +136,14 @@ my $NON_UNIQUE_INSTANCE_NAME = 0;
 my $pinDirection = "";
 my $pinName = "";
 my $pinToFrom = "";
-my $progBarMax = `wc -l $INPUT_VERILOG_FILE`;
+
+# Update progress bar line counting for gzipped files
+my $progBarMax;
+if ($INPUT_VERILOG_FILE =~ /\.gz$/i) {
+    $progBarMax = `zcat '$INPUT_VERILOG_FILE' | wc -l`;
+} else {
+    $progBarMax = `wc -l '$INPUT_VERILOG_FILE'`;
+}
 #my $progress = Term::ProgressBar->new(MAX);
 
 while(<READ_INPUT_VERILOG>) {
@@ -312,7 +329,6 @@ my $referToPlef = \%MACROS_ALREADY;
 my $referToPlefInputPins = \%macroInputPins;
 my $referToPlefOutputPins = \%macroOutputPins;
 
-open (READ_INPUT_VERILOG, "$INPUT_VERILOG_FILE");
 
 my $count = 0;
 my $scaled_count = 0;
@@ -329,6 +345,17 @@ my $pinDirection = "";
 my $pinName = "";
 my $pinToFrom = "";
 
+# Smart file opening based on extension (gzip support)
+my $filehandle_cmd;
+if ($INPUT_VERILOG_FILE =~ /\.gz$/i) {
+    $filehandle_cmd = "zcat '$INPUT_VERILOG_FILE' |";
+    print "INFO-PAR-VERI : 006 : Begin reading the compressed Verilog file (gzipped)\n";
+} else {
+    $filehandle_cmd = "$INPUT_VERILOG_FILE";
+    print "INFO-PAR-VERI : 006 : Begin reading the verilog file\n";
+}
+
+open(READ_INPUT_VERILOG, $filehandle_cmd) or die "ERROR: Cannot open Verilog file '$INPUT_VERILOG_FILE': $!\n";
 
 while(<READ_INPUT_VERILOG>) {
 
@@ -997,7 +1024,6 @@ my $referToPlef = \%MACROS_ALREADY;
 my $referToPlefInputPins = \%macroInputPins;
 my $referToPlefOutputPins = \%macroOutputPins;
 
-open (READ_INPUT_VERILOG, "$INPUT_VERILOG_FILE");
 
 my $count = 0;
 my $scaled_count = 0;
@@ -1020,7 +1046,25 @@ my $begin_cnt = 0;
 my $start_reading = 0;
 my $end_reading = 0;
 
-my $progBarMax = `wc -l $INPUT_VERILOG_FILE`;
+# Smart file opening based on extension (gzip support)
+my $filehandle_cmd;
+if ($INPUT_VERILOG_FILE =~ /\.gz$/i) {
+    $filehandle_cmd = "zcat '$INPUT_VERILOG_FILE' |";
+    print "INFO-PAR-VERI : 007 : Begin reading the compressed Verilog file (gzipped)\n";
+} else {
+    $filehandle_cmd = "$INPUT_VERILOG_FILE";
+    print "INFO-PAR-VERI : 007 : Begin reading the verilog file\n";
+}
+
+open(READ_INPUT_VERILOG, $filehandle_cmd) or die "ERROR: Cannot open Verilog file '$INPUT_VERILOG_FILE': $!\n";
+
+# Update progress bar line counting for gzipped files
+my $progBarMax;
+if ($INPUT_VERILOG_FILE =~ /\.gz$/i) {
+    $progBarMax = `zcat '$INPUT_VERILOG_FILE' | wc -l`;
+} else {
+    $progBarMax = `wc -l '$INPUT_VERILOG_FILE'`;
+}
 #print "progBarMax = $progBarMax\n";
 #my $progress = Term::ProgressBar->new($progBarMax);
 
@@ -1118,7 +1162,7 @@ if ( $assignBufName ne "" ) {
                            $right_expr =~ s/\s+//;
                            my @left_pins_or_nets_array = &array_of_blasted_expr($left_expr,$moduleName);
                            my @right_pins_or_nets_array = &array_of_blasted_expr($right_expr,$moduleName);
-                           print "\nDBG-PAR-VERI : 003 : assign connections left  @left_pins_or_nets_array and right @right_pins_or_nets_array" if ($DEBUG == 300);
+                           print "\nDBG-PAR-VERI : 003 : assign connections left  @left_pins_or_nets_array and right @right_pins_or_nets_array" if ($DEBUG);
                            if($#left_pins_or_nets_array == $#right_pins_or_nets_array) {
                              foreach my $temp_left_bit (@left_pins_or_nets_array){
                                my $temp_right_bit = shift(@right_pins_or_nets_array);
@@ -1814,5 +1858,95 @@ sub get_liberty_pin_index
   }
   return $liberty_pin_bit;
 }#sub get_liberty_pin_index
+
+################################################################################################
+#### writing verilog from lef DB                                                            ####
+################################################################################################
+sub lef2verilog {
+  use Benchmark;
+
+  my $noOfArg = @_;
+  if($noOfArg < 0 || $_[0] eq '-h' ||  $_[0] eq '-help' || $_[0] eq '-HELP'){
+     print "Usage : lef2verilog -output <verilog fileName (default is test.v)>\n";
+     print "                    --bus (switch to write busses)\n";                
+     print "                    -cell {cell1, cell2....} (by default it writes for all cells)\n";
+  }else{
+     my $t0 = new Benchmark;
+     my ($verilogFile, $busMode) = ("test.v", 0);
+     my @macro_list = ();
+     for(my $i = 0; $i < $noOfArg; $i++){
+         if($_[$i] eq "-output"){$verilogFile = $_[$i+1];}
+         if($_[$i] eq "--bus")  {$busMode = 1;}
+         if($_[$i] eq "-cell")  {
+            my $cellListStr = $_[$i+1]; $cellListStr =~ s/\{|\}//g;
+            @macro_list = split(/\,/, $cellListStr);
+         }
+     }#for
+     open(WRITE_VERILOG,">$verilogFile"); 
+     if(@macro_list < 1){
+        @macro_list = @{&serGetLefMacroList};
+     }
+     foreach $macroName (@macro_list ) {  
+       print WRITE_VERILOG "\nmodule $macroName\(";
+       my @pins = $PLDB{$macroName}->dbMdbGetPins;
+       if($busMode != 1){
+          print WRITE_VERILOG join ",",@pins;
+          print WRITE_VERILOG "\)\;\n\n";
+          foreach my $pinName ( @pins ) { 
+            my $flag = $PLDB{$macroName}->dbMdbGetPinDir($pinName);
+            my $pinDir = "";
+            if   ($flag == 0){$pinDir = "input";  }
+            elsif($flag == 1){$pinDir = "output"; }
+            elsif($flag == 2){$pinDir = "inout";  }
+           
+            print WRITE_VERILOG "$pinDir $pinName\;\n"; 
+          }#foreach pinName
+       }else{
+          my %BUSSES = ();
+          foreach my $pinName ( @pins ) { 
+            my $busWidth = $PLDB{$macroName}->dbMdbGetPinBusWidth($pinName);
+            my $busBit = $PLDB{$macroName}->dbMdbGetPinBusBit($pinName);
+            my $busBase = $PLDB{$macroName}->dbMdbGetPinBusBaseName($pinName);
+            if($busWidth == 1){
+               push(@{$BUSSES{$busBase}}, $busBit); 
+            }else{
+               $BUSSES{$pinName} = 0;
+            }      
+          }#foreach pinName
+
+          print WRITE_VERILOG join ",",keys %BUSSES;
+          print WRITE_VERILOG "\)\;\n\n";
+
+          foreach my $busName (keys %BUSSES){
+             my @bits = sort{$a<=>$b} @{$BUSSES{$busName}};
+             my $dir = $PLDB{$macroName}->dbMdbGetPinDir($busName);
+             if(@bits > 0){
+                $dir = $PLDB{$macroName}->dbMdbGetPinDir($busName."[$bits[0]]");     
+             }
+             my $pinDir = "";  
+             if   ($dir == 0){$pinDir = "input";  }
+             elsif($dir == 1){$pinDir = "output"; }
+             elsif($dir == 2){$pinDir = "inout";  }
+
+             if(@bits > 0){
+                print WRITE_VERILOG "$pinDir [$bits[-1]:$bits[0]] $busName\;\n";
+             }else{
+                print WRITE_VERILOG "$pinDir $busName\;\n";
+             }  
+          }
+
+       } 
+       print WRITE_VERILOG "\nendmodule\n";
+     }
+     close(WRITE_VERILOG);
+
+     my $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "Command lef2verilog took:",timestr($td),"\n";
+  }
+
+}#sub lef2verilog
+
+################################################################################################
 
 1;

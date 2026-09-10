@@ -1,42 +1,147 @@
-
+##############################################################################################################
+############################################## create nets function ##########################################
+##############################################################################################################
 sub create_net {
-my $noOfArguments = @_;
-if($_[0] eq '-h') { print "Usage : create_net -type <signal | power | ground>\n";
-                    print "             -name <name of the net to be created >\n";
-                    print "             --force    \n";
-                  } else {
-
-my $netName = "";
-
-for(my $i = 0 ; $i < $noOfArguments ;  $i++){
-if($_[$i] eq "-type"){  $netType = $_[$i+1];}
-if($_[$i] eq "-name") { print "HI I AM IN\n"; $netName = $_[$i+1]; }
-if($_[$i] eq "--force"){  $forced = 1;}
-                              }# for no of arguments
-
-print "Trying to create net $netName \n";
-# first check if the net exists in the NETS and SPECIALNETS db's ...if it does not exist then create the net in the DB
-if ( exists $NETS_ALREADY{$netName} ) {
-     print "ERR : net $netName already exists in the design\n";
-                                      }
-elsif ( exists $SNETS_ALREADY{$netName} ) {
-     print "ERR : net $netName already exists in the design\n";
-                                      }
-else {
-     print "creating net $netName of type $netType\n";
-$NETS_ALREADY{$netName} = NetDB::new();
-$NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
-$NADB{$netName} = NetsAttrDB::new();
-if ( $netType eq "signal" ) { $NADB{$netName}->dbNadbSetNetType(0); }
-if ( $netType eq "power" ) { $NADB{$netName}->dbNadbSetNetType(1); }
-if ( $netType eq "ground" ) { $NADB{$netName}->dbNadbSetNetType(2); }
-
+  my $noOfArguments = @_;
+  if($_[0] eq '-h'){ 
+     print "Usage : create_net -type <signal | power | ground>\n";
+     print "             -name <name of the net to be created >\n";
+     print "             --force    \n";
+  }else{
+     my $netName = "";
+     
+     for(my $i = 0 ; $i < $noOfArguments ;  $i++){
+         if($_[$i] eq "-type")  { $netType = $_[$i+1];}
+         if($_[$i] eq "-name")  { $netName = $_[$i+1];}
+         if($_[$i] eq "--force"){ $forced = 1;}
+     }# for no of arguments
+     
+     print "Trying to create net $netName \n";
+     # first check if the net exists in the NETS and SPECIALNETS db's ...if it does not exist then create the net in the DB
+     if(exists $NETS_ALREADY{$netName}){
+        print "ERR : net $netName already exists in the design\n";
+     }elsif(exists $SNETS_ALREADY{$netName}){
+        print "ERR : net $netName already exists in the design\n";
+     }else{
+        print "creating net $netName of type $netType\n";
+        $NETS_ALREADY{$netName} = NetDB::new();
+        $NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
+        $NADB{$netName} = NetsAttrDB::new();
+        if($netType eq "signal") { $NADB{$netName}->dbNadbSetNetType(0); }
+        if($netType eq "power")  { $SNETS_ALREADY{$netName} = $NETS_ALREADY{$netName}; $NADB{$netName}->dbNadbSetNetType(1); $GLOBAL->dbGlobalSetPowerNet($netName); }
+        if($netType eq "ground") { $SNETS_ALREADY{$netName} = $NETS_ALREADY{$netName}; $NADB{$netName}->dbNadbSetNetType(2); $GLOBAL->dbGlobalSetGroundNet($netName); }
      }
-
-}
-
+  }
 }# sub create_net
 
+##############################################################################################################
+############################################## delete nets function ##########################################
+##############################################################################################################
+sub delete_net {
+  my $noOfArguments = @_;
+  if($noOfArguments < 2 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP'){ 
+     print "Usage : delete_net -type <signal | pg>\n";
+     print "                   -name <name of the net to be created >\n";
+  }else{
+     my ($netType, $netStr) = ("", "");
+     
+     for(my $i = 0 ; $i < $noOfArguments ;  $i++){
+         if($_[$i] eq "-type")  { $netType = $_[$i+1];}
+         if($_[$i] eq "-name")  { $netStr = $_[$i+1];}
+     }# for no of arguments
+
+     my @netList = ();
+     if($netStr eq "All"){
+        foreach my $netName ( keys %NETS_ALREADY ){
+           my $type = $NADB{$netName}->dbNadbGetNetType;
+           if($netType eq 'signal' && $type == 0){
+              if(exists $NADB{$netName}){
+                 delete $NADB{$netName};
+              } 
+              if(exists $NETS_ALREADY{$netName}){
+                 delete $NETS_ALREADY{$netName};
+              }
+              if(exists $NETS_ROUTING_ALREADY{$netName}){
+                 delete $NETS_ROUTING_ALREADY{$netName};
+              }
+           }elsif($netType eq 'pg' && ($type == 1 || $type == 2)){
+              if(exists $NADB{$netName}){
+                 delete $NADB{$netName};
+              } 
+              if(exists $NETS_ALREADY{$netName}){
+                 delete $NETS_ALREADY{$netName};
+              }
+              if(exists $SNETS_ALREADY{$netName}){
+                 delete $SNETS_ALREADY{$netName};
+              }
+              if(exists $NETS_ROUTING_ALREADY{$netName}){
+                 delete $NETS_ROUTING_ALREADY{$netName};
+              }
+              print "deleting net $netName of type $type\n";
+              if($type == 1){$GLOBAL->dbGlobalSetPowerNet("");}
+              if($type == 2){$GLOBAL->dbGlobalSetPowerNet("");}
+           }
+        }
+     }else{
+       my @netList = split(/\,/, $netStr);
+       foreach my $netName (@netList){
+          if(exists $NADB{$netName}){
+             my $type = $NADB{$netName}->dbNadbGetNetType;
+             print "deleting net $netName of type $type\n";
+             if($type == 1){$GLOBAL->dbGlobalSetPowerNet("");}
+             if($type == 2){$GLOBAL->dbGlobalSetGroundNet("");}
+             delete $NADB{$netName};
+          } 
+          if(exists $NETS_ALREADY{$netName}){
+             delete $NETS_ALREADY{$netName};
+          }
+          if(exists $SNETS_ALREADY{$netName}){
+             delete $SNETS_ALREADY{$netName};
+          }
+          if(exists $NETS_ROUTING_ALREADY{$netName}){
+             delete $NETS_ROUTING_ALREADY{$netName};
+          }
+       }
+     }
+  }
+}#sub delete_net
+
+##############################################################################################################
+############################################# connect net function ###########################################
+##############################################################################################################
+sub connect_net {
+  my $noOfArguments = @_;
+  if($_[0] eq '-h'){ 
+     print "Usage : connect_net -net <net Name>\n";
+     print "                    -inst <instance name>\n";
+     print "                    -pin  <instance pin>\n";
+  }else{
+     my ($netName, $instName, $pinName) = ("", "", "");
+     
+     for(my $i = 0 ; $i < $noOfArguments ;  $i++){
+         if($_[$i] eq "-net")  { $netName = $_[$i+1]; }
+         if($_[$i] eq "-inst") { $instName = $_[$i+1];}
+         if($_[$i] eq "-pin")  { $pinName = $_[$i+1]; }
+     }# for no of arguments
+     
+     print "Trying to add connection for $netName \n";
+
+     if(exists $NETS_ALREADY{$netName}){
+        if(exists $COMP_ALREADY{$instName}){
+           $NETS_ALREADY{$netName}{$instName} = $pinName;
+           $COMP_ALREADY{$instName}{$pinName} = $netName;
+        }else{
+           print "ERR-CONN-PG-NET : 002 : $instName not found\n";
+        }
+     }else{
+        print "ERR-CONN-PG-NET : 001 : $netName not found\n";
+     }
+  }
+}# sub connect_net
+
+##############################################################################################################
+############################################# trace power connection #########################################
+##############################################################################################################
 sub tracePowerConnection {
 foreach $inst ( keys %COMP_ALREADY ) {
         my $cellref = $CADB{$inst}->dbCadbGetCellref;

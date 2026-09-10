@@ -450,7 +450,7 @@ return (%WL);
 }#sub report_net_new
 #-----------------------------------------------------------------------------------------------------------------------------#
 sub report_design_xml {
-use XML::Writer;
+# use XML::Writer;
 use IO::File;
 my $output = new IO::File(">design_rpt.xml");
 my $writer = new XML::Writer(OUTPUT => $output,DATA_MODE => 1);
@@ -3406,7 +3406,7 @@ sub def_split_and_return_in_xml {
 use Benchmark;
 my $t0 = new Benchmark;
 
-use XML::Writer;
+# use XML::Writer;
 
 my $no_of_Arguments = @_;
 if($no_of_Arguments < 0 || $_[0] eq "-h"){

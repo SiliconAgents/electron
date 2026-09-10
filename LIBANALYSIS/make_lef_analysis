@@ -350,7 +350,7 @@ print "INFO-LIBLYIS-FND_PN_FCTR : 014 : noOfPins->$noOfPins; get_cell_norm_routa
 }#sub find_pinFactor
 #----------------------------------------------------------------------------------------------------------------------------------#
 sub report_lef_analysis_xml {
-use XML::Writer;
+#use XML::Writer;
 use IO::File;
 
 my $noOfArguments = @_;

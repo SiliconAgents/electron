@@ -16,6 +16,7 @@ my $dd = {
           PM => "UND",
           cellref => "UND",
           L => [],
+          BBOX => [],
           O => N,
           F => "UNPLACED",
           Name => "UND",
@@ -25,6 +26,8 @@ my $dd = {
           Rst => "1", 
           Width => "0",
           Depth => "0", 
+          Area => 0, 
+          Color => "UND", 
           Input => "UND",
           Output => "UND",
           Bidi => "UND",
@@ -68,34 +71,67 @@ return($val);
 #----------------------------------------------#
 # Added by Rajeev
 
-sub dbPimDBSetInstRelBbox {
-#my($self,$x0,$y0, $x1,$y1) = @_;
-#$self->{L}->[0] = $x0;
-#$self->{L}->[1] = $y0;
-#$self->{L}->[2] = $x1;
-#$self->{L}->[3] = $y1;
 ######### addedd due to polygon in place of rectangle ###
+# {BBOX} is the authoritative shape, in coordinates relative to the parent
+# module: 4 values (llx,lly,urx,ury) for a rectangle, or 2n values
+# (x1,y1,x2,y2,...) for a polygon.  {L} is the placement point -- by
+# definition the lower-left corner of that shape.  It is DERIVED from
+# {BBOX} so the two cannot disagree; setting it translates the shape rather
+# than overwriting an independent location.
+
+sub dbPimDBSetInstRelBbox {
 my ($self, @bbox) = @_;
+@{$self->{BBOX}} = ();  # fix if @bbox length ne @{$self->{BBOX}} length
 for(my $i=0; $i <=$#bbox; $i++){
-    $self->{L}->[$i] = $bbox[$i];
+    $self->{BBOX}->[$i] = $bbox[$i];
 }
+$self->dbPimDBSyncInstRelLoc;
 }# sub dbPimDBSetInstRelBbox
 
 sub dbPimDBGetInstRelBbox {
 my($self) = @_;
-my @bbox = @{$self->{L}};
+my @bbox = @{$self->{BBOX}};
 return(@bbox);
 }# sub dbPimDBGetInstRelBbox
 
 
+#<!-- recompute the lower-left placement point from the shape -->
+sub dbPimDBSyncInstRelLoc {
+my ($self) = @_;
+my @bbox = @{$self->{BBOX}};
+if ( @bbox < 2 ) {
+  $self->{L} = [];
+  return;
+}
+my ($llx, $lly) = ($bbox[0], $bbox[1]);
+for (my $i = 2; $i < $#bbox; $i += 2) {
+  if ( $bbox[$i]     < $llx ) { $llx = $bbox[$i];     }
+  if ( $bbox[$i + 1] < $lly ) { $lly = $bbox[$i + 1]; }
+}
+$self->{L} = [ $llx, $lly ];
+}# sub dbPimDBSyncInstRelLoc
+
+#<!-- move the instance: translate the shape so its lower-left lands on
+#     ($x0,$y0).  Shape, point count and size are all preserved. -->
 sub dbPimDBSetInstRelLoc {
 my ($self, $x0, $y0) = @_;
-$self->{L}->[0] = $x0;
-$self->{L}->[1] = $y0;
+my @bbox = @{$self->{BBOX}};
+if ( @bbox >= 2 ) {
+  my ($oldx, $oldy) = $self->dbPimDBGetInstRelLoc;
+  my ($dx, $dy) = ($x0 - $oldx, $y0 - $oldy);
+  for (my $i = 0; $i < $#bbox; $i += 2) {
+    $self->{BBOX}->[$i]     = $bbox[$i]     + $dx;
+    $self->{BBOX}->[$i + 1] = $bbox[$i + 1] + $dy;
+  }
+}
+$self->{L} = [ $x0, $y0 ];
 }# sub dbPimDBSetInstRelLoc
 
 sub dbPimDBGetInstRelLoc {
 my ($self) = @_;
+unless ( defined $self->{L} && @{$self->{L}} >= 2 ) {
+  $self->dbPimDBSyncInstRelLoc;  #<!-- shape was set, loc never cached -->
+}
 my $x0 = $self->{L}->[0];
 my $y0 = $self->{L}->[1];
 return ($x0, $y0);
@@ -130,6 +166,42 @@ my ($self) = @_;
     my $flag =  $self->{F};
   print "status : $flag\n";
 }#sub dbgPimDBGetInstStatus
+
+#----------------------------------------------#
+sub dbPimDBSetInstCellArea {
+my ($self,$area) = @_;
+    $self->{Area} = $area;
+}#sub dbPimDBSetInstCellArea
+
+sub dbPimDBGetInstCellArea{
+my ($self) = @_;
+  my $area =  $self->{Area};
+return($area);
+}#sub dbPimDBGetInstCellArea
+
+sub dbgPimDBGetInstCellArea {
+my ($self) = @_;
+    my $area =  $self->{Area};
+  print "std cells area : $area\n";
+}#sub dbgPimDBGetInstCellArea
+
+#----------------------------------------------#
+sub dbPimDBSetInstColor {
+my ($self,$area) = @_;
+    $self->{Color} = $area;
+}#sub dbPimDBSetInstColor
+
+sub dbPimDBGetInstColor{
+my ($self) = @_;
+  my $area =  $self->{Color};
+return($area);
+}#sub dbPimDBGetInstColor
+
+sub dbgPimDBGetInstColor {
+my ($self) = @_;
+    my $area =  $self->{Color};
+  print "color : $area\n";
+}#sub dbgPimDBGetInstColor
 
 #----------------------------------------------#
 sub dbPimDBSetInstCellref {

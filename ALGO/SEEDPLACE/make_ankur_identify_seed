@@ -70,28 +70,28 @@ sub dbDebugPlaceDB {
     return;
  }else{
     if($_[0] eq "--ankur"){
-       open ( MYFORMAT, ">$file");    
-format MYFORMAT = 
-@<<<<<<<<<<<<<<<<<<<<<<<        @<<<<<<<<    @<<<<<<<    @<<<<<<<<    
-$flop                           $flopNum     $fanInCnt   $fanOutCnt    
-. 
-format MYFORMAT_TOP = 
-ffName                        ffNum       fanInCnt    fanOutCnt
----------------------------------------------------------------
-.
-        #write MYFORMAT;
-        #print WRITE "ffName\t\tffNum\t\tfanInCnt\tfanOutCnt\n";
-        my @flopList = $PLACE{$TOP_MODULE}->dbPlaceGetFlopList;
-        foreach $flop (@flopList){         
-           $flopNum = $PLACE{$TOP_MODULE}->dbPlaceGetNumberByName($flop);
-           my @fanIns = $PLACE{$TOP_MODULE}->dbPlaceGetFanInsByName($flop);
-           my @fanOuts = $PLACE{$TOP_MODULE}->dbPlaceGetFanOutsByName($flop);
-           $fanInCnt = @fanIns;
-           $fanOutCnt = @fanOuts;
-           #print WRITE "$flop\t\t$flopNum\t\t$fanInCnt\t\t$fanOutCnt\n";
-           write MYFORMAT;
-        }  
-       close WRITE;
+#       open ( MYFORMAT, ">$file");    
+#format MYFORMAT = 
+#@<<<<<<<<<<<<<<<<<<<<<<<        @<<<<<<<<    @<<<<<<<    @<<<<<<<<    
+#$flop                           $flopNum     $fanInCnt   $fanOutCnt    
+#. 
+#format MYFORMAT_TOP = 
+#ffName                        ffNum       fanInCnt    fanOutCnt
+#---------------------------------------------------------------
+#.
+#        #write MYFORMAT;
+#        #print WRITE "ffName\t\tffNum\t\tfanInCnt\tfanOutCnt\n";
+#        my @flopList = $PLACE{$TOP_MODULE}->dbPlaceGetFlopList;
+#        foreach $flop (@flopList){         
+#           $flopNum = $PLACE{$TOP_MODULE}->dbPlaceGetNumberByName($flop);
+#           my @fanIns = $PLACE{$TOP_MODULE}->dbPlaceGetFanInsByName($flop);
+#           my @fanOuts = $PLACE{$TOP_MODULE}->dbPlaceGetFanOutsByName($flop);
+#           $fanInCnt = @fanIns;
+#           $fanOutCnt = @fanOuts;
+#           #print WRITE "$flop\t\t$flopNum\t\t$fanInCnt\t\t$fanOutCnt\n";
+#           write MYFORMAT;
+#        }  
+#       close WRITE;
     }elsif($_[0] eq "--conn"){
     }elsif($_[0] eq "--slk"){
     }elsif($_[0] eq "--dist"){

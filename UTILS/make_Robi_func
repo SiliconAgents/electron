@@ -482,14 +482,14 @@ return($pin_num);
 
 
 sub update_hier_floorplan_loc {
-  my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+  my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
   my $input_fpdef = $TOP_MODULE.".fpdef";
   my $output_fpdef = $TOP_MODULE."_out".".fpdef";
   my $ARG1 = "-fpdef";
   my $ARG2 = "-output";
 
     &write_hier_floorplan;
-    #system("$env_proton_home/SCRATCH/blockPlacerGui.pl $ARG1 $input_fpdef $ARG2 $output_fpdef");
+    #system("$env_electron_home/SCRATCH/blockPlacerGui.pl $ARG1 $input_fpdef $ARG2 $output_fpdef");
     &dbPlaceBlockCompactor("-fpdef", $input_fpdef, "-output", $output_fpdef);
     &read_hier_floorplan("-fpdef", $output_fpdef);
 }#sub update_hier_floorplan_loc

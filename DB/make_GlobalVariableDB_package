@@ -70,7 +70,7 @@ my $design = {
                     open_instance_pop_up => 0,
                     open_pinRect_pop_up => 0,
                     DIE_CENTRE => 0,
-                    PROTON_HOME => $ENV{PROTON_HOME},
+                    ELECTRON_HOME => $ENV{ELECTRON_HOME},
                     pin_layer => "",
                     runtime => new Benchmark,
                     FLAT_IMAGE_BBOX => [],
@@ -824,16 +824,16 @@ return($val);
 }#sub dbfGlobalGetDieCentre
 
 #-----------------------------------------------#
-sub dbfGlobalSetProtonHome{
+sub dbfGlobalSetElectronHome{
 my($self,$val) = @_;
-$self->{PROTON_HOME} = $val;
-}#sub dbfGlobalSetProtonHome
+$self->{ELECTRON_HOME} = $val;
+}#sub dbfGlobalSetElectronHome
 
-sub dbfGlobalGetProtonHome {
+sub dbfGlobalGetElectronHome {
 my ($self) = @_;
-my $val = $self->{PROTON_HOME};
+my $val = $self->{ELECTRON_HOME};
 return($val);
-}#sub dbfGlobalGetProtonHome  
+}#sub dbfGlobalGetElectronHome  
 #-----------------------------------------------#
 
 sub dbfGlobalSetPinlayer {

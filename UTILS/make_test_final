@@ -427,7 +427,7 @@ sub new_run_placer_again_input_already
   $full_path_name =~ s/\//_/g;
   my $INPUT_NET_FILE = "$cellref.txt";
   my $NODE_FILE = "nodefile";
-  my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+  my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
   chdir( "benaras/$full_path_name");
   my $second_indicator_file_name = "second_indicator_${cellref}_${instance_in_process}";
   open(WRITE,">$second_indicator_file_name");
@@ -435,7 +435,7 @@ sub new_run_placer_again_input_already
   close(WRITE);
   #while(!(-e "$placeLogFileName")){ 
   #  if (fork() == 0) {exec("$env_eqator_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName&");}
-  #  if (fork() == 0) {exec("$env_proton_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName&");}
+  #  if (fork() == 0) {exec("$env_electron_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName&");}
   #  sleep(5);
   #}
   #my $forked_pid_mpl ;
@@ -447,7 +447,7 @@ sub new_run_placer_again_input_already
   #  }
   #  if ($forked_pid_mpl == 0)  {
   #    exec("$env_eqator_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
-  #    exec("$env_proton_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
+  #    exec("$env_electron_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
   #  }else {
   #    print "\nforked a new process for mpl\n" ;
   #  }
@@ -461,7 +461,7 @@ sub new_run_placer_again_input_already
     }
     if ($forked_pid_mpl == 0)  {
       #exec("$env_eqator_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
-      exec("$env_proton_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
+      exec("$env_electron_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
       #my $forked_pid_child_mpl ;
       #undef $forked_pid_child_mpl ;
       #while (!defined ($forked_pid_child_mpl = fork())){
@@ -470,7 +470,7 @@ sub new_run_placer_again_input_already
       #}
       #if ($forked_pid_child_mpl == 0)  {
       #  exec("$env_eqator_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
-      #  exec("$env_proton_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
+      #  exec("$env_electron_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
       #}else{
       #  print "\nforked a new child process for mpl\n" ;
       #  CORE::exit(0) ;

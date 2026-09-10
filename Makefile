@@ -1,7 +1,7 @@
 1:
 	./UTILS/make_tool
-	\rm -rf proton.log* ; cd ~/ ; \rm -rf proton.log*
-	\rm -rf proton.cmd* ; cd ~/ ; \rm -rf proton.cmd*
+	\rm -rf electron.log* ; cd ~/ ; \rm -rf electron.log*
+	\rm -rf electron.cmd* ; cd ~/ ; \rm -rf electron.cmd*
 	./UTILS/make_tool_hier
 	./UTILS/make_tool_proto
-	chmod +x proton proton_hier proton_proto
+	chmod +x electron electron_hier electron_proto

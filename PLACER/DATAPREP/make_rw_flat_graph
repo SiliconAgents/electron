@@ -824,7 +824,7 @@ print "Command read_flat_graph_placement took:",timestr($td),"\n";
 # INPUTS
 #
 #       options :
-#               -placer <path> : defaults to $PROTON_HOME/3RDBIN/flat_graph_placer
+#               -placer <path> : defaults to $ELECTRON_HOME/3RDBIN/flat_graph_placer
 #               -fanout_limit <n> : passed to write_flat_graph
 #
 #       switches :
@@ -865,9 +865,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] =~ m/^-+\w/)        { print "WARN-PL_FLAT_DES : 001 : invalid option $_[$i]\n"; }
 }
 
-my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+my $electronHome = $GLOBAL->dbfGlobalGetElectronHome;
 unless ( defined $placer && $placer ne "" ) {
-  $placer = "$protonHome/3RDBIN/flat_graph_placer";
+  $placer = "$electronHome/3RDBIN/flat_graph_placer";
 }
 
 my $nodeFile = "nodefile";
@@ -959,7 +959,7 @@ print "Command place_flat_design took:",timestr($td),"\n";
 # INPUTS
 #
 #       options :
-#               -arranger <path> : defaults to $PROTON_HOME/3RDBIN/macro_arranger
+#               -arranger <path> : defaults to $ELECTRON_HOME/3RDBIN/macro_arranger
 #               -space <um> : edge to edge spacing between macros
 #               -macro_area <um2> : area above which a node counts as a macro
 #               -margin <um> : keep out margin from the die edge
@@ -1003,9 +1003,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] =~ m/^-+\w/)      { print "WARN-PL_MACRO : 001 : invalid option $_[$i]\n"; }
 }
 
-my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+my $electronHome = $GLOBAL->dbfGlobalGetElectronHome;
 unless ( defined $arranger && $arranger ne "" ) {
-  $arranger = "$protonHome/3RDBIN/macro_arranger";
+  $arranger = "$electronHome/3RDBIN/macro_arranger";
 }
 
 my $nodeFile = "$TOP_MODULE.macro.nodefile";
@@ -1093,7 +1093,7 @@ print "Command arrange_macros took:",timestr($td),"\n";
 # INPUTS
 #
 #       options :
-#               -placer <path> : defaults to $PROTON_HOME/3RDBIN/eplacer
+#               -placer <path> : defaults to $ELECTRON_HOME/3RDBIN/eplacer
 #               -iters <n> : eplace iterations
 #               -target_density <fraction> : density the placer aims for
 #               -max_displacement <um> : cap on how far a node may move
@@ -1145,9 +1145,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] =~ m/^-+\w/)            { print "WARN-PL_EPLACE : 001 : invalid option $_[$i]\n"; }
 }
 
-my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+my $electronHome = $GLOBAL->dbfGlobalGetElectronHome;
 unless ( defined $placer && $placer ne "" ) {
-  $placer = "$protonHome/3RDBIN/eplacer";
+  $placer = "$electronHome/3RDBIN/eplacer";
 }
 
 my $nodeFile = "$TOP_MODULE.eplace.nodefile";
@@ -1267,9 +1267,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] =~ m/^-+\w/)            { print "WARN-PL_MINCUT : 001 : invalid option $_[$i]\n"; }
 }
 
-my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+my $electronHome = $GLOBAL->dbfGlobalGetElectronHome;
 unless ( defined $placer && $placer ne "" ) {
-  $placer = "$protonHome/3RDBIN/mincut_placer";
+  $placer = "$electronHome/3RDBIN/mincut_placer";
 }
 
 my $nodeFile = "$TOP_MODULE.mincut.nodefile";
@@ -1482,9 +1482,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] =~ m/^-+\w/)            { print "WARN-PL_SEED : 001 : invalid option $_[$i]\n"; }
 }
 
-my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+my $electronHome = $GLOBAL->dbfGlobalGetElectronHome;
 unless ( defined $placer && $placer ne "" ) {
-  $placer = "$protonHome/3RDBIN/seed_placer";
+  $placer = "$electronHome/3RDBIN/seed_placer";
 }
 
 my $nodeFile = "$TOP_MODULE.seed.nodefile";

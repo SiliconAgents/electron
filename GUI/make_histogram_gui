@@ -438,6 +438,7 @@ my $width = 700;
 my $height = 500;
 my $noOfYSteps = 10;
 
+my $dbu = $GLOBAL->dbfGlobalGetDBU();
 my $maxWL = 0;
 my @pinType = ();
 for(my $i=0; $i<@WL; $i++){
@@ -458,7 +459,7 @@ for(my $j=0; $j<=$noOfYSteps; $j++){
     #my $urx = $x_origin+5;
     my $urx = $x_origin;
     my $ury = $lly;
-    my $yText = ($maxWL/2000)/$noOfYSteps*$j;
+    my $yText = ($maxWL/$dbu)/$noOfYSteps*$j;
   #$netstat_canvas->createLine($llx,$lly,$urx,$ury, -fill=>"red");#vertical text pointers
   $netstat_canvas->createOval($llx,$lly,$urx,$ury, -fill=>"red",-width=>3);#vertical text pointers
   $netstat_canvas->createText($llx,$lly,-text=>$yText, -fill=>"blue", -anchor=>"e");#vertical text
@@ -486,7 +487,7 @@ for(my $k=0; $k<=@pinType; $k++){
    my $h_x2 = $h_x1;
    my $h_y2 = $y_origin + $WL[$current_type]*($height/$maxWL);
    my $numNets = $NC[$current_type];
-   my $wire_length = $WL[$current_type]/2000;
+   my $wire_length = $WL[$current_type]/$dbu;
    my $bar_line = $netstat_canvas->createLine($h_x1,$h_y1,$h_x2,$h_y2,-fill=>"red",-width=>10,);#bar lines
    $netstat_canvas->itemconfigure($bar_line, -tag =>'BAR_LINE');
    $netstat_canvas->addtag($current_type, "withtag", $bar_line);

@@ -4,7 +4,7 @@
 sub check_create_app_tcl{
  &create_app_vs_func;
  my $binName = (split(/\//, $0))[-1];
- if($binName ne 'proton' && $binName ne 'proton_for_gschematic'){
+ if($binName ne 'electron' && $binName ne 'electron_hier' &&  $binName ne 'electron_proto'){
     if(exists $app_vs_func{$binName}){
        my $app_cmd = $app_vs_func{$binName};
        &{$app_cmd}(@ARGV);
@@ -832,8 +832,8 @@ sub placeVerilogNetListSub
     if($chipWidth ne ""){&set_floorplan_parameters("-WIDTH",$chipWidth);}
     if($siteHeight ne ""){&set_floorplan_parameters("-SITE_HEIGHT",$siteHeight);}
     if($siteWidth ne ""){&set_floorplan_parameters("-SITE_WIDTH",$siteWidth);}
-    if(!exists $ENV{"PROTON_HOME"}){
-      $GLOBAL->dbfGlobalSetProtonHome("$cloud_share_path/apps/content/drupal_app/");
+    if(!exists $ENV{"ELECTRON_HOME"}){
+      $GLOBAL->dbfGlobalSetElectronHome("$cloud_share_path/apps/content/drupal_app/");
     }
     &set_floorplan();
     &write_controlFile("-very_high_fanout","8","-trim_float_only","1","-basic_mode","1");
@@ -885,8 +885,8 @@ sub routeDefSub{
     }
 
     &read_defII('-def', $defFile, '--all');
-    if(!exists $ENV{"PROTON_HOME"}){
-      $GLOBAL->dbfGlobalSetProtonHome("$cloud_share_path/apps/content/drupal_app/");
+    if(!exists $ENV{"ELECTRON_HOME"}){
+      $GLOBAL->dbfGlobalSetElectronHome("$cloud_share_path/apps/content/drupal_app/");
     }
     &route_flat;
     &write_def('-output', $outFile, '--overwrite');

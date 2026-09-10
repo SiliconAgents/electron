@@ -11,7 +11,7 @@ else { # if correct no. of inputs
 
 	print "INFO-TE : 001 : Writing timing report to file \"$REPORT_FILE\"\n";
 	open (WRITE,">$REPORT_FILE");
-	print WRITE "Report of Static Timing Analysis from proton tool\n";
+	print WRITE "Report of Static Timing Analysis from electron tool\n";
 	print WRITE "----------------------------------------\n";
 	print WRITE "\n";
 	print WRITE "\n";
@@ -126,6 +126,8 @@ foreach my $pinName ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
     print "TE-STA-I2O WARN: 001 : pin $pinName has more than one net connected\n";
     next;
   }
+        	@TEMP_PATH=();
+        	push(@TEMP_PATH,$pinName);
   $netName = $connList[0];
   my $bfsRootInstance = $pinName;
 
@@ -134,8 +136,9 @@ foreach my $pinName ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
   #%driverVisited = ();
 
   my @sinkInsts = &dbPlaceTraceGetNetSinks($netName);
-  foreach my $tag ( @sinkInsts ) { # print "driver is $tag\n"; 
-  &dbgStaTraceIn2Out($tag,$count2);
+  foreach my $instName ( @sinkInsts ) { # print "driver is $tag\n"; 
+        	push(@TEMP_PATH,"$instName $netName");
+  &dbgStaTraceIn2Out($instName,$count2);
   }
 
 
@@ -174,6 +177,7 @@ foreach $pinName ( @pins ) {
 				###############################################
 				# timing report being generated ...
 				###############################################
+                                print "generate report for @TEMP_PATH\n";
 				&dbgStaReport1PathTimingI2O(@TEMP_PATH);
                                 $pathNum++;
                                 $presentNoOfComponents = @TEMP_PATH;
@@ -256,6 +260,7 @@ my @PATHLIST = @_;
                                                  if ( $pinType == 3 ) { $previousInstInPin = $pinName; }
                                                                     }# foreach pin
                                                            }# if cell is a register
+                                 else { $previousInstInPin = 'A'; }
                                  print WRITE "$startInst $cellref ";
                                  my $previousInst = $startInst;
                                  foreach $inst ( @PATHLIST ) {
@@ -296,7 +301,9 @@ my @PATHLIST = @_;
    my $clock_period = 20000;
    my $uncertanity = 100;
    my $setup_time = 200;
-   my $startInst = shift @PATHLIST;
+   #my $startInst = shift @PATHLIST;
+   my $AA = shift @PATHLIST;
+   my $startInst = (split(/\s+/,$AA))[0];
    my $noOfInstOnPath = @PATHLIST;
    my $stopInst = (split(/\s+/,$PATHLIST[$noOfInstOnPath-1]))[0];
 
@@ -308,7 +315,10 @@ my @PATHLIST = @_;
                                  print WRITE "-----------------------------------------------------------\n";
                                  my $cellref = "PIN";
                                  print WRITE "$startInst $cellref ";
-                                 my $previousInst = $startInst;
+                                 
+                                 my ($previousInst,$n)= (split(/\s+/,shift @PATHLIST))[0,1];
+                                 my $previousInstInPin = $NETS_ALREADY{$n}{$previousInst};
+
                                  foreach $inst ( @PATHLIST ) {
                                          my ($i,$n) = (split(/\s+/,$inst))[0,1];
                                          my $previousInstOutPin = $NETS_ALREADY{$n}{$previousInst};
@@ -319,6 +329,10 @@ my @PATHLIST = @_;
                                          printf WRITE " $previousInstInPin->$previousInstOutPin $instDelayTran[0] $cumlativeDelay $instDelayTran[1]\n";
                                          printf WRITE "%s->%s %.2f %.2f %.2f\n", $previousInstInPin, $previousInstOutPin, $instDelayTran[0], $cumlativeDelay, $instDelayTran[1];
 print WRITE "\n";
+                                         if ( exists $PORTS_ALREADY{$TOP_MODULE}{$i} ) {
+                                         print WRITE "$i";
+                                         last;
+                                         }
                                          my $c = $CADB{$i}->dbCadbGetCellref;
                                          print WRITE "$i $c ";
                                          $previousInst = $i;
@@ -396,5 +410,65 @@ my @outputPort = $PLACE{$TOP_MODULE}->dbPlaceGetOutPortList;
 
 
 }# sub dbBuildTimingGraph
+
+##############################################################################################################
+################################ report static timing analysis using "vesta" #################################
+##############################################################################################################
+sub report_sta_vesta{
+  use Benchmark;
+  my $t0 = new Benchmark;
+  my $noOfArg = @_;
+
+  if($noOfArg < 4 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){ 
+     print "Usage : report_sta_vesta -v <verilog netlist> \n";
+     print "                         -lib  <liberty file> \n";
+     print "                         -period  <period> \n";
+     print "                         -out  <sta report file> \n";
+  }else{
+     my ($verilogFile, $staOutFile, $period) = ("", "sta.rpt", 4000);
+     my @libertyFiles = ();
+     for(my $i = 0; $i < $noOfArg; $i++){
+  	 if($_[$i] eq "-v")  {$verilogFile = $_[$i+1];}
+  	 if($_[$i] eq "-period")  {$period = $_[$i+1];}
+  	 if($_[$i] eq "-lib"){
+            my $libFileStr = $_[$i+1]; 
+            $libFileStr =~ s/\{(.*)\}/\1/; 
+            @libertyFiles = split(/\,/, $libFileStr);
+         }
+  	 if($_[$i] eq "-out"){
+            $staOutFile = $_[$i+1]; 
+            if($staOutFile eq ""){
+               $staOutFile = "sta.rpt";
+            }
+         }
+     }#foreach my arg
+
+     if(!-e $verilogFile){ print "WARN : file $verilogFile does not exists !\n"; return;}
+     foreach my $libFile(@libertyFiles){
+        if(!-e $libFile){ 
+           print "WARN : file $libFile does not exists !\n"; 
+           return;
+        }
+     }
+
+     if($staOutFile !~ /\.rpt/){
+        $staOutFile .= ".rpt";
+     }
+
+     #my $result = system("/usr/local/share/qflow/bin/vesta --long $verilogFile @libertyFiles > $staOutFile"); 
+     my $result = `/usr/local/share/qflow/bin/vesta --period $period --long $verilogFile @libertyFiles > $staOutFile`; 
+     print "\n$result\n";
+     print "report file is $staOutFile\n";
+   
+  }#if correct no. of inputs
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  #print "Command report_sta_vesta took:",timestr($td),"\n";
+  print "report static timing analysis took:",timestr($td),"\n";
+}#sub report_sta_vesta
+
+##############################################################################################################
+
 
 1;

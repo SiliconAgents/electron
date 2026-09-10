@@ -2,51 +2,57 @@
 ################# export and Import Lef/Def ###################
 ###############################################################
 sub call_read_def {
-my $fileName =$_;
-my @types = (["Config Files", '.def'],
-             ["All Files", "*"]);
-
-$fileName = $top->getOpenFile(-filetypes =>\@types,
-                              -defaultextension => '.def'); 
-          
-&read_defII("-def","$fileName","-all");
+  my $fileName =$_;
+  my @types = (["Config Files", '.def'],
+               ["All Files", "*"]);
+  
+  $fileName = $top->getOpenFile(-filetypes =>\@types,
+                                -defaultextension => '.def'); 
+            
+  if($fileName ne ""){
+     &read_defII("-def","$fileName","--all");
+  }
 }#sub call_read_def
 #-------------------------------------------------------#
 
 sub call_write_def {
-my $fileName =$_;
-my @types = (["Config Files", '.def'],
-             ["All Files", "*"]);
-
-$fileName = $top->getSaveFile(-filetypes =>\@types,
-                              -defaultextension => '.def'); 
-          
-&write_def("-output","$fileName");
+  my $fileName =$_;
+  my @types = (["Config Files", '.def'],
+               ["All Files", "*"]);
+  
+  $fileName = $top->getSaveFile(-filetypes =>\@types,
+                                -defaultextension => '.def'); 
+            
+  if($fileName ne ""){
+     &write_def("-output","$fileName");
+  }
 }#sub call_write_def
 #------------------------------------------------#
 
 sub read_lef_popup {
-
-my $fileName =$_;
-my @types = (["Config Files", '.lef'],
-             ["All Files", "*"]);
-$fileName = $top->getOpenFile(-filetypes =>\@types,
-                              -defaultextension => '.lef'); 
-          
-&read_lef("-lef","$fileName","-tech","also");
+  my $fileName =$_;
+  my @types = (["Config Files", '.lef'],
+               ["All Files", "*"]);
+  $fileName = $top->getOpenFile(-filetypes =>\@types,
+                                -defaultextension => '.lef'); 
+            
+  if($fileName ne ""){
+     &read_lef("-lef","$fileName","-tech","also");
+  }
 }#sub read_lef_popup
 #-----------------------------------------------#
 
 sub write_lef_popup {
-
-my $fileName =$_;
-my @types = (["Config Files", '.lef'],
-             ["All Files", "*"]);
-
-$fileName = $top->getSaveFile(-filetypes =>\@types,
-                              -defaultextension => '.lef'); 
-          
-&write_lef("-output","$fileName","-tech","also");
+  my $fileName =$_;
+  my @types = (["Config Files", '.lef'],
+               ["All Files", "*"]);
+  
+  $fileName = $top->getSaveFile(-filetypes =>\@types,
+                                -defaultextension => '.lef'); 
+            
+  if($fileName ne ""){
+     &write_lef("-output","$fileName","-tech","also");
+  }
 
 }#sub write_lef_popup
 
@@ -55,358 +61,358 @@ $fileName = $top->getSaveFile(-filetypes =>\@types,
 #############################################################################################################
 #-------------------------------------- popup to write & Run tcl file ---------------------------------#
 sub popup_openConfig {
-use Tk::Dialog;
-my $popupgui = MainWindow->new();
-$popupgui->title ("Run tcl Scripts");
-my $image = $popupgui->Getimage('folder');
-my $book = $popupgui->NoteBook(-tabpady=>0,-tabpadx=>0,-relief=>"raised",-font=> "Times 10 italic", -borderwidth=>2)->pack(-side=>'top', -fill=>'both',-expand=>1);
-###################### Adding Flow Tab ########################
-my $add_file_tab = $book->add( "Sheet 1", -label=>"AddFiles");
-my $flow_tab = $book->add( "Sheet 2", -label=>"Flow");
-
-my $flow_book = $flow_tab->NoteBook(-tabpady=>0,-tabpadx=>0,-relief=>"raised",-font=> "Times 10 italic", -borderwidth=>2)->pack(-side=>'top', -fill=>'both',-expand=>1);
-my $floorplan_tab = $flow_book->add( "Sheet 3", -label=>"FloorPlan");
-my $placement_tab = $flow_book->add( "Sheet 4", -label=>"Placement");
-my $analysis_tab = $flow_book->add( "Sheet 5", -label=>"Analysis");
-
-####################################################### preparing tab1(Run tcl) ################################################
-
-my ($techleffile,$macroleffile,$libfile,$deffile,$verilogfile,$tclfile,$rtlfile,$switch,$sdcfile,$partition_name) = ("","","","","","run.tcl","","","","");
-my ($utilization, $aspect,$width,$height) = ("70", "", "", "");
-        my $add_file_frame1 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame2 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame3 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame4 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame5 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame6 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame7 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame8 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame9 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame10 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $ButtonFrame = $add_file_tab->Frame(-relief=>"raised")->pack(-side => 'bottom');
-
-$add_file_frame1->Label(-text => "Tech Lef")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame1->Button(-text=>'BrowseFile',-image=> $image,-command =>sub {$techleffile = &popup_read_lef;})->pack(-side => 'right');
-$techLefEntry = $add_file_frame1->Entry(-textvariable =>\$techleffile, -width=>30)->pack(-side =>'right');
-
-$add_file_frame2->Radiobutton(-variable =>\$switch,-value => "only",-text => "only")->pack(-side =>"left"); 
-$add_file_frame2->Radiobutton(-variable =>\$switch,-value => "also",-text => "also")->pack(-side =>"left");
-$add_file_frame2->Radiobutton(-variable =>\$switch, -value => "dont",-text => "dont")->pack(-side =>"left");
-
-$add_file_frame3->Label(-text => "Macro Lef")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame3->Button(-text=>'BrowseFile',-image=> $image,-command =>sub {$macroleffile = &popup_read_macrolef($macroLefEntry,"lef");})->pack(-side => 'right');
-$macroLefEntry = $add_file_frame3->Entry(-textvariable =>\$macroleffile, -width=>30)->pack(-side =>'right');
-
-$add_file_frame4->Label(-text => "lib File")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame4->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$libfile = &popup_read_macrolef($macroLibEntry,"lib");})->pack(-side => 'right'); 
-$macroLibEntry = $add_file_frame4->Entry(-textvariable =>\$libfile,-width=>30)->pack(-side =>'right');
-
-$add_file_frame5->Label(-text => "def File")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame5->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$deffile = &popup_read_def;})->pack(-side => 'right');
-$defEntry = $add_file_frame5->Entry(-textvariable =>\$deffile,-width=>30)->pack(-side =>'right');
-
-$add_file_frame6->Label(-text => "verilog File")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame6->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$verilogfile = &popup_read_macrolef($macroVerilogEntry,"verilog")})->pack(-side => 'right');
-$macroVerilogEntry = $add_file_frame6->Entry(-textvariable =>\$verilogfile,-width=>30)->pack(-side =>'right');
-
-$add_file_frame7->Label(-text => "Rtl File")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame7->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$rtlfile = &popup_read_macrolef($macroRtlEntry,"rtl");})->pack(-side => 'right');
-$macroRtlEntry = $add_file_frame7->Entry(-textvariable =>\$rtlfile,-width=>30)->pack(-side =>'right');
-
-$add_file_frame8->Label(-text => "Sdc File")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame8->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$sdcfile = &popup_read_macrolef($macroSdcEntry,"sdc");})->pack(-side => 'right');
-$macroSdcEntry = $add_file_frame8->Entry(-textvariable =>\$sdcfile,-width=>30)->pack(-side =>'right');
-
-#$add_file_frame9->Label(-text => "TclFile")->pack(-side =>'left', -anchor => 'w');
-#$add_file_frame9->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$tclfile = &popup_write_tcl;})->pack(-side => 'right'); 
-#$add_file_frame9->Entry(-textvariable =>\$tclfile,-width=>30)->pack(-side =>'right');
-
-$add_file_frame10->Label(-text => "Floorplan Name")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame10->Entry(-textvariable =>\$partition_name,-width=>30)->pack(-side =>'left');
-$savebutton = $ButtonFrame->Button(-text=>'Save',-command =>sub {&create_popup_2save_file($techLefEntry->get(), $switch,$defEntry->get(),$aspect,$utilization,$width,$height,$partition_name);})->pack(-side => 'left');
-
-$okbutton = $ButtonFrame->Button(-text=>'Ok',-command =>sub {&write_tcl("-output","$tclfile","-techlef","$techleffile","-tech","$switch","-macrolef",$macroLefEntry->get(),"-lib",$macroLibEntry->get(),"-def","$deffile","-verilog",$macroVerilogEntry->get(),"-rtl",$macroRtlEntry->get(),"-sdc",$macroSdcEntry->get(),"-Aspect",$aspect,"-Utilization",$utilization,"-Width",$width,"-Height",$height,"-Partition",$partition_name);&source($tclfile);$popupgui->destroy;})->pack(-side => 'left');
-
-$applybutton = $ButtonFrame->Button(-text=>'Apply',-command =>sub {&write_tcl("-output","$tclfile","-techlef","$techleffile","-tech","$switch","-macrolef",$macroLefEntry->get(),"-lib",$macroLibEntry->get(),"-def","$deffile","-verilog",$macroVerilogEntry->get(),"-rtl",$macroRtlEntry->get(),"-sdc",$macroSdcEntry->get(),"-Aspect",$aspect,"-Utilization",$utilization,"-Width",$width,"-Height",$height,"-Partition",$partition_name);&source($tclfile);})->pack(-side => 'left');
-
-$loadbutton = $ButtonFrame->Button(-text=>'Load',
-                                   -command =>\&open_load_gui,
-                                  )->pack(-side => 'left');
-$fetchbutton = $ButtonFrame->Button(-text=>'Auto Fetch',
-                                    -command =>\&open_auto_fetch_gui,
+  use Tk::Dialog;
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Run tcl Scripts");
+  my $image = $popupgui->Getimage('folder');
+  my $book = $popupgui->NoteBook(-tabpady=>0,-tabpadx=>0,-relief=>"raised",-font=> "Times 10 italic", -borderwidth=>2)->pack(-side=>'top', -fill=>'both',-expand=>1);
+  ###################### Adding Flow Tab ########################
+  my $add_file_tab = $book->add( "Sheet 1", -label=>"AddFiles");
+  my $flow_tab = $book->add( "Sheet 2", -label=>"Flow");
+  
+  my $flow_book = $flow_tab->NoteBook(-tabpady=>0,-tabpadx=>0,-relief=>"raised",-font=> "Times 10 italic", -borderwidth=>2)->pack(-side=>'top', -fill=>'both',-expand=>1);
+  my $floorplan_tab = $flow_book->add( "Sheet 3", -label=>"FloorPlan");
+  my $placement_tab = $flow_book->add( "Sheet 4", -label=>"Placement");
+  my $analysis_tab = $flow_book->add( "Sheet 5", -label=>"Analysis");
+  
+  ####################################################### preparing tab1(Run tcl) ################################################
+  
+  my ($techleffile,$macroleffile,$libfile,$deffile,$verilogfile,$tclfile,$rtlfile,$switch,$sdcfile,$partition_name) = ("","","","","","run.tcl","","","","");
+  my ($utilization, $aspect,$width,$height) = ("70", "", "", "");
+          my $add_file_frame1 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame2 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame3 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame4 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame5 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame6 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame7 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame8 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame9 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $add_file_frame10 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+          my $ButtonFrame = $add_file_tab->Frame(-relief=>"raised")->pack(-side => 'bottom');
+  
+  $add_file_frame1->Label(-text => "Tech Lef")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame1->Button(-text=>'BrowseFile',-image=> $image,-command =>sub {$techleffile = &popup_read_lef;})->pack(-side => 'right');
+  $techLefEntry = $add_file_frame1->Entry(-textvariable =>\$techleffile, -width=>30)->pack(-side =>'right');
+  
+  $add_file_frame2->Radiobutton(-variable =>\$switch,-value => "only",-text => "only")->pack(-side =>"left"); 
+  $add_file_frame2->Radiobutton(-variable =>\$switch,-value => "also",-text => "also")->pack(-side =>"left");
+  $add_file_frame2->Radiobutton(-variable =>\$switch, -value => "dont",-text => "dont")->pack(-side =>"left");
+  
+  $add_file_frame3->Label(-text => "Macro Lef")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame3->Button(-text=>'BrowseFile',-image=> $image,-command =>sub {$macroleffile = &popup_read_macrolef($macroLefEntry,"lef");})->pack(-side => 'right');
+  $macroLefEntry = $add_file_frame3->Entry(-textvariable =>\$macroleffile, -width=>30)->pack(-side =>'right');
+  
+  $add_file_frame4->Label(-text => "lib File")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame4->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$libfile = &popup_read_macrolef($macroLibEntry,"lib");})->pack(-side => 'right'); 
+  $macroLibEntry = $add_file_frame4->Entry(-textvariable =>\$libfile,-width=>30)->pack(-side =>'right');
+  
+  $add_file_frame5->Label(-text => "def File")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame5->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$deffile = &popup_read_def;})->pack(-side => 'right');
+  $defEntry = $add_file_frame5->Entry(-textvariable =>\$deffile,-width=>30)->pack(-side =>'right');
+  
+  $add_file_frame6->Label(-text => "verilog File")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame6->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$verilogfile = &popup_read_macrolef($macroVerilogEntry,"verilog")})->pack(-side => 'right');
+  $macroVerilogEntry = $add_file_frame6->Entry(-textvariable =>\$verilogfile,-width=>30)->pack(-side =>'right');
+  
+  $add_file_frame7->Label(-text => "Rtl File")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame7->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$rtlfile = &popup_read_macrolef($macroRtlEntry,"rtl");})->pack(-side => 'right');
+  $macroRtlEntry = $add_file_frame7->Entry(-textvariable =>\$rtlfile,-width=>30)->pack(-side =>'right');
+  
+  $add_file_frame8->Label(-text => "Sdc File")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame8->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$sdcfile = &popup_read_macrolef($macroSdcEntry,"sdc");})->pack(-side => 'right');
+  $macroSdcEntry = $add_file_frame8->Entry(-textvariable =>\$sdcfile,-width=>30)->pack(-side =>'right');
+  
+  #$add_file_frame9->Label(-text => "TclFile")->pack(-side =>'left', -anchor => 'w');
+  #$add_file_frame9->Button(-text=>'BrowseFile',-image=>$image,-command =>sub {$tclfile = &popup_write_tcl;})->pack(-side => 'right'); 
+  #$add_file_frame9->Entry(-textvariable =>\$tclfile,-width=>30)->pack(-side =>'right');
+  
+  $add_file_frame10->Label(-text => "Floorplan Name")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame10->Entry(-textvariable =>\$partition_name,-width=>30)->pack(-side =>'left');
+  $savebutton = $ButtonFrame->Button(-text=>'Save',-command =>sub {&create_popup_2save_file($techLefEntry->get(), $switch,$defEntry->get(),$aspect,$utilization,$width,$height,$partition_name);})->pack(-side => 'left');
+  
+  $okbutton = $ButtonFrame->Button(-text=>'Ok',-command =>sub {&write_tcl("-output","$tclfile","-techlef","$techleffile","-tech","$switch","-macrolef",$macroLefEntry->get(),"-lib",$macroLibEntry->get(),"-def","$deffile","-verilog",$macroVerilogEntry->get(),"-rtl",$macroRtlEntry->get(),"-sdc",$macroSdcEntry->get(),"-Aspect",$aspect,"-Utilization",$utilization,"-Width",$width,"-Height",$height,"-Partition",$partition_name);&source($tclfile);$popupgui->destroy;})->pack(-side => 'left');
+  
+  $applybutton = $ButtonFrame->Button(-text=>'Apply',-command =>sub {&write_tcl("-output","$tclfile","-techlef","$techleffile","-tech","$switch","-macrolef",$macroLefEntry->get(),"-lib",$macroLibEntry->get(),"-def","$deffile","-verilog",$macroVerilogEntry->get(),"-rtl",$macroRtlEntry->get(),"-sdc",$macroSdcEntry->get(),"-Aspect",$aspect,"-Utilization",$utilization,"-Width",$width,"-Height",$height,"-Partition",$partition_name);&source($tclfile);})->pack(-side => 'left');
+  
+  $loadbutton = $ButtonFrame->Button(-text=>'Load',
+                                     -command =>\&open_load_gui,
                                     )->pack(-side => 'left');
-$cancelbutton = $ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side => 'left');
-####################################################### preparing tab2(Flow tab) ################################################
-##-------------------------- FloorPlan Tab -------------------##
-my $add_flow_frame1 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_frame2 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_frame3 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_frame4 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-
-     $add_flow_frame1->Label(-text => "Utilization")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame1->Entry(-textvariable =>\$utilization,-width=>30)->pack(-side =>'right');
-     
-     $add_flow_frame2->Label(-text => "AspectRatio")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame2->Entry(-textvariable =>\$aspect,-width=>30)->pack(-side =>'right');
-     
-     $add_flow_frame3->Label(-text => "Width")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame3->Entry(-textvariable =>\$width,-width=>30)->pack(-side =>'right');
-     
-     $add_flow_frame4->Label(-text => "Height")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame4->Entry(-textvariable =>\$height,-width=>30)->pack(-side =>'right');
-     
-
-##-------------------------- Placement Tab -------------------##
-my ($level, $switch) = (1, "");
-my $add_flow_placement_frame1 = $placement_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_placement_frame2 = $placement_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $placement_ButtonFrame = $placement_tab->Frame(-relief=>"raised")->pack(-side => 'bottom');
-
-         $add_flow_placement_frame1->Radiobutton(-variable =>\$switch,-value => "hier",-text => "Hier",)->pack(-side =>"left"); 
-         $add_flow_placement_frame1->Entry(-textvariable =>\$level,-width=>10)->pack(-side =>'right');
-         $add_flow_placement_frame1->Label(-text => "Level")->pack(-side =>'right');
-
-         $add_flow_placement_frame2->Radiobutton(-variable =>\$switch,-value => "flat",-text => "Flat")->pack(-side =>"left");
-
-     $plApplyButton = $placement_ButtonFrame->Button(-text=>'Run Placement',-command =>sub { 
-                                                                                             if($switch eq "hier") {
-                                                                                                                    &place_design_hierarchy_from_earlyProto_DB('-no_of_level',$level); 
-                                                                                             }
-                                                                                             if($switch eq "flat") {
-                                                                                                                    &place_graph_plan_4;
-                                                                                             }
-
-                                                                                   })->pack(-side => 'left');
-     $plCancelButton = $placement_ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side => 'left');
-
+  $fetchbutton = $ButtonFrame->Button(-text=>'Auto Fetch',
+                                      -command =>\&open_auto_fetch_gui,
+                                      )->pack(-side => 'left');
+  $cancelbutton = $ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side => 'left');
+  ####################################################### preparing tab2(Flow tab) ################################################
+  ##-------------------------- FloorPlan Tab -------------------##
+  my $add_flow_frame1 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_frame2 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_frame3 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_frame4 = $floorplan_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  
+       $add_flow_frame1->Label(-text => "Utilization")->pack(-side =>'left', -anchor => 'w');
+       $add_flow_frame1->Entry(-textvariable =>\$utilization,-width=>30)->pack(-side =>'right');
+       
+       $add_flow_frame2->Label(-text => "AspectRatio")->pack(-side =>'left', -anchor => 'w');
+       $add_flow_frame2->Entry(-textvariable =>\$aspect,-width=>30)->pack(-side =>'right');
+       
+       $add_flow_frame3->Label(-text => "Width")->pack(-side =>'left', -anchor => 'w');
+       $add_flow_frame3->Entry(-textvariable =>\$width,-width=>30)->pack(-side =>'right');
+       
+       $add_flow_frame4->Label(-text => "Height")->pack(-side =>'left', -anchor => 'w');
+       $add_flow_frame4->Entry(-textvariable =>\$height,-width=>30)->pack(-side =>'right');
+       
+  
+  ##-------------------------- Placement Tab -------------------##
+  my ($level, $switch) = (1, "");
+  my $add_flow_placement_frame1 = $placement_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_placement_frame2 = $placement_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $placement_ButtonFrame = $placement_tab->Frame(-relief=>"raised")->pack(-side => 'bottom');
+  
+           $add_flow_placement_frame1->Radiobutton(-variable =>\$switch,-value => "hier",-text => "Hier",)->pack(-side =>"left"); 
+           $add_flow_placement_frame1->Entry(-textvariable =>\$level,-width=>10)->pack(-side =>'right');
+           $add_flow_placement_frame1->Label(-text => "Level")->pack(-side =>'right');
+  
+           $add_flow_placement_frame2->Radiobutton(-variable =>\$switch,-value => "flat",-text => "Flat")->pack(-side =>"left");
+  
+       $plApplyButton = $placement_ButtonFrame->Button(-text=>'Run Placement',-command =>sub { 
+                                                                                               if($switch eq "hier") {
+                                                                                                                      &place_design_hierarchy_from_earlyProto_DB('-no_of_level',$level); 
+                                                                                               }
+                                                                                               if($switch eq "flat") {
+                                                                                                                      &place_graph_plan_4;
+                                                                                               }
+  
+                                                                                     })->pack(-side => 'left');
+       $plCancelButton = $placement_ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side => 'left');
+  
 }#sub popup_openConfig
 
 ######################################  browse popup windows for lef,def,verilog,lib, rtl etc. ####################################
 sub popup_read_lef {
-my @types = (["Config Files", '.lef'],
-             ["All Files", "*"]);
-my $leffile = $top->getOpenFile(-filetypes =>\@types,
-                               -defaultextension => '.lef'); 
-return($leffile);          
+  my @types = (["Config Files", '.lef'],
+               ["All Files", "*"]);
+  my $leffile = $top->getOpenFile(-filetypes =>\@types,
+                                 -defaultextension => '.lef'); 
+  return($leffile);          
 }#sub popup_read_lef
 
 ############################################### popup to read Macro Lef ######################################################
 sub popup_read_macrolef {
-use Cwd;
-my $parentEntry = $_[0];
-my $file_type = $_[1];
-my $popupgui = MainWindow->new();
-$popupgui->title ("Select Lef Files")if($file_type eq "lef");
-$popupgui->title ("Select Lib Files")if($file_type eq "lib");
-$popupgui->title ("Select Verilog Files")if($file_type eq "verilog");
-$popupgui->title ("Select RTL Files")if($file_type eq "rtl");
-$popupgui->title ("Select Sdc Files")if($file_type eq "sdc");
-$popupgui->title ("Select Spice Files")if($file_type eq "spice");
-my $Dirimage = $popupgui->Getimage('folder');
-my $Fileimage = $popupgui->Getimage('file');
-my @fileList = ();
- @fileList = ("Lef Files (*.lef)", "All Files (*)") if($file_type eq "lef");
- @fileList = ("Lib Files (*.lib)", "All Files (*)") if($file_type eq "lib");
- @fileList = ("Verilog Files (*.gv)","Verilog Files (*.v)","Verilog Files (*.vg)","All Files (*)")  if($file_type eq "verilog");
- @fileList = ("Rtl Files (*.v)", "All Files (*)") if($file_type eq "rtl"); 
- @fileList = ("Sdc Files (*.sdc)", "All Files (*)") if($file_type eq "sdc");
- @fileList = ("Config Files (*)", "All Files (*)") if($file_type eq "");
- @fileList = ("Spice Files (*.sp)","Spice Files (*.spx)","Spice Files (*.spi)","Spice Files (*.pxi)","Spice Files (*.pex)","All Files (*)")  if($file_type eq "spice");
-my $ext = $fileList[0];
-$lefEntryVar = "";
-@LEF_FILES = (); 
-
-my $pathFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x');
-my $ListFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'both');
-my $entryFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x');
-my $typeFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x');
-
-my $path = cwd();
-my @var = split(/\//,$path);
-my @pathList = ("/");
-for(my $i = 1; $i<= $#var; $i++){
-    if($i >1){
-      $reg_path = $pathList[-1]."\/".$var[$i];
-    }else{ 
-      $reg_path = "\/".$var[$i];
-    }
-  push(@pathList,$reg_path); 
-}
-
-my $top_pane = $ListFrame->Scrolled(qw/Pane -width 400 -height 130 -scrollbars s -sticky nsew -relief sunken -borderwidth 2/);
-   $top_pane->Subwidget("xscrollbar")->configure(-width=>15,-borderwidth=>2);
-   $top_pane->pack(qw/-side left -anchor w -fill both -expand 1/);
-
-my $dir_label = $pathFrame->Label(-text=>"Directory:")->pack(-side=>"left");
-   $dir_list = $pathFrame->Optionmenu(
-           -options => \@pathList,
-           -textvariable=>\$path,
-           -command => sub{
-                         for(my $j=0; $j<= $#pathList; $j++){
-                           if($pathList[$j] =~m/$path\/.*/){
-                              delete $pathList[$j];
-                           } 
-                         }
-                         $dir_list->configure(-options=>\@pathList);
-                         &create_ListOfFileDir($top_pane,$path,$ext,$Dirimage,$Fileimage);
-   })->pack(-side=>'left',-expand=>1,-fill=>'x');
- 
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
-my $bitmap = $popupgui->Photo(-file => "$path2eq/ETC/1477730307_arrow-up.png");
-my $upButton = $pathFrame->Button(-text=>"ad",-image => $bitmap, 
-                                  -padx=>0, -pady=>0,
-                                  -command=>sub {
-                                                 my $path2 = $dir_list->cget(-options);
-                                                 &create_ListOfFileDir($top_pane,@$path2[-2],$ext,$Dirimage,$Fileimage);
-                                                  })->pack( -side=>"right");
-$entryFrame->Label(-text=>'File name: ')->pack(-side=>'left');
-$file_entry = $entryFrame->Entry(-textvariable=>\$lefEntryVar)->pack(-side=>'left',-expand=>1,-fill=>'x');
-$entryFrame->Button(-text=>"Open", -relief=>'groove',-borderwidth=>5,-command=>sub{my $setEntryVar = join ",",@LEF_FILES;$parentEntry->configure(-textvariable=>\$setEntryVar);$popupgui->destroy;})->pack(-side=>'right');
-
-$typeFrame->Label(-text=>'Files of type:')->pack(-side=>'left');
-$file_list = $typeFrame->Optionmenu(
-                         -options => \@fileList,
-                         -textvariable=>\$ext,
-                         -command => sub{my $ad = $dir_list->cget(-options);
-                                         &create_ListOfFileDir($top_pane,@$ad[-1],$ext,$Dirimage,$Fileimage);}
-                         )->pack(-side=>'left',-expand=>1,-fill=>'x');
-$typeFrame->Button(-text=>"Cancel", -relief=>'raised', -borderwidth=>2, -command=>sub{$popupgui->destroy;})->pack(-side=>'right');
-
-&create_ListOfFileDir($top_pane,$path,$ext,$Dirimage,$Fileimage);
+  use Cwd;
+  my $parentEntry = $_[0];
+  my $file_type = $_[1];
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Select Lef Files")if($file_type eq "lef");
+  $popupgui->title ("Select Lib Files")if($file_type eq "lib");
+  $popupgui->title ("Select Verilog Files")if($file_type eq "verilog");
+  $popupgui->title ("Select RTL Files")if($file_type eq "rtl");
+  $popupgui->title ("Select Sdc Files")if($file_type eq "sdc");
+  $popupgui->title ("Select Spice Files")if($file_type eq "spice");
+  my $Dirimage = $popupgui->Getimage('folder');
+  my $Fileimage = $popupgui->Getimage('file');
+  my @fileList = ();
+   @fileList = ("Lef Files (*.lef)", "All Files (*)") if($file_type eq "lef");
+   @fileList = ("Lib Files (*.lib)", "All Files (*)") if($file_type eq "lib");
+   @fileList = ("Verilog Files (*.gv)","Verilog Files (*.v)","Verilog Files (*.vg)","All Files (*)")  if($file_type eq "verilog");
+   @fileList = ("Rtl Files (*.v)", "All Files (*)") if($file_type eq "rtl"); 
+   @fileList = ("Sdc Files (*.sdc)", "All Files (*)") if($file_type eq "sdc");
+   @fileList = ("Config Files (*)", "All Files (*)") if($file_type eq "");
+   @fileList = ("Spice Files (*.sp)","Spice Files (*.spx)","Spice Files (*.spi)","Spice Files (*.pxi)","Spice Files (*.pex)","All Files (*)")  if($file_type eq "spice");
+  my $ext = $fileList[0];
+  $lefEntryVar = "";
+  @LEF_FILES = (); 
+  
+  my $pathFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x');
+  my $ListFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'both');
+  my $entryFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x');
+  my $typeFrame = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x');
+  
+  my $path = cwd();
+  my @var = split(/\//,$path);
+  my @pathList = ("/");
+  for(my $i = 1; $i<= $#var; $i++){
+      if($i >1){
+        $reg_path = $pathList[-1]."\/".$var[$i];
+      }else{ 
+        $reg_path = "\/".$var[$i];
+      }
+    push(@pathList,$reg_path); 
+  }
+  
+  my $top_pane = $ListFrame->Scrolled(qw/Pane -width 400 -height 130 -scrollbars s -sticky nsew -relief sunken -borderwidth 2/);
+     $top_pane->Subwidget("xscrollbar")->configure(-width=>15,-borderwidth=>2);
+     $top_pane->pack(qw/-side left -anchor w -fill both -expand 1/);
+  
+  my $dir_label = $pathFrame->Label(-text=>"Directory:")->pack(-side=>"left");
+     $dir_list = $pathFrame->Optionmenu(
+             -options => \@pathList,
+             -textvariable=>\$path,
+             -command => sub{
+                           for(my $j=0; $j<= $#pathList; $j++){
+                             if($pathList[$j] =~m/$path\/.*/){
+                                delete $pathList[$j];
+                             } 
+                           }
+                           $dir_list->configure(-options=>\@pathList);
+                           &create_ListOfFileDir($top_pane,$path,$ext,$Dirimage,$Fileimage);
+     })->pack(-side=>'left',-expand=>1,-fill=>'x');
+   
+  my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
+  my $bitmap = $popupgui->Photo(-file => "$path2eq/ETC/up.gif");
+  my $upButton = $pathFrame->Button(-text=>"ad",-image => $bitmap, 
+                                    -padx=>0, -pady=>0,
+                                    -command=>sub {
+                                                   my $path2 = $dir_list->cget(-options);
+                                                   &create_ListOfFileDir($top_pane,@$path2[-2],$ext,$Dirimage,$Fileimage);
+                                                    })->pack( -side=>"right");
+  $entryFrame->Label(-text=>'File name: ')->pack(-side=>'left');
+  $file_entry = $entryFrame->Entry(-textvariable=>\$lefEntryVar)->pack(-side=>'left',-expand=>1,-fill=>'x');
+  $entryFrame->Button(-text=>"Open", -relief=>'groove',-borderwidth=>5,-command=>sub{my $setEntryVar = join ",",@LEF_FILES;$parentEntry->configure(-textvariable=>\$setEntryVar);$popupgui->destroy;})->pack(-side=>'right');
+  
+  $typeFrame->Label(-text=>'Files of type:')->pack(-side=>'left');
+  $file_list = $typeFrame->Optionmenu(
+                           -options => \@fileList,
+                           -textvariable=>\$ext,
+                           -command => sub{my $ad = $dir_list->cget(-options);
+                                           &create_ListOfFileDir($top_pane,@$ad[-1],$ext,$Dirimage,$Fileimage);}
+                           )->pack(-side=>'left',-expand=>1,-fill=>'x');
+  $typeFrame->Button(-text=>"Cancel", -relief=>'raised', -borderwidth=>2, -command=>sub{$popupgui->destroy;})->pack(-side=>'right');
+  
+  &create_ListOfFileDir($top_pane,$path,$ext,$Dirimage,$Fileimage);
 }#sub popup_read_macrolef
 
 
 sub create_ListOfFileDir {
-my $frame = $_[0];
-my $path = $_[1];
-my $ext = $_[2];
-my $dir_image = $_[3];
-my $file_image = $_[4];
-my @DirFile = ();
-my @dir = ();
-my @files = ();
-
-my $extension = (split(/\(/,$ext))[1];
-for($extension){s/\)//g;}
-
-#-------------- listing the Dir and Files of CWD-----------------# 
-opendir (DIR, "$path");
-while(defined ($fileName = readdir(DIR))){
-   if(-d $path."\/".$fileName){
-      if($fileName =~ m/\.$/){ 
-      }else {
-        push(@dir, $fileName);
-      } 
-   }else{
-      if($fileName =~ m/^.$extension/){
-         push(@files, $fileName);
-      }
-   }
-} 
-closedir(DIR);
-
-@dir = sort @dir;
-@files = sort @files;
-my $noOfDir = @dir;
-my $noOfFrames = int(($#dir+$#files +2)/6); 
-push(@DirFile,@dir,@files);
-
-#-------- Deleting previous Frames and making Hash empty -------#
-foreach my $key (keys %DIR_FRAME_HASH){
-  if(Exists $DIR_FRAME_HASH{$key}){
-     my $f = $DIR_FRAME_HASH{$key};
-     $f->destroy;
-  }
-}
-%DIR_FRAME_HASH = ();
-
-#-------- Updating the path  and path List of Option Menu ------#
-my @var = split(/\//,$path);
-my @pathList = ("/");
-for(my $i = 1; $i<= $#var; $i++){
-    if($i >1){
-      $reg_path = $pathList[-1]."\/".$var[$i];
-    }else{ 
-      $reg_path = "\/".$var[$i];
-    }
-  push(@pathList,$reg_path); 
-}
-
-$dir_list->configure(-textvariable=>\$path);
-$dir_list->configure(-options=>\@pathList);
-
-#------------------- Making buttons for Files and Directory --------------------#
-my $j = 0;
-for(my $i=0; $i<=$noOfFrames; $i++){
-    $dir_frame = $frame->Frame()->pack(-side=>'left',-anchor=>'n');
-    $DIR_FRAME_HASH{$i} = $dir_frame;
-    for(my $k=0; $k<=5; $k++){
-        my $name = $DirFile[$j];
-        if($j > $#DirFile){last;}
-        my $dir_but_frame = $dir_frame->Frame()->pack(-side=>'top',-expand=>1, -fill=>'x',-anchor=>'n');  
-        if($j<$noOfDir){
-           $dir_but_frame->Label(-image=>$dir_image)->pack(-side=>'left');   
-           ${"Button".$name} = $dir_but_frame->Button(-text=> $name,-padx=>0,-pady=>0,-borderwidth=>0,-relief=>'flat',-command=>sub{
-                                                      my $buttonText = ${"Button".$name}->cget('-text');
-                                                      my $path1;
-                                                      if($path eq "\/"){
-                                                         $path1 = $path.$buttonText;
-                                                      }else{ 
-                                                         $path1 = $path."\/".$buttonText;                           
-                                                      }
-                                                      &create_ListOfFileDir($frame,$path1,$ext,$dir_image,$file_image);
-                                                     })->pack(-side=>'left');
-        }else{
-              $dir_but_frame->Label(-image=>$file_image)->pack(-side=>'left');   
-              ${"Button".$name} = $dir_but_frame->Button(-text=>$name,-padx=>0,-pady=>0,-borderwidth=>0,-relief=>'flat',
-                                                         -command=>sub{my $selFile = $path."\/".$name;
-                                                                       my $color = ${"Button".$name}->cget(-foreground);
-                                                                       if($color ne "blue"){
-                                                                          ${"Button".$name}->configure(-foreground=>"blue");
-                                                                          if($lefEntryVar eq ""){
-                                                                             $lefEntryVar = $name;
-                                                                          }else{
-                                                                             $lefEntryVar = $lefEntryVar.",".$name;
-                                                                          }
-                                                                          push(@LEF_FILES,$selFile);
-                                                                        }else{ 
-                                                                          ${"Button".$name}->configure(-foreground=>"Black");
-                                                                          my @lefEntry = split(/\,/,$lefEntryVar);
-                                                                          my @lefTemp = @LEF_FILES;
-                                                                          @LEF_FILES = (); 
-                                                                          my @LEF_ENTRY = ();
-                                                                          foreach(@lefTemp){
-                                                                            my $entryRemove = shift @lefEntry;  
-                                                                            if($_ ne $selFile){
-                                                                               push(@LEF_FILES,$_);
-                                                                               push(@LEF_ENTRY,$entryRemove); 
-                                                                            }
-                                                                          }     
-                                                                          $lefEntryVar = join ",", @LEF_ENTRY;
-                                                                        } 
-                                                        })->pack(-side=>'left');
+  my $frame = $_[0];
+  my $path = $_[1];
+  my $ext = $_[2];
+  my $dir_image = $_[3];
+  my $file_image = $_[4];
+  my @DirFile = ();
+  my @dir = ();
+  my @files = ();
+  
+  my $extension = (split(/\(/,$ext))[1];
+  for($extension){s/\)//g;}
+  
+  #-------------- listing the Dir and Files of CWD-----------------# 
+  opendir (DIR, "$path");
+  while(defined ($fileName = readdir(DIR))){
+     if(-d $path."\/".$fileName){
+        if($fileName =~ m/\.$/){ 
+        }else {
+          push(@dir, $fileName);
         } 
-        $j++;
-   }  
-}
+     }else{
+        if($fileName =~ m/^.$extension/){
+           push(@files, $fileName);
+        }
+     }
+  } 
+  closedir(DIR);
+  
+  @dir = sort @dir;
+  @files = sort @files;
+  my $noOfDir = @dir;
+  my $noOfFrames = int(($#dir+$#files +2)/6); 
+  push(@DirFile,@dir,@files);
+  
+  #-------- Deleting previous Frames and making Hash empty -------#
+  foreach my $key (keys %DIR_FRAME_HASH){
+    if(Exists $DIR_FRAME_HASH{$key}){
+       my $f = $DIR_FRAME_HASH{$key};
+       $f->destroy;
+    }
+  }
+  %DIR_FRAME_HASH = ();
+  
+  #-------- Updating the path  and path List of Option Menu ------#
+  my @var = split(/\//,$path);
+  my @pathList = ("/");
+  for(my $i = 1; $i<= $#var; $i++){
+      if($i >1){
+        $reg_path = $pathList[-1]."\/".$var[$i];
+      }else{ 
+        $reg_path = "\/".$var[$i];
+      }
+    push(@pathList,$reg_path); 
+  }
+  
+  $dir_list->configure(-textvariable=>\$path);
+  $dir_list->configure(-options=>\@pathList);
+  
+  #------------------- Making buttons for Files and Directory --------------------#
+  my $j = 0;
+  for(my $i=0; $i<=$noOfFrames; $i++){
+      $dir_frame = $frame->Frame()->pack(-side=>'left',-anchor=>'n');
+      $DIR_FRAME_HASH{$i} = $dir_frame;
+      for(my $k=0; $k<=5; $k++){
+          my $name = $DirFile[$j];
+          if($j > $#DirFile){last;}
+          my $dir_but_frame = $dir_frame->Frame()->pack(-side=>'top',-expand=>1, -fill=>'x',-anchor=>'n');  
+          if($j<$noOfDir){
+             $dir_but_frame->Label(-image=>$dir_image)->pack(-side=>'left');   
+             ${"Button".$name} = $dir_but_frame->Button(-text=> $name,-padx=>0,-pady=>0,-borderwidth=>0,-relief=>'flat',-command=>sub{
+                                                        my $buttonText = ${"Button".$name}->cget('-text');
+                                                        my $path1;
+                                                        if($path eq "\/"){
+                                                           $path1 = $path.$buttonText;
+                                                        }else{ 
+                                                           $path1 = $path."\/".$buttonText;                           
+                                                        }
+                                                        &create_ListOfFileDir($frame,$path1,$ext,$dir_image,$file_image);
+                                                       })->pack(-side=>'left');
+          }else{
+                $dir_but_frame->Label(-image=>$file_image)->pack(-side=>'left');   
+                ${"Button".$name} = $dir_but_frame->Button(-text=>$name,-padx=>0,-pady=>0,-borderwidth=>0,-relief=>'flat',
+                                                           -command=>sub{my $selFile = $path."\/".$name;
+                                                                         my $color = ${"Button".$name}->cget(-foreground);
+                                                                         if($color ne "blue"){
+                                                                            ${"Button".$name}->configure(-foreground=>"blue");
+                                                                            if($lefEntryVar eq ""){
+                                                                               $lefEntryVar = $name;
+                                                                            }else{
+                                                                               $lefEntryVar = $lefEntryVar.",".$name;
+                                                                            }
+                                                                            push(@LEF_FILES,$selFile);
+                                                                          }else{ 
+                                                                            ${"Button".$name}->configure(-foreground=>"Black");
+                                                                            my @lefEntry = split(/\,/,$lefEntryVar);
+                                                                            my @lefTemp = @LEF_FILES;
+                                                                            @LEF_FILES = (); 
+                                                                            my @LEF_ENTRY = ();
+                                                                            foreach(@lefTemp){
+                                                                              my $entryRemove = shift @lefEntry;  
+                                                                              if($_ ne $selFile){
+                                                                                 push(@LEF_FILES,$_);
+                                                                                 push(@LEF_ENTRY,$entryRemove); 
+                                                                              }
+                                                                            }     
+                                                                            $lefEntryVar = join ",", @LEF_ENTRY;
+                                                                          } 
+                                                          })->pack(-side=>'left');
+          } 
+          $j++;
+     }  
+  }
 }#sub create_ListOfFileDir
 
 #-----------------------------------------------------------#
 sub popup_read_lib {
-my @types = (["Config Files", '.lib'],
-             ["All Files", "*"]);
-my $libfile = $top->getOpenFile(-filetypes =>\@types,
-                              -defaultextension => '.lib'); 
-return($libfile);
+  my @types = (["Config Files", '.lib'],
+               ["All Files", "*"]);
+  my $libfile = $top->getOpenFile(-filetypes =>\@types,
+                                -defaultextension => '.lib'); 
+  return($libfile);
 }#sub popup_read_lib
 
 #-----------------------------------------------------------#
 sub popup_read_def {
-my @types = (["Config Files", '.def'],
-             ["All Files", "*"]);
-my $deffile = $top->getOpenFile(-filetypes =>\@types,
-                              -defaultextension => '.def'); 
-return($deffile);
+  my @types = (["Config Files", '.def'],
+               ["All Files", "*"]);
+  my $deffile = $top->getOpenFile(-filetypes =>\@types,
+                                -defaultextension => '.def'); 
+  return($deffile);
 }#sub popup_read_def
 
 #-----------------------------------------------------------#
@@ -424,21 +430,21 @@ sub popup_read_verilog {
 
 #-----------------------------------------------------------#
 sub popup_read_rtl {
-my @types = (["Config Files", '.v'],
-             ["All Files", "*"]);
-my $rtlfile = $top->getOpenFile(-filetypes =>\@types,
-                              -defaultextension => '.v'); 
-return($rtlfile);          
+  my @types = (["Config Files", '.v'],
+               ["All Files", "*"]);
+  my $rtlfile = $top->getOpenFile(-filetypes =>\@types,
+                                -defaultextension => '.v'); 
+  return($rtlfile);          
 }#sub popup_read_rtl
 
 #-----------------------------------------------------------#
 sub popup_write_tcl {
-my @types = (["Config Files", '.tcl'],
-             ["All Files", "*"]);
-
-my $tclfile = $top->getSaveFile(-filetypes =>\@types,
-                                -defaultextension => '.tcl'); 
-return($tclfile);          
+  my @types = (["Config Files", '.tcl'],
+               ["All Files", "*"]);
+  
+  my $tclfile = $top->getSaveFile(-filetypes =>\@types,
+                                  -defaultextension => '.tcl'); 
+  return($tclfile);          
 }#sub popup_write_tcl
 
 ##################  creating entries for more than one lef reading ######################################
@@ -536,7 +542,7 @@ if($SWITCH eq ""){$SWITCH = "also";}
 if($TCL_FILE eq ""){return; print "WARN: write the tcl file Name\n";}
 
 open (WRITE, ">$TCL_FILE");
-print WRITE "#TCL written from proton verion-$TOOL_VERSION\n";
+print WRITE "#TCL written from electron verion-$TOOL_VERSION\n";
 print WRITE "\n";
 if ($TECH_LEF_FILE eq ""){
 }else{
@@ -699,8 +705,8 @@ my $floorplan_ButtonFrame = $floorplan_tab->Frame(-relief=>"raised")->pack(-side
 #                         &create_ListOfFileDir($top_pane,$path,$ext,$Dirimage,$Fileimage);
 #   })->pack(-side=>'left',-expand=>1,-fill=>'x');
 # 
-#my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
-#my $bitmap = $popupgui->Photo(-file => "$path2eq/ETC/up.png2");
+#my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
+#my $bitmap = $popupgui->Photo(-file => "$path2eq/ETC/up.gif");
 #my $upButton = $pathFrame->Button(-text=>"ad",-image => $bitmap, 
 #                                  -padx=>0, -pady=>0,
 #                                  -command=>sub {
@@ -955,7 +961,7 @@ my $floorplan_ButtonFrame = $floorplan_tab->Frame(-relief=>"raised")->pack(-side
 #if($TCL_FILE eq ""){return; print "WARN: write the tcl file Name\n";}
 #
 #open (WRITE, ">$TCL_FILE");
-#print WRITE "#TCL written from proton verion-$TOOL_VERSION\n";
+#print WRITE "#TCL written from electron verion-$TOOL_VERSION\n";
 #print WRITE "\n";
 #if ($TECH_LEF_FILE eq ""){
 #}else{
@@ -1184,114 +1190,182 @@ $buttonframe->Button(-text=>"Ok", -command=>sub{&write_tcl("-output","$tclfile",
 $buttonframe->Button(-text=>"Cancel", -command=>sub{$mw->destroy;})->pack(-side=>'left');
 }#sub create_popup_2save_file
 
+##############################################################################################################
+########################################## pop-up to set flplan name  ########################################
+##############################################################################################################
 sub flplan_popup {
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Set Floorplan");
 
-my $popupgui = MainWindow->new();
-$popupgui->title ("Set Floorplan");
-my ($top_module, $force)= ("", "");
-        my $frame1 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $frame2 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $ButtonFrame = $popupgui->Frame(-relief=>"raised")->pack(-side => 'bottom');
-
-$frame1->Label(-text => "Top Module")->pack(-side =>'left', -anchor => 'w');
-$frame1->Entry(-textvariable =>\$top_module, -width=>20)->pack(-side =>'right');
-$frame2->Checkbutton(-text=>'force',-variable =>\$force, -onvalue=>"--force", -offvalue => "")->pack(-side=>"left",-anchor=>'n', -expand=>1, -fill=>'x');
-
-$ButtonFrame->Button(-text=>'Ok',-command =>sub {
-                                                 if ($force ne "") {
-                                                   if ($top_module ne ""){&set_floorplan ("-partition","$top_module","--force");}
-                                                   else {&set_floorplan ("--force");}
-                                                 }else {
-                                                   if ($top_module ne ""){&set_floorplan ("-partition","$top_module");}
-                                                   else {&set_floorplan;}
-                                                 }
-                                                    
-                                            })->pack(-side=>"left");
-$ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side=>"left");
-
-
+  my ($top_module, $force)= ($TOP_MODULE, "");
+  my $frame1 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $frame2 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $ButtonFrame = $popupgui->Frame(-relief=>"raised")->pack(-side => 'bottom');
+  
+  $frame1->Label(-text => "Top Module")->pack(-side =>'left', -anchor => 'w');
+  $frame1->Entry(-textvariable =>\$top_module, -width=>20)->pack(-side =>'right');
+  $frame2->Checkbutton(-text=>'force',-variable =>\$force, -onvalue=>"--force", -offvalue => "")->pack(-side=>"left",-anchor=>'n', -expand=>1, -fill=>'x');
+  $ButtonFrame->Button(-text=>'Ok',-command =>sub {
+                                                   if ($force ne "") {
+                                                     if ($top_module ne ""){&set_floorplan ("-partition","$top_module","--force");}
+                                                     else {&set_floorplan ("--force");}
+                                                   }else {
+                                                     if ($top_module ne ""){&set_floorplan ("-partition","$top_module");}
+                                                     else {&set_floorplan;}
+                                                   }
+                                                   $popupgui->destroy;   
+                                              })->pack(-side=>"left");
+  $ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side=>"left");
 }#sub flplan_popup
 
+##############################################################################################################
+####################################### pop-up to set flplan parameters  #####################################
+##############################################################################################################
 sub flplan_parameter_popup {
-my $popupgui = MainWindow->new();
-$popupgui->title ("Flpaln Parametrs");
-my ($utilization, $aspect, $width, $height)= ("70", "", "", "");
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Flpaln Parametrs");
 
-my $add_flow_frame1 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_frame2 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_frame3 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_frame4 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $add_flow_frame5 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-my $floorplan_ButtonFrame = $popupgui->Frame(-relief=>"raised")->pack(-side => 'bottom');
-
-     $add_flow_frame1->Label(-text => "Utilization")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame1->Entry(-textvariable =>\$utilization,-width=>20)->pack(-side =>'right');
-     
-     $add_flow_frame2->Label(-text => "AspectRatio")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame2->Entry(-textvariable =>\$aspect,-width=>20)->pack(-side =>'right');
-     
-     $add_flow_frame3->Label(-text => "Width")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame3->Entry(-textvariable =>\$width,-width=>20)->pack(-side =>'right');
-     
-     $add_flow_frame4->Label(-text => "Height")->pack(-side =>'left', -anchor => 'w');
-     $add_flow_frame4->Entry(-textvariable =>\$height,-width=>20)->pack(-side =>'right');
-     
-     $flApplyButton = $floorplan_ButtonFrame->Button(-text=>'Apply',-command =>sub {
-                                                                                       if($utilization eq ""){$utilization = "variable";}
-                                                                                       if($aspect eq ""){$aspect = "variable";}
-                                                                                       if($width eq ""){$width = 0 ;}
-                                                                                       if($height eq ""){$height = 0;}
-                                                                                       &set_floorplan_parameters('-UTILIZATION',$utilization,'-ASPECT_RATIO',$aspect,'-WIDTH',$width, '-HEIGHT',$height);})->pack(-side => 'left');
-     $flCancelButton = $floorplan_ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side => 'left');
+  my ($utilization, $aspect, $width, $height)= ("70", "1", "", "");
+  my $add_flow_frame1 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_frame2 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_frame3 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_frame4 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_flow_frame5 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $floorplan_ButtonFrame = $popupgui->Frame(-relief=>"raised")->pack(-side => 'bottom');
+  
+  $add_flow_frame1->Label(-text => "Utilization")->pack(-side =>'left', -anchor => 'w');
+  $add_flow_frame1->Entry(-textvariable =>\$utilization,-width=>20)->pack(-side =>'right');
+  
+  $add_flow_frame2->Label(-text => "AspectRatio")->pack(-side =>'left', -anchor => 'w');
+  $add_flow_frame2->Entry(-textvariable =>\$aspect,-width=>20)->pack(-side =>'right');
+  
+  $add_flow_frame3->Label(-text => "Width")->pack(-side =>'left', -anchor => 'w');
+  $add_flow_frame3->Entry(-textvariable =>\$width,-width=>20)->pack(-side =>'right');
+  
+  $add_flow_frame4->Label(-text => "Height")->pack(-side =>'left', -anchor => 'w');
+  $add_flow_frame4->Entry(-textvariable =>\$height,-width=>20)->pack(-side =>'right');
+  
+  $flApplyButton = $floorplan_ButtonFrame->Button(-text=>'Apply',-command =>sub {
+                                                                                  if($utilization eq ""){$utilization = "variable";}
+                                                                                  if($aspect eq ""){$aspect = "variable";}
+                                                                                  if($width eq ""){$width = 0 ;}
+                                                                                  if($height eq ""){$height = 0;}
+                                                                                  &set_floorplan_parameters('-UTILIZATION',$utilization,'-ASPECT_RATIO',$aspect,'-WIDTH',$width, '-HEIGHT',$height); $popupgui->destroy;})->pack(-side => 'left');
+  $flCancelButton = $floorplan_ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side => 'left');
 }#flplan_parameter_popup
-#------------------------------------------------#
+
+##############################################################################################################
+#################################### pop-up to set flplan with parameters  ###################################
+##############################################################################################################
+sub set_flplan_with_parameters_popup {
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Set Floorplan");
+
+  my ($top_module, $force, $utilization, $aspect, $width, $height)= ($TOP_MODULE, "", "70", "1", "", "");
+  my $frame1 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $frame2 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $frame3 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $frame4 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $frame5 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $frame6 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $frame7 = $popupgui->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $ButtonFrame = $popupgui->Frame(-relief=>"raised",-pady=>5)->pack(-side => 'bottom');
+  
+  $frame1->Label(-text => "Top Module",-width=>10, -anchor => 'w')->pack(-side =>'left', -anchor => 'w');
+  $frame1->Entry(-textvariable =>\$top_module, -width=>20)->pack(-side =>'right', -expand=>1, -fill=>'x');
+  $frame2->Checkbutton(-text=>'force',-variable =>\$force, -onvalue=>"--force", -offvalue => "")->pack(-side=>"left",-anchor=>'n', -expand=>1, -fill=>'x');
+
+  $frame3->Label(-text => "Utilization",-width=>10, -anchor => 'w')->pack(-side =>'left');
+  $frame3->Entry(-textvariable =>\$utilization,-width=>20)->pack(-side =>'right', -expand=>1, -fill=>'x');
+  
+  $frame4->Label(-text => "AspectRatio",-width=>10, -anchor => 'w')->pack(-side =>'left');
+  $frame4->Entry(-textvariable =>\$aspect,-width=>20)->pack(-side =>'right', -expand=>1, -fill=>'x');
+  
+  $frame5->Label(-text => "OR")->pack(-side=>"left",-anchor=>'n', -expand=>1, -fill=>'x');
+
+  $frame6->Label(-text => "Width",-width=>10, -anchor => 'w')->pack(-side =>'left');
+  $frame6->Entry(-textvariable =>\$width,-width=>20)->pack(-side =>'right', -expand=>1, -fill=>'x');
+  
+  $frame7->Label(-text => "Height",-width=>10, -anchor => 'w')->pack(-side =>'left');
+  $frame7->Entry(-textvariable =>\$height,-width=>20)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+
+
+  $ButtonFrame->Button(-text=>'Ok',-command =>sub {
+                                                   if($utilization eq ""){$utilization = "variable";}
+                                                   if($aspect eq ""){$aspect = "variable";}
+                                                   if($width eq ""){$width = 0 ;}
+                                                   if($height eq ""){$height = 0;}
+                                                   &set_floorplan_parameters('-UTILIZATION',$utilization,'-ASPECT_RATIO',$aspect,'-WIDTH',$width, '-HEIGHT',$height);
+
+                                                   if($force ne ""){
+                                                      if($top_module ne ""){
+                                                         &set_floorplan ("-partition","$top_module","--force");
+                                                      }else{
+                                                         &set_floorplan ("--force");
+                                                      }
+                                                   }else{
+                                                     if($top_module ne ""){
+                                                        &set_floorplan("-partition","$top_module");
+                                                     }else{
+                                                        &set_floorplan;
+                                                     }
+                                                   }
+                                                   $popupgui->destroy;   
+                                              })->pack(-side=>"left");
+  $ButtonFrame->Button(-text=>'Cancel',-command =>sub {$popupgui->destroy;})->pack(-side=>"left");
+
+}#sub set_flplan_with_parameters_popup
+
+##############################################################################################################
+############################################ pop-up to run yosys tool  #######################################
+##############################################################################################################
 sub popup_yosys_binary {
-use Tk::Dialog;
-my $popupgui = MainWindow->new();
-$popupgui->title ("Create Makefile");
-my $image = $popupgui->Getimage('folder');
-my $book = $popupgui->NoteBook(-tabpady=>0,-tabpadx=>0,-relief=>"raised",-font=> "Times 10 italic", -borderwidth=>2)->pack(-side=>'top', -fill=>'both',-expand=>1);
-####################################################### preparing tab1(Run tcl) ################################################
-my $add_file_tab = $book->add( "Sheet 1", -label=>"AddFiles");
+  use Tk::Dialog;
+  my $popupgui = MainWindow->new();
+  $popupgui->title ("Create Makefile");
+  my $image = $popupgui->Getimage('folder');
+  my $book = $popupgui->NoteBook(-tabpady=>0,-tabpadx=>0,-relief=>"raised",-font=> "Times 10 italic", -borderwidth=>2)->pack(-side=>'top', -fill=>'both',-expand=>1);
 
-my ($techfile,$rtlfile_new,$fab_name,$top_module) = ("","","","","");
-my ($new_rtl_file,$new_lib_file) = ("","");
-        my $add_file_frame1 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame2 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame3 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame4 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $add_file_frame5 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
-        my $ButtonFrame = $add_file_tab->Frame()->pack(-side => 'bottom');
-
-
-$add_file_frame1->Label(-text => "LibFile")->pack(-side=>'left', -anchor => 'w');
-$add_file_frame1->Entry(-textvariable => "xh035", -width =>30 )->pack(-side=>'left');
-
-$add_file_frame1->Checkbutton(-text => "LibFile", -onvalue => "1")->pack(); 
-
-$add_file_frame2->Label(-text => "RTLFile")->pack(-side=>'left', -anchor => 'w');
-$add_file_frame2->Button(-image=>$image,-command =>sub {$rtlfile_new = &popup_read_rtl;}
-                        )->pack(-side => 'right') ;
-$add_file_frame2->Entry(-textvariable => \$rtlfile_new, -width =>30 )->pack(-side=>'left');
-
-$add_file_frame3->Label(-text => "tech")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame3->Entry(-textvariable =>\$techfile,-width=>30)->pack(-side =>'right');
-
-$add_file_frame4->Label(-text => "fab")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame4->Entry(-textvariable =>\$fab_name,-width=>30)->pack(-side =>'right');
-
-$add_file_frame5->Label(-text => "top_module")->pack(-side =>'left', -anchor => 'w');
-$add_file_frame5->Entry(-textvariable =>\$top_module,-width=>30)->pack(-side =>'right');
-
-
-$ButtonFrame->Button(-text => 'Write', -padx=>0, -pady=>0, 
-                     -command=>sub {
-                                    my @full_path_of_rtl = split(/\//,$rtlfile_new);
-                                    $new_rtl_file = $full_path_of_rtl[-1];
-
-                                    &run_yosys_binary("-fab",$fab_name,"-top_module",$top_module,"-tech",$techfile,"-rtl",$new_rtl_file);
-                                    $popupgui->destroy;
-                                    })->pack( -side=>"left");
+  ####################################################### preparing tab1(Run tcl) ################################################
+  my $add_file_tab = $book->add( "Sheet 1", -label=>"AddFiles");
+  my ($techfile,$rtlfile_new,$fab_name,$top_module) = ("","","","",$TOP_MODULE);
+  my ($new_rtl_file,$new_lib_file) = ("","");
+  my $add_file_frame1 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_file_frame2 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_file_frame3 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_file_frame4 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $add_file_frame5 = $add_file_tab->Frame->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
+  my $ButtonFrame = $add_file_tab->Frame()->pack(-side => 'bottom');
+  
+  
+  $add_file_frame1->Label(-text => "LibFile")->pack(-side=>'left', -anchor => 'w');
+  $add_file_frame1->Entry(-textvariable => "xh035", -width =>30 )->pack(-side=>'left');
+  
+  $add_file_frame1->Checkbutton(-text => "LibFile", -onvalue => "1")->pack(); 
+  
+  $add_file_frame2->Label(-text => "RTLFile")->pack(-side=>'left', -anchor => 'w');
+  $add_file_frame2->Button(-image=>$image,-command =>sub {$rtlfile_new = &popup_read_rtl;}
+                          )->pack(-side => 'right') ;
+  $add_file_frame2->Entry(-textvariable => \$rtlfile_new, -width =>30 )->pack(-side=>'left');
+  
+  $add_file_frame3->Label(-text => "tech")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame3->Entry(-textvariable =>\$techfile,-width=>30)->pack(-side =>'right');
+  
+  $add_file_frame4->Label(-text => "fab")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame4->Entry(-textvariable =>\$fab_name,-width=>30)->pack(-side =>'right');
+  
+  $add_file_frame5->Label(-text => "top_module")->pack(-side =>'left', -anchor => 'w');
+  $add_file_frame5->Entry(-textvariable =>\$top_module,-width=>30)->pack(-side =>'right');
+  
+  $ButtonFrame->Button(-text => 'Write', -padx=>0, -pady=>0, 
+                       -command=>sub {
+                                      my @full_path_of_rtl = split(/\//,$rtlfile_new);
+                                      $new_rtl_file = $full_path_of_rtl[-1];
+  
+                                      &run_yosys_binary("-fab",$fab_name,"-top_module",$top_module,"-tech",$techfile,"-rtl",$new_rtl_file);
+                                      $popupgui->destroy;
+                                      })->pack( -side=>"left");
 
 }#sub popup_yosys_binary
 
@@ -1361,7 +1435,27 @@ sub clone_from_git_popup {
 ################################################## Display all foundry tech popup #############################################
 ###############################################################################################################################
 sub import_foundry_lef_popup {
-  my $filename = 'library.config';
+
+my $config_file = "library.config";
+my $found_path;
+
+if (-e $config_file) {
+    $found_path = File::Spec->rel2abs($config_file);
+    print "Found library.config in current directory: $found_path\n";
+} else {
+    my $home_path = File::Spec->catfile($ENV{HOME}, $config_file);
+    if (-e $home_path) {
+        $found_path = $home_path;
+        print "Found library.config in home directory: $found_path\n";
+        $filename = $found_path ;
+    } else {
+        print "library.config not found in current directory or home directory\n";
+        exit 1;
+    }
+}
+
+  if ( -e 'library.config' ) { $filename = 'library.config' ; }
+  print "$filename as config file \n"; 
   my $data;
   if (open (my $json_str, $filename))
   {
@@ -1372,7 +1466,7 @@ sub import_foundry_lef_popup {
   }
   
   my $subWin = MainWindow->new();
-     $subWin->title ("Design Hierarchy Display");
+     $subWin->title ("Select Library");
   
   my $techFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
   my $stdCellFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
@@ -1382,13 +1476,13 @@ sub import_foundry_lef_popup {
   my $MainFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'both');
   my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
   
-  my $techLabel = $techFrame->Label(-text=>"Tech File    :")->pack(-side=>'left');
+  my $techLabel = $techFrame->Label(-text=>"Tech File    :", -foreground=>"navy")->pack(-side=>'left');
   $techEntry = $techFrame->Entry(-textvariable => \$techPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
-  my $stdCellLabel = $stdCellFrame->Label(-text=>"StdCell File:")->pack(-side=>'left');
+  my $stdCellLabel = $stdCellFrame->Label(-text=>"StdCell File:", -foreground=>"navy")->pack(-side=>'left');
   $stdCellEntry = $stdCellFrame->Entry(-textvariable => \$stdCellPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
-  my $libLabel = $libFrame->Label(-text=>"Liberty File :")->pack(-side=>'left');
+  my $libLabel = $libFrame->Label(-text=>"Liberty File :", -foreground=>"navy")->pack(-side=>'left');
   $libEntry = $libFrame->Entry(-textvariable => \$libPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
-  my $vmodelsLabel = $vmodelsFrame->Label(-text=>"Verilog Models :")->pack(-side=>'left');
+  my $vmodelsLabel = $vmodelsFrame->Label(-text=>"Verilog Models :", -foreground=>"navy")->pack(-side=>'left');
   $vmodelsEntry = $vmodelsFrame->Entry(-textvariable => \$vmodelsPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
   my $funcMapLabel = $funcMapFrame->Label(-text=>"Cell Func Map :", -foreground=>"navy")->pack(-side=>'left');
   $funcMapEntry = $funcMapFrame->Entry(-textvariable => \$funcMapPath )->pack(-expand=>1, -fill=>'x',-side=>'left');
@@ -1416,13 +1510,15 @@ sub import_foundry_lef_popup {
   
   my $cf = $top_pane->Frame(-relief=>"groove", -borderwidth=>4,-background=>"light gray");
   $cf->pack(qw/-fill both -expand 1 -side left -anchor w /);
-  my $foundryLabel = $cf->Label(-text=>"FOUNDRY", -background=>'dark grey', -foreground=>'blue', -height=>2)->pack(-side=>'top', -fill=>'x');
+  my $foundryLabel = $cf->Label(-text=>"FOUNDRY", -background=>'dark blue', -foreground=>'white', -height=>2)->pack(-side=>'top', -fill=>'x');
   
   foreach my $lib (keys %$data){
-     ${"button".$lib} = $cf->Button(-text=>$lib,-relief=>"flat", -foreground=>"orange2",-background=>"light gray", 
-                                    -command=>sub{&delete_frame($data, 0); 
+     ${"button".$lib} = $cf->Button(-text=>$lib,-relief=>"flat", -foreground=>"dark green",-background=>"light gray", 
+                                    -command=>sub{&delete_lib_frame($data, 0); 
                                                   &displayLibrary($data, $lib, "", $top_pane,0);
                                                   &highlight_selected_lib($data, $lib, "", "");
+                                                  $GLOBAL->dbGlobalSetStdCellRailWidth($data->{$lib}{'std-cell-rail-width'});
+                                                  $GLOBAL->dbGlobalSetStdCellMetal($data->{$lib}{'std-cell-metal'});
                                     })->pack(-side=>'top',-fill=>'x');
   }
 
@@ -1442,13 +1538,13 @@ sub displayLibrary {
      if(@{$data->{$lib}{node}} > 0){
          $frame = $topFrame->Frame(-relief=>"groove", -borderwidth=>4,-background=>"light gray");
          $frame->pack(qw/-fill both -expand 1 -side left -anchor w /);
-         my $processLabel = $frame->Label(-text=>"PROCESS", -background=>'dark grey', -foreground=>'blue', -height=>2)->pack(-side=>'top', -fill=>'x');
-         $FRAME_HASH{$lib} = $frame;
+         my $processLabel = $frame->Label(-text=>"PROCESS", -background=>'dark blue', -foreground=>'white', -height=>2)->pack(-side=>'top', -fill=>'x');
+         $LIB_FRAME_HASH{$lib} = $frame;
      }else{return;}
      foreach my $node (@{$data->{$lib}{node}}){
          my $nodeType = $node->{type};
-         ${"button".$lib.$nodeType} = $frame->Button(-text=>$nodeType,-relief=>"flat", -foreground=>"orange2",-background=>"light gray", 
-                                                     -command=>sub{&delete_frame($data,1); 
+         ${"button".$lib.$nodeType} = $frame->Button(-text=>$nodeType,-relief=>"flat", -foreground=>"dark green",-background=>"light gray", 
+                                                     -command=>sub{&delete_lib_frame($data,1); 
                                                                    &displayLibrary($data, $lib,$nodeType,$topFrame, 1);
                                                                    &highlight_selected_lib($data, $lib, $nodeType, "");
                                                      })->pack(-side=>'top',-fill=>'x');
@@ -1460,13 +1556,21 @@ sub displayLibrary {
            if(@{$node->{files}} > 0){
                $frame = $topFrame->Frame(-relief=>"groove", -borderwidth=>4,-background=>"light gray");
                $frame->pack(qw/-fill both -expand 1 -side left -anchor w /);
-               my $layerLabel = $frame->Label(-text=>"LAYER", -background=>'dark grey', -foreground=>'blue', -height=>2)->pack(-side=>'top', -fill=>'x');
-               $FRAME_HASH{$lib.$nodeType} = $frame;
+               my $layerLabel = $frame->Label(-text=>"LAYER", -background=>'dark blue', -foreground=>'white', -height=>2)->pack(-side=>'top', -fill=>'x');
+               $LIB_FRAME_HASH{$lib.$nodeType} = $frame;
            }else{return;}
            foreach my $file (@{$node->{files}}){
                my $layer = $file->{layer};
                my $techFile = $file->{tech};
+               # Handle multiple tech files similar to std-cells
+               if(ref $techFile eq "ARRAY"){
+                  $techFile = join (",", @{$file->{tech}});
+               }
                my $stdCellFile = $file->{'std-cells'};
+               if(ref $stdCellFile eq "ARRAY"){
+                  $stdCellFile = join (",", @{$file->{'std-cells'}});
+               }
+               my $ioCellFile = $file->{'io-cells'};
                my $vmodelsFile = $file->{'verilog-models'};
                my $libFile = $file->{'lib'};
                #<!-- optional: says which cells are combinational, sequential or
@@ -1475,11 +1579,24 @@ sub displayLibrary {
                if(ref $funcMapFile eq "ARRAY"){
                   $funcMapFile = join (",", @{$file->{'cell-func-map'}});
                }
-               ${"button".$lib.$nodeType.$layer} = $frame->Button(-text=>$layer,-relief=>"flat", -foreground=>"orange2",-background=>"light gray", 
+               ${"button".$lib.$nodeType.$layer} = $frame->Button(-text=>$layer,-relief=>"flat", -foreground=>"dark green",-background=>"light gray", 
                                                               -command=>sub{ 
                                                                             &highlight_selected_lib($data, $lib, $nodeType, $layer);
-                                                                            $techPath = (split(/\//, $techFile))[-1];      
-                                                                            $stdCellPath = (split(/\//, $stdCellFile))[-1];      
+                                                                            # Handle multiple tech files for display
+                                                                            my @techFiles = split (/\,/, $techFile);
+                                                                            my @tfPath = ();
+                                                                            foreach my $tf (@techFiles){
+                                                                              push (@tfPath, (split(/\//, $tf))[-1]);      
+                                                                            }
+                                                                            $techPath = join (",", @tfPath);
+                                                                            
+                                                                            my @stdCells = split (/\,/, $stdCellFile);
+                                                                            my @sfPath = ();
+                                                                            foreach my $sf (@stdCells){
+                                                                              push (@sfPath, (split(/\//, $sf))[-1]);      
+                                                                            }
+                                                                            #$stdCellPath = (split(/\//, $stdCellFile))[-1];      
+                                                                            $stdCellPath = join (",", @sfPath);
                                                                             $libPath = (split(/\//, $libFile))[-1];      
                                                                             $vmodelsPath = (split(/\//, $vmodelsFile))[-1];      
                                                                             #<!-- the key is optional, so do not print "" as a name -->
@@ -1492,6 +1609,7 @@ sub displayLibrary {
 
                                                                             $techFullPath = $techFile;
                                                                             $stdCellFullPath = $stdCellFile;
+                                                                            $ioCellFullPath = $ioCellFile;
                                                                             $libFullPath = $libFile;
                                                                             $vmodelsFullPath = $vmodelsFile;
                                                                             $funcMapFullPath = $funcMapFile;
@@ -1506,27 +1624,27 @@ sub displayLibrary {
 ##############################################################################################################
 ############################################# deleting the frames ############################################
 ##############################################################################################################
-sub delete_frame {
+sub delete_lib_frame {
   my $data = $_[0];
   my $level = $_[1];
   foreach my $lib (keys %$data){
      if($level >= 0){
         foreach my $node (@{$data->{$lib}{node}}){
            my $type = $node->{type};
-           if(Exists $FRAME_HASH{$lib.$type}){
-              my $frame = $FRAME_HASH{$lib.$type};
+           if(Exists $LIB_FRAME_HASH{$lib.$type}){
+              my $frame = $LIB_FRAME_HASH{$lib.$type};
               $frame->destroy;
            }
         }
      }
      if($level == 0){
-        if(Exists $FRAME_HASH{$lib}){
-           my $frame = $FRAME_HASH{$lib};
+        if(Exists $LIB_FRAME_HASH{$lib}){
+           my $frame = $LIB_FRAME_HASH{$lib};
            $frame->destroy;
         }
      }  
   }
-}#sub delete_frame
+}#sub delete_lib_frame
 
 ##############################################################################################################
 ########################################### highliting selected lib ##########################################
@@ -1574,6 +1692,7 @@ sub highlight_selected_lib{
 ################################################ import library ##############################################
 ##############################################################################################################
 sub import_sel_library{
+  open (WRITE, ">command_file.tcl");
   my $techLef = $techPathEntry->cget('-text'); 
   my $stdCellsLef = $stdCellPathEntry->cget('-text');
   my $libertyFile = $libPathEntry->cget('-text'); 
@@ -1581,21 +1700,34 @@ sub import_sel_library{
   my $funcMapFile = $funcMapPathEntry->cget('-text'); 
   #print "tech:$$techLef | stdcell:$$stdCellsLef | liberty:$$libertyFile | vmodels:$$vmodelsFile\n";
 
+  # Handle multiple tech files similar to std-cells
+  my @techFiles = (split(/\,/,$$techLef));
   my @lefFiles = (split(/\,/,$$stdCellsLef));
   my @libFiles = (split(/\,/,$$libertyFile));
   my @vmodelsFiles = (split(/\,/,$$vmodelsFile));
 
-  $GLOBAL->dbGlobalSetTechLef($$techLef);
+  # Store tech files in global database (assuming multiple tech files support exists)
+  $GLOBAL->dbGlobalSetTechLef(@techFiles);
   $GLOBAL->dbGlobalSetLefFiles(@lefFiles);
   $GLOBAL->dbGlobalSetLibFiles(@libFiles);
   $GLOBAL->dbGlobalSetVerilogModels(@vmodelsFiles);
 
-  &read_lef ("-lef", "$$techLef", "-tech","only");
+  # Read each tech file with "-tech only" option
+  foreach my $techFile (@techFiles){
+     &read_lef ("-lef", "$techFile", "-tech","only");
+     print WRITE "read_lef -lef $techFile -tech only\n";
+  }
+  
+  # Read standard cell LEF files
   foreach my $lef (@lefFiles){
      &read_lef ("-lef","$lef");
+     print WRITE "read_lef -lef $lef\n";
   }
+  
+  # Read liberty files
   foreach my $lib (@libFiles){
-     #&read_lib ("-lib","$lib");
+     &read_lib ("-lib","$lib");
+     print WRITE "read_lib -lib $lib\n";
   }
 
   #<!-- Optional, and read after the liberty on purpose: read_cell_func_map
@@ -1609,6 +1741,9 @@ sub import_sel_library{
   }
 
   &call_read_lef;
+  &read_basic_gui;
+  &dropdown_entry;
+  close(WRITE);
 }#sub import_sel_library
 
 ##############################################################################################################
@@ -1618,7 +1753,7 @@ sub import_verilog_popup{
   my $subWin = MainWindow->new();
   my $image = $subWin->Getimage('folder');
      $subWin->title ("Import Verilog");
-  my ($verilogfile, $topModuleName) = ("", "");
+  my ($verilogfile, $topModuleName) = ("", $TOP_MODULE);
   
   my $fileFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
   my $moduleFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
@@ -1642,7 +1777,7 @@ sub import_hdl_popup{
   my $subWin = MainWindow->new();
   my $image = $subWin->Getimage('folder');
      $subWin->title ("Import HDL");
-  my ($rtlfile, $includeDir, $topModuleName) = ("", "",  "");
+  my ($rtlfile, $includeDir, $topModuleName) = ("", "",  $TOP_MODULE);
   
   my $fileFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $dirFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
@@ -1708,47 +1843,82 @@ sub popup_include_dir {
 ##############################################################################################################
 ################################################# Run Synthesis ##############################################
 ##############################################################################################################
-sub run_yosys_popup {
-  my $fileName =$_;
-  my @types = (["Config Files", '.vg'],
-               ["All Files", "*"]);
-  
-  $fileName = $top->getSaveFile(-filetypes =>\@types,
-                                -defaultextension => '.vg'); 
-            
-  &call_run_yosys_tool("$fileName");
-}#sub run_yosys_popup
+# The yosys-over-REST feature was removed: run_yosys_popup, popup_write_synthesis and
+# call_run_yosys_tool_rest_service POSTed the RTL and a generated synthesis.tcl to a hard-coded
+# AWS EC2 endpoint (http://52.52.201.31:8093/syn) over plain HTTP and pulled the netlist back.
+# The service is long gone and shipping a user's RTL to a fixed public IP is not something the
+# tool should do.  The commented-out call_run_yosys_tool below is the local equivalent, which
+# runs "yosys -s synthesis.tcl" on this machine; the container installs a real yosys.
+# The synthesis.tcl writer that was embedded in the removed sub can be recovered from git
+# history if a local synthesis path is added.
+##############################################################################################################
 
-sub call_run_yosys_tool{
-  my $outputFile = $_[0];
-  open (WRITE, ">synthesis.tcl");
-    print WRITE "#TCL written from proton verion-$TOOL_VERSION\n";
-    my @rtlFiles = $GLOBAL->dbGlobalGetRtlFiles;
-    foreach my $rtl (@rtlFiles){
-       print WRITE "read_verilog $rtl\n";
-    }
-    print WRITE "\nhierarchy -check -top $TOP_MODULE\n";
-    print WRITE "\nproc; opt; fsm; opt; memory; opt\n";
-    print WRITE "\n# mapping to internal cell library\n";
-    print WRITE "techmap; opt\n\n";
-    my @libFiles = $GLOBAL->dbGlobalGetLibFiles;
-    foreach my $lib (@libFiles){
-       print WRITE "# mapping flip-flops to mycells.lib\n";
-       print WRITE "dfflibmap -liberty $lib\n";
-       print WRITE "# mapping logic to mycells.lib\n";
-       print WRITE "abc -liberty $lib\n";
-    }
-    print WRITE "\n# cleanup\n";
-    print WRITE "clean\n";
-    print WRITE "\n# write synthesized design\n";
-    print WRITE "write_verilog $outputFile\n";
-    print WRITE "\n";
-  close(WRITE);
 
-  system("yosys -s synthesis.tcl");
-  system("cat '$outputFile' | grep -v 'src =' | grep -v 'top ='  > t ;  mv t '$outputFile'");
-  #system("rm -rf synthesis.tcl");
-}#sub call_run_yosys_tool
+#sub call_run_yosys_tool{
+#  my $outputFile = $_[0];
+#  open (WRITE, ">synthesis.tcl");
+#    print WRITE "#TCL written from electron verion-$TOOL_VERSION\n";
+#    my @rtlIncludeDir = $GLOBAL->dbGlobalGetRtlDir;
+#    my $len = @rtlIncludeDir ;
+#    print "include dir $len\n";
+#    if ( $len > 1 ) {
+#    my @rtlFiles = $GLOBAL->dbGlobalGetRtlFiles;
+#    foreach my $rtl (@rtlFiles){
+#       print WRITE "read_verilog -I $rtlIncludeDir[0] $rtl\n";
+#    }
+#                              } else {
+#    my @rtlFiles = $GLOBAL->dbGlobalGetRtlFiles;
+#    foreach my $rtl (@rtlFiles){
+#       print WRITE "read_verilog $rtl\n";
+#    }
+#                             }
+#    print WRITE "\nhierarchy -check -top $TOP_MODULE\n";
+#    print WRITE "\nproc; opt; fsm; opt; memory; opt\n";
+#    print WRITE "\n# mapping to internal cell library\n";
+#    print WRITE "techmap; opt\n\n";
+#    my @libFiles = $GLOBAL->dbGlobalGetLibFiles;
+#    foreach my $lib (@libFiles){
+#       print WRITE "# mapping flip-flops to mycells.lib\n";
+#       print WRITE "dfflibmap -liberty $lib\n";
+#       print WRITE "# mapping logic to mycells.lib\n";
+#       print WRITE "abc -liberty $lib\n";
+#    }
+#    print WRITE "\n# cleanup\n";
+#    print WRITE "clean\n";
+#    print WRITE "\n# write synthesized design\n";
+#    print WRITE "write_verilog $outputFile\n";
+#    print WRITE "\n";
+#  close(WRITE);
+#
+#  #system("yosys -s synthesis.tcl");
+#  #system("cat '$outputFile' | grep -v 'src =' | grep -v 'top ='  > t ;  mv t '$outputFile'");
+#  #system("rm -rf synthesis.tcl");
+#}#sub call_run_yosys_tool
+
+##############################################################################################################
+############################################ Run Q-flow Synthesis ############################################
+##############################################################################################################
+sub run_qflow_yosys{
+  if(-d 'synthesis'){
+     system("rm -rf synthesis");
+  }
+  if(-d 'log'){
+     system("rm -rf log");
+  }
+  if(-d 'layout'){
+     system("rm -rf layout");
+  }
+  if(-d 'source'){
+     system("rm -rf source");
+  }
+  system("mkdir synthesis log layout source");
+  my @files = $GLOBAL->dbGlobalGetRtlFiles;
+  foreach my $rtl (@files){
+     system("cp $rtl source/");
+  }
+  system("qflow synthesize -T osu018 vedic_16x16");
+ 
+}#sub run_qflow_yosys
 
 ##############################################################################################################
 ################################################ Post Synthesis ##############################################
@@ -1785,39 +1955,71 @@ sub run_iverilog_popup {
 ##############################################################################################################
 sub add_power_ring_popup {
   my $subWin = MainWindow->new();
-  my $image = $subWin->Getimage('folder');
-     $subWin->title ("Power Ring");
-  my ($offsetX, $offsetY, $layerH, $layerV, $width, $spacing, $nets) = ("", "", "", "", 5, 3, "");
+     $subWin->title ("Add Power Ring");
+
+  my @pgNets = ();
+  if($GLOBAL->dbGlobalGetPowerNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetPowerNet);
+  }
+  if($GLOBAL->dbGlobalGetGroundNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetGroundNet);
+  }
+  my ($offsetX, $offsetY, $layerH, $layerV, $width, $spacing, $nets) = (0, 0, "", "", 5, 3, join(",", @pgNets));
   
   my $offsetFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
   my $layerFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
-  my $widthSpacingFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $widthFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $spacingFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
 
+  ################################## Offset Entry boxes ############################
   $offsetFrame->Label(-text => "Offset X :")->pack(-side =>'left', -anchor => 'w');
-  $xoffsetEntry = $offsetFrame->Entry(-textvariable =>\$offsetX, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  $offsetFrame->Entry(-textvariable =>\$offsetX, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
   $offsetFrame->Label(-text => "Y :")->pack(-side =>'left', -anchor => 'w');
-  $yoffsetEntry = $offsetFrame->Entry(-textvariable =>\$offsetY, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  $offsetFrame->Entry(-textvariable =>\$offsetY, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
 
-  $layerFrame->Label(-text => "Layer H :")->pack(-side =>'left', -anchor => 'w');
-  $hLayerEntry = $layerFrame->Entry(-textvariable =>\$layerH, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  ############################ Layers dropdown Entry boxes #########################
+  $layerFrame->Label(-text => "Layer  H :")->pack(-side =>'left', -anchor => 'w');
+  $hLayerDropdown = $layerFrame->BrowseEntry(-variable => \$layerH, -width=>10,-listwidth=>27)->pack(-side=>'left', -expand=>1, -fill=>'x');
   $layerFrame->Label(-text => "V :")->pack(-side =>'left', -anchor => 'w');
-  $vLayerEntry = $layerFrame->Entry(-textvariable =>\$layerV, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  $vLayerDropdown = $layerFrame->BrowseEntry(-variable => \$layerV, -width=>10,-listwidth=>27)->pack(-side=>'left', -expand=>1, -fill=>'x');
+  
+  ####################### code to list routing metal layers ########################
+  my %routingLayers = ();
+  foreach my $layerName ( keys %PTDB){
+    my $type = $PTDB{$layerName}->dbTechGetLayerType;
+    if($type eq "ROUTING") {
+       my $num = $PTDB{$layerName}->dbTechGetLayerNum;
+       $routingLayers{"$layerName"} = $num;  ## making hash for Routing Layers ##
+    }#if layer is routing 
+  }#for layerName
 
-  $widthSpacingFrame->Label(-text => "Width :")->pack(-side =>'left', -anchor => 'w');
-  $widthEntry = $widthSpacingFrame->Entry(-textvariable =>\$width, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
-  $widthSpacingFrame->Label(-text => "Spacing :")->pack(-side =>'left', -anchor => 'w');
-  $spacingEntry = $widthSpacingFrame->Entry(-textvariable =>\$spacing, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  my @rLayers = sort {$routingLayers{$a}<=>$routingLayers{$b}} keys %routingLayers;
+  foreach my $layer (@rLayers){
+     my $dir = $PTDB{$layer}->dbTechGetLayerDir;
+     if($dir eq "HORIZONTAL"){
+        $hLayerDropdown->insert('end',$layer)
+     }elsif( $dir eq "VERTICAL"){
+        $vLayerDropdown->insert('end',$layer)
+     }
+  }
 
-  $netsFrame->Label(-text => "NETS :")->pack(-side =>'left', -anchor => 'w');
-  $netsEntry = $netsFrame->Entry(-textvariable =>\$nets, -width=>30)->pack(-side =>'right', -expand=>1, -fill=>'x');
+  ################################ Width Entry box #################################
+  $widthFrame->Label(-text => "Width      :")->pack(-side =>'left', -anchor => 'w');
+  $widthFrame->Entry(-textvariable =>\$width, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
 
-  $buttonFrame->Button(-text=>'Run',-command =>sub {
-                                                     &addPowerRing("-offset", "{$offsetX, $offsetY}", "-spacing", $spacing, "-width", $width, "-layerH", $layerH, "-layerV", $layerV, "-nets", "{$nets}"); 
-                                                     $subWin->destroy;
-                                                    })->pack(-side=>"left");
-  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
+  ############################### Spacing Entry box ################################
+  $spacingFrame->Label(-text => "Spacing  :")->pack(-side =>'left', -anchor => 'w');
+  $spacingFrame->Entry(-textvariable =>\$spacing, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+
+  ################################## Nets Entry box ################################
+  $netsFrame->Label(-text => "Nets       :")->pack(-side =>'left', -anchor => 'w');
+  $netsEntry = $netsFrame->Entry(-textvariable =>\$nets, -width=>10)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  ############################### Run & Cancel buttons #############################
+  $buttonFrame->Button(-text=>'Run',-command =>sub {&addPowerRing("-offset", "{$offsetX, $offsetY}", "-spacing", $spacing, "-width", $width, "-layerH", $layerH, "-layerV", $layerV, "-nets", "{$nets}");$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left", -pady=>5);
 }#sub add_power_ring_popup
 
 ##############################################################################################################
@@ -1825,20 +2027,32 @@ sub add_power_ring_popup {
 ##############################################################################################################
 sub power_rows_popup {
   my $subWin = MainWindow->new();
-     $subWin->title ("Power Ring");
-  my ($layer, $width, $nets) = ("", 5, "");
+  $subWin->title ("Add Power Rows");
+  $subWin->geometry("250x130+0+0"); 
+
+  my @pgNets = ();
+  if($GLOBAL->dbGlobalGetPowerNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetPowerNet);
+  }
+  if($GLOBAL->dbGlobalGetGroundNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetGroundNet);
+  }
   
-  my $widthFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
-  my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my ($layer, $width, $nets) = ($GLOBAL->dbGlobalGetStdCellMetal, $GLOBAL->dbGlobalGetStdCellRailWidth, join(",", @pgNets));
+  
+  my $layerFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $widthFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $netsFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
 
-  $widthFrame->Label(-text => "LAYER :")->pack(-side =>'left', -anchor => 'w');
-  $layerEntry = $widthFrame->Entry(-textvariable =>\$layer, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
-  $widthFrame->Label(-text => "WIDTH :")->pack(-side =>'left', -anchor => 'w');
-  $widthEntry = $widthFrame->Entry(-textvariable =>\$width, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  $layerFrame->Label(-text => "LAYER :")->pack(-side =>'left', -anchor => 'w',-pady=>2);
+  $layerFrame->Entry(-textvariable =>\$layer, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x',-pady=>2);
 
-  $netsFrame->Label(-text => "NETS    :")->pack(-side =>'left', -anchor => 'w');
-  $netsEntry = $netsFrame->Entry(-textvariable =>\$nets, -width=>30)->pack(-side =>'right', -expand=>1, -fill=>'x');
+  $widthFrame->Label(-text => "WIDTH :")->pack(-side =>'left', -anchor => 'w',-pady=>2);
+  $widthFrame->Entry(-textvariable =>\$width, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x',-pady=>2);
+
+  $netsFrame->Label(-text => "NETS  :")->pack(-side =>'left', -anchor => 'w',-pady=>2);
+  $netsFrame->Entry(-textvariable =>\$nets, -width=>10)->pack(-side =>'right', -expand=>1, -fill=>'x',-pady=>2);
 
   $buttonFrame->Button(-text=>'Run',-command =>sub {
                                                      &addPowerRows("-layer", $layer, "-width", $width, "-nets", "{$nets}"); 
@@ -1846,6 +2060,202 @@ sub power_rows_popup {
                                                     })->pack(-side=>"left");
   $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
 }#sub power_rows_popup
+
+##############################################################################################################
+############################################# Power Grid Stripes #############################################
+##############################################################################################################
+sub power_grid_stripes_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Add Power Stripes");
+  $subWin->geometry("300x200+1000+300"); 
+
+  my @pgNets = ();
+  if($GLOBAL->dbGlobalGetPowerNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetPowerNet);
+  }
+  if($GLOBAL->dbGlobalGetGroundNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetGroundNet);
+  }
+  my ($offset, $width, $spacing, $layer, $nets, $dir) = (100, 1, 1.5, "", join(",", @pgNets), 'H');
+  
+  my $offsetFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $widthFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $spacingFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $layerFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $netsFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $dirFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  ################################## Offset Entry boxes ############################
+  $offsetFrame->Label(-text => "Offset    :")->pack(-side =>'left', -anchor => 'w');
+  $offsetFrame->Entry(-textvariable =>\$offset, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+
+  ################################ Width Entry box #################################
+  $widthFrame->Label(-text => "Width      :")->pack(-side =>'left', -anchor => 'w');
+  $widthFrame->Entry(-textvariable =>\$width, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+
+  ############################### Spacing Entry box ################################
+  $spacingFrame->Label(-text => "Spacing  :")->pack(-side =>'left', -anchor => 'w');
+  $spacingFrame->Entry(-textvariable =>\$spacing, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+
+  ############################ Layers dropdown Entry boxes #########################
+  $layerFrame->Label(-text => "Layer     :")->pack(-side =>'left', -anchor => 'w');
+  $layerDropdown = $layerFrame->BrowseEntry(-variable => \$layer, -width=>10)->pack(-side=>'left', -expand=>1, -fill=>'x');
+  
+  ################################## Nets Entry box ################################
+  $netsFrame->Label(-text => "Nets       :")->pack(-side =>'left', -anchor => 'w');
+  $netsEntry = $netsFrame->Entry(-textvariable =>\$nets, -width=>10)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  ########################### Stripe's direction buttons ###########################
+  my @layers = &getRoutingLayers("-dir", "H"); 
+  foreach my $l (@layers){
+     $layerDropdown->insert('end',$l);
+  }
+  $dirFrame->Radiobutton(-variable =>\$dir, -value => "H", -text => "Horizontal", -command=>sub{$layerDropdown->delete(0, 'end'); my @layers = &getRoutingLayers("-dir", "H"); foreach my $l (@layers){$layerDropdown->insert('end',$l);}})->pack(-side=>"left",-anchor=>"center"); 
+  $dirFrame->Radiobutton(-variable =>\$dir, -value => "V", -text => "Vertical", -command=>sub{$layerDropdown->delete(0, 'end'); my @layers = &getRoutingLayers("-dir", "V"); foreach my $l (@layers){$layerDropdown->insert('end',$l);}})->pack(-side=>"left",-anchor=>"center");
+
+  ############################### Run & Cancel buttons #############################
+  $buttonFrame->Button(-text=>'Run',-command =>sub {&addPowerGridStripes("-offset", $offset, "-width", $width, "-spacing", $spacing, "-layer", $layer, "-nets", "{$nets}", "-dir", $dir);$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+
+}#sub power_grid_stripes_popup
+
+##############################################################################################################
+###################################### Add Power Ring for Hard Macro #########################################
+##############################################################################################################
+sub add_hardMacro_power_ring_popup {
+  my $subWin = MainWindow->new();
+     $subWin->title ("Add Hard Macro Power Ring");
+
+  my @pgNets = ();
+  if($GLOBAL->dbGlobalGetPowerNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetPowerNet);
+  }
+  if($GLOBAL->dbGlobalGetGroundNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetGroundNet);
+  }
+  my ($instName, $offsetX, $offsetY, $layerH, $layerV, $width, $spacing, $nets) = ("", 1, 1, "", "", 2, 1, join(",", @pgNets));
+  
+  my $instanceFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $offsetFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $layerFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $widthFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $spacingFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  ################################## Instance Entry boxes ############################
+  $instanceFrame->Label(-text => "Instance :")->pack(-side =>'left', -anchor => 'w');
+  my $instanceEntry = $instanceFrame->Entry(-textvariable =>\$instName, -width=>10)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  ################################## Offset Entry boxes ############################
+  $offsetFrame->Label(-text => "Offset X :")->pack(-side =>'left', -anchor => 'w');
+  $offsetFrame->Entry(-textvariable =>\$offsetX, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  $offsetFrame->Label(-text => "Y :")->pack(-side =>'left', -anchor => 'w');
+  $offsetFrame->Entry(-textvariable =>\$offsetY, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+
+  ############################ Layers dropdown Entry boxes #########################
+  $layerFrame->Label(-text => "Layer  H :")->pack(-side =>'left', -anchor => 'w');
+  $hLayerDropdown = $layerFrame->BrowseEntry(-variable => \$layerH, -width=>10,-listwidth=>27)->pack(-side=>'left', -expand=>1, -fill=>'x');
+  $layerFrame->Label(-text => "V :")->pack(-side =>'left', -anchor => 'w');
+  $vLayerDropdown = $layerFrame->BrowseEntry(-variable => \$layerV, -width=>10,-listwidth=>27)->pack(-side=>'left', -expand=>1, -fill=>'x');
+  
+  ####################### code to list routing metal layers ########################
+  my %routingLayers = ();
+  foreach my $layerName ( keys %PTDB){
+    my $type = $PTDB{$layerName}->dbTechGetLayerType;
+    if($type eq "ROUTING") {
+       my $num = $PTDB{$layerName}->dbTechGetLayerNum;
+       $routingLayers{"$layerName"} = $num;  ## making hash for Routing Layers ##
+    }#if layer is routing 
+  }#for layerName
+
+  my @rLayers = sort {$routingLayers{$a}<=>$routingLayers{$b}} keys %routingLayers;
+  foreach my $layer (@rLayers){
+     my $dir = $PTDB{$layer}->dbTechGetLayerDir;
+     if($dir eq "HORIZONTAL"){
+        $hLayerDropdown->insert('end',$layer)
+     }elsif( $dir eq "VERTICAL"){
+        $vLayerDropdown->insert('end',$layer)
+     }
+  }
+
+  ################################ Width Entry box #################################
+  $widthFrame->Label(-text => "Width      :")->pack(-side =>'left', -anchor => 'w');
+  $widthFrame->Entry(-textvariable =>\$width, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+
+  ############################### Spacing Entry box ################################
+  $spacingFrame->Label(-text => "Spacing  :")->pack(-side =>'left', -anchor => 'w');
+  $spacingFrame->Entry(-textvariable =>\$spacing, -width=>10)->pack(-side =>'left', -expand=>1, -fill=>'x');
+
+  ################################## Nets Entry box ################################
+  $netsFrame->Label(-text => "Nets       :")->pack(-side =>'left', -anchor => 'w');
+  $netsEntry = $netsFrame->Entry(-textvariable =>\$nets, -width=>10)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  ############################### Run & Cancel buttons #############################
+  $buttonFrame->Button(-text=>'Run',-command =>sub {&addHardMacroPowerRing("-instance", $instanceEntry->get(), "-offset", "{$offsetX, $offsetY}", "-spacing", $spacing, "-width", $width, "-layerH", $layerH, "-layerV", $layerV, "-nets", "{$nets}");$design_worldcanvas->CanvasBind('<1>' =>"");$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$design_worldcanvas->delete("TEMP_HIGHLIGHT");$design_worldcanvas->CanvasBind('<1>' =>"");$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+
+  #------------------------ select the instance name by click LMB at instance ---------#
+  $design_worldcanvas->CanvasBind('<1>', => sub{
+               my @xy = $design_worldcanvas->eventLocation();
+               my $x = $xy[0];
+               my $y = $xy[1];
+               my @id      = $design_worldcanvas->find(qw/withtag current/);
+               my @tagList = $design_worldcanvas->gettags($id[0]);
+               my @coords  = $design_worldcanvas->coords($id[0]);
+               $design_worldcanvas->delete("TEMP_HIGHLIGHT");
+               if(exists $CADB{$tagList[1]}){
+                  $instanceEntry->configure(-textvariable =>$tagList[1]) if(Exists $instanceEntry);
+                  #$design_worldcanvas->createRectangle(@coords, -outline=>"white", -tags=>"TEMP_HIGHLIGHT");
+                  my $fill_color = $design_worldcanvas->itemcget($tagList[1],-fill);
+                  my $stipple = $design_worldcanvas->itemcget($tagList[1],-stipple);
+                  $design_worldcanvas->createRectangle(@coords,-outline=>"white",-fill=>$fill_color,-stipple=>$stipple,-tags=>"TEMP_HIGHLIGHT");
+
+               }}); 
+#-------------------------------------------------------------------------------------#
+
+}#sub add_hardMacro_power_ring_popup
+
+##############################################################################################################
+################################ function to get sorted list of Routing Layers ###############################
+##############################################################################################################
+sub getRoutingLayers{
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h" || $_[0] eq "-H" || $_[0] eq "-help" ||  $_[0] eq "-HELP"){
+     print "Usage : getRoutingLayers\n";
+     print "      : -dir <H/V/all (default value is all)>\n";
+  }else{
+    my $layerDir = 'all';
+    for(my $i =0;$i < $noOfArguments;$i++){
+        if($_[$i] eq "-dir"){ $layerDir = $_[$i+1];}
+    }#for
+
+    my %routingLayers = ();
+    foreach my $layerName ( keys %PTDB){
+      my $type = $PTDB{$layerName}->dbTechGetLayerType;
+      if($type eq "ROUTING"){
+         my $num = $PTDB{$layerName}->dbTechGetLayerNum;
+         $routingLayers{"$layerName"} = $num;  ## making hash for Routing Layers ##
+      }#if layer is routing 
+    }#for layerName
+
+    my @rLayers = sort {$routingLayers{$a}<=>$routingLayers{$b}} keys %routingLayers;
+    if($layerDir eq 'all'){
+       return(@rLayers);
+    } 
+    my @resLayers = ();
+    foreach my $layer (@rLayers){
+       my $dir = $PTDB{$layer}->dbTechGetLayerDir;
+       if(($layerDir eq 'H') && ($dir eq "HORIZONTAL")){
+          push(@resLayers, $layer);
+       }elsif(($layerDir eq 'V') && ($dir eq "VERTICAL")){
+          push(@resLayers, $layer);
+       }
+    }
+    return(@resLayers);
+  } 
+}#sub getRoutingLayers
 
 ##############################################################################################################
 ################################################ Escape Routing ##############################################
@@ -1886,52 +2296,310 @@ sub escape_router_popup {
 }#sub escape_router_popup
 
 ##############################################################################################################
-################################################ Graywolf Placer #############################################
-##############################################################################################################
-sub graywolf_placer_popup {
-  my $subWin = MainWindow->new();
-  $subWin->title ("Graywolf Placer");
-  $subWin->geometry("400x150+0+0"); 
-  
-  my $porosityFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
-  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
-
-  $porosityFrame->Scale(-orient => 'horizontal', -showvalue => 1, -width => 3, -relief => 'flat', -sliderlength => 20,-troughcolor => 'green', -label => "Porosity", -variable => \$porocity, -to => 3, -font =>"Times 12 bold",-borderwidth => 1,-length=>100)->pack(-side=>'top');
-
-  $buttonFrame->Button(-text=>'Run',-command =>sub { #print "pp:$porocity\n";
-                                                     &place_graywolf("-porosity", $porocity); 
-                                                     $subWin->destroy;
-                                                    })->pack(-side=>"left");
-  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
-}#sub graywolf_placer_popup
-
-##############################################################################################################
-################################################## Create Nets ###############################################
+############################################### Create Signal Net ############################################
 ##############################################################################################################
 sub create_net_popup {
   my $subWin = MainWindow->new();
-  $subWin->title ("Graywolf Placer");
+  $subWin->title ("Add Signal Net");
   $subWin->geometry("250x100+0+0"); 
 
-  my ($netName, $netType) = ("", "");
+  my $netName = "";
   
   my $nameFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
-  my $typeFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
   my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
 
   $nameFrame->Label(-text => "Name :")->pack(-side =>'left', -anchor => 'w');
-  $nameEntry = $nameFrame->Entry(-textvariable =>\$netName, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  $nameFrame->Entry(-textvariable =>\$netName, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
 
-  $typeFrame->Radiobutton(-variable =>\$netType, -value => "signal", -text => "signal")->pack(-side=>"left",-anchor=>"center"); 
-  $typeFrame->Radiobutton(-variable =>\$netType, -value => "power", -text => "power")->pack(-side=>"left",-anchor=>"center");
-  $typeFrame->Radiobutton(-variable =>\$netType, -value => "ground", -text => "ground")->pack(-side=>"left",-anchor=>"center");
+  $buttonFrame->Button(-text=>'Run',-command =>sub {&create_net("-name", "$netName", "-type", "signal"); $subWin->destroy;})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
+}#sub create_net_popup
+
+##############################################################################################################
+################################################ Create PG Nets ##############################################
+##############################################################################################################
+sub create_pg_net_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Add Power and Ground Nets");
+  $subWin->geometry("300x100+0+0"); 
+
+  my ($PowerNetName, $GroundNetName) = ("", "");
+  
+  my $PnameFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $GnameFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  $PnameFrame->Label(-text => "Power Net Name :")->pack(-side =>'left', -anchor => 'w');
+  $PnameFrame->Entry(-textvariable =>\$PowerNetName, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
+  $GnameFrame->Label(-text => "Ground Net Name:")->pack(-side =>'left', -anchor => 'w');
+  $GnameFrame->Entry(-textvariable =>\$GroundNetName, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
 
   $buttonFrame->Button(-text=>'Run',-command =>sub { #print "name:$netName type:$netType\n";
-                                                     &create_net("-name", "$netName", "-type", "$netType"); 
+                                                     &create_net("-name", "$PowerNetName", "-type", "power"); 
+                                                     &create_net("-name", "$GroundNetName", "-type", "ground"); 
                                                      $subWin->destroy;
                                                     })->pack(-side=>"left");
   $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
-}#sub create_net_popup
+}#sub create_pg_net_popup
+
+##############################################################################################################
+############################################## delete Signal Nets ############################################
+##############################################################################################################
+sub delete_net_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Add Power and Ground Nets");
+  $subWin->geometry("300x100+0+0"); 
+
+  my $netStr = "";
+  my @nets = ();
+  foreach my $net (keys %NETS_ALREADY){
+     my $netType = $NADB{$net}->dbNadbGetNetType;
+     if($netType == 0){
+        push(@nets, $net);
+     }
+  }
+  if(@nets > 0){
+     push(@nets, 'All');
+  }
+
+  my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  $netsFrame->Label(-text => "NETS :")->pack(-side =>'left', -anchor => 'w');
+  my $netDropdown = $netsFrame->BrowseEntry(-variable => \$netStr)->pack(-side=>'left', -expand=>1, -fill=>'x');
+  foreach my $net (@nets){
+     $netDropdown->insert('end',$net);
+  }
+
+  $buttonFrame->Button(-text=>'Delete',-command =>sub {&delete_net("-name", "$netStr", "-type", "signal"); $subWin->destroy;})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
+}#sub delete_net_popup
+
+##############################################################################################################
+################################################# delete PG Nets #############################################
+##############################################################################################################
+sub delete_pg_net_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Delete PG Nets");
+  $subWin->geometry("300x100+0+0"); 
+
+  my $pgNetStr = "";
+  my @pgNets = ();
+  if($GLOBAL->dbGlobalGetPowerNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetPowerNet);
+  }
+  if($GLOBAL->dbGlobalGetGroundNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetGroundNet);
+  }
+  if(@pgNets > 0){
+     push(@pgNets, 'All');
+  }
+  
+  my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  $netsFrame->Label(-text => "NETS :")->pack(-side =>'left', -anchor => 'w');
+  my $pgDropdown = $netsFrame->BrowseEntry(-variable => \$pgNetStr)->pack(-side=>'left', -expand=>1, -fill=>'x');
+  foreach my $net (@pgNets){
+     $pgDropdown->insert('end',$net);
+  }
+
+  $buttonFrame->Button(-text=>'Delete',-command =>sub {&delete_net("-name", "$pgNetStr", "-type", "pg"); $subWin->destroy;})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
+}#sub delete_pg_net_popup
+
+##############################################################################################################
+######################################## pop-up to connect signal Net ########################################
+##############################################################################################################
+sub connect_net_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Connect Signal Net");
+  $subWin->geometry("300x150+0+0"); 
+
+
+  my @nets = ();
+  foreach my $net (keys %NETS_ALREADY){
+     my $netType = $NADB{$net}->dbNadbGetNetType;
+     if($netType == 0){
+        push(@nets, $net);
+     }
+  }
+
+  my ($netStr, $instName, $pinName) = ("", "", "");
+  my ($netDropdown, $instanceEntry, $pinDropdown);
+
+  my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $instFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $pinsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  ################################## Net Browse Entry ################################
+  $netsFrame->Label(-text => "NETS        :")->pack(-side =>'left', -anchor => 'w');
+  $netDropdown = $netsFrame->BrowseEntry(-variable=>\$netStr, -browsecmd=>sub{$pinName = ""; &update_pg_pin_list($pinDropdown, $netStr, $instanceEntry->get());})->pack(-side=>'left', -expand=>1, -fill=>'x');
+  foreach my $net (@nets){
+     $netDropdown->insert('end',$net);
+  }
+  ################################## Instance Entry boxes ############################
+  $instFrame->Label(-text => "INSTANCE :")->pack(-side =>'left', -anchor => 'w');
+  $instanceEntry = $instFrame->Entry(-textvariable =>\$instName, -width=>10)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  ############################ Instance Pins Browse Entry #############################
+  $pinsFrame->Label(-text => "PIN           :")->pack(-side =>'left', -anchor => 'w');
+  $pinDropdown = $pinsFrame->BrowseEntry(-variable=>\$pinName)->pack(-side=>'left', -expand=>1, -fill=>'x');
+
+  ############################## Connect & Cancel buttons #############################
+  $buttonFrame->Button(-text=>'Connect',-command =>sub {&connect_net("-net", "$netStr", "-inst", $instanceEntry->get(), "-pin", $pinName); $design_worldcanvas->delete("TEMP_HIGHLIGHT"); $design_worldcanvas->CanvasBind('<1>' =>""); $subWin->destroy;})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$design_worldcanvas->delete("TEMP_HIGHLIGHT");$design_worldcanvas->CanvasBind('<1>' =>"");$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+  #print "net:$netStr inst:".$instanceEntry->get()." pin:$pinName\n"; 
+
+  #------------------------ select the instance name by click LMB at instance ---------#
+  $design_worldcanvas->CanvasBind('<1>', => sub{
+     my @xy = $design_worldcanvas->eventLocation();
+     my $x = $xy[0];
+     my $y = $xy[1];
+     my @id      = $design_worldcanvas->find(qw/withtag current/);
+     my @tagList = $design_worldcanvas->gettags($id[0]);
+     my @coords  = $design_worldcanvas->coords($id[0]);
+     $design_worldcanvas->delete("TEMP_HIGHLIGHT");
+     if(exists $CADB{$tagList[1]}){
+        $instanceEntry->configure(-textvariable =>$tagList[1]) if(Exists $instanceEntry);
+        my $fill_color = $design_worldcanvas->itemcget($tagList[1],-fill);
+        my $stipple = $design_worldcanvas->itemcget($tagList[1],-stipple);
+        $design_worldcanvas->createRectangle(@coords,-outline=>"white",-fill=>$fill_color,-stipple=>$stipple,-tags=>"TEMP_HIGHLIGHT");
+
+        $pinName = "";
+        my $netType = $NADB{$netStr}->dbNadbGetNetType;
+        if(exists $CADB{$tagList[1]}){
+           my $cellref =  $CADB{$tagList[1]}->dbCadbGetCellref;
+           if(exists $PLDB{$cellref}){
+              my @pins = $PLDB{$cellref}->dbMdbGetPins;
+              $pinDropdown->delete(0, 'end');
+              foreach my $p (@pins){
+                 my $pinType = $PLDB{$cellref}->dbMdbGetPinType($p);
+                 if($pinType == $netType){
+                    $pinDropdown->insert('end',$p);
+                 }
+              }
+           }else{
+              print "ERR-CONN-PG-NET-UI : 004 : cell $cellref does not exists in library\n";
+           }
+        }else{
+           print "ERR-CONN-PG-NET-UI : 003 : instance $tagList[1] does not exists in design\n";
+        }
+
+     }}); 
+#-------------------------------------------------------------------------------------#
+}#sub connect_net_popup
+
+##############################################################################################################
+########################################## pop-up to connect PG Net ##########################################
+##############################################################################################################
+sub connect_pg_net_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Connect PG Net");
+  $subWin->geometry("300x150+0+0"); 
+
+  my @pgNets = ();
+  if($GLOBAL->dbGlobalGetPowerNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetPowerNet);
+  }
+  if($GLOBAL->dbGlobalGetGroundNet ne ""){
+     push(@pgNets, $GLOBAL->dbGlobalGetGroundNet);
+  }
+  
+  my ($pgNetStr, $instName, $pinName) = ("", "", "");
+  my ($pgDropdown, $instanceEntry, $pinDropdown);
+
+  my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $instFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $pinsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  ################################## Net Browse Entry ################################
+  $netsFrame->Label(-text => "NETS        :")->pack(-side =>'left', -anchor => 'w');
+  $pgDropdown = $netsFrame->BrowseEntry(-variable=>\$pgNetStr, -browsecmd=>sub{$pinName = ""; &update_pg_pin_list($pinDropdown, $pgNetStr, $instanceEntry->get());})->pack(-side=>'left', -expand=>1, -fill=>'x');
+  foreach my $net (@pgNets){
+     $pgDropdown->insert('end',$net);
+  }
+  ################################## Instance Entry boxes ############################
+  $instFrame->Label(-text => "INSTANCE :")->pack(-side =>'left', -anchor => 'w');
+  $instanceEntry = $instFrame->Entry(-textvariable =>\$instName, -width=>10)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  ############################ Instance Pins Browse Entry #############################
+  $pinsFrame->Label(-text => "PIN           :")->pack(-side =>'left', -anchor => 'w');
+  $pinDropdown = $pinsFrame->BrowseEntry(-variable=>\$pinName)->pack(-side=>'left', -expand=>1, -fill=>'x');
+
+  ############################## Connect & Cancel buttons #############################
+  $buttonFrame->Button(-text=>'Connect',-command =>sub {&connect_net("-net", "$pgNetStr", "-inst", $instanceEntry->get(), "-pin", $pinName); $design_worldcanvas->delete("TEMP_HIGHLIGHT"); $design_worldcanvas->CanvasBind('<1>' =>""); $subWin->destroy;})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$design_worldcanvas->delete("TEMP_HIGHLIGHT");$design_worldcanvas->CanvasBind('<1>' =>"");$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+  #print "net:$pgNetStr inst:".$instanceEntry->get()." pin:$pinName\n"; 
+
+  #------------------------ select the instance name by click LMB at instance ---------#
+  $design_worldcanvas->CanvasBind('<1>', => sub{
+     my @xy = $design_worldcanvas->eventLocation();
+     my $x = $xy[0];
+     my $y = $xy[1];
+     my @id      = $design_worldcanvas->find(qw/withtag current/);
+     my @tagList = $design_worldcanvas->gettags($id[0]);
+     my @coords  = $design_worldcanvas->coords($id[0]);
+     $design_worldcanvas->delete("TEMP_HIGHLIGHT");
+     if(exists $CADB{$tagList[1]}){
+        $instanceEntry->configure(-textvariable =>$tagList[1]) if(Exists $instanceEntry);
+        my $fill_color = $design_worldcanvas->itemcget($tagList[1],-fill);
+        my $stipple = $design_worldcanvas->itemcget($tagList[1],-stipple);
+        $design_worldcanvas->createRectangle(@coords,-outline=>"white",-fill=>$fill_color,-stipple=>$stipple,-tags=>"TEMP_HIGHLIGHT");
+
+        $pinName = "";
+        if(exists  $NADB{$pgNetStr}){
+           my $netType = $NADB{$pgNetStr}->dbNadbGetNetType;
+           if(exists $CADB{$tagList[1]}){
+              my $cellref =  $CADB{$tagList[1]}->dbCadbGetCellref;
+              if(exists $PLDB{$cellref}){
+                 my @pins = $PLDB{$cellref}->dbMdbGetPins;
+                 $pinDropdown->delete(0, 'end');
+                 foreach my $p (@pins){
+                    my $pinType = $PLDB{$cellref}->dbMdbGetPinType($p);
+                    if($pinType == $netType){
+                       $pinDropdown->insert('end',$p);
+                    }
+                 }
+              }else{
+                 print "ERR-CONN-PG-NET-UI : 004 : cell $cellref does not exists in library\n";
+              }
+           }else{
+              print "ERR-CONN-PG-NET-UI : 003 : instance $tagList[1] does not exists in design\n";
+           }
+        }
+
+     }}); 
+#-------------------------------------------------------------------------------------#
+}#sub connect_pg_net_popup
+
+sub update_pg_pin_list{
+  my $dropdown = $_[0];
+  my $net = $_[1];
+  my $inst = $_[2];
+
+  #print "updating net:$net inst:$inst\n";
+  $dropdown->delete(0, 'end');
+  my $netType = $NADB{$net}->dbNadbGetNetType;
+  if(exists $CADB{$inst}){
+     my $cellref =  $CADB{$inst}->dbCadbGetCellref;
+     if(exists $PLDB{$cellref}){
+        my @pins = $PLDB{$cellref}->dbMdbGetPins;
+        foreach my $p (@pins){
+           my $pinType = $PLDB{$cellref}->dbMdbGetPinType($p);
+           if($pinType == $netType){
+              $dropdown->insert('end',$p);
+           }
+        }
+     }else{
+        print "ERR-CONN-PG-NET-UI : 002 : cell $cellref does not exists in library\n";
+     }
+  }else{
+     #print "ERR-CONN-PG-NET-UI : 001 : instance $inst does not exists in design\n";
+  }
+}#sub update_pg_pin_list
 
 ##############################################################################################################
 ################################################### Add Filler ###############################################
@@ -1950,24 +2618,125 @@ sub delete_filler_popup {
   $subWin->title ("Delete Filler");
   $subWin->geometry("250x100+0+0"); 
 
-  my ($cellref, $cellPattern) = ("", "");
+  my ($cellref, $cellPattern) = ("UND", "FILLER");
   
   my $cellFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
   my $patFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
   my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
 
-  $cellFrame->Label(-text => "Cell       :")->pack(-side =>'left', -anchor => 'w');
+  $cellFrame->Label(-text => "Cell Name Pattern     :")->pack(-side =>'left', -anchor => 'w');
   $cellEntry = $cellFrame->Entry(-textvariable =>\$cellref, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
 
-  $patFrame->Label( -text => "Pattern :")->pack(-side =>'left', -anchor => 'w');
+  $patFrame->Label( -text => "Instance Name Pattern :")->pack(-side =>'left', -anchor => 'w');
   $patEntry = $patFrame->Entry(-textvariable =>\$cellPattern, -width=>30)->pack(-side =>'left', -expand=>1, -fill=>'x');
 
-  $buttonFrame->Button(-text=>'Ok',-command =>sub {  #print "cellref:$cellref pattern:$cellPattern\n";
+  $buttonFrame->Button(-text=>'Ok',-command =>sub {  print "cellref:$cellref pattern:$cellPattern\n";
                                                      &delete_fillers("-cell", "$cellref", "-pattern", "$cellPattern"); 
                                                      $subWin->destroy;
                                                     })->pack(-side=>"left");
   $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
 }#sub delete_filler_popup
+
+##############################################################################################################
+################################ popup to run static timing analysis (vesta) #################################
+##############################################################################################################
+sub run_vesta_sta_popup {
+  my $subWin = MainWindow->new();
+  my $image = $subWin->Getimage('folder');
+  $subWin->title ("Run static timing analysis (vesta)");
+  $subWin->geometry("350x150+1000+300"); 
+
+  my @libertyFiles = $GLOBAL->dbGlobalGetLibFiles;
+  my ($verilogFile, $openRpt, $staOutFile, $period) = ("$TOP_MODULE.v", 0, "sta.rpt", 4000);
+  
+  #my $vFileFrame = $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $oFileFrame  = $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $periodFrame  = $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $rmodeFrame  = $subWin->Frame()->pack(-side => 'top');
+  my $buttonFrame = $subWin->Frame()->pack(-side => 'bottom');
+
+  $oFileFrame->Label(-text => "STA File:")->pack(-side =>'left', -anchor => 'w');
+  $oFileFrame->Button(-text=>'BrowseFile',-image=> $image,-command =>sub {$staOutFile = &popup_write_sta;})->pack(-side => 'right');
+  $oFileFrame->Entry(-textvariable =>\$staOutFile, -width=>30)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  $periodFrame->Label(-text => "Period   :")->pack(-side =>'left', -anchor => 'w');
+  $periodFrame->Entry(-textvariable =>\$period, -width=>30)->pack(-side =>'right', -expand=>1, -fill=>'x');
+
+  $rmodeFrame->Checkbutton(-text =>"Open Report", -variable =>\$openRpt, -onvalue =>1, -offvalue=>0, -font=>"Times 8 bold")->pack(-side =>"left");
+
+  $buttonFrame->Button(-text=>'Run',-command =>sub {&write_verilog(-output, $verilogFile, '--overwrite');&report_sta_vesta(-v, $verilogFile, -lib, join(",", @libertyFiles), -period, $period, -out, $staOutFile);$subWin->destroy; if($openRpt == 1){system("gvim $staOutFile");}})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
+}#sub run_vesta_sta_popup
+
+sub popup_write_sta {
+  my @types = (["Config Files", '.rpt'],
+               ["All Files", "*"]);
+  
+  my $fileName = $top->getSaveFile(-filetypes =>\@types,
+                                -defaultextension => '.rpt'); 
+  return ($fileName);
+}#sub popup_write_sta
+
+##############################################################################################################
+################################################# Run Qrouter ################################################
+##############################################################################################################
+# run_qrouter_popup was removed with the qrouter-over-REST feature.  Its only purpose was a
+# "Local" checkbox choosing between sub qroute (local qrouter) and sub rest_call_qroute (a
+# hard-coded AWS EC2 endpoint), and it defaulted to the remote one.  With the remote path gone
+# there is nothing to choose, so the Route menu now calls qroute directly.
+##############################################################################################################
+
+
+##############################################################################################################
+########################################## pop-up to build clock tree ########################################
+##############################################################################################################
+sub build_clock_tree_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Trace Clock Tree");
+  $subWin->geometry("300x150+0+0"); 
+
+
+  my @nets = ();
+  foreach my $net (keys %NETS_ALREADY){
+     my $netType = $NADB{$net}->dbNadbGetNetType;
+     if($netType == 0){
+        push(@nets, $net);
+     }
+  }
+
+  my $netStr = "";
+  my $netDropdown;
+
+  my $netsFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  ################################## Net Browse Entry ################################
+  $netsFrame->Label(-text => "NET :")->pack(-side =>'left', -anchor => 'w');
+  $netDropdown = $netsFrame->BrowseEntry(-variable=>\$netStr)->pack(-side=>'left', -expand=>1, -fill=>'x');
+  foreach my $net (@nets){
+     $netDropdown->insert('end',$net);
+  }
+  ############################## Connect & Cancel buttons #############################
+  $buttonFrame->Button(-text=>'Run',-command =>sub {&build_clock_tree("-net", "$netStr"); $subWin->destroy;})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left", -pady=>5);
+
+}#sub build_clock_tree_popup
+
+##############################################################################################################
+#################################### pop-up to  plot time vs activity ########################################
+##############################################################################################################
+sub call_plot_time_vs_activity {
+  my $fileName =$_;
+  my @types = (["Config Files", '.csv'],
+               ["All Files", "*"]);
+  
+  $fileName = $top->getOpenFile(-filetypes =>\@types,
+                                -defaultextension => '.csv'); 
+            
+  if($fileName ne ""){
+     &plot_time_vs_activity("$fileName");
+  }
+}#sub call_plot_time_vs_activity
 
 ##############################################################################################################
 

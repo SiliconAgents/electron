@@ -3,10 +3,15 @@ sub create_ruler_popup{
 my $popWin = MainWindow->new();
 $popWin->title("Create Ruler");
 
+my ($canvas, $mode, $type);
 my $active_canvas = $GLOBAL->dbGlobalGetActiveCanvas;
 
-my ($mode, $type) = ("Snap", "manhattan") if($active_canvas ne "gds_view");
-my ($mode, $type) = ("Nosnap", "manhattan") if($active_canvas eq "gds_view");
+if($active_canvas eq "design_canvas"){print "WARN: click the mouse on canvas tabs\n";return;}
+elsif($active_canvas eq "hier_view"){$canvas = $hier_canvas;}
+elsif($active_canvas eq "flat_view"){$canvas = $design_worldcanvas;}
+
+($mode, $type) = ("Snap", "manhattan") if($active_canvas ne "gds_view");
+($mode, $type) = ("Nosnap", "manhattan") if($active_canvas eq "gds_view");
 
 my $Frame1 = $popWin->Frame()->pack(-side=>'top', -fill=>'x', -expand=>1);
 my $Frame2 = $popWin->Frame()->pack(-side=>'top', -fill=>'x', -expand=>1);
@@ -20,7 +25,7 @@ $Frame2->Label(-text=>"Ruler Type")->pack(-side=>'left');
 $Frame2->Radiobutton(-text=>'Euclidean', -variable => \$type, -value=>"euclidean", -command=>sub{&create_ruler("-mode",$mode,"-type",$type);})->pack(-side => 'right');
 $Frame2->Radiobutton(-text=>'Manhattan', -variable => \$type, -value=>"manhattan", -command=>sub{&create_ruler("-mode",$mode,"-type",$type);})->pack(-side => 'right');
 
-$buttonFrame->Button(-text=>"Exit", -command=>sub{$popWin->destroy;})->pack();
+$buttonFrame->Button(-text=>"Exit", -command=>sub{$canvas->delete("TEMP_RULER");$popWin->destroy;})->pack();
 &create_ruler("-mode",$mode,"-type",$type);
 }#sub create_ruler_popup
 
@@ -188,16 +193,16 @@ $canvas->CanvasBind('<1>' => sub{
           }
         }
       }
-      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both") if($srcMod ne $sinkMod);
+      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
       if(@ruler_coords == 4){
         if ($ruler_coords[0] == $ruler_coords[2]) {
             my $distance = int(abs($ruler_coords[3] - $ruler_coords[1]));
                $distance = &convert_gui2micron($distance); 
-             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white") if($srcMod ne $sinkMod);
+             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         } else {
             my $distance = int(abs($ruler_coords[2] - $ruler_coords[0]));
                $distance = &convert_gui2micron($distance); 
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white") if($srcMod ne $sinkMod);
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         }
       }else{
         if ($ruler_coords[1] == $ruler_coords[3]) {
@@ -205,15 +210,15 @@ $canvas->CanvasBind('<1>' => sub{
             my $dis2 = int(abs($ruler_coords[5] - $ruler_coords[3])); 
                $dis1 = &convert_gui2micron($dis1); 
                $dis2 = &convert_gui2micron($dis2); 
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$dis1, -fill=>"white") if($srcMod ne $sinkMod);
-            $canvas->createText($ruler_coords[2]+1,($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white") if($srcMod ne $sinkMod);
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$dis1, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
+            $canvas->createText($ruler_coords[2]+1,($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         }else{
             my $dis1 = int(abs($ruler_coords[3] - $ruler_coords[1])); 
             my $dis2 = int(abs($ruler_coords[4] - $ruler_coords[2])); 
                $dis1 = &convert_gui2micron($dis1); 
                $dis2 = &convert_gui2micron($dis2); 
-            $canvas->createText($ruler_coords[0]+1,($ruler_coords[3]+$ruler_coords[1])/2, -text=>$dis1, -fill=>"white") if($srcMod ne $sinkMod);
-            $canvas->createText(($ruler_coords[2]+$ruler_coords[4])/2,$ruler_coords[3]+1, -text=>$dis2, -fill=>"white") if($srcMod ne $sinkMod);
+            $canvas->createText($ruler_coords[0]+1,($ruler_coords[3]+$ruler_coords[1])/2, -text=>$dis1, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
+            $canvas->createText(($ruler_coords[2]+$ruler_coords[4])/2,$ruler_coords[3]+1, -text=>$dis2, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         }
       }
       
@@ -333,19 +338,19 @@ $canvas->CanvasBind('<1>' => sub{
            }
         }
       }
-      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both") if($srcMod ne $sinkMod);
+      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         if ($ruler_coords[0] == $ruler_coords[2]) {
             my $distance = int(abs($ruler_coords[3] - $ruler_coords[1]));
                $distance = &convert_gui2micron($distance); 
-             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white") if($srcMod ne $sinkMod);
+             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         }elsif($ruler_coords[1] == $ruler_coords[3]){
             my $distance = int(abs($ruler_coords[2] - $ruler_coords[0]));
                $distance = &convert_gui2micron($distance); 
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white") if($srcMod ne $sinkMod);
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         }else{
             my $distance = int(sqrt(($ruler_coords[2] - $ruler_coords[0])*($ruler_coords[2] - $ruler_coords[0]) + ($ruler_coords[3] - $ruler_coords[1])*($ruler_coords[3] - $ruler_coords[1])));
                $distance = &convert_gui2micron($distance); 
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2+1, -text=>$distance, -fill=>"white") if($srcMod ne $sinkMod);
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER") if($srcMod ne $sinkMod);
         }
       $ruler_activate = 0;
    }
@@ -377,15 +382,15 @@ $canvas->CanvasBind('<1>' => sub{
         my $y = $xy[1];
         if ($srcX == $x || $srcY == $y){
             my @ruler_coords = ($srcX, $srcY, $x, $y);
-            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
+            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
             if($srcY == $y){
                my $distance = int(abs($ruler_coords[2] - $ruler_coords[0]));
                $distance = &convert_gui2micron($distance); 
-               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white");
+               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }else{
                my $distance = int(abs($ruler_coords[3] - $ruler_coords[1]));
                $distance = &convert_gui2micron($distance); 
-               $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white");
+               $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }
         }else{
             my @ruler_coords = ($srcX, $srcY, $x, $srcY, $x, $y); 
@@ -393,9 +398,9 @@ $canvas->CanvasBind('<1>' => sub{
             my $dis2 = int(abs($ruler_coords[5] - $ruler_coords[3]));
                $dis1 = &convert_gui2micron($dis1); 
                $dis2 = &convert_gui2micron($dis2); 
-            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$dis1, -fill=>"white");
-            $canvas->createText($ruler_coords[2]+1,($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white");
+            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$dis1, -fill=>"white", -tags=>"TEMP_RULER");
+            $canvas->createText($ruler_coords[2]+1,($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white", -tags=>"TEMP_RULER");
         }
    }
    $ruler_activate = 0; 
@@ -426,21 +431,21 @@ $canvas->CanvasBind('<1>' => sub{
         my $x = $xy[0];
         my $y = $xy[1];
         my @ruler_coords = ($srcX, $srcY, $x, $y);
-        $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
+        $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
         if ($srcX == $x || $srcY == $y){
             if($srcY == $y){
                my $distance = int(abs($ruler_coords[2] - $ruler_coords[0]));
                $distance = &convert_gui2micron($distance); 
-               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white");
+               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }else{
                my $distance = int(abs($ruler_coords[3] - $ruler_coords[1]));
                $distance = &convert_gui2micron($distance); 
-               $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white");
+               $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }
         }else{
             my $distance = int(sqrt(($ruler_coords[2] - $ruler_coords[0])*($ruler_coords[2] - $ruler_coords[0]) + ($ruler_coords[3] - $ruler_coords[1])*($ruler_coords[3] - $ruler_coords[1])));
                $distance = &convert_gui2micron($distance); 
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2+1, -text=>$distance, -fill=>"white");
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
         }
    }
    $ruler_activate = 0; 
@@ -586,16 +591,16 @@ return $micP;
 #              @ruler_coords = ($srcMaxX, $srcMaxX_Y, $srcMaxX, $sinkMaxY, $sinkMaxY_X, $sinkMaxY); 
 #          }
 #
-#      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
+#      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
 #      if(@ruler_coords == 4){
 #        if ($ruler_coords[0] == $ruler_coords[2]) {
 #            my $distance = int(abs($ruler_coords[3] - $ruler_coords[1]));
 #               $distance = &convert_gds_gui2micron($distance); 
-#             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white");
+#             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
 #        } else {
 #            my $distance = int(abs($ruler_coords[2] - $ruler_coords[0]));
 #               $distance = &convert_gds_gui2micron($distance); 
-#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white");
+#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
 #        }
 #      }else{
 #        if ($ruler_coords[1] == $ruler_coords[3]) {
@@ -603,15 +608,15 @@ return $micP;
 #            my $dis2 = int(abs($ruler_coords[5] - $ruler_coords[3])); 
 #               $dis1 = &convert_gds_gui2micron($dis1); 
 #               $dis2 = &convert_gds_gui2micron($dis2); 
-#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$dis1, -fill=>"white");
-#            $canvas->createText($ruler_coords[2]+1,($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white");
+#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$dis1, -fill=>"white", -tags=>"TEMP_RULER");
+#            $canvas->createText($ruler_coords[2]+1,($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white", -tags=>"TEMP_RULER");
 #        }else{
 #            my $dis1 = int(abs($ruler_coords[3] - $ruler_coords[1])); 
 #            my $dis2 = int(abs($ruler_coords[4] - $ruler_coords[2])); 
 #               $dis1 = &convert_gds_gui2micron($dis1); 
 #               $dis2 = &convert_gds_gui2micron($dis2); 
-#            $canvas->createText($ruler_coords[0]+1,($ruler_coords[3]+$ruler_coords[1])/2, -text=>$dis1, -fill=>"white");
-#            $canvas->createText(($ruler_coords[2]+$ruler_coords[4])/2,$ruler_coords[3]+1, -text=>$dis2, -fill=>"white");
+#            $canvas->createText($ruler_coords[0]+1,($ruler_coords[3]+$ruler_coords[1])/2, -text=>$dis1, -fill=>"white", -tags=>"TEMP_RULER");
+#            $canvas->createText(($ruler_coords[2]+$ruler_coords[4])/2,$ruler_coords[3]+1, -text=>$dis2, -fill=>"white", -tags=>"TEMP_RULER");
 #        }
 #      }
 #      $ruler_activate = 0;
@@ -748,20 +753,20 @@ return $micP;
 #              @ruler_coords = ($srcMaxX, $srcMaxX_Y, $sinkMaxY_X, $sinkMaxY); 
 #          }
 #
-#      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
+#      $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
 #
 #        if ($ruler_coords[0] == $ruler_coords[2]) {
 #            my $distance = int(abs($ruler_coords[3] - $ruler_coords[1]));
 #               $distance = &convert_gds_gui2micron($distance); 
-#             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white");
+#             $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
 #        }elsif($ruler_coords[1] == $ruler_coords[3]){
 #            my $distance = int(abs($ruler_coords[2] - $ruler_coords[0]));
 #               $distance = &convert_gds_gui2micron($distance); 
-#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white");
+#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
 #        }else{
 #            my $distance = int(sqrt(($ruler_coords[2] - $ruler_coords[0])*($ruler_coords[2] - $ruler_coords[0]) + ($ruler_coords[3] - $ruler_coords[1])*($ruler_coords[3] - $ruler_coords[1])));
 #               $distance = &convert_gds_gui2micron($distance); 
-#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2+1, -text=>$distance, -fill=>"white");
+#            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
 #        }
 #      $ruler_activate = 0;
 #       }#if ruler var set
@@ -790,15 +795,15 @@ $canvas->CanvasBind('<1>' => sub{
         my $y = $xy[1];
         if ($srcX == $x || $srcY == $y){
             my @ruler_coords = ($srcX, $srcY, $x, $y);
-            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
+            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
             if($srcY == $y){
                my $distance = abs($ruler_coords[2] - $ruler_coords[0]);
                $distance = &convert_gds_gui2micron($distance); 
-               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1], -text=>$distance, -fill=>"white");
+               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1], -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }else{
                my $distance = abs($ruler_coords[3] - $ruler_coords[1]);
                $distance = &convert_gds_gui2micron($distance); 
-               $canvas->createText($ruler_coords[0],($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white");
+               $canvas->createText($ruler_coords[0],($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }
         }else{
             my @ruler_coords = ($srcX, $srcY, $x, $srcY, $x, $y); 
@@ -806,9 +811,9 @@ $canvas->CanvasBind('<1>' => sub{
             my $dis2 = abs($ruler_coords[5] - $ruler_coords[3]);
                $dis1 = &convert_gds_gui2micron($dis1); 
                $dis2 = &convert_gds_gui2micron($dis2); 
-            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1], -text=>$dis1, -fill=>"white");
-            $canvas->createText($ruler_coords[2],($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white");
+            $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1], -text=>$dis1, -fill=>"white", -tags=>"TEMP_RULER");
+            $canvas->createText($ruler_coords[2],($ruler_coords[3]+$ruler_coords[5])/2, -text=>$dis2, -fill=>"white", -tags=>"TEMP_RULER");
         }
    }
    $ruler_activate = 0; 
@@ -835,21 +840,21 @@ $canvas->CanvasBind('<1>' => sub{
         my $x = $xy[0];
         my $y = $xy[1];
         my @ruler_coords = ($srcX, $srcY, $x, $y);
-        $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both");
+        $canvas->createLine(@ruler_coords, -fill=>"yellow", -arrow=>"both", -tags=>"TEMP_RULER");
         if ($srcX == $x || $srcY == $y){
             if($srcY == $y){
                my $distance = abs($ruler_coords[2] - $ruler_coords[0]);
                $distance = &convert_gds_gui2micron($distance); 
-               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white");
+               $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,$ruler_coords[1]+1, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }else{
                my $distance = abs($ruler_coords[3] - $ruler_coords[1]);
                $distance = &convert_gds_gui2micron($distance); 
-               $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white");
+               $canvas->createText($ruler_coords[0]+1,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
             }
         }else{
             my $distance = sqrt(($ruler_coords[2] - $ruler_coords[0])*($ruler_coords[2] - $ruler_coords[0]) + ($ruler_coords[3] - $ruler_coords[1])*($ruler_coords[3] - $ruler_coords[1]));
                $distance = &convert_gds_gui2micron($distance); 
-            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white");
+            $canvas->createText(($ruler_coords[0]+$ruler_coords[2])/2,($ruler_coords[1]+$ruler_coords[3])/2, -text=>$distance, -fill=>"white", -tags=>"TEMP_RULER");
         }
    }
    $ruler_activate = 0; 

@@ -1,36 +1,271 @@
-
+##########################################################################################################
+########################### command to run graywolf placer for flat design  ##############################
+##########################################################################################################
 sub place_graywolf {
-# write the design.cel file 
-& write_graywolf_cel_file ;
-& write_placement_par_file ;
-system ("graywolf -n placement");
-& read_graywolf_placement_result ;
+  use Benchmark;
+  my $t0 = new Benchmark; 
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h"){
+     print "Usage: place_graywolf -porosity <-1/0/1/2 (default -1)>\n";
+  }else{
+     my $porosity = -1;
+     for(my $i=0; $i < $noOfArguments;$i++){
+         if($_[$i] eq "-porosity"){$porosity = $_[$i+1];}
+     }#for
 
+     #write the design.cel file 
+     &write_graywolf_cel_file($porosity);
+     &write_placement_par_file ;
+     system ("graywolf -n placement");
+     &read_graywolf_placement_result ;
+     
+     #------ refine the port placement and assign them metal layer ----#
+     &prePlaceData( "--noTrace", "--noLevel");
+     &snapPlace( "--iosOnly");
+     &remove_pins_overlap;
+     # the place_output_fine_tune snaps the std cells to rows and fixes the X pitch as well as matches the row orientation
+     &place_output_fine_tune ;
+     if($DEBUG ==0) {system("rm -rf placement.*")};
+     #---------  pins are refined -------------------------------------#
+  }
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command place_graywolf took:",timestr($td),"\n";
 }#sub place_graywolf
 
+##########################################################################################################
+########################### command to run graywolf placer for hier module  ##############################
+##########################################################################################################
+sub place_graph_graywolf_pseudo {
+  # write the design.cel file 
+  &write_hier_graywolf_cel_file ;
+  &write_hier_placement_par_file ;
+  system ("graywolf -n placement");
+  &read_hier_graywolf_placement_result ;
+  
+  #------ refine the port placement and assign them metal layer ----#
+  #&prePlaceData( "--noTrace", "--noLevel");
+  #&snapPlace( "--iosOnly");
+  #&remove_pins_overlap;
+  # the place_output_fine_tune snaps the std cells to rows and fixes the X pitch as well as matches the row orientation
+  #&place_output_fine_tune ;
+  #if($DEBUG !=0) {system("rm -rf placement.*")};
+  #---------  pins are refined -------------------------------------#
+}#sub place_graph_graywolf_pseudo
+
+##########################################################################################################
+################################ command to run mpl & router on pseudo module ############################
+##########################################################################################################
 sub doHierPnR {
-# This command will execute PnR on a hierarchical design. This is intended to be used on a design created from xls sheet interface.
-
-# step 1 : place the current edited top module #
-&set_place_mode(qw/--keepTempFile/);
-&place_graph_mpl_pseudo;
-print "MPL done\n";
-&commitModule(qw/ -module mychip/);
-print "post place commit done\n";
-&pin_place_hier("--honorbus");
-print "pin refine done\n";
-
-# TODO : fix the edit_module command to get the pin location of child instances 
-# temporarili, we are editing all child modules
-#------ edit all child modules ---- #
-
-&edit_module_hierarchy;
-print "edit all module done\n";
-
-# route the edited module using eeRouter
-&route_hier;
-print "route done\n";
-
+  # This command will execute PnR on a hierarchical design. This is intended to be used on a design created from xls sheet interface.
+  
+  # step 1 : place the current edited top module #
+  &set_place_mode(qw/--keepTempFile/);
+  &place_graph_mpl_pseudo;
+  print "MPL done\n";
+  &commitModule(qw/ -module mychip/);
+  print "post place commit done\n";
+  &pin_place_hier("--honorbus");
+  print "pin refine done\n";
+  
+  # TODO : fix the edit_module command to get the pin location of child instances 
+  # temporarili, we are editing all child modules
+  #------ edit all child modules ---- #
+  
+  &edit_module_hierarchy;
+  print "edit all module done\n";
+  
+  # route the edited module using eeRouter
+  &route_hier;
+  print "route done\n";
 }#sub doHierPnR
+
+##########################################################################################################
+########## command to run mpl placer on full hierarchy and convert design from  hier to flat #############
+##########################################################################################################
+sub place_hier_mpl{
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $incr = $_[0];
+  my $global_top = $GLOBAL->dbfGlobalGetTOP;
+  &editModule('-module', $global_top);
+  foreach my $moduleName (keys %MODULE_ALREADY){
+     &editModule('-module', $moduleName);
+     &set_place_mode('--keepTempFile');
+     &place_graph_mpl_pseudo($incr);
+     &commitModuleLocOnly('-module', $moduleName);  
+  }
+  &editModule('-module', $global_top);
+  &hier2flat;
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "Command place_hier_mpl took:",timestr($td),"\n";
+}#sub place_hier_mpl
+
+##########################################################################################################
+######## command to run graywolf placer on full hierarchy and convert design from  hier to flat ##########
+##########################################################################################################
+sub place_hier_graywolf {
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $global_top = $GLOBAL->dbfGlobalGetTOP;
+  &editModule('-module', $global_top);
+  foreach my $moduleName (keys %MODULE_ALREADY){
+     &editModule('-module', $moduleName);
+     &place_graph_graywolf_pseudo;
+     &commitModuleLocOnly('-module', $moduleName);  
+  }
+  &editModule('-module', $global_top);
+  &hier2flat;
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "Command place_hier_graywolf took:",timestr($td),"\n";
+}#sub place_hier_graywolf
+
+##########################################################################################################
+####### command to run mpl+graywolf placer on full hierarchy and convert design from  hier to flat #######
+##########################################################################################################
+sub place_hier_fractal{
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $noOfArguments = @_;
+  if($noOfArguments < 0 || $_[0] eq "-h" ||  $_[0] eq "-help" ||  $_[0] eq "-HELP"){
+     print "Usage: place_hier_fractal -min_inst_limit <number (default value is 4)>\n";
+     print "                          --incr\n";
+  }else{
+     my $min_inst_limit = 4;
+     my $incr;
+     for(my $i = 0; $i < $noOfArguments; $i++) {
+         if($_[$i] eq "-min_inst_limit"){$min_inst_limit = $_[$i+1];}
+         if($_[$i] eq "--incr"){ $incr = $_[$i]; }
+     }#for
+
+     #my $incr = $_[0];
+     #my $global_top = $GLOBAL->dbfGlobalGetTOP;
+     #&editModule('-module', $global_top);
+     #foreach my $moduleName (keys %MODULE_ALREADY){
+     #   my @hierInsts = $MODULE_ALREADY{$moduleName}->dbVNOMGetHierInst;
+     #   my @leafInsts = $MODULE_ALREADY{$moduleName}->dbVNOMGetLeafInst;
+     #   &editModule('-module', $moduleName);
+     #   if(@hierInsts > 0){
+     #      &set_place_mode('--keepTempFile');
+     #      &place_graph_mpl_pseudo($incr);
+     #      &commitModuleLocOnly('-module', $moduleName);
+     #   }  
+     #   if(@leafInsts > 0){
+     #      &place_graph_graywolf_pseudo;
+     #      &commitModuleLocOnly('-module', $moduleName);
+     #   }  
+     #}
+     #&editModule('-module', $global_top);
+     #&hier2flat;
+
+     my $global_top = $GLOBAL->dbfGlobalGetTOP;
+     &editModule('-module', $global_top);
+     foreach my $moduleName (keys %MODULE_ALREADY){
+        #print "module:$moduleName\n";
+        my @hierInsts = $MODULE_ALREADY{$moduleName}->dbVNOMGetHierInst;
+        my @leafInsts = $MODULE_ALREADY{$moduleName}->dbVNOMGetLeafInst;
+
+        &editModule('-module', $moduleName);
+        my $flag = &hasGraywolfLargeHierInst($moduleName);
+
+        if((@hierInsts + @leafInsts) <= $min_inst_limit){
+           #print " setting inst loc at 0,0 \n";
+           &place_hier_inst_at_zero($moduleName); 
+        }elsif(@leafInsts > 0 && $flag == 0 ){
+           #print " graywolf running\n";
+           &place_graph_graywolf_pseudo;
+        }else{  
+           #print " mpl running\n";
+           &set_place_mode('--keepTempFile');
+           &place_graph_mpl_pseudo($incr);
+        }  
+        &commitModuleLocOnly('-module', $moduleName);
+     }
+     &editModule('-module', $global_top);
+     &hier2flat;
+     print "start legalizing placement ....\n";
+     &legalizeFlatPlace;
+     print "done legalizing placement ....\n";
+  }
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "Command place_hier_fractal took:",timestr($td),"\n";
+}#sub place_hier_fractal
+
+##########################################################################################################
+############################# check if hier inst size is greater than 20000 ##############################
+##########################################################################################################
+sub hasGraywolfLargeHierInst{
+  my $moduleName = $_[0];
+
+  my $dbu = $GLOBAL->dbfGlobalGetDBU;
+  my @hierInsts = $MODULE_ALREADY{$moduleName}->dbVNOMGetHierInst;
+  #print "module:$moduleName hierInsts:@hierInsts\n";
+  foreach my $inst (@hierInsts){
+     my $cellref = $PSEUDO_VINST_ALREADY{$moduleName}{$inst}->dbPimDBGetInstCellref;
+     #my @size = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetSize;
+     #print "inst:$inst cell:$cellref size:@size\n"; 
+     my $status = $PSEUDO_VINST_ALREADY{$moduleName}{$inst}->dbPimDBGetInstStatus;
+     my @loc = $PSEUDO_VINST_ALREADY{$moduleName}{$inst}->dbPimDBGetInstRelBbox;  
+     if($status eq 'UNPLACED'){
+        @loc = &return_pseudo_vinst_size($moduleName,$inst);
+     }
+     #print " status:$status loc:@loc\n";
+     my $instW = ($loc[2] - $loc[0])*$dbu;
+     my $instH = ($loc[3] - $loc[1])*$dbu;
+     if($instW > 20000 || $instH > 20000){
+        return (1);
+     }
+  }
+  return (0);
+}#sub hasGraywolfLargeHierInst
+
+##########################################################################################################
+##################################### placing hier inst at 0,0 ###########################################
+##########################################################################################################
+sub place_hier_inst_at_zero{
+  my $moduleName = $_[0];
+  foreach my $instance (keys %{$PSEUDO_VINST_ALREADY{$moduleName}}){
+     if($PSEUDO_VINST_ALREADY{$moduleName}{$instance}->dbPimDBGetInstStatus() eq "FIXED"){next;};
+     my @org_bbox = &return_pseudo_vinst_size($moduleName,$instance);
+     my $width = $org_bbox[2] - $org_bbox[0];
+     my $height = $org_bbox[3] - $org_bbox[1];
+     my @bbox = (0, 0, $width, $height);
+     $PSEUDO_VINST_ALREADY{$moduleName}{$instance}->dbPimDBSetInstRelBbox(@bbox);
+     #$PSEUDO_VINST_ALREADY{$moduleName}{$instance}->dbPimDBSetInstRelLoc(0, 0);
+     $PSEUDO_VINST_ALREADY{$moduleName}{$instance}->dbPimDBSetInstStatus(PLACED);
+     $PSEUDO_VINST_ALREADY{$moduleName}{$instance}->dbPimDBSetInstOrient(N);
+  }
+}#sub place_hier_inst_at_zero
+
+##########################################################################################################
+sub legalizeFlatPlace {
+
+&prePlaceData("--noTrace");
+&snapPlace;
+&syncPlace;
+&remove_overlap;
+
+}#sub legalizeFlatPlace
+
+
+sub placeIoPorts() {
+
+  my @size = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetSize;
+  my $maxX = $size[2] - $size[0];
+  my $maxY = $size[3] - $size[1];
+
+
+
+} #sub placeIoPorts
 
 1;

@@ -1,6 +1,6 @@
 #!/usr/bin/perl 
 
-use DBI;
+# use DBI;
 sub reset_testcase_daily {
 #my $KB_DATABASE = "DB;aditya.lnx4.com";
 my $DBvalue = $GLOBAL->dbfGlobalGetInitializeDB;

@@ -3,7 +3,7 @@ my $t0 = new Benchmark;
 
 #****f* ModuleName/tool
 # FUNCTION
-#   tool invokes the proton QA System
+#   tool invokes the electron QA System
 #   it provides a user interactive shell which can be used as a command line interface (CLI)
 #   The GUI can be open at anytime by issuing "win" or "gui" on the CLI
 #****
@@ -78,7 +78,6 @@ sub interrupt {
 #perl2exe_include Tk::After ;
 ##perl2exe_include Tk::Widget ;
 ##perl2exe_include DynaLoader;
-##perl2exe_include DBD::mysql;
 ##perl2exe_include Tk::Scrollbar;
 
 use Benchmark;
@@ -113,16 +112,11 @@ use Tk::Optionmenu;
 
 #use utf8;
 use DBI;
-#use DBD::SQLite;
-use DBD::mysql;
-#use DBD::mysqlPP;
 #use Carp::Heavy;
 #use GD::Graph::lines;
 use Spreadsheet::Read;
 use Spreadsheet::WriteExcel;
 #use Spreadsheet::ReadSXC;
-#use Text::CSV;
-use Text::CSV_XS;
 use Tk::Balloon;
 use Tk::DynaTabFrame;
 use CGI;
@@ -131,15 +125,16 @@ use Tk::widgets qw/PNG/;
 #use Schedule::Load::Chooser;
 #use Schedule::Load::Hosts;
 #use Schedule::Load::Schedule;
-use File::Data;
+use File::File::Data;
 use Tk::Adjuster;
 # added by Rajeev on 01/08/09 to address the issue that code did not open gui on viraj.lnx6.com
 #use Tk::PRINT;
+# added by Rajeev on 01/20/09 because Nitij's RTL gen code was not working
 
 # Needed by titan --fixed by Rajeev on 03/15/10
 use Getopt::Long;
-use XML::Simple;
-use PDF::Create;
+#use XML::Simple;
+#use PDF::Create;
 
 
 # needed for RTL parser fixed on 10/8/2010
@@ -179,28 +174,28 @@ use Storable;
 use GDS2;
 
 # needed for supporting XML-RPC
-use Frontier::Daemon;
+# use Frontier::Daemon;
 
 # needed for creating binary
 use URI;
 
 # needed by the image generation routine
-use GD;
+# use GD;
 use Graphics::ColorNames 2.10;
 use Graphics::ColorNames::X;
 use Module::Load ;
 use Module::Loaded ;
-use liberty;
+# use Liberty;
 
 use Spreadsheet::ParseExcel;
 use Data::Dumper;
-use XML::Writer;
+# use XML::Writer;
 use IO::File;
 use PerlIO ;
 
 # for rpc need switch
 use Switch ;
-use XML::SAX::PurePerl ; 
+# use XML::SAX::PurePerl ; 
 
 ################################################################################################
 #     for log file                                                         
@@ -221,7 +216,7 @@ use Verilog::VCD;
 
 ################################################################################################
 ################################################################################################
-use Tk::Splashscreen;
+# use Tk::Splashscreen;
 use JSON;
 
 
@@ -235,6 +230,7 @@ require "$BEEHOME/UTILS/make_err_msg";
 require "$BEEHOME/UTILS/perl_dump";
 #require "$BEEHOME/UTILS/make_rw_shareable_data";
 require "$BEEHOME/UTILS/make_Robi_func";
+require "$BEEHOME/UTILS/make_unix_shell";
 require "$BEEHOME/UTILS/make_Robi_write_graph";
 require "$BEEHOME/UTILS/make_place_graph_new";
 require "$BEEHOME/UTILS/make_unixLike_commands";
@@ -270,6 +266,7 @@ require "$BEEHOME/PARSER/make_elaborate";
 require "$BEEHOME/PARSER/make_querry";
 require "$BEEHOME/PARSER/make_floorplan";
 require "$BEEHOME/PARSER/make_get_nets";
+require "$BEEHOME/PARSER/make_rw_cdl";
 require "$BEEHOME/PARSER/make_rw_def";
 require "$BEEHOME/PARSER/make_rw_lef";
 require "$BEEHOME/PARSER/make_rw_lib";
@@ -291,6 +288,9 @@ require "$BEEHOME/PARSER/make_rw_xls";
 require "$BEEHOME/PARSER/make_rw_xml";
 require "$BEEHOME/PARSER/make_rw_edif";
 require "$BEEHOME/PARSER/make_rw_electric";
+require "$BEEHOME/ROUTER/make_jspeed_router";
+require "$BEEHOME/PARSER/make_w_export";
+
 #####  RTL ######
 require "$BEEHOME/RTL/p2v";
 require "$BEEHOME/RTL/Fifo";
@@ -320,6 +320,7 @@ require "$BEEHOME/GUI/make_gds_image";
 require "$BEEHOME/GUI/make_gui_kb_tab";
 require "$BEEHOME/GUI/make_gui_prototype";
 require "$BEEHOME/GUI/make_gui_support_func";
+require "$BEEHOME/GUI/make_heatMap_gui";
 require "$BEEHOME/GUI/make_help_gui";
 require "$BEEHOME/GUI/make_histogram_gui";
 #require "$BEEHOME/GUI/make_lef_gui";
@@ -410,6 +411,8 @@ require "$BEEHOME/ALGO/PLACE_NEW/make_leastpath_resistance";
 require "$BEEHOME/ALGO/PLACE_NEW/make_place_out_fine_tuned";
 require "$BEEHOME/ALGO/SEEDPLACE/make_ankur_identify_seed";
 ##### database programs #####
+require "$BEEHOME/DB/make_CdlDB_package";
+require "$BEEHOME/DB/make_CdlPinDB_package";
 require "$BEEHOME/DB/make_CompDB_package";
 require "$BEEHOME/DB/make_CompPinDB_package";
 require "$BEEHOME/DB/make_NetDB_package";
@@ -465,6 +468,7 @@ require "$BEEHOME/DB/make_TimingClockDB_package";
 require "$BEEHOME/DB/make_RouteCellDB_package";
 require "$BEEHOME/DB/make_eFarm_package";
 require "$BEEHOME/DB/make_ViaDB_package";
+require "$BEEHOME/DB/make_DefViaDB_package";
 require "$BEEHOME/DB/make_ViaRuleDB_package";
 require "$BEEHOME/DB/make_ViaRuleLayerDB_package";
 require "$BEEHOME/DB/make_ViaLayerDB_package";
@@ -580,8 +584,8 @@ require "$BEEHOME/EFARM/make_initMacDB";
 require "$BEEHOME/EFARM/make_services";
 require "$BEEHOME/EFARM/make_gui_efarm_tab";
 
-require "$BEEHOME/LVS/make_LVS";
-
+###### SCRATCH ############
+require "$BEEHOME/SCRATCH/make_LVS";
 
 ######## PLACER #########
 require "$BEEHOME/PLACER/DATAPREP/make_read_graph_files";
@@ -592,6 +596,7 @@ require "$BEEHOME/PLACER/DATAPREP/smatrix_placement/make_run_smatrix_placement";
 require "$BEEHOME/PLACER/DATAPREP/smatrix_placement/make_write_smatrix_graph";
 require "$BEEHOME/PLACER/DATAPREP/smatrix_placement/make_read_smatrix_graph";
 require "$BEEHOME/PLACER/DATAPREP/make_rw_graywolf_files";
+require "$BEEHOME/PLACER/DATAPREP/make_rw_hier_graywolf_files";
 require "$BEEHOME/PLACER/FUNTIONS/make_placer_commands";
 
 ######## FLEX #########
@@ -601,7 +606,12 @@ require "$BEEHOME/FLEX_COMMANDS/make_timing_browser";
 
 ###### SPARK ############
 require "$BEEHOME/SPARK/make_rw_sdef";
+require "$BEEHOME/SPARK/make_rw_sgraph";
 
+######## PADFRAME #########
+require "$BEEHOME/PADFRAME/make_padframe";
+
+require "$BEEHOME/TESTS/demo1.pl";
 
 ################################################################################################
 # Check the existence of the environment variable
@@ -625,7 +635,7 @@ $MAC_DATABASE = "";
 my @kbOrder = ("ID", "TestName", "Status", "Path to testcase","TNS", "WNS", "# Timing Paths", "# Components", "# Nets", "# Inputs", "# Outputs", "# Clocks", "Pin/Net Ratio", "Utilization", "# Layers", "Technology", "Operating Voltage", "PVT Corner", "VT", "0utime","0wtime");
 $GLOBAL->dbGlobalSetKbfo(@kbOrder);
 $DEBUG = 0;
-$WINSTART = 0;
+$WINSTART = 1;
 $EXIT_TOOL = 0;
 $PROMPT = "electron_shell";
 $echo_commands ="true";
@@ -635,8 +645,8 @@ $MAC_DATABASE = "UND";
 ############  setting the environment variables  #######
 ##  Later I will put up a hash so that all there variables can be set and displayed and querried
 $dieIsCentre = 0;
-$DEF_DATABASE_UNIT=2000;
-$GLOBAL->dbfGlobalSetDBU("2000");
+$DEF_DATABASE_UNIT=4000;
+$GLOBAL->dbfGlobalSetDBU("4000");
 $MICRONFACTOR = 1;
 srand(0);
 &createTKcolors;
@@ -645,11 +655,11 @@ srand(0);
 #   tools help commands
 ################################################################################################
 sub printMainHelp {
-print "Usage : eqator.lnx.bin                       : inteactive mode\n";
+print "Usage : electron                     : inteactive mode\n";
 print "Options available are : [--help | -h]             : print out this help\n";
 print "                        [--win]              : interactive mode with GUI\n";
-print "                        [--win]              : interactive mode with GUI\n";
-print "                        [--version]          : print the version of proton\n";
+print "                        [--gui]              : interactive mode with GUI\n";
+print "                        [--version]          : print the version of electron\n";
 print "                        [-init <fileName>]   : batch mode, tcl run file executed after tool invocation\n";
 print "                        [-f <fileName>]      : batch mode, tcl run file executed after tool invocation\n";
 print "                        [-log <fileName>]    : log fileName to be used to capture all messages from the tool\n";
@@ -659,6 +669,7 @@ print "                        [--nolog]            : log file will not be gener
 print "                        [--overwritelog]     : new log file will not be generated last log file will be overwritten\n";
 print "                        [--cleanlog]         : existing log files will be removed\n";
 print "                        [--EOC]              : exit from tool\n";
+print "                        [--DEBUG]            : run the tool in debug mode .. to be used by R&D\n";
 exit;
 }#sub printMainHelp
 
@@ -694,7 +705,10 @@ $numArgs = $#ARGV;
       elsif ( $ARGV[$xx] eq "-log" ) { $LOG_FILE = $ARGV[$xx+1 ];}         
       elsif ( $ARGV[$xx] eq "-cmdlog" ) { $CMD_FILE = $ARGV[$xx+1 ];}         
       elsif ( $ARGV[$xx] eq "--win" ) { $WINSTART = 1;}         
+      elsif ( $ARGV[$xx] eq "--gui" ) { $WINSTART = 1;}         
+      elsif ( $ARGV[$xx] eq "--nogui" ) { $WINSTART = 0;}         
       elsif ( $ARGV[$xx] eq "--EOC" ) { $EXIT_TOOL = 1;}         
+      elsif ( $ARGV[$xx] eq "--DEBUG" ) { $DEBUG = 1;}         
       elsif ( $ARGV[$xx] eq "-key" ) { $LICKEY = $ARGV[$xx+1 ] ;}         
       elsif ( $ARGV[$xx] eq "-port" ) { $DAEMON_PORT = $ARGV[$xx+1] ; $daemonize = 1 ; }         
                                             }                
@@ -705,16 +719,17 @@ $numArgs = $#ARGV;
 print "MSG : 000 : starting a fresh session\n";
 my $t1 = new Benchmark;
 my $td = timediff($t1,$t0);
-print "proton :",timestr($td),"\n";
+print "electron :",timestr($td),"\n";
 if ( $dbInitFile == 1 ) {                                     
      &source($INIT_FILE);                                     
                         }                                     
 if ( $daemonize == 1 ) {
-     print "Starting proton as a daemon on port $DAEMON_PORT\n";
+     print "Starting electron as a daemon on port $DAEMON_PORT\n";
      &allow_remote_login('-host', $hostname , '-port', $DAEMON_PORT);
                        }
 elsif ( $WINSTART == 1 ) {
-     &win;
+     &win ;
+     &exit ;
                       }
 elsif ( $EXIT_TOOL == 1 ) {
      exit;
@@ -792,14 +807,12 @@ if(exists $p2cmdArgs->{$cmd}){
 	}
 	print "$PROMPT \> ";
 } else {
-#if command starts with "sys " interpret as system command
-#else put it insides a eval block. $perlcmd = "{."$_."}"; eval $perlcmd
-	if ($_ =~ /^\s*sys (.*)/) {
-		system($1);
-	} else {
-		$perlcmd = "{"."$_"."}";
-		eval($perlcmd); 
-	}
+# Not a command in commandsFile.  Dispatch order (see UTILS/make_unix_shell):
+#   "sys <cmd>"   -> always the unix shell
+#   "peval <code>"-> always perl eval
+#   <cmd> in PATH -> the unix shell, so "ls -l", "make", "grep FOO f" just work
+#   otherwise     -> perl eval, the historical behaviour
+	&dbfHandleUnknownCommand($_, $cmd, 1);
 	print "$PROMPT \> ";
 	} # if a system command
 } #if only CR
@@ -863,7 +876,7 @@ for ( my $xx = -1; $xx < $numArgs ; $xx++ ) {
   }         
   elsif ( $ARGV[$xx] eq "--cleanlog" ) { 
     #$NOLOG = 1;
-    system ("rm proton.log*");
+    system ("rm electron.log*");
     #exit;
   }         
   elsif ( $ARGV[$xx] eq "--overwritelog" ) { 
@@ -878,15 +891,15 @@ $cmdfileName = "";
 if($LOG_FILE eq ""){
   if( ($NOLOG == 0) && ($overwritelog == 0) ) {
     for (my $i = 0 ; 1;$i++){
-      $logFileName ="proton.log".$i;
-      $cmdfileName ="proton.cmd".$i;
+      $logFileName ="electron.log".$i;
+      $cmdfileName ="electron.cmd".$i;
       if (-e $logFileName){
         $t= $i+1;
-        $logFileName = "proton.log".$t; 
-        $cmdfileName ="proton.cmd".$t;
+        $logFileName = "electron.log".$t; 
+        $cmdfileName ="electron.cmd".$t;
       }else {
-        $logFileName ="proton.log".$i;
-        $cmdfileName ="proton.cmd".$i;
+        $logFileName ="electron.log".$i;
+        $cmdfileName ="electron.cmd".$i;
         last;	
       }
     }
@@ -896,14 +909,14 @@ if($LOG_FILE eq ""){
   }
   if( $overwritelog == 1 ) {
     for (my $i = 0 ; 1;$i++){
-      $logFileName ="proton.log".$i;
-      $cmdfileName ="proton.cmd".$i;
+      $logFileName ="electron.log".$i;
+      $cmdfileName ="electron.cmd".$i;
       if (-e $logFileName){
       } 
       else {
         $i = $i-1;
-        $logFileName ="proton.log".$i;
-        $cmdfileName ="proton.cmd".$i;
+        $logFileName ="electron.log".$i;
+        $cmdfileName ="electron.cmd".$i;
         last;	
       }
     }
@@ -920,7 +933,7 @@ if($LOG_FILE eq ""){
 #my $ver = $GLOBAL->dbfGlobalGetVersion;
 print "\n\n\t#########################################\n";
 print "\t#                                       #\n";
-print "\t#       Welcome to Proton tool          #\n";
+print "\t#       Welcome to Electron tool        #\n";
 print "\t#          release-ID  $build_version              #\n";
 print "\t#                                       #\n";
 print "\t#########################################\n\n\n";
@@ -965,7 +978,7 @@ undef @COMPONENTS ;
 undef @GCellArray;
 
 $dieIsCentre = 0;
-$DEF_DATABASE_UNIT=2000;
+$DEF_DATABASE_UNIT=4000;
 undef $GLOBAL;
 $MICRONFACTOR = 1;
 print "\.";
@@ -973,7 +986,7 @@ print " \. done \n";
 
 print "\n\n\t#########################################\n";
 print "\t#                                       #\n";
-print "\t#     Thank you for using Proton!       #\n";
+print "\t#     Thank you for using Electron!     #\n";
 print "\t#                                       #\n";
 print "\t#########################################\n\n\n";
 closeTee(*STDOUT);

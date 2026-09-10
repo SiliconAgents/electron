@@ -20,7 +20,6 @@ cpanm Tk::WorldCanvas
 cpanm Tk::DynaTabFrame
 cpanm Spreadsheet::Read
 cpanm Spreadsheet::WriteExcel
-cpanm Text::CSV_XS
 cpanm File::Data
 cp /home/rsrivastava/perl5/lib/perl5/File/File/Data.pm /home/rsrivastava/perl5/lib/perl5/File/
 
@@ -53,7 +52,7 @@ cpanm Math::Clipper
 cpanm Mojo::UserAgent
 cpanm Tk::TableMatrix::Spreadsheet
 
-setenv PROTON_HOME /home/rsrivastava/potato/
+setenv ELECTRON_HOME /home/rsrivastava/potato/
 
 cpanm List::Part
 cpanm List::Flatten

@@ -57,7 +57,7 @@ $box = [0,0,540,540];
   $guiCanvasHeight = 500;
   $guiCanvasWidth = 500;
 $GLOBAL->dbGlobalSetGuiStatus(1);
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
 ################ define some bitmaps #######
 my $bitmaps = [];
@@ -994,7 +994,7 @@ $tab13 = $book->add( "Sheet 13", -label=>"Img-View", -justify => "center" );
 sub imgview_canvas {
 #use Tk::WorldCanvas;
 $box = [0,0,540,540];
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
 my $imgTopFrame = $tab13->Frame()->pack(-side => 'top',-fill=>'y');
 
@@ -1058,7 +1058,7 @@ sub popup_load_img_file {
 
 sub hierview_canvas {
 use Tk::WorldCanvas;
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
 my $hierLeftFrame = $tab9->Frame()->pack(-side => 'left',-fill=>'y');
 

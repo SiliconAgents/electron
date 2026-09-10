@@ -227,7 +227,7 @@ sub place_and_commit_given_module_with_floorplan_plan_1
   my $NODE_PIN_MAP_FILE = "$start_module.node_pin_map.txt";
   my $NODE_FILE = "nodefile";
   my $LIB_FILE = "libfile";
-  my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+  my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
   my $placeLogFileName = "hierarchical_placement.log";
 
 
@@ -351,7 +351,7 @@ sub place_and_commit_given_module_with_floorplan_plan_1
     }
     if ($forked_pid_plan_1 == 0)  {
       #exec("$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
-      exec("$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
+      exec("$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
       #my $forked_pid_child_plan_1 ;
       #undef $forked_pid_child_plan_1 ;
       #while (!defined ($forked_pid_child_plan_1 = fork())){
@@ -360,7 +360,7 @@ sub place_and_commit_given_module_with_floorplan_plan_1
       #}
       #if ($forked_pid_child_plan_1 == 0)  {
       #  exec("$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
-      #  exec("$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
+      #  exec("$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
       #}else{
       #  print "\nforked a new child process for plan_1\n" ;
       #  CORE::exit(0) ;
@@ -470,7 +470,7 @@ sub fire_placement_curr_instance_plan_1_plan_1
   my $NODE_PIN_MAP_FILE = "$cellref.node_pin_map.txt";
   my $NODE_FILE = "nodefile";
   my $LIB_FILE = "libfile";
-  my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome;
+  my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
 
   my $global_top_module = $GLOBAL->dbfGlobalGetTOP();
   my $curr_floor_plan_name = $global_top_module."\/".$full_path_name ; 
@@ -522,7 +522,7 @@ sub fire_placement_curr_instance_plan_1_plan_1
   
   #while(!(-e "$placeLogFileName")){ 
   #  if (fork() == 0) {exec("$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");}
-  #  if (fork() == 0) {exec("$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");}
+  #  if (fork() == 0) {exec("$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");}
   #  sleep(5);
   #}
 
@@ -535,7 +535,7 @@ sub fire_placement_curr_instance_plan_1_plan_1
     }
     if ($forked_pid_plan_1 == 0)  {
       #exec("$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
-      exec("$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
+      exec("$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
       #my $forked_pid_child_plan_1 ;
       #undef $forked_pid_child_plan_1 ;
       #while (!defined ($forked_pid_child_plan_1 = fork())){
@@ -544,7 +544,7 @@ sub fire_placement_curr_instance_plan_1_plan_1
       #}
       #if ($forked_pid_child_plan_1 == 0)  {
       #  exec("$env_eqator_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
-      #  exec("$env_proton_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
+      #  exec("$env_electron_home/3RDBIN/plan_1 $INPUT_NET_FILE $NODE_FILE > $placeLogFileName");
       #}else{
       #  print "\nforked a new child process for plan_1\n" ;
       #  CORE::exit(0) ;

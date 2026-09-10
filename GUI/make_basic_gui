@@ -37,6 +37,22 @@ sub hashValueAscendingNum {
 ############################# Making the Radiobuttons for each Metal Layer ################################
 ###########################################################################################################
 sub read_basic_gui {
+    my $rlayers = $RlibFrame4->children;
+    my $lbl = shift @$rlayers;
+    foreach my $btn (@$rlayers){
+      $btn->destroy;
+    }
+    my $clayers = $ClibFrame4->children;
+    shift @$clayers;
+    foreach my $btn (@$clayers){
+      $btn->destroy;
+    }
+    my $mlayers = $MlibFrame4->children;
+    shift @$mlayers;
+    foreach my $btn (@$mlayers){
+      $btn->destroy;
+    }
+
     my $t;   
     foreach my $layerName ( keys %PTDB){
       my $type = $PTDB{$layerName}->dbTechGetLayerType;
@@ -131,309 +147,230 @@ my @box_org = $basicCanvas->getView();
 ############################################## display Via ######################################################
 
 sub dropdown_entry {
-foreach my $viaName(keys %VDB){
-     my $VN = $VDB{$viaName}->dbViaGetViaName;
-     my $Vn = $VDB{$viaName}->dbViaGetViaNum;
-     $vd{$VN} = $Vn;
-}#foreach
-     my @via = sort hash_Value_AscendingNumber(keys(%vd));
-    $Via_menubar->Label(-text => "VIA Name",-font=>"Times 10 italic")->pack(-side =>'left', -anchor => 'w');
-my $dropdown_value = "----Select Via----";
-#my $Via_dropdown = $Via_menubar->BrowseEntry(-variable => \$dropdown_value,-width => 0,)->pack;
-my $Via_dropdown = $Via_menubar->BrowseEntry(-variable => \$dropdown_value)->pack;
-   $Via_dropdown->configure(-browsecmd => sub {&display_via($dropdown_value);});
-   foreach(@via){
-        $Via_dropdown->insert('end', $_);
-   }
-   #$dropdown_value = "----Select Via----";
+  my $widgets = $Via_menubar->children;
+  foreach my $w (@$widgets){
+    $w->destroy;
+  }
+   
+  my %vd = (); 
+  foreach my $viaName(keys %VDB){
+    my $viaName = $VDB{$viaName}->dbViaGetViaName;
+    my $viaNum = $VDB{$viaName}->dbViaGetViaNum;
+    $vd{$viaName} = $viaNum;
+  }#foreach
+  my @via = sort {$vd{$a} <=> $vd{$b}} keys %vd;
+
+  $Via_menubar->Label(-text => "VIA Name",-font=>"Times 10 italic")->pack(-side =>'left', -anchor => 'w');
+  my $dropdown_value = "----Select Via----";
+  #my $Via_dropdown = $Via_menubar->BrowseEntry(-variable => \$dropdown_value,-width => 0,)->pack;
+  my $Via_dropdown = $Via_menubar->BrowseEntry(-variable => \$dropdown_value)->pack;
+  $Via_dropdown->configure(-browsecmd => sub {&display_via($dropdown_value);});
+  foreach(@via){
+     $Via_dropdown->insert('end', $_);
+  }
+
 }#sub dropdown_entry
 
 sub display_via {
-my $viaName = $_[0];
-print " vianame $viaName\n";
-   $basicViaCanvas->delete("all");
-my $basicViaCanvasHeight = 100;           #---- actual height of basicViaCanvas ------#
-my $basicViaCanvasWidth = 490;            #---- actual width of basicViaCanvas ------#
+  my $viaName = $_[0];
 
-my $viaDisplayFact = abs($basicViaCanvasHeight/2);
-   $viaDisplayFact = int($viaDisplayFact);
-my $widthHL;
-my $widthVL;
-######################################### Calculating Scale factor,ShiftX and ShiftY ########################################
+  $basicViaCanvas->delete("all");
+  my $basicViaCanvasHeight = 100;           #---- actual height of basicViaCanvas ------#
+  my $basicViaCanvasWidth = 490;            #---- actual width of basicViaCanvas ------#
+  
+  my %via_layers = ();
+  ############################# Calculating Scale factor,ShiftX and ShiftY ###############################
+  my $viaDisplayFact = abs($basicViaCanvasHeight/2);
+  $viaDisplayFact = int($viaDisplayFact);
+  my $widthHL;
+  my $widthVL;
 
-                   my @vialayer = $VDB{$viaName}->dbGetViaLayer;
-              foreach $via(@vialayer){
-                   my $layer = $via->dbGetViaLayerName;
-                   my $type = $PTDB{$layer}->dbTechGetLayerType;
-                   my $dir = $PTDB{$layer}->dbTechGetLayerDir;
-                   my $width = $PTDB{$layer}->dbTechGetLayerWidth;
-                   if($type eq "ROUTING"){
-                                           if ($dir eq "VERTICAL"){$widthVL = $width }#if vertical layer    
-                                           if ($dir eq "HORIZONTAL"){$widthHL = $width}#if horizontal lay
-                                            }#if type is routing
-                                            }
+  my @vialayer = $VDB{$viaName}->dbGetViaLayer;
+  foreach $via(@vialayer){
+     my $layer = $via->dbGetViaLayerName;
+     my $layerNum = $PTDB{$layer}->dbTechGetLayerNum;
+     my $color = $PTDB{$layer}->dbTechGetLayerColor;
+     my $type = $PTDB{$layer}->dbTechGetLayerType;
+     my $dir = $PTDB{$layer}->dbTechGetLayerDir;
+     my $width = $PTDB{$layer}->dbTechGetLayerWidth;
+     my $llx; my $lly;
+     my $urx; my $ury;
+     $via_layers{$layer} = $layerNum;
+     if($type eq "ROUTING"){
+        if($dir eq "VERTICAL"){ 
+           $widthVL = $width;
+           $llx = 2-$widthVL;
+           $lly = 0;
+           $urx = 2;
+           $ury = $lly+1;
+        }#if vertical layer    
+        if($dir eq "HORIZONTAL"){
+           $widthHL = $width;
+           $llx = 0;
+           $lly = 1-$widthHL;
+           $urx = $llx+2;
+           $ury = 1;
+        }#if horizontal lay
 
-                   my @vialayer = $VDB{$viaName}->dbGetViaLayer;
-              foreach $via(@vialayer){
-                   my $layer = $via->dbGetViaLayerName;
-                   my $color = $PTDB{$layer}->dbTechGetLayerColor;
-                   my $type = $PTDB{$layer}->dbTechGetLayerType;
-                   my $dir = $PTDB{$layer}->dbTechGetLayerDir;
-                   my $width = $PTDB{$layer}->dbTechGetLayerWidth;
-                   my $llx; my $lly;
-                   my $urx; my $ury;
-                   if($type eq "ROUTING"){
+        $llx = $llx*$viaDisplayFact;
+        $lly = $lly*$viaDisplayFact;
+        $urx = $urx*$viaDisplayFact;
+        $ury = $ury*$viaDisplayFact;
+        
+        ##################  shifting of x by 100   ################ 
+        $llx = $llx+100;
+        $urx = $urx+100;
+        ############## changing display upside down ###############
+        $lly = $basicViaCanvasHeight - $lly;
+        $ury = $basicViaCanvasHeight - $ury;
+        
+        $basicViaCanvas->createRectangle($llx,$lly,$urx,$ury, -outline,$color,-fill,$color,-stipple,"gray12");                                               
+     }#if routing
+  }#foreach vialayer
 
-                            if ($dir eq "VERTICAL"){ 
-                                                    $llx = 2-$widthVL;
-                                                    $lly = 0;
-                          			    $urx = 2;
-                          		            $ury = $lly+1;
+  my $shiftX = (2-$widthVL/2)*$viaDisplayFact+100;  ## shifting of VIA co-ordinates in X and Y ,Assume origin ##
+  my $shiftY = (1-$widthHL/2)*$viaDisplayFact;      ## as "cross section point of Horizontal & Vertical wire" ##
+  
+  ####################################### Drawing the layer rectangles #########################################
+  my @stipple = ("question","gray50","gray25", "gray12", "gray75", "question", "hourglass","questhead");
+  foreach $vial(@vialayer){
+     my $x = shift@stipple;
+     my $layer = $vial->dbGetViaLayerName;
+     my $color = $PTDB{$layer}->dbTechGetLayerColor;
+     my @rect = $vial->dbGetViaRect;
+     foreach $r (@rect) {
+        my $llx = @$r[0];
+        my $lly = @$r[1];
+        my $urx = @$r[2];
+        my $ury = @$r[3];
+        ##################### Scaling of Co-Ordinates ######################
+        $llx = $llx*$viaDisplayFact;
+        $lly = $lly*$viaDisplayFact;
+        $urx = $urx*$viaDisplayFact;
+        $ury = $ury*$viaDisplayFact;
+        ####################  Shifting of Co-Ordinates #####################
+        $llx = $llx+$shiftX;
+        $lly = $lly+$shiftY;
+        $urx = $urx+$shiftX;
+        $ury = $ury+$shiftY;  
+        ################### changing display upside down ###################
+        $lly = $basicViaCanvasHeight-$lly;
+        $ury = $basicViaCanvasHeight-$ury;
 
-                                                              }#if vertical layer    
-                            if ($dir eq "HORIZONTAL"){
-                                                    $llx = 0;
-                                                    $lly = 1-$widthHL;
-                          		            $urx = $llx+2;
-                          			    $ury = 1;
-                                                               }#if horizontal lay
-
-
-$llx = $llx*$viaDisplayFact;
-$lly = $lly*$viaDisplayFact;
-$urx = $urx*$viaDisplayFact;
-$ury = $ury*$viaDisplayFact;
-
-##################  shifting of x by 100   ################ 
-$llx = $llx+100;
-$urx = $urx+100;
-######---------------- changing display upside down ------------------------######
-$lly = $basicViaCanvasHeight - $lly;
-$ury = $basicViaCanvasHeight - $ury;
-
-$basicViaCanvas->createRectangle($llx,$lly,$urx,$ury, -outline,$color,-fill,$color,-stipple,"gray12");                                               
-                                             }#if routing
-                                     }#foreach vialayer
-
-####################################### Drawing the layer rectangles ###########################################
-
-my $shiftX = (2-$widthVL/2)*$viaDisplayFact+100; ## shifting of VIA co-ordinates in X and Y ,Assume origin ##
-my $shiftY = (1-$widthHL/2)*$viaDisplayFact;      ## as "cross section point of Horizontal & Vertical wire" ##
-
-my @stipple = ("question","gray50","gray25", "gray12", "gray75", "question", "hourglass","questhead");
-              foreach $vial(@vialayer){
-                   my $x = shift@stipple;
-                   my $layer = $vial->dbGetViaLayerName;
-                   my $type = $PTDB{$layer}->dbTechGetLayerType;
-                   my $color = $PTDB{$layer}->dbTechGetLayerColor;
-                   my @rect = $vial->dbGetViaRect;
-                   foreach $r (@rect) {
-                        my $llx = @$r[0];
-                        my $lly = @$r[1];
-                        my $urx = @$r[2];
-                        my $ury = @$r[3];
-
-######----------------  Scaling of Co-Ordinates ------------------------######
-                           $llx = $llx*$viaDisplayFact;
-                           $lly = $lly*$viaDisplayFact;
-                           $urx = $urx*$viaDisplayFact;
-                           $ury = $ury*$viaDisplayFact;
-
-######----------------  Shifting of Co-Ordinates ------------------------######
-                       
-      $llx = $llx+$shiftX;
-      $lly = $lly+$shiftY;
-      $urx = $urx+$shiftX;
-      $ury = $ury+$shiftY;  
-######---------------- changing display upside down ------------------------######
-      $lly = $basicViaCanvasHeight-$lly;
-      $ury = $basicViaCanvasHeight-$ury;
-
-$basicViaCanvas->createRectangle($llx,$lly,$urx,$ury, -outline,$color,-fill,$color,-stipple,$x,-tags,$layer);      
-
-                                         }#foreach rect 
-
-                                 }#foreach vialayer    
-&via_zoomInOut($basicViaCanvas,$basicViaCanvasWidth,$basicViaCanvasHeight)
-
+        $basicViaCanvas->createRectangle($llx,$lly,$urx,$ury, -outline,$color,-fill,$color,-stipple,$x,-tags,$layer);      
+     }#foreach rect 
+  }#foreach vialayer    
+  &via_zoomInOut($basicViaCanvas,$basicViaCanvasWidth,$basicViaCanvasHeight);
+  &layer_display(\%via_layers);
 }#sub display_via
    
 #############################################################################################################################
 
 sub layer_display {
-$RoutingMenu = $RoutingLayerMenu->Menu();
-$RoutingLayerMenu->configure(-menu=>$RoutingMenu);
-$CutMenu = $CutLayerMenu->Menu();
-$CutLayerMenu->configure(-menu=>$CutMenu);
+  my %dispLayers = %{$_[0]};
 
-my @key = sort hashValueAscendingNum (keys(%RML));
-my $n = @key;
-my @ViaVar = (); 
-for (my $j = 0; $j<$n; $j++)
-              {
-                $metal[$j] = shift @key;
-
-      if ($n == 0){last;}
-      my $type = $PTDB{$metal[$j]}->dbTechGetLayerType;
-      my $layerNo =$PTDB{$metal[$j]}->dbTechGetLayerNum;
-      my $layername= $metal[$j];
-      if ($type eq "ROUTING"){    
-                        $RoutingMenu->Checkbutton(-label=>$metal[$j],
-                                                  -variable=>\$ViaVar[$j],
-                                                  -onvalue=> 1,
-                                                  -offvalue => 0, 
-                                                  -command=> sub{if ($ViaVar[$layerNo]==1){&call_ViaLayer_display($layername);}
-                                                                 else {$basicViaCanvas->delete($layername);}
-                                                                  }
-                                                             );
-                                              }#iftype is routing 
-
-     if ($type eq "CUT"){
-                       $CutMenu->Checkbutton(-label=>$metal[$j],
-                                             -variable=>\$ViaVar[$j],
-                                             -onvalue=> 1, 
-                                             -offvalue => 0, 
-                                             -command=> sub{if ($ViaVar[$layerNo]==1){&call_ViaLayer_display($layername);}
-                                                                 else {$basicViaCanvas->delete($layername);}}
-                                                         );
-                                               }#if type is Cut
-                               }#foreach layer
+  $RoutingMenu = $RoutingLayerMenu->Menu();
+  $RoutingLayerMenu->configure(-menu=>$RoutingMenu);
+  $CutMenu = $CutLayerMenu->Menu();
+  $CutLayerMenu->configure(-menu=>$CutMenu);
+  
+  my @ViaVar = (); 
+  my @layers = sort {$dispLayers{$a}<=>$dispLayers{$b}} (keys(%dispLayers));
+  for(my $j = 0; $j<=$#layers; $j++){
+      if(@layers < 1){last;}
+      my $layerName= $layers[$j];
+      my $type = $PTDB{$layerName}->dbTechGetLayerType;
+      my $layerNum =$PTDB{$layerName}->dbTechGetLayerNum;
+      $ViaVar[$layerNum] = 1;
+      if($type eq "ROUTING"){    
+         $RoutingMenu->Checkbutton(-label=>$layerName, -variable=>\$ViaVar[$layerNum], -onvalue=> 1, -offvalue => 0,
+                                   -command=> sub{
+                                                  if($ViaVar[$layerNum]==1){
+                                                     my $color = $PTDB{$layerName}->dbTechGetLayerColor;
+                                                     $basicViaCanvas->itemconfigure($layerName, -fill=>$color, -outline=>$color);
+                                                  }else{
+                                                     $basicViaCanvas->itemconfigure($layerName, -fill=>"", -outline=>"");
+                                                  }
+                                   });
+      }#iftype is routing 
+      if($type eq "CUT"){
+         $CutMenu->Checkbutton(-label=>$layerName, -variable=>\$ViaVar[$layerNum], -onvalue=> 1,  -offvalue => 0,
+                               -command=> sub{
+                                              if($ViaVar[$layerNum]==1){
+                                                 my $color = $PTDB{$layerName}->dbTechGetLayerColor;
+                                                 $basicViaCanvas->itemconfigure($layerName, -fill=>$color, -outline=>$color);
+                                              }else{
+                                                 $basicViaCanvas->itemconfigure($layerName, -fill=>"", -outline=>"");
+                                              }
+                                   });
+      }#if type is Cut
+  }#foreach layer
 }#sub layer_display
-
-#############################################################################################################################
-
-sub call_ViaLayer_display {
-my $layerName = $_[0];
-my $viaName = $dropdown_value;
-my $basicViaCanvasHeight = 200; #---- actual height of basicViaCanvas ------#
-my $basicViaCanvasWidth = 690;  #---- actual height of basicViaCanvas ------#
-
-my $viaDisplayFact = abs($basicViaCanvasHeight/2);
-   $viaDisplayFact = int($viaDisplayFact); 
-my $widthHL;
-my $widthVL;
-######################################### Calculating Scale factor,ShiftX and ShiftY ########################################
-
-                   my @vialayer = $VDB{$viaName}->dbGetViaLayer;
-              foreach $via(@vialayer){
-                   my $layer = $via->dbGetViaLayerName;
-                   my $type = $PTDB{$layer}->dbTechGetLayerType;
-                   my $dir = $PTDB{$layer}->dbTechGetLayerDir;
-                   my $width = $PTDB{$layer}->dbTechGetLayerWidth;
-                   if($type eq "ROUTING"){
-                                           if ($dir eq "VERTICAL"){$widthVL = $width }#if vertical layer    
-                                           if ($dir eq "HORIZONTAL"){$widthHL = $width}#if horizontal lay
-                                            }#if type is routing
-                                          }#for routing layer
-
-####################################### Drawing the layer rectangles ###########################################
-
-my $shiftX = (2-$widthVL/2)*$viaDisplayFact+100; ## shifting of VIA co-ordinates in X and Y ,Assume origin ##
-my $shiftY = (1-$widthHL/2)*$viaDisplayFact;      ## as "cross section point of Horizontal & Vertical wire" ##
-
-my @stipple = ("question","gray50","gray25", "gray12", "gray75", "question", "hourglass","questhead");
-              foreach $vial(@vialayer){
-                   my $layer = $vial->dbGetViaLayerName;
-                   my $x = shift@stipple;
-              if($layer eq $layerName){
-                   my $type = $PTDB{$layerName}->dbTechGetLayerType;
-                   my $color = $PTDB{$layerName}->dbTechGetLayerColor;
-                   my @rect = $vial->dbGetViaRect;
-                   foreach $r (@rect) {
-                        my $llx = @$r[0];
-                        my $lly = @$r[1];
-                        my $urx = @$r[2];
-                        my $ury = @$r[3];
-
-######----------------  Scaling of Co-Ordinates ------------------------######
-
-                           $llx = $llx*$viaDisplayFact;
-                           $lly = $lly*$viaDisplayFact;
-                           $urx = $urx*$viaDisplayFact;
-                           $ury = $ury*$viaDisplayFact;
-
-######----------------  Shifting of Co-Ordinates ------------------------######
-                       
-      $llx = $llx+$shiftX;
-      $lly = $lly+$shiftY;
-      $urx = $urx+$shiftX;
-      $ury = $ury+$shiftY;  
-######---------------- changing display upside down ------------------------######
-      $lly = $basicViaCanvasHeight-$lly;
-      $ury = $basicViaCanvasHeight-$ury;
-$basicViaCanvas->createRectangle($llx,$lly,$urx,$ury, -outline,$color,-fill,$color,-stipple,$x,-tags,$layerName );      
-
-                                         }#foreach rect 
-
-                                    }#layer found
-
-                                 }#foreach vialayer    
-
-}#sub call_ViaLayer_display
 
 ############################################################################################################
 sub via_zoomInOut {
-my $canvas = $_[0];
-my $canvasWidth = $_[1];
-my $canvasHeight = $_[2];
+  my $canvas = $_[0];
+  my $canvasWidth = $_[1];
+  my $canvasHeight = $_[2];
+  
+  my $box = [0,0,$canvasWidth,$canvasHeight];
+  my $zoomRect;
+  my @zoomRectCoords;
+  $canvas->CanvasBind('<3>' => sub {
+      my $x = $canvas->canvasx($Tk::event->x);
+      my $y = $canvas->canvasy($Tk::event->y);
 
-my $box = [0,0,$canvasWidth,$canvasHeight];
-my $zoomRect;
-my @zoomRectCoords;
-        $canvas->CanvasBind('<3>' => sub {
-            my $x = $canvas->canvasx($Tk::event->x);
-            my $y = $canvas->canvasy($Tk::event->y);
+      @zoomRectCoords = ($x, $y, $x, $y);
 
-            @zoomRectCoords = ($x, $y, $x, $y);
+      $zoomRect = $canvas->createRectangle(
+                                      @zoomRectCoords,
+                                      -outline => 'red',
+                                      );
+  });
 
-            $zoomRect = $canvas->createRectangle(
-                                            @zoomRectCoords,
-                                            -outline => 'red',
-                                            );
-        });
-                $canvas->CanvasBind('<B3-Motion>' => sub {
-            @zoomRectCoords[2,3] = ($canvas->canvasx($Tk::event->x),
-                                    $canvas->canvasy($Tk::event->y));
+  $canvas->CanvasBind('<B3-Motion>' => sub {
+      @zoomRectCoords[2,3] = ($canvas->canvasx($Tk::event->x),
+                              $canvas->canvasy($Tk::event->y));
 
-            $canvas->coords($zoomRect => @zoomRectCoords);
-        });
-                $canvas->CanvasBind('<B3-ButtonRelease>' => sub {
-            # Delete the rectangle.
-            $canvas->delete($zoomRect);
+      $canvas->coords($zoomRect => @zoomRectCoords);
+  });
+  $canvas->CanvasBind('<B3-ButtonRelease>' => sub {
+      # Delete the rectangle.
+      $canvas->delete($zoomRect);
 
-            # Was the rectangle big enough?
-            return if
-                abs($zoomRectCoords[0] - $zoomRectCoords[2]) < 10 ||
-                    abs($zoomRectCoords[1] - $zoomRectCoords[3]) < 10;
+      # Was the rectangle big enough?
+      return if
+          abs($zoomRectCoords[0] - $zoomRectCoords[2]) < 10 ||
+              abs($zoomRectCoords[1] - $zoomRectCoords[3]) < 10;
 
-            # Let's find the zooming factor.
-            my $dx = $canvas->width  /abs($zoomRectCoords[0] - $zoomRectCoords[2]);
-            my $dy = $canvas->height /abs($zoomRectCoords[1] - $zoomRectCoords[3]);
+      # Let's find the zooming factor.
+      my $dx = $canvas->width  / abs($zoomRectCoords[0] - $zoomRectCoords[2]);
+      my $dy = $canvas->height / abs($zoomRectCoords[1] - $zoomRectCoords[3]);
 
-            my $scale = [$dx => $dy] -> [$dy <= $dx];
+      my $scale = [$dx => $dy] -> [$dy <= $dx];
 
-            # Let's scale everything up.
-            $canvas->Subwidget('scrolled')->scale('all' => 0, 0, $scale, $scale);
+      # Let's scale everything up.
+      $canvas->Subwidget('scrolled')->scale('all' => 0, 0, $scale, $scale);
 
-            # Modify the bounding box.
-            $_ *= $scale for @$box;
+      # Modify the bounding box.
+      $_ *= $scale for @$box;
 
-            # Resize the scrollregion.
-            $canvas->configure(-scrollregion => $box);
+      # Resize the scrollregion.
+      $canvas->configure(-scrollregion => $box);
 
-            # Now we change the view to center on correct area.
-            $canvas->xviewMoveto($zoomRectCoords[0] * $scale / $box->[2]);
-            $canvas->yviewMoveto($zoomRectCoords[1] * $scale / $box->[3]);
-        });
+      # Now we change the view to center on correct area.
+      $canvas->xviewMoveto($zoomRectCoords[0] * $scale / $box->[2]);
+      $canvas->yviewMoveto($zoomRectCoords[1] * $scale / $box->[3]);
+  });
 
-            $canvas->CanvasBind('<2>' => sub {
-             #my $scale = $canvasWidth/$box->[2];
-             my $scale = $canvasHeight/$box->[3];
+  $canvas->CanvasBind('<2>' => sub {
+      #my $scale = $canvasWidth/$box->[2];
+      my $scale = $canvasHeight/$box->[3];
 
-            $canvas->Subwidget('scrolled')->scale('all' => 0, 0, $scale, $scale);
-            $box = [0, 0, $canvasWidth, $canvasHeight];
-            $canvas->configure(-scrollregion => $box);
-        });
+      $canvas->Subwidget('scrolled')->scale('all' => 0, 0, $scale, $scale);
+      $box = [0, 0, $canvasWidth, $canvasHeight];
+      $canvas->configure(-scrollregion => $box);
+  });
 
 }#sub via_zoomInOut
 

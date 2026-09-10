@@ -2571,6 +2571,7 @@ sub addPowerRows {
              $NETS_ROUTING_ALREADY{$powerNet}->dbNetRoutingDBSetFixedRoute($line);
           }
        }
+       #&addPowerVias;
     }
   }#else
 }#sub addPowerRows
@@ -2653,6 +2654,7 @@ sub addPowerRows {
 sub addPowerVias {
   use Math::Clipper ':all';
   use Math::Polygon;
+  use List::Util qw[min max];
 
   my $noOfArguments = @_;
   if($noOfArguments <0 || $_[0] eq "-h"){
@@ -2669,6 +2671,18 @@ sub addPowerVias {
     }#for layerName
     my @Layers = sort {$LAYERS_HASH{$a}<=>$LAYERS_HASH{$b}}(keys(%LAYERS_HASH));
 
+    #---------- removing layers if it does not start with routing layer -----------#
+    my @tempLayers = @Layers;
+    foreach my $l (@tempLayers ){
+       my $type = $PTDB{$l}->dbTechGetLayerType;
+       if($type eq "CUT"){
+          shift @Layers;
+       }else{
+          last;
+       }
+    }
+    #------------------------------------------------------------------------------#
+
     my $MICRONFACTOR = $GLOBAL->dbGlobalGetMicronFactor;
     my $MulFactor = $MICRONFACTOR/$DEF_DATABASE_UNIT;
 
@@ -2677,8 +2691,9 @@ sub addPowerVias {
        my $netType = $NADB{$net}->dbNadbGetNetType;
        if(($netType == 1) || ($netType == 2)){
           if(exists $NETS_ROUTING_ALREADY{$net}){ 
-             my @data = $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBGetSpecialRoute;
+             my @data = $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBGetSpecialRoute; # we will push this routing data in @fixed_route_data later
              my @fixed_route_data = $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBGetFixedRoute;
+             push(@fixed_route_data, @data);
    
              foreach my $segment ( @fixed_route_data ) {
                 my @seg = split(/\s+/,$segment);
@@ -2691,7 +2706,7 @@ sub addPowerVias {
                    @{$SPECIAL_ROUTE_HASH{$seg[0]}} = ([[$routeBox[0],$routeBox[1]], [$routeBox[2],$routeBox[1]], [$routeBox[2],$routeBox[3]], [$routeBox[0],$routeBox[3]]]);
                 } 
              }
-             print "net is $net\n";
+             #print "net is $net\n";
              for(my $i=0; $i<$#Layers; $i+=2){
                  #print "routing layer:$Layers[$i]\n";
                  #print "via layer:$Layers[$i+1]\n";
@@ -2709,34 +2724,45 @@ sub addPowerVias {
                     my @closedPoly = (@$p, [$p->[0]->[0],$p->[0]->[1]]);
                     my $overlapPoly = Math::Polygon->new(points=>\@closedPoly);
                     my $center = $overlapPoly->centroid;
-                    print "center:@$center\n";
-                    #my $line = "NEW $Layers[$i] 0 ( $center->[0] $center->[1] ) $Layers[$i+1] DO 1 BY 1 STEP 0 0";  
-                    #if(exists $NETS_ROUTING_ALREADY{$net}){
-                    #   $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBSetFixedRoute($line);
+                    ################################# changed by aditya to get min size rect ##########################
+                    #my $dir = $PTDB{$Layers[$i]}->dbTechGetLayerDir;
+                    #my $layerWidth = 0;
+                    #if($dir eq "VERTICAL"){
+                    #   $layerWidth = abs($p->[2]->[0] - $p->[0]->[0]); ## we will calculate (x2-x1) for horizontal layer & (y2-y1) for vertical layer
+                    #}else{
+                    #   $layerWidth = abs($p->[2]->[1] - $p->[0]->[1]); ## we will calculate (x2-x1) for horizontal layer & (y2-y1) for vertical layer
                     #}
-   
-                    #my @viaBbox = ($p->[3]->[0],$p->[3]->[1],$p->[2]->[0],$p->[2]->[1]);
-                    #print "viaBbox:@viaBbox\n";
-                    my @xx = ();
-                    my @yy = ();
-                    foreach my $p1(@$p){
-                       push(@xx, $p1->[0]); 
-                       push(@yy, $p1->[1]); 
+                    my $layerWidth = min(abs($p->[2]->[0] - $p->[0]->[0]), abs($p->[2]->[1] - $p->[0]->[1]));
+                    ###################################################################################################
+
+                    my $line = "$Layers[$i] $layerWidth ( $center->[0] $center->[1] ) $Layers[$i+1] DO 1 BY 1 STEP 0 0";  
+                    #my $line = "$Layers[$i] 0 ( $center->[0] $center->[1] ) $Layers[$i+1] DO 1 BY 1 STEP 0 0";  
+                    if(exists $NETS_ROUTING_ALREADY{$net}){
+                       $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBSetSpecialRoute($line);
                     }
-                    @xx = sort{$a<=>$b}@xx;
-                    @yy = sort{$a<=>$b}@yy;
-                    my @viaBbox = ($xx[0], $yy[0], $xx[-1], $yy[-1]);
-                    #print "viaBbox:@viaBbox\n";
-                    my $llx = 20 + $viaBbox[0]*$MulFactor;
-                    my $lly = 20 + $viaBbox[1]*$MulFactor;
-                    my $urx = 20 + $viaBbox[2]*$MulFactor;
-                    my $ury = 20 + $viaBbox[3]*$MulFactor;
-                    my $color = "green";
-                    $design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>$color, -tags=>"SPNETTAG", -state =>"normal", -fill =>$color, -stipple => "gray12");
-                    #my $tx = 20 + $center->[0]*$MulFactor; 
-                    #my $ty = 20 + $center->[1]*$MulFactor; 
-                    #print "tx:ty=>$tx $ty\n";
-                    #$design_worldcanvas->createText($tx,$ty, -text=>"via", -anchor=>"sw",-tags=>"INSTTEMP",-fill=>"white",-font=>"Times 12");
+   
+                    ##my @viaBbox = ($p->[3]->[0],$p->[3]->[1],$p->[2]->[0],$p->[2]->[1]);
+                    ##print "viaBbox:@viaBbox\n";
+                    #my @xx = ();
+                    #my @yy = ();
+                    #foreach my $p1(@$p){
+                    #   push(@xx, $p1->[0]); 
+                    #   push(@yy, $p1->[1]); 
+                    #}
+                    #@xx = sort{$a<=>$b}@xx;
+                    #@yy = sort{$a<=>$b}@yy;
+                    #my @viaBbox = ($xx[0], $yy[0], $xx[-1], $yy[-1]);
+                    ##print "viaBbox:@viaBbox\n";
+                    #my $llx = 20 + $viaBbox[0]*$MulFactor;
+                    #my $lly = 20 + $viaBbox[1]*$MulFactor;
+                    #my $urx = 20 + $viaBbox[2]*$MulFactor;
+                    #my $ury = 20 + $viaBbox[3]*$MulFactor;
+                    #my $color = "green";
+                    #$design_worldcanvas->createRectangle($llx,$lly,$urx,$ury, -outline=>$color, -tags=>"SPNETTAG", -state =>"normal", -fill =>$color, -stipple => "gray12");
+                    ##my $tx = 20 + $center->[0]*$MulFactor; 
+                    ##my $ty = 20 + $center->[1]*$MulFactor; 
+                    ##print "tx:ty=>$tx $ty\n";
+                    ##$design_worldcanvas->createText($tx,$ty, -text=>"via", -anchor=>"sw",-tags=>"INSTTEMP",-fill=>"white",-font=>"Times 12");
 
                  }
              }
@@ -2745,5 +2771,216 @@ sub addPowerVias {
     }
   }#else
 }#sub addPowerVias
+
+########################################################################################
+############################# Add power grid stripes ###################################
+########################################################################################
+sub addPowerGridStripes {
+  my $noOfArguments = @_;
+  if($noOfArguments < 4 || $_[0] eq "-h" || $_[0] eq "-H" || $_[0] eq "-help" ||  $_[0] eq "-HELP"){
+     print "Usage : addPowerGridStripes\n";
+     print "      : -offset <offset value (default is 100 micron)>\n";
+     print "      : -spacing <spacing (default value is 1 micron)>\n";
+     print "      : -width <width of stripe (default value is 2 micron)>\n";
+     print "      : -dir <H/V (default value is H)>\n";
+     print "      : -layer <H/V layer name}>\n";
+     print "      : -nets <{list of pg net}>\n";
+  }else{
+    my ($offset, $spacing, $width, $dir, $layer) = (100, 1, 2, "H", "");
+    my @nets_arr = ();
+  
+    for(my $i =0;$i < $noOfArguments;$i++){
+        if($_[$i] eq "-offset") { $offset = $_[$i+1]; } 
+        if($_[$i] eq "-spacing"){ $spacing = $_[$i+1];}
+        if($_[$i] eq "-width")  { $width = $_[$i+1];  }
+        if($_[$i] eq "-dir")    { $dir = $_[$i+1];    }
+        if($_[$i] eq "-layer")  { $layer = $_[$i+1];  }
+        if($_[$i] eq "-nets")   {
+           my $nets_str = $_[$i+1];
+           $nets_str =~ s/\{\s*//;
+           $nets_str =~ s/\s*\}//;
+           @nets_arr = split(/\,/,$nets_str);
+        } 
+    }#for
+
+    my $dbu = $GLOBAL->dbfGlobalGetDBU;
+
+    $offset = $offset*$dbu;
+    $spacing = $spacing*$dbu;
+    $width = $width*$dbu;
+
+    if(exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}){
+       #my @core_bbox = $GLOBAL->dbGlobalGetCoreBBox;
+       my @core_bbox = @{$DIE_ALREADY{dieArea}};
+       if($dir eq "H"){
+          my $netCnt = 0;
+          foreach my $netName (@nets_arr){
+             my ($ringP1, $ringP2) = ($core_bbox[2], $core_bbox[0]);
+             my ($p1, $p2) = (0, 0);
+             my @data = $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBGetFixedRoute;
+             foreach my $segment ( @data ){
+                my @routeBox = get_stripe_layer_coords($segment); # first element is width of stripe
+                if($routeBox[1] == $routeBox[3]){
+                   if($routeBox[1] < $ringP1){
+                      $ringP1 = $routeBox[1];
+                      $p1 = $ringP1 - $routeBox[0]/2;
+                   }
+                   if($routeBox[1] > $ringP2){
+                      $ringP2 = $routeBox[1];
+                      $p2 = $ringP2 + $routeBox[0]/2;
+                   }
+                }
+             }
+             my $refP = $core_bbox[1] + $spacing*$netCnt + $offset;
+             while($refP < $core_bbox[3]){
+                my $p = $refP/$dbu;
+                my $line = $layer." ".$width." + "."SHAPE STRIPE" . " ( $p1 $refP )" ." ( $p2 * )";
+                $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetFixedRoute($line);
+                $refP = $refP + $offset;
+             }
+             $netCnt++;
+          }#foreach net
+       }elsif($dir eq "V"){
+          my $netCnt = 0;
+          foreach my $netName (@nets_arr){
+             my ($ringP1, $ringP2) = ($core_bbox[3], $core_bbox[1]);
+             my ($p1, $p2) = (0, 0);
+             my @data = $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBGetFixedRoute;
+             foreach my $segment ( @data ){
+                my @routeBox = get_stripe_layer_coords($segment); # first element is width of stripe
+                if($routeBox[2] == $routeBox[4]){
+                   if($routeBox[2] < $ringP1){
+                      $ringP1 = $routeBox[2];
+                      $p1 = $ringP1 - $routeBox[0]/2;
+                   }
+                   if($routeBox[2] > $ringP2){
+                      $ringP2 = $routeBox[2];
+                      $p2 = $ringP2 + $routeBox[0]/2;
+                   }
+                }
+             }
+             my $refP = $core_bbox[0] + $spacing*$netCnt + $offset;
+             while($refP < $core_bbox[2]){
+                my $p = $refP/$dbu;
+                my $line = $layer." ".$width." + "."SHAPE STRIPE" . " ( $refP $p1 )" ." ( * $p2 )";
+                $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetFixedRoute($line);
+                $refP = $refP + $offset;
+             }
+             $netCnt++;
+          }#foreach net
+       }
+       #&addPowerVias;
+    }#if floorplan exists
+  }#else
+}#sub addPowerGridStripes
+
+########################################################################################
+############################ Add power ring for Hard Macro #############################
+########################################################################################
+sub addHardMacroPowerRing {
+  my $noOfArguments = @_;
+  if($noOfArguments <0 || $_[0] eq "-h"){
+     print "Usage : addHardMacroPowerRing\n";
+     print "      : -instance <instance name>\n";
+     print "      : -offset <{x, y}>\n";
+     print "      : -spacing <spacing>\n";
+     print "      : -width <width>\n";
+     print "      : -layerH <horizontal layer name>\n";
+     print "      : -layerV <vertical layer name>\n";
+     print "      : -nets <{list of net}>\n";
+  }else {
+    my @offset_arr = (0, 0);
+    my @nets_arr = ();
+    my ($instance, $spacing, $width, $layerH, $layerV) = ("", 5, 0, "", "");
+  
+    for(my $i =0;$i < $noOfArguments;$i++){
+        if($_[$i] eq "-instance"){
+           $instance = $_[$i+1];
+        } 
+        if($_[$i] eq "-offset"){
+           my $offset_str = $_[$i+1];
+           $offset_str =~ s/\{\s*//;
+           $offset_str =~ s/\s*\}//;
+           @offset_arr = split(/\,/,$offset_str);
+        } 
+        if($_[$i] eq "-spacing"){
+           $spacing = $_[$i+1];
+        } 
+        if($_[$i] eq "-width"){
+           $width = $_[$i+1]; 
+        } 
+        if($_[$i] eq "-layerH"){
+           $layerH = $_[$i+1]; 
+        } 
+        if($_[$i] eq "-layerV"){
+           $layerV = $_[$i+1]; 
+        } 
+        if($_[$i] eq "-nets"){
+           my $nets_str = $_[$i+1]; 
+           $nets_str =~ s/\{\s*//;
+           $nets_str =~ s/\s*\}//;
+           @nets_arr = split(/\,/,$nets_str);
+       } 
+    }#for
+    my $dbu = $GLOBAL->dbfGlobalGetDBU;
+
+    my $offsetX = $offset_arr[0]*$dbu;
+    my $offsetY = $offset_arr[1]*$dbu;
+    $spacing = $spacing*$dbu;
+    $width = $width*$dbu;
+
+    if(exists $COMP_ALREADY{$instance}){
+       my @bbox = $CADB{$instance}->dbCadbGetbBox;
+       my $cellref = $CADB{$instance}->dbCadbGetCellref;
+       if(exists $PLDB{$cellref}){
+          my $class = $PLDB{$cellref}->dbMdbGetClass;
+          if($class eq "BLOCK"){
+             for(my $i=0; $i<=$#nets_arr;$i++){
+                 if(exists $NETS_ROUTING_ALREADY{$nets_arr[$i]}){
+                    # left stripes
+                    my $xl1 = $bbox[0] - ($offsetX + $spacing*$i + $width*($i+1/2));
+                    my $yl1 = $bbox[1] - ($offsetY + $spacing*$i + $width*($i+1));
+                    my $xl2 = $xl1;
+                    my $yl2 = $bbox[3] + ($offsetY + $spacing*$i + $width*($i+1));
+                    #print "left:$nets_arr[$i] $xl1 $yl1 $xl2 $yl2\n";
+                    my $line = $layerV." ".$width." + "."SHAPE STRIPE" . " ( $xl1 $yl1 )" ." ( * $yl2 )";
+                    $NETS_ROUTING_ALREADY{$nets_arr[$i]}->dbNetRoutingDBSetFixedRoute($line);
+
+                    # right stripes
+                    my $xr1 = $bbox[2] + ($offsetX + $spacing*$i + $width*($i+1/2));
+                    my $yr1 = $bbox[1] - ($offsetY + $spacing*$i + $width*($i+1));
+                    my $xr2 = $xr1;
+                    my $yr2 = $bbox[3] + ($offsetY + $spacing*$i + $width*($i+1));
+                    #print "right:$nets_arr[$i] $xr1 $yr1 $xr2 $yr2\n";
+                    my $line = $layerV." ".$width." + "."SHAPE STRIPE" . " ( $xr1 $yr1 )" ." ( * $yr2 )";
+                    $NETS_ROUTING_ALREADY{$nets_arr[$i]}->dbNetRoutingDBSetFixedRoute($line);
+
+                    # bottom stripes
+                    my $xb1 = $bbox[0] - ($offsetX + $spacing*$i + $width*($i+1));
+                    my $yb1 = $bbox[1] - ($offsetY + $spacing*$i + $width*($i+1/2));
+                    my $xb2 = $bbox[2] + ($offsetX + $spacing*$i + $width*($i+1));
+                    my $yb2 = $yb1;
+                    #print "bottom:$nets_arr[$i] $xb1 $yb1 $xb2 $yb2\n";
+                    my $line = $layerH." ".$width." + "."SHAPE STRIPE" . " ( $xb1 $yb1 )" ." ( $xb2 * )";
+                    $NETS_ROUTING_ALREADY{$nets_arr[$i]}->dbNetRoutingDBSetFixedRoute($line);
+
+                    # top stripes
+                    my $xt1 = $bbox[0] - ($offsetX + $spacing*$i + $width*($i+1));
+                    my $yt1 = $bbox[3] + ($offsetY + $spacing*$i + $width*($i+1/2));
+                    my $xt2 = $bbox[2] + ($offsetX + $spacing*$i + $width*($i+1));
+                    my $yt2 = $yt1;
+                    #print "right:$nets_arr[$i] $xt1 $yt1 $xt2 $yt2\n";
+                    my $line = $layerH." ".$width." + "."SHAPE STRIPE" . " ( $xt1 $yt1 )" ." ( $xt2 * )";
+                    $NETS_ROUTING_ALREADY{$nets_arr[$i]}->dbNetRoutingDBSetFixedRoute($line);
+
+                 }#if exists in NETS_ROUTING_ALREADY
+             }#f#oreach net
+         }#if block
+       }#if cell exists in library
+    }#if instance exists in comp_already
+  }#else
+}#sub addHardMacroPowerRing
+
+########################################################################################
 
 1;

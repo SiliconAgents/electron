@@ -24,7 +24,6 @@ cpanm DBI
 sudo apt-get install libdbd-mysql-perl
 cpanm Spreadsheet::Read
 cpanm Spreadsheet::WriteExcel
-cpanm Text::CSV_XS
 cpanm Tk::DynaTabFrame
 cpanm File::Data
 sudo cp /home/ubuntu/perl5/lib/perl5/File/File/Data.pm /home/ubuntu/perl5/lib/perl5/File/Data.pm

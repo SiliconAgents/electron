@@ -1,10 +1,10 @@
 # Layered on the proton base image rather than on ubuntu:22.04 directly, so this
 # image gets perl-tk, the CPAN modules, cudd and OpenSTA without rebuilding them,
-# and PROTON_HOME on PATH actually points at a runnable proton.  Build the base
+# and ELECTRON_HOME on PATH actually points at a runnable proton.  Build the base
 # first:  make build   (the artemis target does this for you if it is missing).
 FROM localhost/pysparkcad
 
-# DEBIAN_FRONTEND and PROTON_HOME are inherited from the base image.
+# DEBIAN_FRONTEND and ELECTRON_HOME are inherited from the base image.
 ENV FLEX_INCLUDE_DIR=/usr/local/include
 
 # Defensive only: stop apt dropping privileges to the _apt user for downloads.

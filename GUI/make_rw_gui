@@ -27,37 +27,37 @@ sub shift_banner {
 }
 
 #############################################################################################################
-###################################### Preparing proton GUI #################################################
+###################################### Preparing electron GUI #################################################
 #############################################################################################################
 
 sub start_gui {
 
 $top = MainWindow->new();
 #------------------ adding a splash screen ---------#
-$sp = $top->Splashscreen();
-    
-    $sp->Label(
-         -text   => 'Starting up',
-         -width  => 20,
-         -height => 10,
-         -font => [-size => 50]
-    )->pack();
-    
-    $sp->Splash(500); # init splash screen
-    
-    $sp->update;  # and display it
-    
-    #$mw->withdraw; # hide main widow during init
+# $sp = $top->Splashscreen();
+#     
+#     $sp->Label(
+#         -text   => 'Starting up',
+#          -width  => 20,
+#          -height => 10,
+#          -font => [-size => 50]
+#     )->pack();
+#     
+#     $sp->Splash(500); # init splash screen
+#     
+#     $sp->update;  # and display it
+#     
+#     #$mw->withdraw; # hide main widow during init
 
      
 
-$top->title (" Proton ");
+$top->title (" Electron (".$GLOBAL->dbfGlobalGetTOP.")");
 #$top->geometry("700x590+0+0");
 $box = [0,0,540,540];
   $guiCanvasHeight = 500;
   $guiCanvasWidth = 500;
 $GLOBAL->dbGlobalSetGuiStatus(1);
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
 ################ define some bitmaps #######
 my $bitmaps = [];
@@ -219,7 +219,7 @@ $Filemenu->command(-label => "Clone from Git",
     -command => \&clone_from_git_popup,
     -underline => 0);  # "C" in Convert
 $Filemenu->separator();
-$Filemenu->command(-label => "Exit proton",
+$Filemenu->command(-label => "Exit electron",
     -command => \&win_kill,
     -underline => 0);  # "C" in Close
 
@@ -310,8 +310,8 @@ sub design_menuitems {
 #        [qw/cascade ~Functions -accelerator Ctrl-n -menuitems/ =>
 #         [
 #           [qw/command ~FlipChip -command/ =>\&create_popupToDisplayBump],       '',
-#           [qw/command ~Flip\Rotate -command/ => \&createPopup_toFlipOrRotateInst],   '',
-#           [qw/command ~Query -command/ => \&createPopup_toQueryInstAndNets],   '',
+           [qw/command ~Flip\Rotate -command/ => \&createPopup_toFlipOrRotateInst],   '',
+           [qw/command ~Query -command/ => \&createPopup_toQueryInstAndNets],   '',
 #           [qw/command ~InstConnections -command/ => \&create_popup_toDtrawConnections],   '',
 #           [qw/command/, '~Save Design', -command=>\&popup_save_design],         '',
 #           [qw/command/, '~Restore Design', -command=>\&popup_get_design],      '',
@@ -321,6 +321,13 @@ sub design_menuitems {
 #       #[qw/command ~Cookie-Cut -command/ => \&call_popup_dbfTstGUICookieCut], '',
 #       #[qw/command ~Fractals -command/ => \&call_popup_dbfGUIFractals],       '',
 #       [qw/command ~Help -command/ => \&design_help_gui],
+# [qw/cascade ~Nets -menuitems/ =>
+#         [
+#          [qw/command/, 'Add Nets', qw/-command/ =>\&create_net_popup,], '',
+#           [qw/command/, 'Connect Net', qw/-command/ =>\&connect_net_popup,], '',
+#           [qw/command/, 'Delete Net', qw/-command/ =>\&delete_net_popup,],
+#         ],
+#      ],                                                      '',
      ];
  
    } #sub design_menuitems         
@@ -365,18 +372,15 @@ $Synthesisbutton = $menubar->Menubutton(-text=>"Synthesis", -underline => 0,-rel
 $Synthesismenu = $Synthesisbutton->Menu();
 $Synthesisbutton->configure(-menu=>$Synthesismenu);
 
+# The "Yosys" entry was removed with the yosys-over-REST feature: it ran synthesis on a
+# hard-coded AWS EC2 endpoint.  See the note in GUI/make_gui_support_func.
+
 $Synthesismenu->command(
-   -command => \&run_yosys_popup,
-    -label => "Yosys",
+   -command => \&run_qflow_yosys,
+    -label => "Qflow-Yosys",
     -underline => 0); # yosys
 #$Synthesismenu->separator;
 
-#$Synthesismenu->command(
-#   -command => \&popup_openConfig,
-#    -label => "jroute ",
-#    -underline => 0); # jroute
-#$Synthesismenu->separator;
-#
 #$Synthesismenu->command(
 #   -command => \&popup_yosys_binary,
 #    -label => "yosys ",
@@ -399,16 +403,22 @@ $floorplanbutton->pack(-side=>'left',-fill=>'x', -expand=>1);
 $floorplanmenu = $floorplanbutton->Menu();
 $floorplanbutton->configure(-menu=>$floorplanmenu);
 
+#$floorplanmenu->command(
+#    -command => \&flplan_popup,
+#    -label => "SetFlplan",
+#    -underline => 0); # D in Display
+#
+#$floorplanmenu->separator;
+#$floorplanmenu->command(
+#    -command => \&flplan_parameter_popup,
+#    -label => "SetFlplan Parameters",
+#    -underline => 0); # D in Display
+#$floorplanmenu->separator;
 $floorplanmenu->command(
-    -command => \&flplan_popup,
+    -command => \&set_flplan_with_parameters_popup,
     -label => "SetFlplan",
     -underline => 0); # D in Display
 
-$floorplanmenu->separator;
-$floorplanmenu->command(
-    -command => \&flplan_parameter_popup,
-    -label => "SetFlplan Parameters",
-    -underline => 0); # D in Display
 $floorplanmenu->separator;
 $floorplanmenu->command(
     -command => \&hier_pin_planner,
@@ -428,18 +438,58 @@ $proutemenu = $proutebutton->Menu();
 $proutebutton->configure(-menu=>$proutemenu);
 
      $proutemenu->command(
-    -command => \&create_net_popup,
-    -label => "Power Nets",
+    -command => \&plot_leakage_power_heat_map,
+    -label => "Plot leakage Power HeatMap",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&plot_activity_heat_map,
+    -label => "Plot Pin Activity HeatMap",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&call_plot_time_vs_activity,
+    -label => "Plot Time vs Activity",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&create_pg_net_popup,
+    -label => "Add PG Nets",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&connect_pg_net_popup,
+    -label => "Connect PG Net",
     -underline => 0); # D in Display
 $proutemenu->separator;
      $proutemenu->command(
     -command => \&add_power_ring_popup,
-    -label => "Power Ring",
+    -label => "Add PG Ring",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&power_grid_stripes_popup,
+    -label => "Add PG Stripes",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&add_hardMacro_power_ring_popup,
+    -label => "Add Macro PG Ring",
     -underline => 0); # D in Display
 $proutemenu->separator;
      $proutemenu->command(
     -command => \&power_rows_popup,
-    -label => "Power Rows",
+    -label => "Add StdCell PG Rails",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&addPowerVias,
+    -label => "Add Vias",
+    -underline => 0); # D in Display
+$proutemenu->separator;
+     $proutemenu->command(
+    -command => \&delete_pg_net_popup,
+    -label => "Delete PG Nets",
     -underline => 0); # D in Display
 #$proutemenu->separator;
 #     $proutemenu->command(
@@ -468,8 +518,13 @@ $placemenu = $placebutton->Menu();
 $placebutton->configure(-menu=>$placemenu);
 
      $placemenu->command(
-    -command => \&graywolf_placer_popup,
-    -label => "graywolf",
+    -command => \&flat_place,
+    -label => "Flat Place",
+    -underline => 0); # D in Display
+$placemenu->separator;
+     $placemenu->command(
+    -command => \&arrange_macros_popup,
+    -label => "Arrange Macros",
     -underline => 0); # D in Display
 $placemenu->separator;
      $placemenu->command(
@@ -503,9 +558,24 @@ $placemenu->separator;
     -underline => 0); # D in Display
 #$placemenu->separator;
 #     $placemenu->command(
-#    -command => \&create_hPlace_popup,
-#    -label => "mpl_hierPlace",
+#    -command => \&create_hier_mpl_placer_popup,
+#    -label => "Hier MPL Placer",
 #    -underline => 0); # D in Display
+#$placemenu->separator;
+#     $placemenu->command(
+#    -command => \&create_hier_graywolf_placer_popup,
+#    -label => "Hier Graywolf Placer",
+#    -underline => 0); # D in Display
+#$placemenu->separator;
+#     $placemenu->command(
+#    -command => \&create_hier_fractal_placer_popup,
+#    -label => "Fractal Placer",
+#    -underline => 0); # D in Display
+$placemenu->separator;
+     $placemenu->command(
+    -command => \&legalizeFlatPlace,
+    -label => "legalizePlace",
+    -underline => 0); # D in Display
 #$placemenu->separator;
 #     $placemenu->command(
 #    -command => \&place_graph_plan_4_pseudo,
@@ -536,6 +606,30 @@ $placemenu->separator;
 $placebutton->pack(-side=>'left',-fill=>'x', -expand=>1);
 
 ##############################################################################################
+#         CTS  Menu                                                                        #
+##############################################################################################
+
+#$ctsbutton = $menubar->Menubutton(-text=>"CTS", -underline => 0,-relief=>"raised",-pady=>0, -height=> 2);
+#$ctsmenu = $ctsbutton->Menu();
+#$ctsbutton->configure(-menu=>$ctsmenu);
+#
+#     $ctsmenu->command(
+#    -command => \&build_clock_tree_popup,
+#    -label => "Build",
+#    -underline => 0); # D in Display
+#$ctsmenu->separator;
+#     $ctsmenu->command(
+#    -command => \&dbErr_gui_not_yet,
+#    -label => "Trace",
+#    -underline => 0); # D in Display
+#$ctsmenu->separator;
+#     $ctsmenu->command(
+#    -command => \&dbErr_gui_not_yet,
+#    -label => "Report",
+#    -underline => 0); # D in Display
+#$ctsbutton->pack(-side=>'left',-fill=>'x', -expand=>1);
+
+##############################################################################################
 #         route  Menu                                                                        #
 ##############################################################################################
 
@@ -543,9 +637,19 @@ $routebutton = $menubar->Menubutton(-text=>"Route", -underline => 0,-relief=>"ra
 $routemenu = $routebutton->Menu();
 $routebutton->configure(-menu=>$routemenu);
 
+#     $routemenu->command(
+#    -command => \&run_jroute,
+#    -label => "J-Route",
+#    -underline => 0); # D in Display
+#$routemenu->separator;
      $routemenu->command(
     -command => \&qroute,
-    -label => "qRoute",
+    -label => "Q-Route",
+    -underline => 0); # D in Display
+$routemenu->separator;
+     $routemenu->command(
+    -command => \&run_jroute,
+    -label => "H-Route",
     -underline => 0); # D in Display
 $routemenu->separator;
 
@@ -558,11 +662,14 @@ $timingbutton = $menubar->Menubutton(-text=>"Timing", -underline => 0,-relief=>"
 $timingmenu = $timingbutton->Menu();
 $timingbutton->configure(-menu=>$timingmenu);
 
-     $timingmenu->command(-command => \&dbErr_gui_not_yet,
-    -label => "load",
+#     $timingmenu->command(-command => \&dbErr_gui_not_yet,
+#    -label => "load",
+#    -underline => 0); # L in Lef
+#$timingmenu->separator;
+     $timingmenu->command(-command => \&run_vesta_sta_popup,
+    -label => "Vesta",
     -underline => 0); # L in Lef
 $timingmenu->separator;
-
      $timingmenu->command(
     -command => \&gui_hilite_sta_path,
     -label => "Display",
@@ -625,13 +732,13 @@ $drcbutton->pack(-side=>'left',-fill=>'x', -expand=>1);
 ##############################################################################################
 #         Output Menu                                                                        #
 ##############################################################################################
-#$outputbutton = $menubar->Menubutton(-text=>"Output",-underline => 0,-relief=>"raised",-pady=>0,-height=>2);
-#$outputmenu = $outputbutton->Menu();
-#$outputbutton->configure(-menu=>$outputmenu);
-#
-#     $outputmenu->command(-command => \&write_lef,
-#    -label => "Lef",
-#    -underline => 0); # L in Lef
+$outputbutton = $menubar->Menubutton(-text=>"Output",-underline => 0,-relief=>"raised",-pady=>0,-height=>2);
+$outputmenu = $outputbutton->Menu();
+$outputbutton->configure(-menu=>$outputmenu);
+
+     $outputmenu->command(-command => \&export_all,
+    -label => "Export All",
+    -underline => 0); # L in Lef
 #$outputmenu->separator;
 #     $outputmenu->command(-command => \&write_lib,
 #    -label => "Lib",
@@ -641,7 +748,7 @@ $drcbutton->pack(-side=>'left',-fill=>'x', -expand=>1);
 #    -label => "Libplot",
 #    -underline => 0); # L in Lef
 #$outputmenu->separator;
-#$outputbutton->pack(-side=>'left',-fill=>'x', -expand=>1);
+$outputbutton->pack(-side=>'left',-fill=>'x', -expand=>1);
 ###############################################################################################
 ##         Utilities Menu                                                                         #
 ###############################################################################################
@@ -837,8 +944,8 @@ sub help_menuitems {
       [
        [qw/command ~Design -command/ =>\&design_help_gui],       '',
        [qw/command ~Library -command/ => \&library_help_gui],   '',
-       [qw/command ~Prototype -command/ => \&proto_help_gui],   '',
-       [qw/command ~HierView  -command/ => \&hierView_help_gui],
+       #[qw/command ~Prototype -command/ => \&proto_help_gui],   '',
+       #[qw/command ~HierView  -command/ => \&hierView_help_gui],
      ];
  
 }#sub help_menuitems         
@@ -866,7 +973,7 @@ $tab2 = $book->add( "Sheet 2", -label=>"Library", -raisecmd=>\&activate_LibraryT
 ##$tab9 = $book->add( "Sheet 9", -label=>"Hier-View", -raisecmd=>\&activate_HierViewTab,-justify => "center" );
 #$tab9 = $book->add( "Sheet 9", -label=>"Hier-View", -createcmd=>\&activate_HierViewTab,-justify => "center" );
 #$tab10 = $book->add( "Sheet 10", -label=>"rtl-edit",-justify => "center" );
-#$tab12 = $book->add( "Sheet 12", -label=>"Specify",-justify => "center" );
+$tab12 = $book->add( "Sheet 12", -label=>"Specify",-justify => "center" );
 
 #&design_canvas;
 &create_design_worldCanv;
@@ -879,11 +986,11 @@ $tab2 = $book->add( "Sheet 2", -label=>"Library", -raisecmd=>\&activate_LibraryT
 #&designStat_canvas;
 #&hierview_canvas;
 #&rtledit_canvas;
-#&prepare_specify_tab;
+&prepare_specify_tab;
 
 sub hierview_canvas {
 use Tk::WorldCanvas;
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
 my $hierLeftFrame = $tab9->Frame()->pack(-side => 'left',-fill=>'y');
 
@@ -895,7 +1002,8 @@ $hier_canvas->CanvasBind('<Motion>', sub {&dbfGuiShowWorldCanvasCoords($hier_can
 
 #----------------------- Making widgets in hier-view left frame ---------------------------------#
 my $display_hierpin = 0;
-my $pinRect_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/ptnPinGuide.png2");
+#my $pinRect_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/ptnPinGuide.gif");
+my $pinRect_image = $hierLeftFrame->Photo(-file=> "$path2eq/PNG/pinRect_32.png");
 my $hierpinButton = $hierLeftFrame->Checkbutton(-variable =>\$display_hierpin,-image=>$pinRect_image,-indicatoron => 0,
                                                 -command=> sub{if($display_hierpin == 0){ 
                                                                  $hier_canvas->delete("HIERPINS"); 
@@ -906,7 +1014,8 @@ my $hierpin_baloon = $hierLeftFrame->Balloon();
 #---------------------------------------------------------------------#
 
 my $display_nets = 0;
-my $Net_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/show_net.png2");
+#my $Net_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/show_net.gif");
+my $Net_image = $hierLeftFrame->Photo(-file=> "$path2eq/PNG/1477694821_strategy.png");
 my $NetButton = $hierLeftFrame->Checkbutton(-variable =>\$display_nets,-image=>$Net_image,-indicatoron => 0,
                                                 -command=> sub{if($display_nets == 0){ 
                                                                  $hier_canvas->delete("HIER_NET"); 
@@ -918,7 +1027,8 @@ my $net_baloon = $hierLeftFrame->Balloon();
 #---------------------------------------------------------------------#
 
 my $display_routing = 0;
-my $routingNet_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/trim.png2");
+#my $routingNet_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/trim.gif");
+my $routingNet_image = $hierLeftFrame->Photo(-file=> "$path2eq/PNG/routingNets_32.png");
 my $routingButton = $hierLeftFrame->Checkbutton(-variable =>\$display_routing,-image=>$routingNet_image,-indicatoron => 0,
                                                 -command=> sub{if($display_routing == 0){ 
                                                                  $hier_canvas->delete("HIER_ROUTING_NET"); 
@@ -929,7 +1039,8 @@ my $routing_baloon = $hierLeftFrame->Balloon();
 #---------------------------------------------------------------------#
 
 my $display_instanceName = 0;
-my $instanceName_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/reportSlt.png2");
+#my $instanceName_image = $hierLeftFrame->Photo(-file=> "$path2eq/ETC/reportSlt.gif");
+my $instanceName_image = $hierLeftFrame->Photo(-file=> "$path2eq/PNG/1477698504_tag-01.png");
 my $instanceNameButton = $hierLeftFrame->Checkbutton(-variable =>\$display_instanceName,-image=>$instanceName_image,-indicatoron => 0,
                                                 -command=> sub{if($display_instanceName == 0){ 
                                                                  $hier_canvas->delete("TEMP_TEXT"); 
@@ -940,43 +1051,73 @@ my $instanceName_baloon = $hierLeftFrame->Balloon();
 #----------------------- Making widgets in hier-view right frame ---------------------------------#
 
 my $rightFrame = $tab9->Frame()->pack(-side => 'left',-fill=>'y');
-my $cut_image = $rightFrame->Photo(-file=> "$path2eq/ETC/cut.png2");
+#my $cut_image = $rightFrame->Photo(-file=> "$path2eq/ETC/cut.gif");
+my $cut_image = $rightFrame->Photo(-file=> "$path2eq/PNG/cut_32_1.png");
 my $cutButton = $rightFrame->Button(-image=> $cut_image,-command=>sub{&rectilinearCut_widget($hier_canvas);})->pack(-side=>'top');
 my $cut_baloon = $rightFrame->Balloon();
    $cut_baloon->attach($cutButton, -balloonmsg => 'rectilinear cut');
 
 #---------------------------------------------------------------------#
-my $move_image = $rightFrame->Photo(-file => "$path2eq/ETC/move.png2");               
+#my $move_image = $rightFrame->Photo(-file => "$path2eq/ETC/move.gif");               
+my $move_image = $rightFrame->Photo(-file => "$path2eq/PNG/move_32.png");               
 my $moveButton = $rightFrame->Button(-image=> $move_image,-command=>sub{&moveResizeInstance_widget($hier_canvas);})->pack(-side=>'top');
 my $move_baloon = $rightFrame->Balloon();
    $move_baloon->attach($moveButton, -balloonmsg => 'move/resize');
 
 #---------------------------------------------------------------------#
-my $undo_image = $rightFrame->Photo(-file => "$path2eq/ETC/undo.png2");               
+#my $undo_image = $rightFrame->Photo(-file => "$path2eq/ETC/undo.gif");               
+my $undo_image = $rightFrame->Photo(-file => "$path2eq/PNG/undo_32_1.png");               
 my $undoButton = $rightFrame->Button(-image=> $undo_image,-command=>sub{&perform_redo_undo("undo",$hier_canvas);})->pack(-side=>'top');
 my $undo_baloon = $rightFrame->Balloon();
    $undo_baloon->attach($undoButton, -balloonmsg => 'Undo');
 
 #---------------------------------------------------------------------#
-my $redo_image = $rightFrame->Photo(-file => "$path2eq/ETC/redo.png2");               
+#my $redo_image = $rightFrame->Photo(-file => "$path2eq/ETC/redo.gif");               
+my $redo_image = $rightFrame->Photo(-file => "$path2eq/PNG/redo_32_1.png");               
 my $redoButton = $rightFrame->Button(-image=> $redo_image,-command=>sub{&perform_redo_undo("redo",$hier_canvas);})->pack(-side=>'top');
 my $redo_baloon = $rightFrame->Balloon();
    $redo_baloon->attach($redoButton, -balloonmsg => 'Redo');
 
 #---------------------------------------------------------------------#
-my $uphier_image = $rightFrame->Photo(-file => "$path2eq/ETC/hierup.png2");               
-my $uphierButton = $rightFrame->Button(-image=> $uphier_image,-command=>sub{&upHier;$hier_canvas->delete('all');&display_hierarchy;})->pack(-side=>'top');
+#my $uphier_image = $rightFrame->Photo(-file => "$path2eq/ETC/hierup.gif");               
+my $uphier_image = $rightFrame->Photo(-file => "$path2eq/PNG/hierup_32.png");               
+my $uphierButton = $rightFrame->Button(-image=> $uphier_image,-command=>sub{&upHier;$top->configure(-title => " Electron (".$TOP_MODULE.")");$hier_canvas->delete('all');&display_hierarchy;})->pack(-side=>'top');
 my $uphier_baloon = $rightFrame->Balloon();
    $uphier_baloon->attach($uphierButton, -balloonmsg => 'Up Hierarchy');
 
 #---------------------------------------------------------------------#
-my $downhier_image = $rightFrame->Photo(-file => "$path2eq/ETC/hierdown.png2");               
-my $downhierButton = $rightFrame->Button(-image=> $downhier_image,-command=>sub{&call_popup_downHier();})->pack(-side=>'top');
+#my $downhier_image = $rightFrame->Photo(-file => "$path2eq/ETC/hierdown.gif");               
+my $downhier_image = $rightFrame->Photo(-file => "$path2eq/PNG/hierdown_32.png");               
+#<!-- declared first: a closure cannot see a "my" variable inside that same
+#     variable's own initializer, and the callback has to pass the button so the
+#     popup can open out of it -->
+my $downhierButton;
+$downhierButton = $rightFrame->Button(-image=> $downhier_image,-command=>sub{&call_popup_downHier("", $downhierButton);})->pack(-side=>'top');
 my $downhier_baloon = $rightFrame->Balloon();
    $downhier_baloon->attach($downhierButton, -balloonmsg => 'Down Hierarchy');
 
 #---------------------------------------------------------------------#
-my $refresh_image = $rightFrame->Photo(-file => "$path2eq/ETC/redraw.png2");               
+my $ruler_image = $rightFrame->Photo(-file       => "$path2eq/PNG/ruler_32.png");               
+my $rulerButton = $rightFrame->Button(-image=> $ruler_image,-command=>sub{&create_ruler_popup})->pack(-side=>'top');
+my $ruler_baloon = $rightFrame->Balloon();
+   $ruler_baloon->attach($rulerButton, -balloonmsg => 'Ruler');
+
+#---------------------------------------------------------------------#
+my $commitmodule_image = $rightFrame->Photo(-file       => "$path2eq/PNG/commitModule_32.png");               
+my $commitmoduleButton = $rightFrame->Button(-image=> $commitmodule_image,-command=>sub{&commitModule();})->pack(-side=>'top');
+my $commitmodule_baloon = $rightFrame->Balloon();
+   $commitmodule_baloon->attach($commitmoduleButton, -balloonmsg => 'Commit Module');
+
+#---------------------------------------------------------------------#
+#<!-- no icon for this one yet, a text button keeps its meaning obvious -->
+my $physonlyButton = $rightFrame->Button(-text=> "Phys\nOnly", -font=>"Times 7 bold", -padx=>0, -pady=>0,
+                                         -command=>sub{&call_popup_physical_only_module();})->pack(-side=>'top', -fill=>'x');
+my $physonly_baloon = $rightFrame->Balloon();
+   $physonly_baloon->attach($physonlyButton, -balloonmsg => 'Edit/Commit module, physical data only (no nets, connectivity or routing)');
+
+#---------------------------------------------------------------------#
+#my $refresh_image = $rightFrame->Photo(-file => "$path2eq/ETC/redraw.gif");               
+my $refresh_image = $rightFrame->Photo(-file => "$path2eq/PNG/redraw_32_1.png");               
 my $refreshButton = $rightFrame->Button(-image=> $refresh_image,-command=>sub{&activate_HierViewTab();})->pack(-side=>'top');
 my $refresh_baloon = $rightFrame->Balloon();
    $refresh_baloon->attach($refreshButton, -balloonmsg => 'Refresh');
@@ -1002,94 +1143,98 @@ my $designRightFrame = $tab1->Frame()->pack(-side => 'left', -anchor=>'n');
 #$designRightFrame1 = $tab1->Frame()->pack(-side => 'left', -anchor=>'n');
 #$designRightFrame2 = $tab1->Frame()->pack(-side => 'left', -anchor=>'n');
 
-my $cut_image = $designRightFrame->Photo(-file=> "$path2eq/ETC/cut.png2");
+#my $cut_image = $designRightFrame->Photo(-file=> "$path2eq/ETC/cut.gif");
+my $cut_image = $designRightFrame->Photo(-file=> "$path2eq/PNG/cut_32_1.png");
 my $cutButton = $designRightFrame->Button(-image=> $cut_image,-command=>sub{})->pack(-side=>'top');
 my $cut_baloon = $designRightFrame->Balloon();
    $cut_baloon->attach($cutButton, -balloonmsg => 'rectilinear cut');
 
 #----------------------------------------------------------------------#
-my $move_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/move.png2");               
+#my $move_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/move.gif");               
+my $move_image = $designRightFrame->Photo(-file       => "$path2eq/PNG/move_32.png");               
 my $moveButton = $designRightFrame->Button(-image=> $move_image,-command=>sub{&moveOrResize_Instance_byWidgetIn_designCanvas($design_canvas);})->pack(-side=>'top');
 my $move_baloon = $designRightFrame->Balloon();
    $move_baloon->attach($moveButton, -balloonmsg => 'move/resize');
 
 #----------------------------------------------------------------------#
-my $undo_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/undo.png2");               
+#my $undo_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/undo.gif");               
+my $undo_image = $designRightFrame->Photo(-file       => "$path2eq/PNG/undo_32_1.png");               
 my $undoButton = $designRightFrame->Button(-image=> $undo_image,-command=>sub{})->pack(-side=>'top');
 my $undo_baloon = $designRightFrame->Balloon();
    $undo_baloon->attach($undoButton, -balloonmsg => 'Undo');
 
 #----------------------------------------------------------------------#
-my $redo_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/redo.png2");               
+#my $redo_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/redo.gif");               
+my $redo_image = $designRightFrame->Photo(-file       => "$path2eq/PNG/redo_32_1.png");               
 my $redoButton = $designRightFrame->Button(-image=> $redo_image,-command=>sub{})->pack(-side=>'top');
 my $redo_baloon = $designRightFrame->Balloon();
    $redo_baloon->attach($redoButton, -balloonmsg => 'Redo');
 
 #----------------------------------------------------------------------#
-my $stWire_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/swap-conponents.png2");               
+my $stWire_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/swap-conponents.gif");               
 my $stWireButton = $designRightFrame->Button(-image=> $stWire_image,-command=>sub{&create_help_forConnection_widgets("StraightWire");&dbTstGUICreateStraightWires("","","straightWire")})->pack(-side=>'top');
 my $stWire_baloon = $designRightFrame->Balloon();
    $stWire_baloon->attach($stWireButton, -balloonmsg => 'StraightWire');
 
 #----------------------------------------------------------------------#
-my $zWire_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/addWire.png2");               
+my $zWire_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/addWire.gif");               
 my $zWireButton = $designRightFrame->Button(-image=> $zWire_image,-command=>sub{&create_help_forConnection_widgets("ZWire");&dbTstGUICreateZWires("","","zWire")})->pack(-side=>'top');
 my $zWire_baloon = $designRightFrame->Balloon();
    $zWire_baloon->attach($zWireButton, -balloonmsg => 'ZWire');
 
 #----------------------------------------------------------------------#
-#my $rWire_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/budget.png2");               
-#my $rWireButton = $designRightFrame->Button(-image=> $rWire_image,-command=>sub{&create_help_forConnection_widgets("RoutingWire");&dbTstGUICreateRoutingWires("","","routingWire")})->pack(-side=>'top');
-#my $rWire_baloon = $designRightFrame->Balloon();
-#   $rWire_baloon->attach($rWireButton, -balloonmsg => 'RoutingWire');
+my $rWire_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/budget.gif");               
+my $rWireButton = $designRightFrame->Button(-image=> $rWire_image,-command=>sub{&create_help_forConnection_widgets("RoutingWire");&dbTstGUICreateRoutingWires("","","routingWire")})->pack(-side=>'top');
+my $rWire_baloon = $designRightFrame->Balloon();
+   $rWire_baloon->attach($rWireButton, -balloonmsg => 'RoutingWire');
 
 #----------------------------------------------------------------------#
-#my $stBus_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/stretchWire.png2");               
-#my $stBusButton = $designRightFrame->Button(-image=> $stBus_image,-command=>sub{&create_help_forConnection_widgets("StraightBus");&dbTstGUICreateStraightBus("","","straightBus")})->pack(-side=>'top');
-#my $stBus_baloon = $designRightFrame->Balloon();
+my $stBus_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/stretchWire.gif");               
+my $stBusButton = $designRightFrame->Button(-image=> $stBus_image,-command=>sub{&create_help_forConnection_widgets("StraightBus");&dbTstGUICreateStraightBus("","","straightBus")})->pack(-side=>'top');
+my $stBus_baloon = $designRightFrame->Balloon();
    $stBus_baloon->attach($stBusButton, -balloonmsg => 'StraightBus');
 
 #----------------------------------------------------------------------#
-my $zBus_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/addBusGuide.png2");               
+my $zBus_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/addBusGuide.gif");               
 my $zBusButton = $designRightFrame->Button(-image=> $zBus_image,-command=>sub{&create_help_forConnection_widgets("ZBus");&dbTstGUICreateZBus("","","zBus")})->pack(-side=>'top');
 my $zBus_baloon = $designRightFrame->Balloon();
    $zBus_baloon->attach($zBusButton, -balloonmsg => 'ZBus');
 
 #----------------------------------------------------------------------#
-my $rBus_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/p2pRoute.png2");               
+my $rBus_image = $designRightFrame->Photo(-file       => "$path2eq/ETC/p2pRoute.gif");               
 my $rBusButton = $designRightFrame->Button(-image=> $rBus_image,-command=>sub{&create_help_forConnection_widgets("RoutingBus");&dbTstGUICreateRoutingBus("","","routingBus")})->pack(-side=>'top');
 my $rBus_baloon = $designRightFrame->Balloon();
    $rBus_baloon->attach($rBusButton, -balloonmsg => 'RoutingBus');
 
 #----------------------------------------------------------------------#
-#my $resize = $designRightFrame->Photo(-file       => "$path2eq/ETC/art_tool4_magnify1b.png2");
-my $resize = $designRightFrame->Photo(-file       => "$path2eq/ETC/metalSplit.png2");
+#my $resize = $designRightFrame->Photo(-file       => "$path2eq/ETC/art_tool4_magnify1b.gif");
+my $resize = $designRightFrame->Photo(-file       => "$path2eq/ETC/metalSplit.gif");
 my $resizeButton = $designRightFrame->Button(-text => "ReSIZE",-image=> $resize, -command => \&dbfGuiResizeModules,)->pack(-side=>"top");
 my $resize_baloon = $designRightFrame->Balloon();
    $resize_baloon->attach($resizeButton, -balloonmsg => 'ReSize');
 
 #----------------------------------------------------------------------#
-#my $zoom = $designRightFrame->Photo(-file       => "$path2eq/ETC/b5_magnify2.png2");
-#my $zoom = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoom_hilited.png2");
-my $zoom = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoom_selected.png2");
+#my $zoom = $designRightFrame->Photo(-file       => "$path2eq/ETC/b5_magnify2.gif");
+#my $zoom = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoom_hilited.gif");
+my $zoom = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoom_selected.gif");
 my $zoomButton = $designRightFrame->Button(-text => "Zoom",-image=> $zoom, -command => \&dbfGuiZoom,)->pack(-side=>"top");
 my $zoom_balloon = $designRightFrame->Balloon();
    $zoom_balloon->attach($zoomButton, -balloonmsg => 'Zoom');
 
 #----------------------------------------------------------------------#
-my $zoomin = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoomin.png2");
+my $zoomin = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoomin.gif");
 my $zoominButton = $designRightFrame->Button(-text => "Zoom In",-image=> $zoomin,-command => \&dbfGuiZoomIn,)->pack(-side=>"top");
 my $zoomin_balloon = $designRightFrame->Balloon();
    $zoomin_balloon->attach($zoominButton, -balloonmsg => 'Zoom In');
 
 #----------------------------------------------------------------------#
-my $zoomout = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoomout.png2");
+my $zoomout = $designRightFrame->Photo(-file       => "$path2eq/ETC/zoomout.gif");
 my $zoomoutButton = $designRightFrame->Button(-text => "Zoom Out",-image=> $zoomout,-command => \&dbfGuiZoomOut,)->pack(-side=>"top");
 my $zoomout_baloon = $designRightFrame->Balloon();
    $zoomout_baloon->attach($zoomoutButton, -balloonmsg => 'Zoom Out');
 
 #----------------------------------------------------------------------#
-my $zoomfit = $designRightFrame->Photo(-file       => "$path2eq/ETC/fit.png2");
+my $zoomfit = $designRightFrame->Photo(-file       => "$path2eq/ETC/fit.gif");
 my $zoomfitButton = $designRightFrame->Button(-text => "Zoom Fit",-image=> $zoomfit,-command => \&dbfGuiZoom,)->pack(-side=>"top");
 my $zoomfit_baloon = $designRightFrame->Balloon();
    $zoomfit_baloon->attach($zoomfitButton, -balloonmsg => 'Zoom Fit');
@@ -1107,7 +1252,7 @@ sub library_canvas {
 $libBook = $tab2->NoteBook(-tabpady=>0,-tabpadx=>0,-relief=>"raised",-font=> "Times 10 italic")->pack(-side=>"top",-fill=>'both',-expand=>1);
 $basicTab = $libBook->add( "Sheet 1", -label=>"tech",-raisecmd=>\&activate_basicViewTab,-justify => "center" );
 $lefTab = $libBook->add( "Sheet 2", -label=>"lef-view",-raisecmd=>\&activate_lefViewTab,-justify => "center" );
-#$gdsTab = $libBook->add( "Sheet 3", -label=>"gds-view",-raisecmd=>\&activate_gdsViewTab,-justify => "center" );
+$gdsTab = $libBook->add( "Sheet 3", -label=>"gds-view",-raisecmd=>\&activate_gdsViewTab,-justify => "center" );
 #$synTab = $libBook->add( "Sheet 4", -label=>"synlib-view",-raisecmd=>\&activate_libViewTab,-justify => "center" );
 #$rtlTab = $libBook->add( "Sheet 5", -label=>"rtls",-justify => "center" );
 #$netlistTab = $libBook->add( "Sheet 6", -label=>"netlists",-justify => "center" );
@@ -1125,9 +1270,9 @@ $libFrame6 = $basicTab->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -
 #$libFrame8 = $synTab->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'both');
 ##$libFrame9 = $synTab->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
 #
-#$libFrame10 = $gdsTab->Frame()->pack(-side => 'top', -fill=>'x');
-#$libFrame10_1 = $gdsTab->Frame()->pack(-side => 'top', -fill=>'x');
-#$libFrame11 = $gdsTab->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'both');
+$libFrame10 = $gdsTab->Frame()->pack(-side => 'top', -fill=>'x');
+$libFrame10_1 = $gdsTab->Frame()->pack(-side => 'top', -fill=>'x');
+$libFrame11 = $gdsTab->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'both');
 #
 #$libFrame12 = $rtlTab->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
 #$libFrame13 = $rtlTab->Frame()->pack(-side => 'top',-anchor=>'n', -expand=>1, -fill=>'x');
@@ -1187,7 +1332,6 @@ $basicViaCanvas->Subwidget("yscrollbar")->configure(-width=>10,-borderwidth=>1);
 $basicViaCanvas->pack(qw/-expand 1 -side bottom -fill both/);
 
 &dropdown_entry;
-&layer_display;
 
 #####################################################################   Create Syn Canvas  #####################################################################
 
@@ -1227,83 +1371,83 @@ $basicViaCanvas->pack(qw/-expand 1 -side bottom -fill both/);
 #$synCanvas->CanvasBind('<Motion>', sub {});
 #
 ####################################################### Create gdsViewer Canvas ###################################################
-#
-#$gdsgui_menubar = $libFrame10->Frame(-relief=>"raised", -borderwidth=>1)->pack(-side =>'top', -fill =>'x');
-#
-#$gdsCanvas = $libFrame11->Scrolled('WorldCanvas', -scrollbars=>'se',-bg =>'black',-width=>540, -height=>540)->pack(qw/-expand 1 -fill both -side top/);
-#$gdsCanvas->Subwidget('xscrollbar')->configure(-takefocus => 0);
-#$gdsCanvas->Subwidget('yscrollbar')->configure(-takefocus => 0);
-#$gdsCanvas->configure(-confine => 1);
-#$gdsCanvas->CanvasBind('<Motion>', sub {&dbfGuiShowGdsCanvasCoords($gdsCanvas)});
-#
-#$gdsgui_menubar->Label(-text => "FileName",-font=>"Times 10 italic")->pack(-side =>'left', -anchor => 'w');
-#$gdsgui_menubar->Entry(-textvariable => \$gdsfile)->pack(-side =>'left', -anchor => 'w', -fill => 'x' );
-#
-#my $image = $top->Getimage('folder');
-#my $Browsebutton = $gdsgui_menubar->Button(-image=>$image,-command =>sub {&gdsfilelist_popup;})->pack(-side => 'left'); 
-#$displayVar = "display1";
-#
-#
-#$gdsgui_menubar->Radiobutton(-variable =>\$displayVar,
-#  		             -value => "display2",
-#                             -text => "Display2",
-#                             -padx=>0, -pady=>0,
-#                             -command => sub {
-#                                              $gdsCanvas->delete("all");
-#                                              &gds_display($displayVar);
-#                                                   } )->pack(-side =>"right");
-#
-#
-#$gdsgui_menubar->Radiobutton(-variable =>\$displayVar,
-#  		             -value => "display1",
-#  		             -text => "Display1",
-#                             -padx=>0, -pady=>0,
-#                             -command => sub {
-#                                              $gdsCanvas->delete("all");
-#                                              &gds_display($displayVar);
-#                                                   } )->pack(-side =>"right");
-#
-#$gdsgui_menubar->Checkbutton(-text=>'pinText',-relief=>"groove", -pady =>0, -padx=>0,
-#                             -variable =>\$gdsVar,
-#                             -command=> sub{ if($gdsVar == 0) { $gdsCanvas->delete("GDSPINTEXT"); }
-#                                                       else { &gds_display($displayVar);}
-#                                      })->pack(-side=>"right", -anchor=>'w');
-#
-#
-#$gdsReadButton=$gdsgui_menubar->Button(-text=>"ReadGDS",
-#                                          -relief=>"raised", 
-#                                          -pady=>0,-padx=>0,
-#                                          -highlightthickness=>0,  
-#                                          -command=>sub {&read_gds($gdsfile);}
-#                                           )->pack(-side=>"left");
-#
-#$gdsDisplayButton=$gdsgui_menubar->Button(-text=>"DisplayGDS",
-#                                          -relief=>"raised", 
-#                                          -pady=>0,-padx=>0,
-#                                          -highlightthickness=>0,  
-#                                          -command=>sub {$gdsCanvas->delete("all");
-#                                           &gds_display($displayVar);}
-#                                           )->pack(-side=>"left");
-#
-#
-#$moduleHierList = $libFrame14->Scrolled('Tree',
-#                        -header => 1,
-#                        -columns => 50,
-#                        -width => 130,
-#                        -height => 6,
-#                        -padx => 0,
-#                        -pady => 0,
-#                        -scrollbars => 'osoe',
-#                        -relief => "sunken",
-#                        -borderwidth => 1,
-#                        -selectmode => 'single',
-#                        -browsecmd  => sub {
-#                                           }
-#                              )
-#                      ->pack(-side => 'top',-expand => 1, -fill => 'both');
-#$moduleHierList->autosetmode();
-#$moduleHierList->Subwidget("xscrollbar")->configure(-width=>10);
-#$moduleHierList->Subwidget("yscrollbar")->configure(-width=>10);
+
+$gdsgui_menubar = $libFrame10->Frame(-relief=>"raised", -borderwidth=>1)->pack(-side =>'top', -fill =>'x');
+
+$gdsCanvas = $libFrame11->Scrolled('WorldCanvas', -scrollbars=>'se',-bg =>'black',-width=>540, -height=>540)->pack(qw/-expand 1 -fill both -side top/);
+$gdsCanvas->Subwidget('xscrollbar')->configure(-takefocus => 0);
+$gdsCanvas->Subwidget('yscrollbar')->configure(-takefocus => 0);
+$gdsCanvas->configure(-confine => 1);
+$gdsCanvas->CanvasBind('<Motion>', sub {&dbfGuiShowGdsCanvasCoords($gdsCanvas)});
+
+$gdsgui_menubar->Label(-text => "FileName",-font=>"Times 10 italic")->pack(-side =>'left', -anchor => 'w');
+$gdsgui_menubar->Entry(-textvariable => \$gdsfile)->pack(-side =>'left', -anchor => 'w', -fill => 'x' );
+
+my $image = $top->Getimage('folder');
+my $Browsebutton = $gdsgui_menubar->Button(-image=>$image,-command =>sub {&gdsfilelist_popup;})->pack(-side => 'left'); 
+$displayVar = "display1";
+
+
+$gdsgui_menubar->Radiobutton(-variable =>\$displayVar,
+  		             -value => "display2",
+                             -text => "Display2",
+                             -padx=>0, -pady=>0,
+                             -command => sub {
+                                              $gdsCanvas->delete("all");
+                                             &gds_display($displayVar);
+                                                   } )->pack(-side =>"right");
+
+
+$gdsgui_menubar->Radiobutton(-variable =>\$displayVar,
+  		             -value => "display1",
+  		             -text => "Display1",
+                             -padx=>0, -pady=>0,
+                             -command => sub {
+                                              $gdsCanvas->delete("all");
+                                              &gds_display($displayVar);
+                                                   } )->pack(-side =>"right");
+
+$gdsgui_menubar->Checkbutton(-text=>'pinText',-relief=>"groove", -pady =>0, -padx=>0,
+                             -variable =>\$gdsVar,
+                             -command=> sub{ if($gdsVar == 0) { $gdsCanvas->delete("GDSPINTEXT"); }
+                                                       else { &gds_display($displayVar);}
+                                      })->pack(-side=>"right", -anchor=>'w');
+
+
+$gdsReadButton=$gdsgui_menubar->Button(-text=>"ReadGDS",
+                                          -relief=>"raised", 
+                                          -pady=>0,-padx=>0,
+                                          -highlightthickness=>0,  
+                                          -command=>sub {&read_gds($gdsfile);}
+                                           )->pack(-side=>"left");
+
+$gdsDisplayButton=$gdsgui_menubar->Button(-text=>"DisplayGDS",
+                                          -relief=>"raised", 
+                                          -pady=>0,-padx=>0,
+                                          -highlightthickness=>0,  
+                                          -command=>sub {$gdsCanvas->delete("all");
+                                           &gds_display($displayVar);}
+                                           )->pack(-side=>"left");
+
+
+##$moduleHierList = $libFrame14->Scrolled('Tree',
+##                        -header => 1,
+##                        -columns => 50,
+##                        -width => 130,
+##                        -height => 6,
+##                        -padx => 0,
+##                        -pady => 0,
+##                        -scrollbars => 'osoe',
+##                        -relief => "sunken",
+##                        -borderwidth => 1,
+##                        -selectmode => 'single',
+##                        -browsecmd  => sub {
+##                                           }
+##                              )
+##                      ->pack(-side => 'top',-expand => 1, -fill => 'both');
+##$moduleHierList->autosetmode();
+##$moduleHierList->Subwidget("xscrollbar")->configure(-width=>10);
+##$moduleHierList->Subwidget("yscrollbar")->configure(-width=>10);
 
 }#sub library_canvas
 
@@ -1651,7 +1795,7 @@ my $var7  = 1;
 ##   Display control in left frame
 ##############################################################################################
 
-my $instance_image = $leftFrame->Photo(-file=> "$path2eq/ETC/1477693873_brick__wall.png");
+my $instance_image = $leftFrame->Photo(-file=> "$path2eq/PNG/1477693873_brick__wall.png");
 my $instanceButton = $leftFrame->Checkbutton(-variable =>\$var1,-image=>$instance_image,-indicatoron => 0,
                                              -command=> sub{ if($var1 == 0){}
                                                              else {
@@ -1665,7 +1809,7 @@ my $instance_baloon = $leftFrame->Balloon();
 
 #----------------------------------------------------------------------------#
 
-my $net_image = $leftFrame->Photo(-file=> "$path2eq/ETC/1477694821_strategy.png");
+my $net_image = $leftFrame->Photo(-file=> "$path2eq/PNG/1477694821_strategy.png");
 my $netButton = $leftFrame->Checkbutton(-variable =>\$var2,-image=>$net_image,-indicatoron => 0,
                                         -command=> sub{if($var2 == 0) {$design_worldcanvas->delete("NETTAG");}
                                                        else {&design_nets_display;}
@@ -1675,7 +1819,7 @@ my $net_baloon = $leftFrame->Balloon();
 
 #----------------------------------------------------------------------------#
                 
-my $spnet_image = $leftFrame->Photo(-file=> "$path2eq/ETC/1477694713_battery.png");
+my $spnet_image = $leftFrame->Photo(-file=> "$path2eq/PNG/1477694713_battery.png");
 my $spnetButton = $leftFrame->Checkbutton(-variable =>\$var3,-image=>$spnet_image,-indicatoron => 0,
                                           -command=> sub{if($var3 == 0){$design_worldcanvas->delete(SPNETTAG);}
                                                          else {&SpecialNets_display;}
@@ -1684,7 +1828,7 @@ my $spnet_baloon = $leftFrame->Balloon();
    $spnet_baloon->attach($spnetButton, -balloonmsg => 'SpecialNets');
 
 #----------------------------------------------------------------------------#
-my $instanceName_image = $leftFrame->Photo(-file=> "$path2eq/ETC/1477698504_tag-01.png");
+my $instanceName_image = $leftFrame->Photo(-file=> "$path2eq/PNG/1477698504_tag-01.png");
 my $instanceNameButton = $leftFrame->Checkbutton(-variable =>\$var4,-image=>$instanceName_image,-indicatoron => 0,
                                                  -command=> sub{if($var4 == 0){$design_worldcanvas->delete("INSTANCETEXT");}
                                                                  else {&display_instance_name;}
@@ -1693,20 +1837,21 @@ my $instanceName_baloon = $leftFrame->Balloon();
    $instanceName_baloon->attach($instanceNameButton, -balloonmsg => 'InstanceName');
 
 #----------------------------------------------------------------------------#
-###---my $pinRect_image = $leftFrame->Photo(-file=> "$path2eq/ETC/ptnPinGuide.png2");
-###---my $pinRectButton = $leftFrame->Checkbutton(-variable =>\$var11,-image=>$pinRect_image,-indicatoron => 0,
-###---                                            -command=> sub{ if($var11 == 0) {
-###---                                                               #$design_worldcanvas->delete(PINRECT);
-###---                                                             }else {
-###---                                                               my $open_pinRect_popup = $GLOBAL->dbfGlobalGetPinRectPopup;
-###---                                                               if($open_pinRect_popup == 0){&pinRectDisplayPopUp}
-###---                                                             }
-###---                                            })->pack(-side=>"top", -anchor=>'w');
-###---my $pinRect_baloon = $leftFrame->Balloon();
-###---   $pinRect_baloon->attach($pinRectButton, -balloonmsg => 'PinRects');
-###---
+#my $pinRect_image = $leftFrame->Photo(-file=> "$path2eq/ETC/ptnPinGuide.gif");
+my $pinRect_image = $leftFrame->Photo(-file=> "$path2eq/PNG/pinRect_32.png");
+my $pinRectButton = $leftFrame->Checkbutton(-variable =>\$var11,-image=>$pinRect_image,-indicatoron => 0,
+                                            -command=> sub{ if($var11 == 0) {
+                                                               #$design_worldcanvas->delete(PINRECT);
+                                                             }else {
+                                                               my $open_pinRect_popup = $GLOBAL->dbfGlobalGetPinRectPopup;
+                                                               if($open_pinRect_popup == 0){&pinRectDisplayPopUp}
+                                                             }
+                                            })->pack(-side=>"top", -anchor=>'w');
+my $pinRect_baloon = $leftFrame->Balloon();
+   $pinRect_baloon->attach($pinRectButton, -balloonmsg => 'PinRects');
+
 #----------------------------------------------------------------------------#
-my $obsRect_image = $leftFrame->Photo(-file=> "$path2eq/ETC/1477696651_Padlock.png");
+my $obsRect_image = $leftFrame->Photo(-file=> "$path2eq/PNG/1477696651_Padlock.png");
 my $obsRectButton = $leftFrame->Checkbutton(-variable =>\$var13,-image=>$obsRect_image,-indicatoron => 0,
                                             -command=> sub{if($var13 == 0) {
                                                                $design_worldcanvas->delete(OBSRECT);
@@ -1716,22 +1861,22 @@ my $obsRect_baloon = $leftFrame->Balloon();
    $obsRect_baloon->attach($obsRectButton, -balloonmsg => 'ObsRects');
 
 #----------------------------------------------------------------------------#
-###---my $pinText_image = $leftFrame->Photo(-file=> "$path2eq/ETC/pinSelected.png2");
-###---my $pinTextButton = $leftFrame->Checkbutton(-variable =>\$var12,-image=>$pinText_image,-indicatoron => 0,
-###---                                            -command=> sub{ if($var12 == 0){$design_worldcanvas->delete("PINTEXT");
-###---                                                            }else {
-###---                                                              my $class = "all";
-###---                                                              if($hardMacroVar == 1){$class = "BLOCK";}
-###---                                                              elsif($stdCellVar == 1){$class = "CORE";}
-###---                                                              else{$class = "NONE";}
-###---                                                              &Inst_pinRect_display(1,$class);
-###---                                                            } 
-###---                                            })->pack(-side=>"top", -anchor=>'w');
-###---my $pinText_baloon = $leftFrame->Balloon();
-###---   $pinText_baloon->attach($pinTextButton, -balloonmsg => 'PinName');
-###---
+my $pinText_image = $leftFrame->Photo(-file=> "$path2eq/PNG/pinText_32.png");
+my $pinTextButton = $leftFrame->Checkbutton(-variable =>\$var12,-image=>$pinText_image,-indicatoron => 0,
+                                            -command=> sub{ if($var12 == 0){$design_worldcanvas->delete("PINTEXT");
+                                                            }else {
+                                                              my $class = "all";
+                                                              if($hardMacroVar == 1){$class = "BLOCK";}
+                                                              elsif($stdCellVar == 1){$class = "CORE";}
+                                                              else{$class = "NONE";}
+                                                              &Inst_pinRect_display(1,$class);
+                                                            } 
+                                            })->pack(-side=>"top", -anchor=>'w');
+my $pinText_baloon = $leftFrame->Balloon();
+   $pinText_baloon->attach($pinTextButton, -balloonmsg => 'PinName');
+
 #----------------------------------------------------------------------------#
-my $port_image = $leftFrame->Photo(-file=> "$path2eq/ETC/1477697764_port.png");
+my $port_image = $leftFrame->Photo(-file=> "$path2eq/PNG/1477697764_port.png");
 my $portButton = $leftFrame->Checkbutton(-variable => \$var5,-image=>$port_image,-indicatoron => 0,
                                          -command=> sub{if($var5 == 0){$design_worldcanvas->itemconfigure("PORTS", -fill=>"",-outline=>"");}
                                                         else {$design_worldcanvas->itemconfigure("PORTS", -fill=>"yellow3",-outline=>"yellow3");}
@@ -1740,7 +1885,7 @@ my $port_baloon = $leftFrame->Balloon();
    $port_baloon->attach($portButton, -balloonmsg => 'Ports');
 
 #----------------------------------------------------------------------------#
-my $rows_image = $leftFrame->Photo(-file=> "$path2eq/ETC/1477693786_interface-49.png");
+my $rows_image = $leftFrame->Photo(-file=> "$path2eq/PNG/1477693786_interface-49.png");
 my $rowsButton = $leftFrame->Checkbutton(-variable =>\$var6,-image=>$rows_image,-indicatoron => 0,
                                          -command=> sub{ if($var6 == 0){ $design_worldcanvas->itemconfigure("ROWS",-fill=>"");}
                                                          else{$design_worldcanvas->itemconfigure("ROWS", -fill=>"grey41"); } 
@@ -1749,68 +1894,78 @@ my $rows_baloon = $leftFrame->Balloon();
    $rows_baloon->attach($rowsButton, -balloonmsg => 'Rows');
 
 #----------------------------------------------------------------------------#
-###---my $bump_image = $leftFrame->Photo(-file=> "$path2eq/ETC/addVia.png2");
-###---my $bumpButton = $leftFrame->Checkbutton(-variable =>\$var7,-image=>$bump_image,-indicatoron => 0,
-###---                                         -command=> sub{if($var7 == 0){$design_worldcanvas->itemconfigure("BUMPNET", -fill=>""); }
-###---                                                        else {$design_worldcanvas->itemconfigure("BUMPNET", -fill=>"white");} 
-###---                                          })->pack(-side=>"top", -anchor=>'w');
-###---my $bump_baloon = $leftFrame->Balloon();
-###---   $bump_baloon->attach($bumpButton, -balloonmsg => 'BumpNet');
-###---
-###---#----------------------------------------------------------------------------#
-###---my $track_image = $leftFrame->Photo(-file=> "$path2eq/ETC/grid-snap.png2");
-###---my $trackButton = $leftFrame->Checkbutton(-image=>$track_image,-indicatoron => 0,
-###---                                          -command=> sub{ print "Track visible\n"; 
-###---                                         })->pack(-side=>"top", -anchor=>'w');
-###---my $track_baloon = $leftFrame->Balloon();
-###---   $track_baloon->attach($trackButton, -balloonmsg => 'Track');
-###---
-###---#----------------------------------------------------------------------------#
-###---my $pCell_image = $leftFrame->Photo(-file=> "$path2eq/ETC/place_mode.png2");
-###---my $pCellButton = $leftFrame->Checkbutton(-variable => \$var8,-image=>$pCell_image,-indicatoron => 0,
-###---                                          -command=> sub{if($var8 == 1) { &dbPlaceGuiDisplayGrid; }
-###---                                                         else { &dbPlaceGuiClearGrid; }
-###---                                       })->pack(-side=>"top", -anchor=>'w');
-###---my $pCell_baloon = $leftFrame->Balloon();
-###---   $pCell_baloon->attach($pCellButton, -balloonmsg => 'Pcell');
-###---
-###---#----------------------------------------------------------------------------#
-###---my $gCell_image = $leftFrame->Photo(-file=> "$path2eq/ETC/cioPlan.png2");
-###---my $gCellButton = $leftFrame->Checkbutton(-image=>$gCell_image,-indicatoron => 0,
-###---                                          -command=> sub{ print "Gcell display ON\n"; 
-###---                                         })->pack(-side=>"top", -anchor=>'w');
-###---my $gCell_baloon = $leftFrame->Balloon();
-###---   $gCell_baloon->attach($gCellButton, -balloonmsg => 'Gcell');
-###---
-###---#----------------------------------------------------------------------------#
-###---my $vCong_image = $leftFrame->Photo(-file=> "$path2eq/ETC/distribute-vertical.png2");
-###---my $vCongButton = $leftFrame->Checkbutton(-variable =>\$var9,-image=>$vCong_image,-indicatoron => 0,
-###---                                          -command=> sub{ if($var9 == 0){$design_canvas->delete(VCONG);}
-###---                                                          else {&display_congestion_map(1,0);} 
-###---                                          })->pack(-side=>"top", -anchor=>'w');
-###---my $vCong_baloon = $leftFrame->Balloon();
-###---   $vCong_baloon->attach($vCongButton, -balloonmsg => 'VerticalCong');
-###---
-###---#----------------------------------------------------------------------------#
-###---my $hCong_image = $leftFrame->Photo(-file=> "$path2eq/ETC/distribute-horizontal.png2");
-###---my $hCongButton = $leftFrame->Checkbutton(-variable =>\$var10,-image=>$hCong_image,-indicatoron => 0,
-###---                                          -command=> sub{ if($var10 == 0){$design_canvas->delete(HCONG);} 
-###---                                                          else {&display_congestion_map(0,1);}
-###---                                          })->pack(-side=>"top", -anchor=>'w');
-###---my $hCong_baloon = $leftFrame->Balloon();
-###---   $hCong_baloon->attach($hCongButton, -balloonmsg => 'HorizontalCong');
-###---
-###---#----------------------------------------------------------------------------#
-###---my $description_image = $leftFrame->Photo(-file=> "$path2eq/ETC/save_cktree.png2");
-###---my $descriptionButton = $leftFrame->Checkbutton(-variable =>\$var14,-image=>$description_image,-indicatoron => 0,
-###---                        -command=> sub{ if($var14 == 0) {&closeDisplay_descriptionBox;}
-###---
-###---                                      else {&description_box_binding;}
-###---                                        }
-###---                        )->pack(-side=>"top", -anchor=>'w');
-###---my $description_baloon = $leftFrame->Balloon();
-###---   $description_baloon->attach($descriptionButton, -balloonmsg => 'Description');
-###---
+#my $bump_image = $leftFrame->Photo(-file=> "$path2eq/ETC/addVia.gif");
+my $bump_image = $leftFrame->Photo(-file=> "$path2eq/PNG/bumpNet_32_2.png");
+my $bumpButton = $leftFrame->Checkbutton(-variable =>\$var7,-image=>$bump_image,-indicatoron => 0,
+                                         -command=> sub{if($var7 == 0){$design_worldcanvas->itemconfigure("BUMPNET", -fill=>""); }
+                                                        else {$design_worldcanvas->itemconfigure("BUMPNET", -fill=>"white");} 
+                                          })->pack(-side=>"top", -anchor=>'w');
+my $bump_baloon = $leftFrame->Balloon();
+   $bump_baloon->attach($bumpButton, -balloonmsg => 'BumpNet');
+
+#----------------------------------------------------------------------------#
+#my $track_image = $leftFrame->Photo(-file=> "$path2eq/ETC/grid-snap.gif");
+my $track_image = $leftFrame->Photo(-file=> "$path2eq/PNG/track_32.png");
+my $trackButton = $leftFrame->Checkbutton(-image=>$track_image,-indicatoron => 0, -variable => \$var8,
+                                          -command=> sub{ 
+                                                    print "Track visible\n" ; 
+                                                         if($var8 == 1) { &dbPlaceGuiDisplayTracks; }
+                                                         else { &dbPlaceGuiClearTracks; }
+                                         })->pack(-side=>"top", -anchor=>'w');
+my $track_baloon = $leftFrame->Balloon();
+   $track_baloon->attach($trackButton, -balloonmsg => 'Track');
+
+#----------------------------------------------------------------------------#
+#my $pCell_image = $leftFrame->Photo(-file=> "$path2eq/ETC/place_mode.gif");
+my $pCell_image = $leftFrame->Photo(-file=> "$path2eq/PNG/pcell_32.png");
+my $pCellButton = $leftFrame->Checkbutton(-variable => \$var8,-image=>$pCell_image,-indicatoron => 0,
+                                          -command=> sub{if($var8 == 1) { &dbPlaceGuiDisplayGrid; }
+                                                         else { &dbPlaceGuiClearGrid; }
+                                       })->pack(-side=>"top", -anchor=>'w');
+my $pCell_baloon = $leftFrame->Balloon();
+   $pCell_baloon->attach($pCellButton, -balloonmsg => 'Pcell');
+
+#----------------------------------------------------------------------------#
+#my $gCell_image = $leftFrame->Photo(-file=> "$path2eq/ETC/cioPlan.gif");
+my $gCell_image = $leftFrame->Photo(-file=> "$path2eq/PNG/gcell_32.png");
+my $gCellButton = $leftFrame->Checkbutton(-image=>$gCell_image,-indicatoron => 0,
+                                          -command=> sub{ print "Gcell display ON\n"; 
+                                         })->pack(-side=>"top", -anchor=>'w');
+my $gCell_baloon = $leftFrame->Balloon();
+   $gCell_baloon->attach($gCellButton, -balloonmsg => 'Gcell');
+
+#----------------------------------------------------------------------------#
+#my $vCong_image = $leftFrame->Photo(-file=> "$path2eq/ETC/distribute-vertical.gif");
+my $vCong_image = $leftFrame->Photo(-file=> "$path2eq/PNG/verticalCong_32.png");
+my $vCongButton = $leftFrame->Checkbutton(-variable =>\$var9,-image=>$vCong_image,-indicatoron => 0,
+                                          -command=> sub{ if($var9 == 0){$design_canvas->delete(VCONG);}
+                                                          else {&display_congestion_map(1,0);} 
+                                          })->pack(-side=>"top", -anchor=>'w');
+my $vCong_baloon = $leftFrame->Balloon();
+   $vCong_baloon->attach($vCongButton, -balloonmsg => 'VerticalCong');
+
+#----------------------------------------------------------------------------#
+#my $hCong_image = $leftFrame->Photo(-file=> "$path2eq/ETC/distribute-horizontal.gif");
+my $hCong_image = $leftFrame->Photo(-file=> "$path2eq/PNG/horizontalCong_32.png");
+my $hCongButton = $leftFrame->Checkbutton(-variable =>\$var10,-image=>$hCong_image,-indicatoron => 0,
+                                          -command=> sub{ if($var10 == 0){$design_canvas->delete(HCONG);} 
+                                                          else {&display_congestion_map(0,1);}
+                                          })->pack(-side=>"top", -anchor=>'w');
+my $hCong_baloon = $leftFrame->Balloon();
+   $hCong_baloon->attach($hCongButton, -balloonmsg => 'HorizontalCong');
+
+#----------------------------------------------------------------------------#
+#my $description_image = $leftFrame->Photo(-file=> "$path2eq/ETC/save_cktree.gif");
+my $description_image = $leftFrame->Photo(-file=> "$path2eq/PNG/saveCktTree_32_2.png");
+my $descriptionButton = $leftFrame->Checkbutton(-variable =>\$var14,-image=>$description_image,-indicatoron => 0,
+                        -command=> sub{ if($var14 == 0) {&closeDisplay_descriptionBox;}
+
+                                      else {&description_box_binding;}
+                                        }
+                        )->pack(-side=>"top", -anchor=>'w');
+my $description_baloon = $leftFrame->Balloon();
+   $description_baloon->attach($descriptionButton, -balloonmsg => 'Description');
+
 #----------------------------------------------------------------------------#
 
 ##############################################################################################
@@ -1863,20 +2018,20 @@ my $rows_baloon = $leftFrame->Balloon();
 
 ############################## Main Event ####################################################
 
-$sp->Destroy(); # get rid of Splash
+#$sp->Destroy(); # get rid of Splash
 $top->deiconify; # and show main window
 MainLoop();
 }# sub start_gui
 
 ###########################################################################################################
-#*************************************** proton GUI completed ********************************************#
+#*************************************** electron GUI completed ********************************************#
 ###########################################################################################################
 
 
 sub exit_choice {
 
     print "You chose the Exit choice!\n";
-    print "Exiting the proton system ....\n";
+    print "Exiting the electron system ....\n";
     $GLOBAL->dbGlobalSetGuiStatus(0);
     exit;
 }#sub exit_choice
@@ -2122,16 +2277,18 @@ sub dbfGuiQueryModules {
 }#sub dbfGuiQueryModules
 
 sub dbfGuiResetCanvasBind {
-print "INFO-GUI-001 : resetting the canvas bindings\n" if ($DEBUG > 21);
-$design_canvas->CanvasBind('<1>' =>"");
-$design_canvas->CanvasBind('<B1-Motion>' =>"");
-$design_canvas->CanvasBind('<B1-ButtonRelease>' =>"");
-$design_canvas->CanvasBind('<2>' => "");
-$design_canvas->CanvasBind('<Shift-Button-1>' => "");
-$design_canvas->CanvasBind('<Control-Button-1>' => "");
-$design_canvas->CanvasBind('<Motion>' => "");
-#$design_canvas->CanvasBind('<3>' => "");
-$design_canvas->delete(YELLOWBOX);
+  if(Exists $design_canvas){
+     print "INFO-GUI-001 : resetting the canvas bindings\n" if ($DEBUG > 21);
+     $design_canvas->CanvasBind('<1>' =>"");
+     $design_canvas->CanvasBind('<B1-Motion>' =>"");
+     $design_canvas->CanvasBind('<B1-ButtonRelease>' =>"");
+     $design_canvas->CanvasBind('<2>' => "");
+     $design_canvas->CanvasBind('<Shift-Button-1>' => "");
+     $design_canvas->CanvasBind('<Control-Button-1>' => "");
+     $design_canvas->CanvasBind('<Motion>' => "");
+     #$design_canvas->CanvasBind('<3>' => "");
+     $design_canvas->delete(YELLOWBOX);
+  }
 }#sub dbfGuiResetCanvasBind
 
 

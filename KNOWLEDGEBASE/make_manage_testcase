@@ -762,18 +762,18 @@ if($toolName eq "realTime"){
    elsif($testBuild eq "latestBuild"){$testBuild = "/home/rajeevs/builds/install/bin/realTime";}
    else{$testBuild ="/home/rajeevs/builds/realtime_build/".$testBuild."/install/bin/realTime";}
 }else{  
-   my $env_proton_home = $GLOBAL->dbfGlobalGetProtonHome; 
-   if($testBuild eq ""){$testBuild = $env_proton_home ."/proton";}
-   elsif($testBuild eq "latestBuild"){$testBuild = $env_proton_home ."/proton";}
+   my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome; 
+   if($testBuild eq ""){$testBuild = $env_electron_home ."/electron";}
+   elsif($testBuild eq "latestBuild"){$testBuild = $env_electron_home ."/electron";}
    else{$testBuild = $testBuild;}
 }
-  open(WRITE_MAKEFILE,">Makefile_proton");
+  open(WRITE_MAKEFILE,">Makefile_electron");
   print WRITE_MAKEFILE "all:\n";
   print WRITE_MAKEFILE "\t-cvs -d $cvsPath update -d .\n";
 if($toolName eq "realTime"){
   print WRITE_MAKEFILE "\trm -rf realTime.log.* realTime.cmd.* oasys.[0-9]* realtime_run.log eqator.log* eqator.res\n";
   print WRITE_MAKEFILE "\t-LM_LICENSE_FILE=1700\@kashgar.oasys-ds.com RLM_LICENSE=28000\@kashgar.oasys-ds.com $testBuild $testScript >& realtime_run.log\n";
-  print WRITE_MAKEFILE "\t\${EQATOR_HOME}/proton -f /home/rajeevs/SQL/add_data.tcl --nolog\n";
+  print WRITE_MAKEFILE "\t\${EQATOR_HOME}/electron -f /home/rajeevs/SQL/add_data.tcl --nolog\n";
 }else{
   print WRITE_MAKEFILE "\trm -rf placed.def eqator.log*\n";
   print WRITE_MAKEFILE "\t$testBuild -f $testScript\n";
@@ -781,8 +781,8 @@ if($toolName eq "realTime"){
   print WRITE_MAKEFILE "\t$testBuild -f /vol2/testcase/placement_analysis/add_data.tcl\n";
 }
   close(WRITE_MAKEFILE);
-  system("mv Makefile_proton $testPath");
-  system("cd $testPath ; make -f Makefile_proton &"); 
+  system("mv Makefile_electron $testPath");
+  system("cd $testPath ; make -f Makefile_electron &"); 
 
  } 
 }#sub write_makefile

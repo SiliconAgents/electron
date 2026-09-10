@@ -11,11 +11,14 @@ sub prepare_specify_tab{
 #############################################################################################
 
 sub create_block_specify_table{
-use Tk::TableMatrix::Spreadsheet;
 
+#<!-- Starting size only.  The table is grown to fit the design by
+#     add_rows_in_block_specify_table, or on demand via the "Add Rows"
+#     control below, so this is a starting-from-scratch default and not a
+#     limit.  30 matches the net table and the xls-load path. -->
 my ($max_row, $max_col) = (30, 13);
 my $specify_table_topFrame = $specifyBlockTab->Frame()->pack(-side=>"top");
-   $specify_table_middleFrame = $specifyBlockTab->Frame()->pack(-side=>"top");
+   $specify_table_middleFrame = $specifyBlockTab->Frame()->pack(-side=>"top", -fill=>'both', -expand=>1);
 my $specify_table_bottomFrame = $specifyBlockTab->Frame()->pack(-side=>"top");
 
 my $arrayVar = {};
@@ -26,6 +29,7 @@ foreach my $headersName (@headersNames){
   $arrayVar->{"0,$col_count"} = $headersName;
 }
 
+@border = (0,0,0,1);
 $block_specify_table = $specify_table_middleFrame->Scrolled('Spreadsheet', 
                                           -rows => $max_row, -cols => $max_col, 
                                           -width => $max_col, -height => 20,
@@ -35,14 +39,45 @@ $block_specify_table = $specify_table_middleFrame->Scrolled('Spreadsheet',
                                           -titlerows => 1,
                                           -titlecols => 1,
                                           -bg => 'white',
-                                         )->pack();
+
+                                          #-selectmode => 'multiple',
+                                          #-selecttype => 'row',
+                                          #-resizeborders => 'col',
+                                          -flashmode => 1,
+                                          -flashtime => 2,
+                                          #-browsecommand => \&brscmd,
+                                          #-colstretchmode => 'last',
+                                          #-rowstretchmode => 'last',
+                                          -selecttitles => 1,
+                                          #-scrollbars=>'se',
+                                          -sparsearray=>0,
+                                          -rowheight => 2,
+                                          #-bd => \@border,
+                                          -justify => 'left',
+                                          -drawmode => 'compatible',
+                                          #-drawmode => 'slow',
+                                          -wrap => 0,
+                                          -relief => 'solid'
+                                         )->pack(-fill=>'both', -expand=>1);
 $block_specify_table->tagConfigure('active', -bg => 'gray90', -relief => 'sunken');
-$block_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'black', -relief =>'sunken');
+$block_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'blue', -font=>'courier 13 bold', -relief =>'sunken');
+#$table->rowHeight(0,1);
+#$table->tagRow('title',0);
+#$table->tagConfigure('title', -bd=>2, -relief=>'raised');
+#$table->colWidth(0,5,3,6,4,10);
+
 
 
 my $write_button = $specify_table_bottomFrame->Button(-text => 'Create Design', -command=>sub{&run_pseudo_command_for_blocks;})->pack(-side=>"left");
 my $write_button = $specify_table_bottomFrame->Button(-text => 'UpdateFromHier', -command=>sub{&add_rows_in_block_specify_table;&update_block_specify_table("",2);&editModule("-module", $GLOBAL->dbfGlobalGetTOP);})->pack(-side=>"left");
 my $exit_button = $specify_table_bottomFrame->Button(-text => 'Refresh', -command=>sub{&refresh_block_table;})->pack(-side=>"left");
+
+#<!-- for a design entered from scratch: append rows as the user needs them -->
+$block_add_rows_count = 10;
+my $add_rows_button = $specify_table_bottomFrame->Button(-text => 'Add Rows',
+                        -command=>sub{&add_empty_rows_in_block_specify_table($block_add_rows_count);})->pack(-side=>"left");
+my $add_rows_entry = $specify_table_bottomFrame->Entry(-width=>5,
+                        -textvariable=>\$block_add_rows_count)->pack(-side=>"left");
 
 my $read_xls_button = $specify_table_topFrame->Button(-text => 'Load xls', -command=>sub{&call_read_block_xls_andLoadData();})->pack(-side=>"left");
 my $write_xls_button = $specify_table_topFrame->Button(-text => 'Write xls', -command=>sub{&call_write_block_specify_xls;})->pack(-side=>"left");
@@ -67,7 +102,7 @@ my @types = (["Config Files", '.xls'],
 sub read_block_xls_andLoadData {
 my $fileName = $_[0];
 use Spreadsheet::ParseExcel;
-use Tk::TableMatrix::Spreadsheet;
+# use Tk::TableMatrix::Spreadsheet;
 
 my $oExcel = new Spreadsheet::ParseExcel;
 my $oBook = $oExcel->Parse($fileName);
@@ -105,9 +140,21 @@ $block_specify_table = $specify_table_middleFrame->Scrolled('Spreadsheet',
                                           -titlerows => 1,
                                           -titlecols => 1,
                                           -bg => 'white',
-                                         )->pack();
+
+                                          -flashmode => 1,
+                                          -flashtime => 2,
+                                          -selecttitles => 1,
+                                          -sparsearray=>0,
+                                          -rowheight => 2,
+                                          #-bd => \@border,
+                                          -justify => 'left',
+                                          -drawmode => 'compatible',
+                                          #-drawmode => 'slow',
+                                          -wrap => 0,
+                                          -relief => 'solid'
+                                         )->pack(-fill=>'both', -expand=>1);
 $block_specify_table->tagConfigure('active', -bg => 'gray90', -relief => 'sunken');
-$block_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'black', -relief =>'sunken');
+$block_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'blue', -font=>'courier 13 bold', -relief =>'sunken');
 
 foreach my $row_num(1 .. $max_row-1){
    $block_specify_table->set("$row_num,0",$row_num);
@@ -180,20 +227,34 @@ LOOPA: foreach my $row(1 .. $rows-1){
                   print "#<CMD> commit_module -module $current_top\n";
                   print "#<CMD> edit_module -module $parent_module\n";
                }                                         
-               if(exists $PLDB{$modName}){                     
-                 &createPseudoInstance("-parent", $parent_module, "-cell", $modName, "-inst", $instName, "-loc", "{$llx,$lly}", "-orient", $orient);
-                 print "#<CMD> createPseudoInstance -parent $parent_module -cell $modName -inst $instName -loc {$llx,$lly} -orient $orient\n";
+               if(exists $PLDB{$modName}){
+                 #<!-- re-place an instance that is already there rather than
+                 #     letting createPseudoInstance() warn and keep the old loc -->
+                 if(exists $PSEUDO_VINST_ALREADY{$parent_module}{$instName}){
+                   &update_pseudo_inst_loc_and_status($parent_module, $instName, $modName, $orient, $llx, $lly, $urx, $ury);
+                 }else{
+                   &createPseudoInstance("-parent", $parent_module, "-cell", $modName, "-inst", $instName, "-loc", "{$llx,$lly}", "-orient", $orient);
+                   print "#<CMD> createPseudoInstance -parent $parent_module -cell $modName -inst $instName -loc {$llx,$lly} -orient $orient\n";
+                 }
                }else {
                  &createPseudoModule("-top", "$parent_module", "-module", $modName, "-bbox", "{$llx,$lly,$urx,$ury}");
                  print "#<CMD> createPseudoModule -top $parent_module -module $modName -bbox {$llx,$lly,$urx,$ury}\n";
-                 &createPseudoHierModuleInst("-parent", $parent_module, "-bbox", "{$llx,$lly,$urx,$ury}","-cellref", "$modName", "-inst", "$instName");
-                 print "#<CMD> createPseudoHierModuleInst -parent $parent_module -bbox {$llx,$lly,$urx,$ury} -cellref $modName -inst $instName\n";
+                 if(exists $PSEUDO_VINST_ALREADY{$parent_module}{$instName}){
+                   &update_pseudo_inst_loc_and_status($parent_module, $instName, $modName, $orient, $llx, $lly, $urx, $ury);
+                 }else{
+                   &createPseudoHierModuleInst("-parent", $parent_module, "-bbox", "{$llx,$lly,$urx,$ury}","-cellref", "$modName", "-inst", "$instName");
+                   print "#<CMD> createPseudoHierModuleInst -parent $parent_module -bbox {$llx,$lly,$urx,$ury} -cellref $modName -inst $instName\n";
+                 }
                  if($array > 1){
                     for(my $i=1; $i< $array; $i++){
                         $llx = $urx + $space;
                         $urx = $llx + $mod_width;
-                        &createPseudoHierModuleInst("-parent", $parent_module, "-bbox", "{$llx,$lly,$urx,$ury}","-cellref", "$modName", "-inst", $instName.$i);
-                        print "#<CMD> createPseudoHierModuleInst -parent $parent_module -bbox {$llx,$lly,$urx,$ury} -cellref $modName -inst $instName$i\n";
+                        if(exists $PSEUDO_VINST_ALREADY{$parent_module}{$instName.$i}){
+                          &update_pseudo_inst_loc_and_status($parent_module, $instName.$i, $modName, $orient, $llx, $lly, $urx, $ury);
+                        }else{
+                          &createPseudoHierModuleInst("-parent", $parent_module, "-bbox", "{$llx,$lly,$urx,$ury}","-cellref", "$modName", "-inst", $instName.$i);
+                          print "#<CMD> createPseudoHierModuleInst -parent $parent_module -bbox {$llx,$lly,$urx,$ury} -cellref $modName -inst $instName$i\n";
+                        }
                     }
                  }
                }
@@ -206,6 +267,46 @@ LOOPA: foreach my $row(1 .. $rows-1){
       print "#<CMD> commit_module -module $current_top\n";
       print "#<CMD> edit_module -module $top_module\n";
 }#sub run_pseudo_command_for_blocks
+
+######################################################################################################
+############# Subroutine to re-place an instance that is already in the pseudo DB #####################
+######################################################################################################
+# createPseudoInstance() refuses to touch an existing instance: it prints
+# "instance already exists" and returns, leaving the old location in place.  For
+# "Create Design" that is the wrong behaviour -- re-running it after editing
+# locX/locY in the table has to move the instance.  Update in place rather than
+# re-creating, so the instance keeps its color, area and connectivity.
+#
+# $urx/$ury are used for a hier module inst; for a leaf inst the shape comes
+# from the cell itself and only the lower-left is user data.
+sub update_pseudo_inst_loc_and_status{
+   my ($parent, $instName, $cellref, $orient, $llx, $lly, $urx, $ury) = @_;
+
+   unless(exists $PSEUDO_VINST_ALREADY{$parent}{$instName}){
+      print "WARN: GUI-UPD_INST : 001 : instance $instName not found in $parent, nothing to update\n";
+      return 0;
+   }
+
+   my @bbox = ();
+   if(exists $PLDB{$cellref}){
+      #<!-- same math as createPseudoInstance, kept identical on purpose so
+      #     creating and updating one row can never disagree -->
+      my @size = $PLDB{$cellref}->dbMdbGetSize;
+      @bbox = ($llx, $lly, $llx+$size[0], $lly+$size[1]);
+   }else{
+      @bbox = ($llx, $lly, $urx, $ury);
+   }
+
+   $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstRelBbox(@bbox);
+   $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstStatus("PLACED");
+   $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstOrient($orient) if(defined $orient && $orient ne "");
+   #<!-- physical change only: the instance itself already existed, so the
+   #     logical netlist is untouched -->
+   $PSEUDO_MODULE_ALREADY{$parent}->dbaTstgenSetPhysicalDirty(1);
+
+   print "INFO: GUI-UPD_INST : 002 : moved existing inst $instName of $cellref in $parent to @bbox, status PLACED, orient $orient\n";
+   return 1;
+}#sub update_pseudo_inst_loc_and_status
 
 ######################################################################################################
 ############################ Subroutine to write data from table to xls ##############################
@@ -278,8 +379,15 @@ sub add_rows_in_block_specify_table{
    my $num_hinst = &find_total_num_hInst("",0);
    #---- 2 extra rows are needed, one for column name & 2nd for top module ---#
    my $total_num_rows_needed = $num_hinst+2;
-   if($total_num_rows_needed > 30){
+   #<!-- Size from the design.  This used to compare against a hard-coded 30
+   #     while the table was created with only 10 rows, so any design with 9
+   #     to 28 hier instances was silently truncated -- the extra rows were
+   #     never created and the set() calls for them were dropped on the
+   #     floor.  Grow only: never discard rows the user has already typed. -->
+   my $current_num_rows = $block_specify_table->cget(-rows);
+   if($total_num_rows_needed > $current_num_rows){
       $block_specify_table->configure(-rows=>$total_num_rows_needed);
+      print "INFO: block specify table grown from $current_num_rows to $total_num_rows_needed rows for $num_hinst hier instances\n";
    }
    my @headers = ("module", "parent", "instance", "width", "height", "locX", "locY", "status", "ffs", "io", "tc", "rc");
    my $col_count = 0;
@@ -288,6 +396,23 @@ sub add_rows_in_block_specify_table{
      $block_specify_table->set("0,$col_count", $header)
    }
 }#sub add_rows_in_block_specify_table
+
+######################################################################################################
+######## Subroutine to append empty rows, for a table being filled in from scratch ###################
+######################################################################################################
+sub add_empty_rows_in_block_specify_table{
+   my $num_rows = $_[0];
+   $num_rows = 10 unless(defined $num_rows);
+   $num_rows =~ s/^\s+|\s+$//g;
+   unless($num_rows =~ /^\d+$/ && $num_rows > 0){
+      print "WARN: GUI-ADD_ROWS : 001 : \"Add Rows\" needs a positive whole number, got \"$num_rows\"\n";
+      return;
+   }
+   my $current_num_rows = $block_specify_table->cget(-rows);
+   my $new_num_rows = $current_num_rows + $num_rows;
+   $block_specify_table->configure(-rows=>$new_num_rows);
+   print "INFO: block specify table grown from $current_num_rows to $new_num_rows rows\n";
+}#sub add_empty_rows_in_block_specify_table
 
 sub update_block_specify_table{
    my $moduleName = $_[0];
@@ -425,7 +550,7 @@ my @y_coords = ();
 ############################## subroutine to write xml from xls ######################################
 ######################################################################################################
 sub write_block_xlsToXml {
-use XML::Excel;
+# use XML::Excel;
 my $xlsFileName = $_[0];
 my $xmlFileName = $_[1];
 
@@ -451,7 +576,7 @@ $xls->print_xml("$xmlFileName",
 ############################## subroutine to write xls from xml ######################################
 ######################################################################################################
 sub write_block_xmlToXls{
-use XML::Simple;
+# use XML::Simple;
 use Data::Dumper;
 use Spreadsheet::WriteExcel;
 
@@ -518,7 +643,7 @@ use Tk::TableMatrix::Spreadsheet;
 
 my ($max_row, $max_col) = (30, 8);
 my $net_specify_table_topFrame = $specifyNetTab->Frame()->pack(-side=>"top");
-   $net_specify_table_middleFrame = $specifyNetTab->Frame()->pack(-side=>"top");
+   $net_specify_table_middleFrame = $specifyNetTab->Frame()->pack(-side=>"top", -fill=>'both', -expand=>1);
 my $net_specify_table_bottomFrame = $specifyNetTab->Frame()->pack(-side=>"top");
 
 my $arrayVar = {};
@@ -538,14 +663,33 @@ $net_specify_table = $net_specify_table_middleFrame->Scrolled('Spreadsheet',
                                           -titlerows => 1,
                                           -titlecols => 1,
                                           -bg => 'white',
-                                         )->pack();
+
+                                          -flashmode => 1,
+                                          -flashtime => 2,
+                                          -selecttitles => 1,
+                                          -sparsearray=>0,
+                                          -rowheight => 2,
+                                          #-bd => \@border,
+                                          -justify => 'left',
+                                          -drawmode => 'compatible',
+                                          #-drawmode => 'slow',
+                                          -wrap => 0,
+                                          -relief => 'solid'
+                                         )->pack(-fill=>'both', -expand=>1);
 $net_specify_table->tagConfigure('active', -bg => 'gray90', -relief => 'sunken');
-$net_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'black', -relief =>'sunken');
+$net_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'blue', -font=>'courier 13 bold', -relief =>'sunken');
 
 
 my $write_button = $net_specify_table_bottomFrame->Button(-text => 'Create Nets', -command=>sub{&run_pseudo_command_for_nets;})->pack(-side=>"left");
 my $write_button = $net_specify_table_bottomFrame->Button(-text => 'UpdateFromHier', -command=>sub{&add_rows_in_net_specify_table;&update_net_specify_table("",1);&editModule("-module", $GLOBAL->dbfGlobalGetTOP);})->pack(-side=>"left");
 my $exit_button = $net_specify_table_bottomFrame->Button(-text => 'Refresh', -command=>sub{&refresh_net_table;})->pack(-side=>"left");
+
+#<!-- for nets entered from scratch: append rows as the user needs them -->
+$net_add_rows_count = 10;
+my $net_add_rows_button = $net_specify_table_bottomFrame->Button(-text => 'Add Rows',
+                        -command=>sub{&add_empty_rows_in_net_specify_table($net_add_rows_count);})->pack(-side=>"left");
+my $net_add_rows_entry = $net_specify_table_bottomFrame->Entry(-width=>5,
+                        -textvariable=>\$net_add_rows_count)->pack(-side=>"left");
 
 my $read_xls_button = $net_specify_table_topFrame->Button(-text => 'Load xls', -command=>sub{&call_read_net_xls_andLoadData();})->pack(-side=>"left");
 my $write_xls_button = $net_specify_table_topFrame->Button(-text => 'Write xls', -command=>sub{&call_write_net_specify_xls;})->pack(-side=>"left");
@@ -615,9 +759,21 @@ $net_specify_table = $net_specify_table_middleFrame->Scrolled('Spreadsheet',
                                           -titlerows => 1,
                                           -titlecols => 1,
                                           -bg => 'white',
-                                         )->pack();
+
+                                          -flashmode => 1,
+                                          -flashtime => 2,
+                                          -selecttitles => 1,
+                                          -sparsearray=>0,
+                                          -rowheight => 2,
+                                          #-bd => \@border,
+                                          -justify => 'left',
+                                          -drawmode => 'compatible',
+                                          #-drawmode => 'slow',
+                                          -wrap => 0,
+                                          -relief => 'solid'
+                                         )->pack(-fill=>'both', -expand=>1);
 $net_specify_table->tagConfigure('active', -bg => 'gray90', -relief => 'sunken');
-$net_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'black', -relief =>'sunken');
+$net_specify_table->tagConfigure('title', -bg => 'gray85', -fg => 'blue', -font=>'courier 13 bold', -relief =>'sunken');
  
 my $new_row_num = 1;  
 for(my $iSheet=0; $iSheet < $oBook->{SheetCount} ; $iSheet++) {
@@ -768,8 +924,11 @@ sub add_rows_in_net_specify_table{
    my $num_hinst = &find_total_num_specify_nets("",0);
    #---- 1 extra row is needed for column name  ---#
    my $total_num_rows_needed = $num_hinst+1;
-   if($total_num_rows_needed > 30){
+   #<!-- size from the design, not a hard-coded limit; grow only -->
+   my $current_num_rows = $net_specify_table->cget(-rows);
+   if($total_num_rows_needed > $current_num_rows){
       $net_specify_table->configure(-rows=>$total_num_rows_needed);
+      print "INFO: net specify table grown from $current_num_rows to $total_num_rows_needed rows for $num_hinst nets\n";
    }
    my @headers = ("name", "parent", "source", "sink", "width", "type", "class");
    my $col_count = 0;
@@ -778,6 +937,23 @@ sub add_rows_in_net_specify_table{
      $net_specify_table->set("0,$col_count", $header)
    }
 }#sub add_rows_in_net_specify_table
+
+######################################################################################################
+######## Subroutine to append empty rows, for a net table being filled in from scratch ################
+######################################################################################################
+sub add_empty_rows_in_net_specify_table{
+   my $num_rows = $_[0];
+   $num_rows = 10 unless(defined $num_rows);
+   $num_rows =~ s/^\s+|\s+$//g;
+   unless($num_rows =~ /^\d+$/ && $num_rows > 0){
+      print "WARN: GUI-ADD_ROWS : 002 : \"Add Rows\" needs a positive whole number, got \"$num_rows\"\n";
+      return;
+   }
+   my $current_num_rows = $net_specify_table->cget(-rows);
+   my $new_num_rows = $current_num_rows + $num_rows;
+   $net_specify_table->configure(-rows=>$new_num_rows);
+   print "INFO: net specify table grown from $current_num_rows to $new_num_rows rows\n";
+}#sub add_empty_rows_in_net_specify_table
 
 sub update_net_specify_table{
    my $moduleName = $_[0];
@@ -822,7 +998,7 @@ sub update_net_specify_table{
 ############################## subroutine to write xml from xls ######################################
 ######################################################################################################
 sub write_net_xlsToXml{
-use XML::Excel;
+# use XML::Excel;
 my $xlsFileName = $_[0];
 my $xmlFileName = $_[1];
 if (!defined($xlsFileName) || !defined($xmlFileName)){
@@ -847,7 +1023,7 @@ $xls->print_xml("$xmlFileName",
 ############################## subroutine to write xls from xml ######################################
 ######################################################################################################
 sub write_net_xmlToXls{
-use XML::Simple;
+# use XML::Simple;
 use Data::Dumper;
 use Spreadsheet::WriteExcel;
 

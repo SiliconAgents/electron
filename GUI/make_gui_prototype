@@ -44,8 +44,8 @@ $drawOption = "create";
 $Frame1->Label(-text => "Color")->pack(-anchor => 'n');
 $subFrame = $Frame1->Frame()->pack(-anchor => 'n',-expand=>1,-fill=>'x');
 
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
-my $bitmap = $popupWindow->Photo(-file       => "$path2eq/ETC/color5a.png2");
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
+my $bitmap = $popupWindow->Photo(-file       => "$path2eq/ETC/color5a.gif");
 $subFrame->Button(-image => $bitmap, -padx=>0, -pady=>0, -command=>sub {&create_color_popup; &fill_canvas_bind;})->pack( -side=>"right");
 #$subFrame->Button(text=>"colors", -padx=>0, -pady=>0, -command=>sub {&create_color_popup; &fill_canvas_bind;})->pack( -side=>"right");
 $subFrame->Entry(-textvariable => \$fillcolor, -width =>5 )->pack(-side=>'right');
@@ -592,11 +592,118 @@ $buttonFrame->Button(-text => 'Cancel', -padx=>0, -pady=>0, -command=>sub {$popu
 }#sub call_popup_edit_module
 
 #############################################################################################################################
+######################## creating popup window to edit/commit a Module, physical data only ##################################
+#############################################################################################################################
+# Drives "edit_module --physical_only" and "commit_module --physical_only": instance
+# locations, pin locations and floorplan sizes move between the pseudo and the main
+# database, nets/connectivity/routing do not.  Edit is the cheap load (the netlist conn
+# lines are never parsed), Commit writes only the physical data back.
+sub call_popup_physical_only_module {
+my $moduleName = $_[0];
+my $fplan = $_[1];
+unless ( defined $moduleName && $moduleName ne "" ) {
+  $moduleName = $TOP_MODULE;
+}
+my $popupWindow = MainWindow->new();
+$popupWindow->title("Physical Only");
+
+my $Frame1 = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'x');
+my $Frame2 = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'x');
+my $noteFrame = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'x');
+my $buttonFrame = $popupWindow->Frame()->pack(-side => 'bottom');
+
+$Frame1->Label(-text => "Module    ")->pack(-side=>'left');
+$Frame1->Entry(-textvariable => \$moduleName, -width =>12 )->pack(-side=>'right');
+$Frame2->Label(-text => "Floorplan")->pack(-side=>'left');
+$Frame2->Entry(-textvariable => \$fplan, -width =>12 )->pack(-side=>'right');
+
+$noteFrame->Label(-text => "nets, connectivity and routing are not transferred",
+                  -font => "Times 8")->pack(-side=>'left');
+
+$buttonFrame->Button(-text => 'Edit', -padx=>0, -pady=>0,
+                     -command=>sub {&editModule(&physical_only_args($moduleName, $fplan));
+                                    $popupWindow->destroy;
+                                    &refresh_hierView_after_physical_only;
+                                    })->pack( -side=>"left");
+$buttonFrame->Button(-text => 'Commit', -padx=>0, -pady=>0,
+                     -command=>sub {&commitModule(&physical_only_args($moduleName, $fplan));
+                                    $popupWindow->destroy;
+                                    &refresh_hierView_after_physical_only;
+                                    })->pack( -side=>"left");
+$buttonFrame->Button(-text => 'Cancel', -padx=>0, -pady=>0, -command=>sub {$popupWindow->destroy;})->pack( -side=>"left");
+
+}#sub call_popup_physical_only_module
+
+# Build the arg list, leaving "-floorplan" out entirely when the field is blank
+# rather than passing an undef through @_.
+sub physical_only_args {
+my $moduleName = $_[0];
+my $fplan = $_[1];
+my @args = ("-module", $moduleName);
+if ( defined $fplan && $fplan ne "" ) {
+  push(@args, "-floorplan", $fplan);
+}
+push(@args, "--physical_only");
+return (@args);
+}#sub physical_only_args
+
+# editModule changes $TOP_MODULE, so the Hier-View has to be redrawn afterwards.
+sub refresh_hierView_after_physical_only {
+if ( defined $hier_canvas ) {
+  &activate_HierViewTab;
+}
+}#sub refresh_hierView_after_physical_only
+
+#############################################################################################################################
 #################################### creating popup window to display downHier ##############################################
 #############################################################################################################################
+#<!-- Place a popup flush against the right edge of a widget and top aligned
+#     with it, so it reads as accordioning out of that button rather than
+#     landing wherever the window manager felt like.  Opens leftwards instead
+#     when there is no room on the right, then clamps to the screen.  With no
+#     live anchor widget it does nothing and placement is left to the WM. -->
+sub dbfGuiPopupBesideWidget {
+
+my ($popup, $anchor) = @_;
+
+unless ( defined $popup && Exists($popup) ) {
+  return;
+}
+unless ( defined $anchor && Exists($anchor) ) {
+  return;
+}
+
+#<!-- Hide while measuring and moving.  Without this the window is mapped where
+#     the WM chose and then visibly jumps.  The update is what realises the
+#     geometry: before it, reqwidth/reqheight are still 1. -->
+$popup->withdraw;
+$popup->update;
+
+my $popW = $popup->reqwidth;
+my $popH = $popup->reqheight;
+my $x = $anchor->rootx + $anchor->width;
+my $y = $anchor->rooty;
+
+if ( $x + $popW > $popup->screenwidth ) {
+  $x = $anchor->rootx - $popW;   #<!-- no room to the right, open leftwards -->
+}
+if ( $x < 0 ) { $x = 0; }
+if ( $y + $popH > $popup->screenheight ) {
+  $y = $popup->screenheight - $popH;
+}
+if ( $y < 0 ) { $y = 0; }
+
+$popup->geometry("+$x+$y");
+$popup->deiconify;
+$popup->raise;
+
+}# sub dbfGuiPopupBesideWidget
+
+
 sub call_popup_downHier {
 my $parent = $TOP_MODULE;
 my $instName = $_[0];
+my $anchorWidget = $_[1];   #<!-- optional, the button this popup opens out of -->
 my $floorplan = "";
 my $popupWindow = MainWindow->new();
 $popupWindow->title("Descend Hierarchy");
@@ -615,6 +722,7 @@ $Frame3->Label(-text => "Floorplan")->pack(-side=>'left');
 $Frame3->Entry(-textvariable => \$floorplan, -width =>12 )->pack(-side=>'right');
 $buttonFrame->Button(-text => 'Go', -padx=>0, -pady=>0, 
                      -command=>sub {&downHier("-parent",$parent,"-inst",$instEntry->get(),"-floorplan", $floorplan);
+                                    $top->configure(-title => " Electron (".$TOP_MODULE.")");  
                                     $hier_canvas->delete('all');&display_hierarchy;$hier_canvas->CanvasBind('<1>' =>"");
                                     $popupWindow->destroy;
                                     })->pack( -side=>"left");
@@ -636,8 +744,11 @@ $hier_canvas->CanvasBind('<1>', => sub{
                   my $stipple = $hier_canvas->itemcget($tagList[1],-stipple);
                   $hier_canvas->createPolygon(@coords,-outline=>"white",-fill=>$fill_color,-stipple=>$stipple,-tags=>"TEMP_HIGHLIGHT");
 
-               }}); 
+               }});
 #-------------------------------------------------------------------------------------#
+
+#<!-- last, so every frame is packed and the requested size is final -->
+&dbfGuiPopupBesideWidget($popupWindow, $anchorWidget);
 
 }#sub call_popup_downHier
 
@@ -752,16 +863,16 @@ $fileName = $top->getSaveFile(-filetypes =>\@types,
 sub popupToCreateFloorplanWidget{
 my $popupWindow = MainWindow->new();
    $popupWindow->title("Floorplan Widget");
-my $path2eq = $GLOBAL->dbfGlobalGetProtonHome;
+my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 my $topFrame = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'both');
 my $bottomFrame = $popupWindow->Frame()->pack(-side => 'bottom');
 
-my $cut_image = $topFrame->Photo(-file       => "$path2eq/ETC/cut.png2");
+my $cut_image = $topFrame->Photo(-file       => "$path2eq/ETC/cut.gif");
 my $cutButton = $topFrame->Button(-image=> $cut_image,-command=>sub{&rectilinearCut_widget($hier_canvas);})->pack(-side=>'left',-anchor=>'nw');
 my $cut_baloon = $topFrame->Balloon();
    $cut_baloon->attach($cutButton, -balloonmsg => 'rectilinear cut');
 
-my $move_image = $topFrame->Photo(-file       => "$path2eq/ETC/move.png2");               
+my $move_image = $topFrame->Photo(-file       => "$path2eq/ETC/move.gif");               
 my $moveButton = $topFrame->Button(-image=> $move_image,-command=>sub{ my $active_canvas = $GLOBAL->dbGlobalGetActiveCanvas;
                                                                        if($active_canvas eq "flat_view"){
                                                                           &move_flat_inst($design_worldcanvas);
@@ -772,12 +883,12 @@ my $moveButton = $topFrame->Button(-image=> $move_image,-command=>sub{ my $activ
 my $move_baloon = $topFrame->Balloon();
    $move_baloon->attach($moveButton, -balloonmsg => 'move/resize');
 
-my $undo_image = $topFrame->Photo(-file       => "$path2eq/ETC/undo.png2");               
+my $undo_image = $topFrame->Photo(-file       => "$path2eq/ETC/undo.gif");               
 my $undoButton = $topFrame->Button(-image=> $undo_image,-command=>sub{&perform_redo_undo("undo",$hier_canvas);})->pack(-side=>'left',-anchor=>'nw');
 my $undo_baloon = $topFrame->Balloon();
    $undo_baloon->attach($undoButton, -balloonmsg => 'Undo');
 
-my $redo_image = $topFrame->Photo(-file       => "$path2eq/ETC/redo.png2");               
+my $redo_image = $topFrame->Photo(-file       => "$path2eq/ETC/redo.gif");               
 my $redoButton = $topFrame->Button(-image=> $redo_image,-command=>sub{&perform_redo_undo("redo",$hier_canvas);})->pack(-side=>'left',-anchor=>'nw');
 my $redo_baloon = $topFrame->Balloon();
    $redo_baloon->attach($redoButton, -balloonmsg => 'Redo');
