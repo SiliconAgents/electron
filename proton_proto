@@ -535,7 +535,6 @@ require "$BEEHOME/TSTGEN/make_remove_hier_pins_overlap";
 ####### Power programs ######
 require "$BEEHOME/POWER/make_pg_connections";
 require "$BEEHOME/POWER/make_sroute";
-require "$BEEHOME/POWER/make_dragnet";
 
 ####### Flow programs #####
 require "$BEEHOME/FLOW/make_flow_matrix";
