@@ -20,10 +20,20 @@
       |                                                                                	|
       \--------------------------------------------------------------------------------------/
 
+Note :
+Electron is the fork of unmaintained open source code at https://github.com/efabless/proton. proton is released under AGPL3 license as listed in License.txt file. Since Efabless closed down in 2025, we are unable to confirm the ownership and hence assume it is in the public domain.
+
+This is our attempt to bring Proton back to life as we were the original contributors. Our belief that proton was designed ground up since inception in a way that blends very well for Agentic mode of chip design. 
+
+We have fixed some known bugs, improved installation using containers and enhanced its LEF/DEF parsers to handle advanced technology nodes. 
+
+If you are interested in enhancing electron please feel free to clone and contribute back. Also let us know of any bugs you find or ask for enhancements.
+
+Original Readme text :
 Proton : ASIC Place and Route Suite
 ===================================
 
-This is a framework for ASIC Place and Route. It uses other open source tools like Iverilog, Yosys, Gray Wolf and Qrouter as engines.
+This is a framework for ASIC Place and Route. It uses other open source tools like Iverilog, Yosys and few inbuilt engines.
 Proton provides a platform to import and export chip data in standard formats ( LEF / DEF/ Verilog / GDS2 ). 
 Proton is written in perl and uses many of the packages available on CPAN. The GUI is written in Perl-TK. 
 
