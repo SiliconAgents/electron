@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Macro arranger driver for proton's arrange_macros.
+
+Called as
+
+    macro_arranger <nodefile> <out nodefile> [extra arranger args...]
+
+Runs the macro arranging pass over a nodefile written by write_flat_graph and
+writes an updated nodefile with the macros moved, which read_flat_nodefile then
+applies to the database.
+
+Two things this wrapper exists to get right:
+
+  --origin lower-left  A node record holds the instance's lower left corner,
+                       which is what proton stores.  The arranger defaults to
+                       treating the coordinates as centres, and reading them
+                       that way offsets every macro by half its own size.
+
+  the nodefile round   The arranger only rewrites records that already carry a
+                       location, and only treats a node as a macro when its
+                       area is over the threshold AND it already has one.  So
+                       unplaced macros are left alone rather than being moved
+                       to the origin.  Nothing here needs to compensate, but it
+                       does mean arranging is a tidy up of placed macros, not a
+                       from scratch macro placement.
+
+The arranger itself can be pointed elsewhere with MACRO_ARRANGER.
+"""
+
+import os
+import subprocess
+import sys
+
+DEFAULT_ARRANGER = "/proj_pd/user_dev/rsrivastava/pyspark_cad/python/macro_arranger.py"
+
+
+def die(msg):
+    sys.stderr.write("ERR-MACRO_ARR : %s\n" % msg)
+    sys.exit(1)
+
+
+def read_arranged_names(csv):
+    """Names of the macros the arranger moved, from its id,name,... CSV."""
+    names = set()
+    if not os.path.exists(csv):
+        return names
+    with open(csv) as fh:
+        first = True
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if first:
+                first = False
+                if line.lower().startswith("id,"):
+                    continue
+            f = line.split(",")
+            if len(f) >= 2:
+                names.add(f[1])
+    return names
+
+
+def mark_fixed(nodefile, names):
+    """Rewrite the status column to FIXED for the named nodes."""
+    out = []
+    n = 0
+    with open(nodefile) as fh:
+        for line in fh:
+            s = line.strip()
+            if not s or s.startswith("#") or s.split()[0] in (
+                    "DBU", "DIEAREA", "ROWHEIGHT", "NODES"):
+                out.append(line)
+                continue
+            f = s.split()
+            #<!-- only a record that carries a location can be meaningfully
+            #     fixed: status is field 5, x and y are 6 and 7 -->
+            if len(f) >= 8 and f[1] in names and f[5] != "FIXED":
+                f[5] = "FIXED"
+                n += 1
+                out.append(" ".join(f) + "\n")
+            else:
+                out.append(line)
+    with open(nodefile, "w") as fh:
+        fh.writelines(out)
+    return n
+
+
+def main(argv):
+    args = argv[1:]
+    if len(args) < 2:
+        sys.stderr.write(__doc__)
+        sys.stderr.write("\nusage: macro_arranger <nodefile> <out nodefile> "
+                         "[extra arranger args]\n")
+        return 1
+
+    nodefile, outnode = args[0], args[1]
+    extra = args[2:]
+
+    if not os.path.exists(nodefile):
+        die("%s does not exist" % nodefile)
+
+    arranger = os.environ.get("MACRO_ARRANGER", DEFAULT_ARRANGER)
+    if not os.path.exists(arranger):
+        die("macro arranger not found at %s\n"
+            "                set MACRO_ARRANGER to point at it" % arranger)
+
+    base = os.path.splitext(os.path.basename(outnode))[0]
+    csv = base + ".macro.csv"
+    png = base + ".macro.png"
+
+    cmd = ["python3", arranger,
+           "--origin", "lower-left",
+           "--write-nodefile", outnode,
+           "-o", csv,
+           "--plot", png,
+           nodefile] + extra
+
+    sys.stderr.write("INFO-MACRO_ARR : running %s\n" % " ".join(cmd))
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        die("%s exited with status %d" % (os.path.basename(arranger), rc))
+    if not os.path.exists(outnode):
+        die("%s produced no %s" % (os.path.basename(arranger), outnode))
+
+    # Mark every macro the arranger actually moved as FIXED in the output
+    # nodefile, so its position survives any later placement pass.  The CSV
+    # lists exactly those macros, which is more reliable than comparing
+    # coordinates for equality.
+    arranged = read_arranged_names(csv)
+    if arranged:
+        n = mark_fixed(outnode, arranged)
+        sys.stderr.write("INFO-MACRO_ARR : marked %d arranged macro(s) FIXED in %s\n"
+                         % (n, outnode))
+
+    sys.stderr.write("INFO-MACRO_ARR : arranged nodefile in %s\n" % outnode)
+    sys.stderr.write("INFO-MACRO_ARR : layout plot in %s\n" % png)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

@@ -1,0 +1,45 @@
+# Layered on the proton base image rather than on ubuntu:22.04 directly, so this
+# image gets perl-tk, the CPAN modules, cudd and OpenSTA without rebuilding them,
+# and PROTON_HOME on PATH actually points at a runnable proton.  Build the base
+# first:  make build   (the artemis target does this for you if it is missing).
+FROM localhost/pysparkcad
+
+# DEBIAN_FRONTEND and PROTON_HOME are inherited from the base image.
+ENV FLEX_INCLUDE_DIR=/usr/local/include
+
+# Defensive only: stop apt dropping privileges to the _apt user for downloads.
+#
+# This did NOT fix the "Could not open file /var/cache/apt/archives/partial/...
+# (13: Permission denied)" failure seen when first layering on the base image.
+# That was host side: in the base image's layer the partial directory is owned
+# by a subordinate uid with mode 700, so overlayfs cannot copy it up and not
+# even container root can write it.  The cure is on the host,
+#   podman unshare chmod 755 <storage>/overlay/<layer>/diff/var/cache/apt/archives/partial
+# and the underlying cause is podman's storage living on wekafs, via
+# XDG_DATA_HOME in the Makefile.  Kept because fetching as root is harmless and
+# avoids one class of rootless apt failure, but it is not the fix.
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/00sandbox
+
+# Python itself, and the X and Qt libraries PyQt5 needs at run time
+RUN apt-get update && \
+    apt-get install -y python3-tk python3-pip python3-dev && \
+    apt-get install -y libx11-xcb1 libqt5gui5
+
+# pyspark needs a JDK
+RUN apt-get update && \
+    apt install openjdk-17-jdk -y
+
+RUN apt install -y pigz
+
+RUN pip install pyqtgraph PyQt5
+
+RUN pip install pyspark
+
+RUN pip install matplotlib
+# scipy is required by pyspark_cad/python/graph_embed_place.py, which proton's
+# flat_graph_placer drives: it imports scipy.sparse, csgraph and sparse.linalg.
+# pandas pulls in numpy but not scipy, so it has to be asked for explicitly.
+RUN pip install numpy scipy pandas psutil openpyxl mysql-connector-python
+
+ENV ARTEMIS_HOME=/proj_pd/user_dev/rsrivastava/artemis
+ENV PATH=$ARTEMIS_HOME:$PATH

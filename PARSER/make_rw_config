@@ -1,0 +1,184 @@
+sub read_config_file {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $config_file;
+my $tech_node;
+my $foundry;
+my $layer;
+my $read_macro_lefs = 0;  # Default: don't read macro LEFs
+my $read_io_lefs = 0;     # Default: don't read IO cell LEFs
+
+my $noOfArguments = @_;
+
+if( $noOfArguments == 2 || $noOfArguments >= 4 ) {
+
+my $READ_TECHNOLOGY = "dont";
+my $file_list = 0;
+for(my $i = 0; $i < $noOfArguments; $i++){
+if($_[$i] eq "-config"){$config_file = $_[$i+1];}
+if($_[$i] eq "-technode"){$tech_node = $_[$i+1];}
+if($_[$i] eq "-foundary"){$foundry = $_[$i+1];}
+if($_[$i] eq "-layer"){$layer = $_[$i+1];}
+if($_[$i] eq "-read_macro_lefs"){$read_macro_lefs = 1;}
+if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
+                                         } # for
+
+
+    die "Error: Config file not specified\n" unless $config_file;
+    die "Error: Config file '$config_file' not found\n" unless -f $config_file;
+    die "Error: Tech node not specified\n" unless $tech_node;
+    die "Error: Foundry not specified\n" unless $foundry;
+    die "Error: Layer not specified\n" unless defined $layer;
+
+    my $config = parse_config($config_file);
+    my $output_file = "load_lefs.tcl";
+
+    open(my $fh, '>', $output_file) or die "Cannot open $output_file: $!\n";
+
+    my $found_lefs = 0;
+
+    if (!exists $config->{$foundry}) {
+        close($fh);
+        unlink $output_file;
+        die "Error: Foundry '$foundry' not found in configuration\n";
+    }
+
+    if (!exists $config->{$foundry}{node}) {
+        close($fh);
+        unlink $output_file;
+        die "Error: No nodes found for foundry '$foundry'\n";
+    }
+
+    foreach my $node (@{$config->{$foundry}{node}}) {
+        next unless $node->{type} =~ /$tech_node/i;
+
+        foreach my $file_group (@{$node->{files}}) {
+            my $file_layer = $file_group->{layer};
+
+            if ($layer eq $file_layer) {
+                if (exists $file_group->{tech}) {
+                    my $tech_files = ref($file_group->{tech}) eq 'ARRAY' ?
+                                   $file_group->{tech} : [$file_group->{tech}];
+
+                    foreach my $lef_file (@$tech_files) {
+                        print $fh "read_lef -lef $lef_file -tech only\n";
+                        &read_lef(-lef,$lef_file,-tech,only);
+                        $found_lefs++;
+                    }
+                }
+
+                if (exists $file_group->{'std-cell-lefs'}) {
+                    my $stdcell_lef_group = $file_group->{'std-cell-lefs'};
+
+                    # Check if std-cell-lefs has VT type hierarchy (hash) or is a simple array
+                    if (ref($stdcell_lef_group) eq 'HASH') {
+                        # Handle VT type hierarchy (ulvt, slvt, lvt, rvt, mixed, etc.)
+                        foreach my $vt_type (keys %$stdcell_lef_group) {
+                            my $stdcell_lef_files = ref($stdcell_lef_group->{$vt_type}) eq 'ARRAY' ?
+                                                   $stdcell_lef_group->{$vt_type} : [$stdcell_lef_group->{$vt_type}];
+
+                            foreach my $lef_file (@$stdcell_lef_files) {
+                                print $fh "read_lef -lef $lef_file -tech dont\n";
+                                &read_lef(-lef,$lef_file,-tech,dont);
+                                $found_lefs++;
+                            }
+                        }
+                    } else {
+                        # Handle legacy simple array format
+                        my $stdcell_lef_files = ref($stdcell_lef_group) eq 'ARRAY' ?
+                                               $stdcell_lef_group : [$stdcell_lef_group];
+
+                        foreach my $lef_file (@$stdcell_lef_files) {
+                            print $fh "read_lef -lef $lef_file -tech dont\n";
+                            &read_lef(-lef,$lef_file,-tech,dont);
+                            $found_lefs++;
+                        }
+                    }
+                }
+
+                # Process macro LEFs if the switch is enabled
+                if ($read_macro_lefs && exists $file_group->{'macro-lefs'}) {
+                    my $macro_lef_files = ref($file_group->{'macro-lefs'}) eq 'ARRAY' ?
+                                         $file_group->{'macro-lefs'} : [$file_group->{'macro-lefs'}];
+
+                    foreach my $lef_file (@$macro_lef_files) {
+                        print $fh "read_lef -lef $lef_file -tech dont\n";
+                        &read_lef(-lef,$lef_file,-tech,dont);
+                        $found_lefs++;
+                    }
+                }
+
+                # Process IO cell LEFs if the switch is enabled
+                if ($read_io_lefs && exists $file_group->{'io-cell-lefs'}) {
+                    my $io_lef_group = $file_group->{'io-cell-lefs'};
+
+                    # Handle different voltage threshold variants
+                    foreach my $vt_type (keys %$io_lef_group) {
+                        my $io_lef_files = ref($io_lef_group->{$vt_type}) eq 'ARRAY' ?
+                                          $io_lef_group->{$vt_type} : [$io_lef_group->{$vt_type}];
+
+                        foreach my $lef_file (@$io_lef_files) {
+                            print $fh "read_lef -lef $lef_file -tech dont\n";
+                            &read_lef(-lef,$lef_file,-tech,dont);
+                            $found_lefs++;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    close($fh);
+
+    if ($found_lefs == 0) {
+        unlink $output_file;
+        my $error_msg = "Warning: No LEF files found for tech node '$tech_node' from foundry '$foundry' and layer '$layer'";
+        if ($read_macro_lefs || $read_io_lefs) {
+            my @extra_types;
+            push @extra_types, "macro LEFs" if $read_macro_lefs;
+            push @extra_types, "IO cell LEFs" if $read_io_lefs;
+            $error_msg .= " (including " . join(" and ", @extra_types) . ")";
+        }
+        print "$error_msg\n";
+        return;
+    }
+
+    my $lef_types = "tech and std-cell LEFs";
+    if ($read_macro_lefs || $read_io_lefs) {
+        my @extra_types;
+        push @extra_types, "macro LEFs" if $read_macro_lefs;
+        push @extra_types, "IO cell LEFs" if $read_io_lefs;
+        $lef_types .= " and " . join(" and ", @extra_types);
+    }
+    print "Generated $output_file with $found_lefs read_lef commands ($lef_types)\n";
+    # &source($output_file);
+    return;
+
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command read_config took:",timestr($td),"\n";
+
+}# sub read_config
+
+sub parse_config {
+    my ($config_file) = @_;
+
+    open(my $fh, '<', $config_file) or die "Cannot open $config_file: $!\n";
+    my $json_text = do { local $/; <$fh> };
+    close($fh);
+
+    my $json = JSON->new;
+    my $config = eval { $json->decode($json_text) };
+    die "Error parsing JSON in $config_file: $@\n" if $@;
+
+    return $config;
+}
+
+
+
+
+1;

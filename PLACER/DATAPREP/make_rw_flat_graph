@@ -1,0 +1,966 @@
+#***** /write_flat_graph
+#  write_flat_graph
+# FUNCTION
+#       Writes the flat placement graph of the current top module: a nodefile
+#       describing every placeable object, and <TOP_MODULE>.txt describing the
+#       connectivity between them.
+#
+#       Everything is written in design units (microns), not normalised into the
+#       [-10,10] square that write_graph_modified_mpl uses for the mpl binary.
+#       The placer therefore works in the same space as the design and needs no
+#       scale factors, and there is no division by a die dimension to go wrong.
+#
+#       The nodefile carries the instance name on every record, so
+#       read_flat_graph_placement can rebuild the node number to name map from
+#       it. Writing and reading are therefore independent runs and survive
+#       restarting proton in between.
+#
+# SYNOPSIS
+#  write_flat_graph
+#
+# INPUTS
+#
+#       options :
+#               -nodefile <fileName> : defaults to nodefile
+#               -graph <fileName> : defaults to <TOP_MODULE>.txt
+#               -fanout_limit <n> : skip nets touching n or more nodes
+#
+# OUTPUTS
+#               node file : nodefile
+#                       <node> <name> INST|PORT <width> <height> <status> [<x> <y>]
+#               graph file : <TOP_MODULE>.txt
+#                       <driver node> <sink node>, one line per pair, so a net
+#                       with several sinks writes one line per sink all sharing
+#                       the same driver.  Nets with no driver write nothing.
+#
+#****
+sub write_flat_graph {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $nodeFile = "nodefile";
+my $graphFile;
+my $fanoutLimit = 0;
+my $nodeFileOnly = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : write_flat_graph -nodefile <file name>\n";
+  print "                         -graph <file name>\n";
+  print "                         -fanout_limit <high fan out threshold>\n";
+  print "                         --nodefile_only\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-nodefile")      { $nodeFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-graph")         { $graphFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--nodefile_only"){ $nodeFileOnly = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-PL_FLAT_GRPH : 001 : invalid option $_[$i]\n"; }
+}
+unless ( defined $graphFile && $graphFile ne "" ) {
+  $graphFile = "$TOP_MODULE.txt";
+}
+
+#<!-- The floorplan is a hard prerequisite: without a die the placer has no
+#     region to place into.  write_graph_modified_mpl skips this check and dies
+#     either on a method call on undef or on a division by zero, neither of
+#     which says what is actually wrong. -->
+my $flplanID = $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"};
+unless ( defined $flplanID && exists $FLOORPLAN_ALREADY{$flplanID} ) {
+  print "ERR-PL_FLAT_GRPH : 002 : module $TOP_MODULE has no floorplan, nothing to write\n";
+  print "ERR-PL_FLAT_GRPH : 002 : read a DEF with a DIEAREA, or run floorplan -partition $TOP_MODULE\n";
+  return;
+}
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) {
+  print "ERR-PL_FLAT_GRPH : 003 : database units are not set\n";
+  return;
+}
+
+my @size = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
+unless ( @size >= 4 && defined $size[0] && defined $size[1] &&
+                       defined $size[2] && defined $size[3] ) {
+  print "ERR-PL_FLAT_GRPH : 004 : floorplan of $TOP_MODULE has no size\n";
+  return;
+}
+my $dieLlx = $size[0] / $dbu;
+my $dieLly = $size[1] / $dbu;
+my $dieUrx = $size[2] / $dbu;
+my $dieUry = $size[3] / $dbu;
+if ( $dieUrx <= $dieLlx || $dieUry <= $dieLly ) {
+  my $w = $dieUrx - $dieLlx;
+  my $h = $dieUry - $dieLly;
+  print "ERR-PL_FLAT_GRPH : 005 : die of $TOP_MODULE has no area (width $w, height $h)\n";
+  return;
+}
+
+my $rowHeight = $GLOBAL->dbGlobalGetRowHeight;
+unless ( defined $rowHeight && $rowHeight > 0 ) {
+  $rowHeight = 0;
+}
+
+#-------------------------------- collect the nodes -------------------------------#
+#<!-- Ports first then instances, the numbering every other graph writer in the
+#     tree uses.  %FLAT_NODE_NUM is kept for the graph file below; the reader
+#     does not depend on it, it re-reads the nodefile. -->
+%FLAT_NODE_NUM = ();
+my @nodeLines = ();
+my $nodeCnt = 0;
+
+foreach my $port ( sort keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
+  $FLAT_NODE_NUM{$port} = $nodeCnt;
+  $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortSetNodeNum($nodeCnt);
+  my $status = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetStatus;
+  #<!-- PortDB stores status as a number: 3 FIXED, 2 PLACED, 1 UNPLACED -->
+  my $line = "$nodeCnt $port PORT 0 0 ";
+  if ( $status == 3 ) {
+    my @loc = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetLoc;
+    my $px = (defined $loc[0]) ? $loc[0] / $dbu : 0;
+    my $py = (defined $loc[1]) ? $loc[1] / $dbu : 0;
+    $line .= "FIXED $px $py";
+  }
+  elsif ( $status == 2 ) {
+    my @loc = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetLoc;
+    my $px = (defined $loc[0]) ? $loc[0] / $dbu : 0;
+    my $py = (defined $loc[1]) ? $loc[1] / $dbu : 0;
+    $line .= "PLACED $px $py";
+  }
+  else {
+    $line .= "UNPLACED";
+  }
+  push(@nodeLines, $line);
+  $nodeCnt++;
+}
+
+foreach my $inst ( sort keys %COMP_ALREADY ) {
+  unless ( exists $CADB{$inst} ) {
+    print "WARN-PL_FLAT_GRPH : 006 : instance $inst has no CADB entry, skipped\n";
+    next;
+  }
+  my $cellref = $CADB{$inst}->dbCadbGetCellref;
+  my $orient = $CADB{$inst}->dbCadbGetOrient;
+  my $status = $CADB{$inst}->dbCadbGetStatus;
+
+  #<!-- LEF sizes are already microns, unlike DEF locations -->
+  my ($cellW, $cellH) = (0, 0);
+  if ( exists $PLDB{$cellref} ) {
+    my @box = $PLDB{$cellref}->dbMdbGetSize;
+    if ( @box >= 2 ) {
+      ($cellW, $cellH) = ($box[0], $box[1]);
+      #<!-- a rotated instance occupies the transposed footprint -->
+      if ( $orient eq "E" || $orient eq "FE" || $orient eq "W" || $orient eq "FW" ) {
+        ($cellW, $cellH) = ($box[1], $box[0]);
+      }
+    }
+  }
+  else {
+    print "WARN-PL_FLAT_GRPH : 007 : cell $cellref of instance $inst is not in the library, size 0\n";
+  }
+
+  $FLAT_NODE_NUM{$inst} = $nodeCnt;
+  $CADB{$inst}->dbCadbSetNodeNum($nodeCnt);
+  my $line = "$nodeCnt $inst INST $cellW $cellH ";
+  if ( $status eq "FIXED" || $status eq "PLACED" ) {
+    my @loc = $CADB{$inst}->dbCadbGetLoc;
+    my $ix = (defined $loc[0]) ? $loc[0] / $dbu : 0;
+    my $iy = (defined $loc[1]) ? $loc[1] / $dbu : 0;
+    $line .= "$status $ix $iy";
+  }
+  else {
+    $line .= "UNPLACED";
+  }
+  push(@nodeLines, $line);
+  $nodeCnt++;
+}
+
+#-------------------------------- write the nodefile ------------------------------#
+unless ( open(WRITE_FLAT_NODE, ">$nodeFile") ) {
+  print "ERR-PL_FLAT_GRPH : 008 : cannot open $nodeFile for writing\n";
+  return;
+}
+print WRITE_FLAT_NODE "# flat placement nodes for $TOP_MODULE, written by proton\n";
+print WRITE_FLAT_NODE "# all coordinates and dimensions are in microns\n";
+print WRITE_FLAT_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>]\n";
+print WRITE_FLAT_NODE "# a status of FIXED means the placer must not move the node\n";
+print WRITE_FLAT_NODE "DBU $dbu\n";
+print WRITE_FLAT_NODE "DIEAREA $dieLlx $dieLly $dieUrx $dieUry\n";
+print WRITE_FLAT_NODE "ROWHEIGHT $rowHeight\n";
+print WRITE_FLAT_NODE "NODES $nodeCnt\n";
+foreach my $line ( @nodeLines ) {
+  print WRITE_FLAT_NODE "$line\n";
+}
+close(WRITE_FLAT_NODE);
+print "INFO-PL_FLAT_GRPH : 009 : wrote $nodeCnt nodes of $TOP_MODULE to $nodeFile\n";
+
+#<!-- Consumers that only need geometry, macro_arranger among them, never read
+#     the graph.  Writing it means walking every net, which is the expensive
+#     half of this command, so skip it when it was not asked for. -->
+if ( $nodeFileOnly ) {
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "Command write_flat_graph took:",timestr($td),"\n";
+  return;
+}
+
+#-------------------------------- write the graph ---------------------------------#
+#<!-- One driver and one sink per line, "<driver> <sink>".  A net with several
+#     sinks therefore contributes one line per sink, all sharing the driver.
+#     This is a two column edge list rather than the hyperedge encoding the
+#     other graph writers in the tree use, so a net is no longer recoverable
+#     from the file: a three sink net is indistinguishable from three separate
+#     two pin nets.  Nothing downstream needs that distinction today. -->
+unless ( open(WRITE_FLAT_GRAPH, ">$graphFile") ) {
+  print "ERR-PL_FLAT_GRPH : 010 : cannot open $graphFile for writing\n";
+  return;
+}
+
+my $defaultFanout = $GLOBAL->dbfGlobalGetFanoutLimit;
+if ( $fanoutLimit == 0 && defined $defaultFanout && $defaultFanout > 0 ) {
+  $fanoutLimit = $defaultFanout;
+}
+
+my $netCnt = 0;
+my $edgeCnt = 0;
+my $skipCnt = 0;
+my $noDriverCnt = 0;
+foreach my $net ( sort keys %NETS_ALREADY ) {
+  if ( $net eq "" || $net =~ m/\d*\'b[01]+/ ) {
+    next;  #<!-- tie constant, not a net -->
+  }
+  if ( exists $NETS_ROUTING_ALREADY{$net} ) {
+    my $netUse = $NETS_ROUTING_ALREADY{$net}->dbNetGetType;
+    if ( $netUse eq "POWER" || $netUse eq "GROUND" ) {
+      next;
+    }
+  }
+
+  #<!-- getNetDriver returns (inst, pin), or an empty list when the net has no
+  #     driving pin.  getNetSink returns (inst, pin) pairs. -->
+  my @driverInst = &getNetDriver($net);
+  my @sinkInst = &getNetSink($net);
+
+  #<!-- Every line needs a driver, so a net without one contributes nothing.
+  #     Counted rather than dropped quietly: on a netlist where many nets have
+  #     no driving pin the graph would otherwise come out mysteriously small. -->
+  unless ( @driverInst >= 2 && defined $driverInst[0] &&
+           exists $FLAT_NODE_NUM{$driverInst[0]} ) {
+    $noDriverCnt++;
+    next;
+  }
+  my $drvNode = $FLAT_NODE_NUM{$driverInst[0]};
+
+  my @sinkNodes = ();
+  my %seenSink = ();
+  for (my $i = 0; $i < @sinkInst; $i += 2) {
+    my $sink = $sinkInst[$i];
+    unless ( defined $sink && exists $FLAT_NODE_NUM{$sink} ) {
+      next;
+    }
+    my $sinkNode = $FLAT_NODE_NUM{$sink};
+    if ( $sinkNode == $drvNode ) {
+      next;  #<!-- an instance feeding its own pin is not an edge -->
+    }
+    if ( exists $seenSink{$sinkNode} ) {
+      next;  #<!-- several pins of one instance on this net, one edge is enough -->
+    }
+    $seenSink{$sinkNode} = 1;
+    push(@sinkNodes, $sinkNode);
+  }
+
+  my $degree = 1 + @sinkNodes;
+  unless ( @sinkNodes ) {
+    next;  #<!-- driver with nothing to drive -->
+  }
+  if ( $fanoutLimit > 0 && $degree >= $fanoutLimit ) {
+    $skipCnt++;
+    next;
+  }
+
+  $netCnt++;
+  foreach my $sinkNode ( @sinkNodes ) {
+    print WRITE_FLAT_GRAPH "$drvNode $sinkNode\n";
+    $edgeCnt++;
+  }
+}
+close(WRITE_FLAT_GRAPH);
+
+print "INFO-PL_FLAT_GRPH : 011 : wrote $edgeCnt driver to sink edges from $netCnt nets of $TOP_MODULE to $graphFile\n";
+if ( $skipCnt > 0 ) {
+  print "INFO-PL_FLAT_GRPH : 012 : $skipCnt high fan out nets skipped\n";
+}
+if ( $noDriverCnt > 0 ) {
+  print "INFO-PL_FLAT_GRPH : 013 : $noDriverCnt nets have no driver and contribute no edges\n";
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command write_flat_graph took:",timestr($td),"\n";
+
+}# sub write_flat_graph
+
+
+#<!-- Put one placed object into the flat database, given a location already in
+#     DEF units.  Shared by read_flat_graph_placement and read_flat_nodefile so
+#     the bbox and orientation handling lives in one place.
+#     Returns (applied, wasFixed, orientWasFixed). -->
+sub dbfFlatApplyPlacement {
+
+#<!-- $dbu is passed in rather than read from an outer scope: it is a "my" in
+#     each caller, so referring to it here would silently be an undeclared
+#     global holding undef, and every bbox would come out with zero extent. -->
+my ($instance, $defX, $defY, $dbu, $setStatus) = @_;
+my $orientFixed = 0;
+#<!-- callers that are placing say PLACED; the macro arranger path says FIXED so
+#     an arranged macro is pinned against any later placement pass -->
+unless ( defined $setStatus && $setStatus ne "" ) {
+  $setStatus = "PLACED";
+}
+
+if ( exists $CADB{$instance} ) {
+  if ( $CADB{$instance}->dbCadbGetStatus eq "FIXED" ) {
+    return (0, 1, 0);   #<!-- pinned before placement, leave it alone -->
+  }
+  $CADB{$instance}->dbCadbSetLoc($defX, $defY);
+  $CADB{$instance}->dbCadbSetStatus($setStatus);
+
+  #<!-- The canvas draws an instance from its bbox, not its location: see the
+  #     dbCadbGetbBox fetch in the instance loop of make_worldCan_def_gui.
+  #     dbCadbSetLoc does not maintain the bbox, so without this the component
+  #     is drawn at wherever it used to be, or not drawn at all when it had
+  #     never been placed.  Same idiom as verifyBlockHalo in
+  #     DESANALYSIS/make_design_analysis. -->
+  my $cellref = $CADB{$instance}->dbCadbGetCellref;
+  if ( exists $PLDB{$cellref} ) {
+    #<!-- CompDB initialises the orientation to the string "UND", not to undef
+    #     or empty, so an instance that was never placed carries that.  Handing
+    #     it to utilLocToBbox produces "Illegal orientation UND" and a bbox with
+    #     no extent.  Accept only what that helper understands and settle on N
+    #     otherwise, writing it back so the rest of the flow, DEF out included,
+    #     does not see UND on a placed instance either. -->
+    my $orient = $CADB{$instance}->dbCadbGetOrient;
+    unless ( defined $orient && exists $FLAT_VALID_ORIENT{$orient} ) {
+      $orient = "N";
+      $CADB{$instance}->dbCadbSetOrient("N");
+      $orientFixed = 1;
+    }
+    my @cellSize = $PLDB{$cellref}->dbMdbGetSize;
+    if ( @cellSize >= 2 && defined $cellSize[0] && defined $cellSize[1] ) {
+      #<!-- LEF sizes are microns, the component database is in DEF units -->
+      my @bbox = &utilLocToBbox($defX, $defY, $orient,
+                                $cellSize[0] * $dbu, $cellSize[1] * $dbu);
+      $CADB{$instance}->dbCadbSetbBox(@bbox);
+    }
+  }
+  return (1, 0, $orientFixed);
+}
+elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$instance} ) {
+  if ( $PORTS_ALREADY{$TOP_MODULE}{$instance}->dbPortGetStatus == 3 ) {
+    return (0, 1, 0);
+  }
+  $PORTS_ALREADY{$TOP_MODULE}{$instance}->dbPortSetLoc($defX, $defY);
+  $PORTS_ALREADY{$TOP_MODULE}{$instance}->dbPortSetStatus($setStatus);
+  return (1, 0, 0);
+}
+
+return (0, 0, 0);
+
+}# sub dbfFlatApplyPlacement
+
+
+#***** /read_flat_nodefile
+#  read_flat_nodefile
+# FUNCTION
+#       Reads a nodefile back and applies the positions it carries to the flat
+#       database.  This is the return path for tools that rewrite the nodefile
+#       in place rather than emitting a separate coordinate file, macro_arranger
+#       with --write-nodefile being the one this was written for.
+#
+#       Only records that carry a location are applied, so a node the tool left
+#       UNPLACED is passed over rather than being moved to the origin.  Nodes
+#       whose status is FIXED are skipped, as in read_flat_graph_placement.
+#
+# SYNOPSIS
+#  read_flat_nodefile
+#
+# INPUTS
+#
+#       options :
+#               -input <fileName> : defaults to <TOP_MODULE>.arranged.nodefile
+#
+# OUTPUTS
+#               instance and port locations in the flat database
+#
+#****
+sub read_flat_nodefile {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+my $inFile;
+my $refFile;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : read_flat_nodefile -input <file name>\n";
+  print "                           -reference <nodefile as it was before the tool ran>\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-input")     { $inFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-reference") { $refFile = $_[$i+1]; }
+  elsif ($_[$i] =~ m/^-+\w/)     { print "WARN-PL_FLAT_ND : 001 : invalid option $_[$i]\n"; }
+}
+unless ( defined $inFile && $inFile ne "" ) {
+  $inFile = "$TOP_MODULE.arranged.nodefile";
+}
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) {
+  print "ERR-PL_FLAT_ND : 002 : database units are not set\n";
+  return;
+}
+unless ( -e $inFile ) {
+  print "ERR-PL_FLAT_ND : 003 : $inFile does not exist\n";
+  return;
+}
+unless ( open(READ_FLAT_ND, "$inFile") ) {
+  print "ERR-PL_FLAT_ND : 004 : cannot open $inFile for reading\n";
+  return;
+}
+
+%FLAT_VALID_ORIENT = map { $_ => 1 } qw(N FN S FS W FW E FE);
+
+#<!-- A tool may hand back records marked FIXED because it pinned what it just
+#     did, the macro arranger being the case this exists for.  Those have to be
+#     applied.  Records that were already FIXED before the tool ran must not be:
+#     they were pinned by the user and the tool is not entitled to move them.
+#     Status alone cannot tell the two apart, so the caller supplies the earlier
+#     nodefile and anything FIXED in it is left alone.  With no reference the
+#     old behaviour stands and every FIXED record is skipped. -->
+my %wasFixed = ();
+if ( defined $refFile && $refFile ne "" ) {
+  if ( open(READ_FLAT_REF, "$refFile") ) {
+    while ( my $r = <READ_FLAT_REF> ) {
+      chomp($r);
+      next if ( $r =~ m/^\s*#/ || $r =~ m/^\s*$/ );
+      my @rf = split(/\s+/, $r);
+      next if ( @rf < 6 || $rf[0] =~ m/^(DBU|DIEAREA|ROWHEIGHT|NODES)$/ );
+      $wasFixed{$rf[1]} = 1 if ( $rf[5] eq "FIXED" );
+    }
+    close(READ_FLAT_REF);
+  }
+  else {
+    print "WARN-PL_FLAT_ND : 012 : cannot read reference $refFile, every FIXED record will be skipped\n";
+    undef $refFile;
+  }
+}
+
+my ($placedCnt, $fixedCnt, $unknownCnt, $noLocCnt, $orientFixCnt, $pinnedCnt) = (0, 0, 0, 0, 0, 0);
+
+while ( my $line = <READ_FLAT_ND> ) {
+  chomp($line);
+  if ( $line =~ m/^\s*#/ || $line =~ m/^\s*$/ ) {
+    next;
+  }
+  $line =~ s/^\s+//;
+  my @f = split(/\s+/, $line);
+  if ( @f > 0 && $f[0] =~ m/^(DBU|DIEAREA|ROWHEIGHT|NODES)$/ ) {
+    next;
+  }
+  unless ( @f >= 6 ) {
+    next;
+  }
+  my ($node, $name, $kind, $w, $h, $status) = @f[0,1,2,3,4,5];
+
+  #<!-- six field records carry no location: the tool left this node where it
+  #     was, so there is nothing to apply.  Moving it to the origin would be
+  #     worse than leaving it alone. -->
+  unless ( @f >= 8 && defined $f[6] && defined $f[7] ) {
+    $noLocCnt++;
+    next;
+  }
+  my ($x, $y) = ($f[6], $f[7]);
+  unless ( $x =~ m/^-?\d+(\.\d+)?$/ && $y =~ m/^-?\d+(\.\d+)?$/ ) {
+    print "WARN-PL_FLAT_ND : 005 : ignoring malformed record: $line\n";
+    next;
+  }
+  if ( $status eq "FIXED" ) {
+    #<!-- pinned before the tool ran, or no reference to judge by -->
+    if ( !defined $refFile || $refFile eq "" || exists $wasFixed{$name} ) {
+      $fixedCnt++;
+      next;
+    }
+  }
+
+  #<!-- dbfFlatApplyPlacement refuses to touch anything already FIXED in the
+  #     database, which is exactly the macro we are trying to pin, so clear the
+  #     status first and let the record's own status be written -->
+  if ( $status eq "FIXED" && exists $CADB{$name} &&
+       $CADB{$name}->dbCadbGetStatus eq "FIXED" ) {
+    $CADB{$name}->dbCadbSetStatus("PLACED");
+  }
+
+  my ($applied, $wasFixed, $orientFixed) =
+      &dbfFlatApplyPlacement($name, $x * $dbu, $y * $dbu, $dbu, $status);
+  if ( $applied ) {
+    $placedCnt++;
+    $pinnedCnt++ if ( $status eq "FIXED" );
+    $orientFixCnt += $orientFixed;
+  }
+  elsif ( $wasFixed ) {
+    $fixedCnt++;
+  }
+  else {
+    print "WARN-PL_FLAT_ND : 006 : $name is neither a component nor a port\n";
+    $unknownCnt++;
+  }
+}
+close(READ_FLAT_ND);
+
+print "INFO-PL_FLAT_ND : 007 : placed $placedCnt nodes from $inFile\n";
+if ( $pinnedCnt > 0 ) {
+  print "INFO-PL_FLAT_ND : 013 : $pinnedCnt of them were marked FIXED by the tool\n";
+}
+if ( $fixedCnt > 0 ) {
+  print "INFO-PL_FLAT_ND : 008 : $fixedCnt fixed nodes left untouched\n";
+}
+if ( $noLocCnt > 0 ) {
+  print "INFO-PL_FLAT_ND : 009 : $noLocCnt nodes carry no location and were not moved\n";
+}
+if ( $unknownCnt > 0 ) {
+  print "WARN-PL_FLAT_ND : 010 : $unknownCnt names in $inFile are not in the design\n";
+}
+if ( $orientFixCnt > 0 ) {
+  print "INFO-PL_FLAT_ND : 011 : $orientFixCnt instance(s) had no usable orientation, set to N\n";
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command read_flat_nodefile took:",timestr($td),"\n";
+
+}# sub read_flat_nodefile
+
+
+#***** /read_flat_graph_placement
+#  read_flat_graph_placement
+# FUNCTION
+#       Reads the placement produced from the flat graph and writes the
+#       locations back into the flat database.
+#
+#       The result file holds one "<node> <x> <y>" line per placed node, with
+#       coordinates in microns, matching what write_flat_graph emitted.  The
+#       node number to name map is rebuilt by re-reading the nodefile, so this
+#       does not have to run in the same session as the write.
+#
+#       Nodes the nodefile marked FIXED are ignored, so anything pinned before
+#       placement stays where it was even if the placer moved it.
+#
+# SYNOPSIS
+#  read_flat_graph_placement
+#
+# INPUTS
+#
+#       options :
+#               -input <fileName> : defaults to <TOP_MODULE>.xy.out
+#               -nodefile <fileName> : defaults to nodefile
+#
+# OUTPUTS
+#               instance and port locations in the flat database
+#
+#****
+sub read_flat_graph_placement {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $nodeFile = "nodefile";
+my $inFile;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : read_flat_graph_placement -input <file name>\n";
+  print "                                  -nodefile <file name>\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-input")    { $inFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-nodefile") { $nodeFile = $_[$i+1]; }
+  elsif ($_[$i] =~ m/^-+\w/)    { print "WARN-PL_FLAT_RD : 001 : invalid option $_[$i]\n"; }
+}
+unless ( defined $inFile && $inFile ne "" ) {
+  $inFile = "$TOP_MODULE.xy.out";
+}
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) {
+  print "ERR-PL_FLAT_RD : 002 : database units are not set\n";
+  return;
+}
+
+#------------------------ rebuild the map from the nodefile -----------------------#
+unless ( -e $nodeFile ) {
+  print "ERR-PL_FLAT_RD : 003 : $nodeFile does not exist, cannot map nodes to instances\n";
+  return;
+}
+unless ( open(READ_FLAT_NODE, "$nodeFile") ) {
+  print "ERR-PL_FLAT_RD : 004 : cannot open $nodeFile for reading\n";
+  return;
+}
+my %nodeName = ();
+my %nodeIsFixed = ();
+while ( my $line = <READ_FLAT_NODE> ) {
+  chomp($line);
+  if ( $line =~ m/^\s*#/ || $line =~ m/^\s*$/ ) {
+    next;
+  }
+  if ( $line =~ m/^(DBU|DIEAREA|ROWHEIGHT|NODES)\b/ ) {
+    next;
+  }
+  my @f = split(/\s+/, $line);
+  unless ( @f >= 6 ) {
+    next;
+  }
+  my ($num, $name, $type, $w, $h, $status) = @f[0,1,2,3,4,5];
+  $nodeName{$num} = $name;
+  if ( $status eq "FIXED" ) {
+    $nodeIsFixed{$num} = 1;
+  }
+}
+close(READ_FLAT_NODE);
+
+my $mapCnt = keys %nodeName;
+if ( $mapCnt == 0 ) {
+  print "ERR-PL_FLAT_RD : 005 : $nodeFile holds no node records\n";
+  return;
+}
+
+#------------------------------- read the placement -------------------------------#
+unless ( -e $inFile ) {
+  print "ERR-PL_FLAT_RD : 006 : placement file $inFile does not exist\n";
+  return;
+}
+unless ( open(READ_FLAT_XY, "$inFile") ) {
+  print "ERR-PL_FLAT_RD : 007 : cannot open $inFile for reading\n";
+  return;
+}
+
+#<!-- the orientations utilLocToBbox knows how to turn into a bbox -->
+%FLAT_VALID_ORIENT = map { $_ => 1 } qw(N FN S FS W FW E FE);
+
+my ($placedCnt, $fixedCnt, $unknownCnt, $orientFixCnt) = (0, 0, 0, 0);
+while ( my $line = <READ_FLAT_XY> ) {
+  chomp($line);
+  if ( $line =~ m/^\s*#/ || $line =~ m/^\s*$/ ) {
+    next;
+  }
+  $line =~ s/^\s+//;
+  my ($node, $x, $y) = (split(/\s+/, $line))[0,1,2];
+  unless ( defined $node && defined $x && defined $y ) {
+    next;
+  }
+  unless ( $x =~ m/^-?\d+(\.\d+)?$/ && $y =~ m/^-?\d+(\.\d+)?$/ ) {
+    print "WARN-PL_FLAT_RD : 008 : ignoring malformed placement line: $line\n";
+    next;
+  }
+  unless ( exists $nodeName{$node} ) {
+    $unknownCnt++;
+    next;
+  }
+  if ( exists $nodeIsFixed{$node} ) {
+    $fixedCnt++;
+    next;  #<!-- was pinned before placement, leave it alone -->
+  }
+
+  my $instance = $nodeName{$node};
+  #<!-- back to DEF units for the database -->
+  my $defX = $x * $dbu;
+  my $defY = $y * $dbu;
+
+  my ($applied, $wasFixed, $orientFixed) = &dbfFlatApplyPlacement($instance, $defX, $defY, $dbu);
+  if ( $applied ) {
+    $placedCnt++;
+    $orientFixCnt += $orientFixed;
+  }
+  elsif ( $wasFixed ) {
+    $fixedCnt++;
+  }
+  else {
+    print "WARN-PL_FLAT_RD : 009 : $instance is neither a component nor a port\n";
+    $unknownCnt++;
+  }
+}
+close(READ_FLAT_XY);
+
+print "INFO-PL_FLAT_RD : 010 : placed $placedCnt nodes from $inFile\n";
+if ( $fixedCnt > 0 ) {
+  print "INFO-PL_FLAT_RD : 011 : $fixedCnt fixed nodes left untouched\n";
+}
+if ( $unknownCnt > 0 ) {
+  print "WARN-PL_FLAT_RD : 012 : $unknownCnt nodes in $inFile did not match $nodeFile\n";
+}
+if ( $orientFixCnt > 0 ) {
+  print "INFO-PL_FLAT_RD : 013 : $orientFixCnt instance(s) had no usable orientation, set to N\n";
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command read_flat_graph_placement took:",timestr($td),"\n";
+
+}# sub read_flat_graph_placement
+
+
+#***** /place_flat_design
+#  place_flat_design
+# FUNCTION
+#       Flat global placement: write the graph, run the flat graph placer over
+#       it, and read the result back into the database.  The same shape as
+#       place_graph_mpl, but built on write_flat_graph and
+#       read_flat_graph_placement and working in design units throughout.
+#
+#       The placer binary does not exist yet.  When it is missing the command
+#       writes the graph, says so, and stops without reading anything, rather
+#       than reading a stale result file from an earlier run.
+#
+# SYNOPSIS
+#  place_flat_design
+#
+# INPUTS
+#
+#       options :
+#               -placer <path> : defaults to $PROTON_HOME/3RDBIN/flat_graph_placer
+#               -fanout_limit <n> : passed to write_flat_graph
+#
+#       switches :
+#               --write_only : write the graph and stop
+#               --keep : do not delete the graph files afterwards
+#
+# OUTPUTS
+#               instance locations in the flat database
+#
+#****
+sub place_flat_design {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $placer;
+my $fanoutLimit = 0;
+my $writeOnly = 0;
+my $keepFiles = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : place_flat_design -placer <path to flat graph placer>\n";
+  print "                          -fanout_limit <high fan out threshold>\n";
+  print "                          --write_only\n";
+  print "                          --keep\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-placer")       { $placer = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit") { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "--write_only")  { $writeOnly = 1; }
+  elsif ($_[$i] eq "--keep")        { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)        { print "WARN-PL_FLAT_DES : 001 : invalid option $_[$i]\n"; }
+}
+
+my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+unless ( defined $placer && $placer ne "" ) {
+  $placer = "$protonHome/3RDBIN/flat_graph_placer";
+}
+
+my $nodeFile = "nodefile";
+my $graphFile = "$TOP_MODULE.txt";
+my $xyFile = "$TOP_MODULE.xy.out";
+
+#<!-- a result file left over from a previous run would be read back as if it
+#     belonged to this one -->
+if ( -e $xyFile ) {
+  unlink($xyFile);
+}
+
+my @writeArgs = ("-nodefile", $nodeFile, "-graph", $graphFile);
+if ( $fanoutLimit > 0 ) {
+  push(@writeArgs, "-fanout_limit", $fanoutLimit);
+}
+&write_flat_graph(@writeArgs);
+
+unless ( -e $graphFile && -e $nodeFile ) {
+  print "ERR-PL_FLAT_DES : 002 : the graph was not written, stopping\n";
+  return;
+}
+
+if ( $writeOnly ) {
+  print "INFO-PL_FLAT_DES : 003 : --write_only given, $nodeFile and $graphFile left in place\n";
+  return;
+}
+
+unless ( -x $placer ) {
+  print "WARN-PL_FLAT_DES : 004 : flat graph placer $placer not found or not executable\n";
+  print "WARN-PL_FLAT_DES : 005 : $nodeFile and $graphFile have been written, no placement was run\n";
+  print "WARN-PL_FLAT_DES : 006 : run the placer yourself, then read_flat_graph_placement -input $xyFile\n";
+  return;
+}
+
+print "INFO-PL_FLAT_DES : 007 : placing $TOP_MODULE with $placer\n";
+my $rc = system("$placer $graphFile $nodeFile $xyFile");
+if ( $rc != 0 ) {
+  print "ERR-PL_FLAT_DES : 008 : $placer exited with status $rc, no placement read back\n";
+  return;
+}
+unless ( -e $xyFile ) {
+  print "ERR-PL_FLAT_DES : 009 : $placer produced no $xyFile, no placement read back\n";
+  return;
+}
+
+&read_flat_graph_placement("-input", $xyFile, "-nodefile", $nodeFile);
+
+unless ( $keepFiles ) {
+  unlink($graphFile);
+  unlink($nodeFile);
+  unlink($xyFile);
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command place_flat_design took:",timestr($td),"\n";
+
+}# sub place_flat_design
+
+
+#***** /arrange_macros
+#  arrange_macros
+# FUNCTION
+#       Tidies the placed macros of the current top module: writes a nodefile,
+#       runs the macro arranger over it, and applies the arranged positions back
+#       to the flat database.
+#
+#       Standalone, and deliberately does not write the connectivity graph: the
+#       arranger works from geometry alone, and writing the graph means walking
+#       every net, which is the expensive half of write_flat_graph.
+#
+#       Only macros that are already placed are arranged.  The arranger treats a
+#       node as a macro when its area is over the threshold and it already has a
+#       location, so this is a tidy up of existing macro placement rather than a
+#       from scratch macro placer.  Macros marked FIXED are left where they are.
+#
+# SYNOPSIS
+#  arrange_macros
+#
+# INPUTS
+#
+#       options :
+#               -arranger <path> : defaults to $PROTON_HOME/3RDBIN/macro_arranger
+#               -space <um> : edge to edge spacing between macros
+#               -macro_area <um2> : area above which a node counts as a macro
+#               -margin <um> : keep out margin from the die edge
+#
+#       switches :
+#               --write_only : write the nodefile and stop
+#               --keep : do not delete the nodefiles afterwards
+#
+# OUTPUTS
+#               macro locations in the flat database
+#
+#****
+sub arrange_macros {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $arranger;
+my ($space, $macroArea, $margin);
+my $writeOnly = 0;
+my $keepFiles = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : arrange_macros -arranger <path to macro arranger>\n";
+  print "                       -space <edge to edge spacing in microns>\n";
+  print "                       -macro_area <area in um2 above which a node is a macro>\n";
+  print "                       -margin <keep out from the die edge in microns>\n";
+  print "                       --write_only\n";
+  print "                       --keep\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-arranger")   { $arranger = $_[$i+1]; }
+  elsif ($_[$i] eq "-space")      { $space = $_[$i+1]; }
+  elsif ($_[$i] eq "-macro_area") { $macroArea = $_[$i+1]; }
+  elsif ($_[$i] eq "-margin")     { $margin = $_[$i+1]; }
+  elsif ($_[$i] eq "--write_only"){ $writeOnly = 1; }
+  elsif ($_[$i] eq "--keep")      { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)      { print "WARN-PL_MACRO : 001 : invalid option $_[$i]\n"; }
+}
+
+my $protonHome = $GLOBAL->dbfGlobalGetProtonHome;
+unless ( defined $arranger && $arranger ne "" ) {
+  $arranger = "$protonHome/3RDBIN/macro_arranger";
+}
+
+my $nodeFile = "$TOP_MODULE.macro.nodefile";
+my $outNodeFile = "$TOP_MODULE.arranged.nodefile";
+
+#<!-- an arranged file left over from a previous run would be read back as if
+#     it belonged to this one -->
+if ( -e $outNodeFile ) {
+  unlink($outNodeFile);
+}
+
+&write_flat_graph("-nodefile", $nodeFile, "--nodefile_only");
+unless ( -e $nodeFile ) {
+  print "ERR-PL_MACRO : 002 : the nodefile was not written, stopping\n";
+  return;
+}
+
+if ( $writeOnly ) {
+  print "INFO-PL_MACRO : 003 : --write_only given, $nodeFile left in place\n";
+  return;
+}
+
+unless ( -x $arranger ) {
+  print "WARN-PL_MACRO : 004 : macro arranger $arranger not found or not executable\n";
+  print "WARN-PL_MACRO : 005 : $nodeFile has been written, nothing was arranged\n";
+  print "WARN-PL_MACRO : 006 : run the arranger yourself, then read_flat_nodefile -input $outNodeFile\n";
+  return;
+}
+
+my $cmd = "$arranger $nodeFile $outNodeFile";
+if ( defined $space && $space ne "" )         { $cmd .= " --space $space"; }
+if ( defined $macroArea && $macroArea ne "" ) { $cmd .= " --macro-area $macroArea"; }
+if ( defined $margin && $margin ne "" )       { $cmd .= " --margin $margin"; }
+
+print "INFO-PL_MACRO : 007 : arranging macros of $TOP_MODULE with $arranger\n";
+my $rc = system($cmd);
+if ( $rc != 0 ) {
+  print "ERR-PL_MACRO : 008 : the macro arranger exited with status $rc, nothing read back\n";
+  return;
+}
+unless ( -e $outNodeFile ) {
+  print "ERR-PL_MACRO : 009 : the macro arranger produced no $outNodeFile, nothing read back\n";
+  return;
+}
+
+#<!-- the original nodefile lets the reader tell a macro the arranger just
+#     pinned from one the user had pinned beforehand -->
+&read_flat_nodefile("-input", $outNodeFile, "-reference", $nodeFile);
+
+unless ( $keepFiles ) {
+  unlink($nodeFile);
+  unlink($outNodeFile);
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command arrange_macros took:",timestr($td),"\n";
+
+}# sub arrange_macros
+
+1;

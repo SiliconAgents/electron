@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+"""Flat graph placer driver for proton's place_flat_design.
+
+Called as
+
+    flat_graph_placer <graph> <nodefile> <xyout> [extra placer args...]
+
+which is the interface place_flat_design uses.  It runs the graph embedding
+placer over the edge list, then turns that placer's CSV into the
+"<node> <x> <y>" file read_flat_graph_placement expects.
+
+The embedding placer knows nothing about the die: it reads only the edge list,
+and its output is in its own space.  With --legalize the coordinates are grid
+slots, a column index and a row index; without it they are normalised embedding
+coordinates.  Neither is microns.  This wrapper therefore reads DIEAREA out of
+the nodefile and maps the placer's bounding box onto it, which is the only
+reason the nodefile is passed in at all.
+
+The mapping scales each axis independently so the result fills the die.  That
+does not preserve the aspect ratio of the embedding, which is deliberate: a
+placement that leaves most of the die empty is not useful.  Pass --keep-aspect
+to scale both axes by the same factor and centre the result instead.
+
+The embedding placer itself can be pointed somewhere else with the
+GRAPH_EMBED_PLACE environment variable.
+"""
+
+import os
+import subprocess
+import sys
+
+DEFAULT_PLACER = "/proj_pd/user_dev/rsrivastava/pyspark_cad/python/graph_embed_place.py"
+
+
+def die(msg):
+    sys.stderr.write("ERR-FLAT_PLACER : %s\n" % msg)
+    sys.exit(1)
+
+
+def read_diearea(nodefile):
+    """Pull DIEAREA llx lly urx ury out of the nodefile written by write_flat_graph."""
+    try:
+        with open(nodefile) as fh:
+            for line in fh:
+                if line.startswith("DIEAREA"):
+                    f = line.split()
+                    if len(f) >= 5:
+                        return tuple(float(v) for v in f[1:5])
+    except IOError as exc:
+        die("cannot read %s: %s" % (nodefile, exc))
+    die("%s has no DIEAREA line, cannot map the placement onto the die" % nodefile)
+
+
+def read_sizes(nodefile):
+    """name -> (width, height) from the nodefile, so cells can be kept inside the die."""
+    sizes = {}
+    try:
+        with open(nodefile) as fh:
+            for line in fh:
+                if line.startswith("#") or not line.strip():
+                    continue
+                if line.split()[0] in ("DBU", "DIEAREA", "ROWHEIGHT", "NODES"):
+                    continue
+                f = line.split()
+                if len(f) >= 5:
+                    try:
+                        sizes[f[1]] = (float(f[3]), float(f[4]))
+                    except ValueError:
+                        continue
+    except IOError as exc:
+        die("cannot read %s: %s" % (nodefile, exc))
+    return sizes
+
+
+def read_csv(path):
+    """node,x,y,... -> [(name, x, y)], skipping the header."""
+    rows = []
+    try:
+        with open(path) as fh:
+            first = True
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                if first:
+                    first = False
+                    if line.lower().startswith("node,"):
+                        continue
+                f = line.split(",")
+                if len(f) < 3:
+                    continue
+                try:
+                    rows.append((f[0], float(f[1]), float(f[2])))
+                except ValueError:
+                    continue
+    except IOError as exc:
+        die("cannot read placer output %s: %s" % (path, exc))
+    return rows
+
+
+def main(argv):
+    args = argv[1:]
+    keep_aspect = False
+    if "--keep-aspect" in args:
+        keep_aspect = True
+        args = [a for a in args if a != "--keep-aspect"]
+
+    if len(args) < 3:
+        sys.stderr.write(__doc__)
+        sys.stderr.write("\nusage: flat_graph_placer <graph> <nodefile> <xyout> "
+                         "[--keep-aspect] [extra placer args]\n")
+        return 1
+
+    graph, nodefile, xyout = args[0], args[1], args[2]
+    extra = args[3:]
+
+    for f in (graph, nodefile):
+        if not os.path.exists(f):
+            die("%s does not exist" % f)
+
+    placer = os.environ.get("GRAPH_EMBED_PLACE", DEFAULT_PLACER)
+    if not os.path.exists(placer):
+        die("graph embedding placer not found at %s\n"
+            "                  set GRAPH_EMBED_PLACE to point at it" % placer)
+
+    base = os.path.splitext(os.path.basename(graph))[0]
+    csv = base + ".placement.csv"
+    png = base + ".png"
+
+    cmd = ["python3", placer,
+           "-m", "flow",
+           "--legalize",
+           "--plot", png,
+           "-o", csv,
+           graph] + extra
+
+    sys.stderr.write("INFO-FLAT_PLACER : running %s\n" % " ".join(cmd))
+    rc = subprocess.call(cmd)
+    if rc != 0:
+        die("%s exited with status %d" % (os.path.basename(placer), rc))
+    if not os.path.exists(csv):
+        die("%s produced no %s" % (os.path.basename(placer), csv))
+
+    rows = read_csv(csv)
+    if not rows:
+        die("%s holds no placement rows" % csv)
+
+    llx, lly, urx, ury = read_diearea(nodefile)
+    dieW = urx - llx
+    dieH = ury - lly
+    if dieW <= 0 or dieH <= 0:
+        die("die area from %s has no extent (%g x %g)" % (nodefile, dieW, dieH))
+
+    sizes = read_sizes(nodefile)
+
+    xs = [r[1] for r in rows]
+    ys = [r[2] for r in rows]
+    spanX = max(xs) - min(xs)
+    spanY = max(ys) - min(ys)
+    minX, minY = min(xs), min(ys)
+
+    # An instance location is its lower left corner, so mapping the placer's
+    # extremes straight onto the die edges puts every cell on the right or top
+    # edge partly outside it.  Map onto the die inset by the cell's own size
+    # instead, so the whole cell lands inside.  Ports have zero size and so keep
+    # the full range.
+    maxW = max([sizes.get(r[0], (0.0, 0.0))[0] for r in rows] or [0.0])
+    maxH = max([sizes.get(r[0], (0.0, 0.0))[1] for r in rows] or [0.0])
+    oversized = []
+
+    uniform = None
+    if keep_aspect:
+        # One scale for both axes, so the inset has to use the largest cell.
+        availW = max(dieW - maxW, 0.0)
+        availH = max(dieH - maxH, 0.0)
+        cand = []
+        if spanX > 0:
+            cand.append(availW / spanX)
+        if spanY > 0:
+            cand.append(availH / spanY)
+        uniform = min(cand) if cand else 0.0
+
+    try:
+        with open(xyout, "w") as fh:
+            fh.write("# <node> <x> <y> in microns, lower left corners inside "
+                     "DIEAREA %g %g %g %g\n" % (llx, lly, urx, ury))
+            for name, x, y in rows:
+                w, h = sizes.get(name, (0.0, 0.0))
+                availW = dieW - w
+                availH = dieH - h
+                if availW < 0 or availH < 0:
+                    oversized.append(name)
+                    availW = max(availW, 0.0)
+                    availH = max(availH, 0.0)
+
+                fx = ((x - minX) / spanX) if spanX > 0 else 0.0
+                fy = ((y - minY) / spanY) if spanY > 0 else 0.0
+
+                if uniform is not None:
+                    nx = llx + (dieW - w - spanX * uniform) / 2.0 + (x - minX) * uniform
+                    ny = lly + (dieH - h - spanY * uniform) / 2.0 + (y - minY) * uniform
+                    #<!-- centring can still push a large cell out, so clamp -->
+                    nx = min(max(nx, llx), llx + availW)
+                    ny = min(max(ny, lly), lly + availH)
+                else:
+                    nx = llx + fx * availW
+                    ny = lly + fy * availH
+
+                fh.write("%s %.4f %.4f\n" % (name, nx, ny))
+    except IOError as exc:
+        die("cannot write %s: %s" % (xyout, exc))
+
+    if oversized:
+        sys.stderr.write("WARN-FLAT_PLACER : %d node(s) are larger than the die "
+                         "and were pinned to its lower left corner: %s\n"
+                         % (len(oversized), " ".join(oversized[:5])))
+
+    sys.stderr.write("INFO-FLAT_PLACER : wrote %d placed nodes to %s\n"
+                     % (len(rows), xyout))
+    sys.stderr.write("INFO-FLAT_PLACER : layout plot in %s\n" % png)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
