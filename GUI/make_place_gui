@@ -407,6 +407,78 @@ sub seed_place_popup {
 }#sub seed_place_popup
 
 
+#<!-- Interactive hierarchical placement.  Unlike the rest of this menu the
+#     work happens in another program's window and proton blocks while it is
+#     open, so the popup is short: the things worth deciding before the window
+#     appears.  Where the pins go on which edge, and over how many routing
+#     layers, is set inside hier_place itself. -->
+sub hier_place_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Hier Place");
+  $subWin->geometry("380x240+0+0");
+
+  my ($module, $layer, $fanout, $extra) = ("", "", "", "");
+  my $kinds = "INST PORT";
+  my ($noSize, $noPorts, $keepFiles, $reportOnly) = ("", "", "", "");
+
+  my $modFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $kindFrame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $layFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $fanFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $argFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $optFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $opt2Frame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $noteFrame  = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $buttonFrame= $subWin->Frame()->pack(-side => 'bottom');
+
+  #<!-- blank means the module being edited, which is what TOP_MODULE is -->
+  $modFrame->Label(-text => "Module (blank = edited) ")->pack(-side=>'left');
+  $modFrame->Entry(-textvariable => \$module, -width=>14)->pack(-side=>'left');
+  $kindFrame->Label(-text => "Place           ")->pack(-side=>'left');
+  $kindFrame->Optionmenu(-variable => \$kinds,
+                         -options => ["INST PORT", "INST"])->pack(-side=>'left');
+  $layFrame->Label(-text  => "Pin layer       ")->pack(-side=>'left');
+  $layFrame->Entry(-textvariable => \$layer, -width=>8)->pack(-side=>'left');
+  $fanFrame->Label(-text  => "Fanout limit    ")->pack(-side=>'left');
+  $fanFrame->Entry(-textvariable => \$fanout, -width=>8)->pack(-side=>'left');
+  $argFrame->Label(-text  => "Extra args      ")->pack(-side=>'left');
+  $argFrame->Entry(-textvariable => \$extra, -width=>22)->pack(-side=>'left');
+
+  $optFrame->Checkbutton(-text => "keep sizes", -variable => \$noSize,
+                         -onvalue => "--no_size", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "skip pins", -variable => \$noPorts,
+                         -onvalue => "--no_ports", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $opt2Frame->Checkbutton(-text => "report only", -variable => \$reportOnly,
+                         -onvalue => "--report_only", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $opt2Frame->Checkbutton(-text => "keep files", -variable => \$keepFiles,
+                         -onvalue => "--keep", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $noteFrame->Label(-text => "proton waits for the window; press Save before closing",
+                    -font=>"Times 8")->pack(-side=>'left');
+
+  $buttonFrame->Button(-text=>'Run', -command => sub {
+                         my @args = ();
+                         if ( $module ne "" )                        { push(@args, "-module", $module); }
+                         if ( defined $kinds && $kinds ne "" )       { push(@args, "-kinds", $kinds); }
+                         if ( $layer ne "" )                         { push(@args, "-layer", $layer); }
+                         if ( $fanout =~ m/^\d+$/ && $fanout > 0 )   { push(@args, "-fanout_limit", $fanout); }
+                         if ( $extra ne "" )                         { push(@args, "-args", $extra); }
+                         if ( $noSize ne "" )     { push(@args, $noSize); }
+                         if ( $noPorts ne "" )    { push(@args, $noPorts); }
+                         if ( $reportOnly ne "" ) { push(@args, $reportOnly); }
+                         if ( $keepFiles ne "" )  { push(@args, $keepFiles); }
+                         &hier_place(@args);
+                         $subWin->destroy;
+                       })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel', -command => sub {$subWin->destroy;})->pack(-side=>"left");
+
+}#sub hier_place_popup
+
+
 ##########################################################################################################
 ############################# Creating popup Gui to run mpl placer on hierarchy ##########################
 ##########################################################################################################

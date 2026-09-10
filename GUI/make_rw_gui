@@ -488,6 +488,11 @@ $placemenu->separator;
     -underline => 0); # D in Display
 $placemenu->separator;
      $placemenu->command(
+    -command => \&hier_place_popup,
+    -label => "Hier Place",
+    -underline => 0); # D in Display
+$placemenu->separator;
+     $placemenu->command(
     -command => \&add_filler_popup,
     -label => "Add Filler",
     -underline => 0); # D in Display
