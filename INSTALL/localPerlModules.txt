@@ -1,0 +1,43 @@
+Make a personal configuration for use with the CPAN module:
+On the command line, enter:
+perl -MCPAN -e 'mkmyconfig'
+When prompted, press Enter or Return to allow automatic configuration.
+For "What approach do you want?", press Enter or Return to select the default option (local::lib).
+Press Enter or Return to let the application automatically choose CPAN mirror sites.
+Press Enter or Return to add the necessary environment variables to your shell configuration file.
+If prompted to run automatic configuration again, press Enter or Return to select [yes].
+You'll see output indicating autoconfiguration is complete, with MyConfig.pm written to the following directory (replace username with your IU username):
+
+/N/u/username/Carbonate/.cpan/CPAN/MyConfig.pm'
+When returned to the shell prompt, run the CPAN module; enter:
+perl -MCPAN -e shell
+Configure the CPAN module to install new modules in your home directory:
+At the first CPAN prompt (cpan[1]>), enter:
+o conf makepl_arg INSTALL_BASE=~/perl5
+You'll see the following output:
+
+makepl_arg         [INSTALL_BASE=~/perl5]
+Please use 'o conf commit' to make the config permanent!
+At the next CPAN prompt, enter:
+o conf commit
+You'll see the following output (replace username with your IU username):
+
+commit: wrote '/N/u/username/Carbonate/.cpan/CPAN/MyConfig.pm'
+At the next CPAN prompt, enter:
+exit
+Modify your environment to use the new library of modules:
+If you're using the bash shell, add the following lines to your ~/.bashrc file (replace username with your IU username):
+export PERL_MM_OPT="INSTALL_BASE=/N/u/username/Carbonate/perl5"
+export PERL5LIB="/N/u/username/Carbonate/perl5/lib/perl5:$PERL5LIB"
+export PATH="/N/u/username/Carbonate/perl5/bin:$PATH"
+eval $(perl -I$HOME/perl5/lib/perl5 -Mlocal::lib)
+If you're using a variant of the C shell, you'll need to set the environment variables manually in your shell configuration file.
+Use the CPAN module (or the cpan command) to install modules locally:
+$ perl -MCPAN -Mlocal::lib -e 'CPAN::install(Math::Matrix)'
+This will produce a lot of output.
+
+In your Perl script, use the local::lib module to have your local library searched when modules are loaded:
+#!/usr/bin/perl
+use strict;
+use local::lib;
+use Math::Matrix;

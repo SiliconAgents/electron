@@ -644,7 +644,7 @@ $GLOBAL->dbGlobalSetKbfo(@kbOrder);
 $DEBUG = 0;
 $WINSTART = 1;
 $EXIT_TOOL = 0;
-$PROMPT = "proton_shell";
+$PROMPT = "electron_shell";
 $echo_commands ="true";
 $got_ctrlc=-1;
 $KB_DATABASE = "UND";

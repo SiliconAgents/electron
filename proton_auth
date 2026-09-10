@@ -649,7 +649,7 @@ $GLOBAL->dbGlobalSetKbfo(@kbOrder);
 $DEBUG = 0;
 $WINSTART = 1;
 $EXIT_TOOL = 0;
-$PROMPT = "proton_shell";
+$PROMPT = "electron_shell";
 $echo_commands ="true";
 $got_ctrlc=-1;
 $KB_DATABASE = "UND";
@@ -884,7 +884,7 @@ use Data::Dumper;
 #use LWP::UserAgent;
 #'#perl2exe_exclude'; #added to hide perl2exe warning message but not working
 
-print "Build Date: 10-Sep-2026 16:09:45\n";
+print "Build Date: 10-Sep-2026 16:19:12\n";
 $auth_code_return = 0;
 $appName = 'proton';
 my $secretFile = $ENV{"HOME"}."/silverline_secret";
@@ -1041,8 +1041,8 @@ $data = $xml->XMLin("$start_time_result");
 $run_count = $data->{app_run_count};
 #print Dumper($data);
 
-$build_version = "137";
-######buildadmin uncomment this# $build_version = "137";
+$build_version = "139";
+######buildadmin uncomment this# $build_version = "139";
 $NOLOG = 0 ;
 $HELP = 0;
 $overwritelog = 0;
