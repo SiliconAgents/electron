@@ -21,15 +21,16 @@
       \--------------------------------------------------------------------------------------/
 
 Note :
-Electron is the fork of unmaintained open source code at https://github.com/efabless/proton. proton is released under AGPL3 license as listed in License.txt file. Since Efabless closed down in 2025, we are unable to confirm the ownership and hence assume it is in the public domain.
+Electron is the fork of unmaintained open source code at https://github.com/efabless/proton. proton is released under AGPL3 license as listed in License.txt file. Since Efabless closed down in 2025, we are unable to confirm the ownership and hence assume proton code is in the public domain.
 
-This is our attempt to bring Proton back to life as we were the original contributors. Our belief that proton was designed ground up since inception in a way that blends very well for Agentic mode of chip design. 
+This is our attempt to bring Proton back to life as we were the original contributors. Our belief that proton was designed ground up since inception in a way that blends very well for Agentic era of chip design. 
 
 We have fixed some known bugs, improved installation using containers and enhanced its LEF/DEF parsers to handle advanced technology nodes. 
 
 If you are interested in enhancing electron please feel free to clone and contribute back. Also let us know of any bugs you find or ask for enhancements.
 
 Original Readme text :
+
 Proton : ASIC Place and Route Suite
 ===================================
 
@@ -40,7 +41,9 @@ Proton is written in perl and uses many of the packages available on CPAN. The G
 
 Getting Started
 ===============
-clone the latest code from this git repository. You will need to install Iverilog, Yosys, Graywolf and Qrouter separately on your system. Install the perl packages needed by proton from CPAN.
+clone the latest code from this git repository. 
+Install all the required packages and container stuff using Makefile provided in the INSTALL dir 
+You will need to install Iverilog, Yosys separately on your system. Install the perl packages needed by proton from CPAN.
 set the following environment variables
 
 	export $PROTON_HOME=/<your-install-dir>/proton
