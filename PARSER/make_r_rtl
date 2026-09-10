@@ -1949,5 +1949,383 @@ close(FILE);
 }#sub rtl_area_estimation
 
 #-----------------------------------------------------------------------------------#
+##########################################################################################################
+############################################### Verilog to lef ###########################################
+##########################################################################################################
+sub verilog2lef {
+  my $noOfArg = @_;
+  my ($lefFile, $cellW, $cellH, $cellClass, $siteName) = ("", "", "", "CORE", "tsm5site");
+
+  if($noOfArg < 6 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP')   {
+    print "Usage:  verilog2lef -lef <lef filename>\n";
+    print "                   -w < cell width >\n";
+    print "                   -h < cell height >\n";
+    print "                   -class < cell class >\n";
+    print "                   -site < site name >\n";
+    return (1);
+  } else {
+    for(my $i = 0; $i < $noOfArg; $i++){
+        if ($_[$i] eq "-lef") { $lefFile = $_[$i+1]; }
+        if ($_[$i] eq "-w")   { $cellW = $_[$i+1]; }
+        if ($_[$i] eq "-h")   { $cellH = $_[$i+1]; }
+        if ($_[$i] eq "-class")   { $cellClass = $_[$i+1]; }
+        if ($_[$i] eq "-site")   { $siteName = $_[$i+1]; }
+    }
+  }
+  
+  my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+  #print "top:$moduleName lef:$lefFile w:$cellW h:$cellH\n";
+  my @inPins = $MODULE_ALREADY{$moduleName}->dbVNOMGetInput;
+  my @outPins = $MODULE_ALREADY{$moduleName}->dbVNOMGetOutput;
+  my @bidiPins = $MODULE_ALREADY{$moduleName}->dbVNOMGetBidi;
+
+  open(WRITE_LEF, ">$lefFile");
+  print WRITE_LEF "MACRO $moduleName\n";
+  print WRITE_LEF "  CLASS $cellClass ;\n";
+  print WRITE_LEF "  FOREIGN $moduleName 0.0 0.0 ;\n";
+  print WRITE_LEF "  ORIGIN 0 0 ;\n";
+  print WRITE_LEF "  SIZE $cellW BY $cellH ;\n";
+  print WRITE_LEF "  SYMMETRY X Y ;\n";
+  #print WRITE_LEF "  SYMMETRY X Y R90 ;\n\n";
+  print WRITE_LEF "  SITE $siteName ;\n";
+  
+  foreach my $pin (@inPins){
+     print WRITE_LEF "  PIN $pin\n";
+     print WRITE_LEF "    DIRECTION INPUT ;\n";
+     print WRITE_LEF "    USE SIGNAL ;\n";
+     print WRITE_LEF "    PORT\n";
+     print WRITE_LEF "    END\n";
+     print WRITE_LEF "  END $pin\n\n";
+  }
+
+  foreach my $pin (@outPins){
+     print WRITE_LEF "  PIN $pin\n";
+     print WRITE_LEF "    DIRECTION OUTPUT ;\n";
+     if($pin =~ /\bvss|\bgnd/i){
+        print WRITE_LEF "    USE GROUND ;\n";
+     }elsif($pin =~ /\bvdd/i){
+        print WRITE_LEF "    USE POWER ;\n";
+     }else{
+        print WRITE_LEF "    USE SIGNAL ;\n";
+     }
+     print WRITE_LEF "    PORT\n";
+     print WRITE_LEF "    END\n";
+     print WRITE_LEF "  END $pin\n\n";
+  }
+
+  foreach my $pin (@bidiPins){
+     print WRITE_LEF "  PIN $pin\n";
+     print WRITE_LEF "    DIRECTION INOUT ;\n";
+     if($pin =~ /\bvss|\bgnd/i){
+        print WRITE_LEF "    USE GROUND ;\n";
+     }elsif($pin =~ /\bvdd/i){
+        print WRITE_LEF "    USE POWER ;\n";
+     }else{
+        print WRITE_LEF "    USE SIGNAL ;\n";
+     }
+     print WRITE_LEF "    PORT\n";
+     print WRITE_LEF "    END\n";
+     print WRITE_LEF "  END $pin\n\n";
+  }
+
+  print WRITE_LEF "END $moduleName\n";
+  #print WRITE_LEF "\nEND LIBRARY\n";
+  close WRITE_LEF;
+}#sub verilog2lef
+
+##########################################################################################################
+############################################### Verilog to lib ###########################################
+##########################################################################################################
+sub verilog2lib {
+  my $noOfArg = @_;
+  my $CAPACITANCE = 0.005;
+  my ($libFile, $cellW, $cellH) = ("", "", "");
+
+  if($noOfArg < 6 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP')   {
+    print "Usage: verilog2lib -lib <lib filename>\n";
+    print "                   -w < cell width >\n";
+    print "                   -h < cell height >\n";
+    return (1);
+  } else {
+    for(my $i = 0; $i < $noOfArg; $i++){
+        if ($_[$i] eq "-lib") { $libFile = $_[$i+1]; }
+        if ($_[$i] eq "-w")   { $cellW = $_[$i+1]; }
+        if ($_[$i] eq "-h")   { $cellH = $_[$i+1]; }
+    }
+  }
+  
+  my $moduleName = $GLOBAL->dbfGlobalGetTOP;
+  my @inPins = $MODULE_ALREADY{$moduleName}->dbVNOMGetInput;
+  my @outPins = $MODULE_ALREADY{$moduleName}->dbVNOMGetOutput;
+  my @bidiPins = $MODULE_ALREADY{$moduleName}->dbVNOMGetBidi;
+
+  #open(WRITE, ">$libFile");
+  #print WRITE "cell\($moduleName\) \{\n";
+  my $area = $cellW*$cellH;
+  #print WRITE "\tarea \: $area\;\n";
+  #print WRITE "\tdont_use \t\t\: TRUE\;\n";
+  #print WRITE "\tdont_touch \t\t\: TRUE\;\n";
+  #print WRITE "\tinterface_timing \t\: TRUE\;\n";
+
+  #foreach my $pin (@inPins){
+  #   print WRITE "\tpin\($pin\) \{\n";
+  #   print WRITE "\t\tdirection \: input\;\n";
+  #   print WRITE "\t\tcapacitance \: $CAPACITANCE\;\n";
+  #   print WRITE "\t\}\n";
+  #}
+
+  #foreach my $pin (@outPins){
+  #   print WRITE "\tpin\($pin\) \{\n";
+  #   print WRITE "\t\tdirection \: output\;\n";
+  #   print WRITE "\t\tcapacitance \: $CAPACITANCE\;\n";
+  #   print WRITE "\t\}\n";
+  #}
+
+  #foreach my $pin (@bidiPins){
+  #   print WRITE "\tpin\($pin\) \{\n";
+  #   print WRITE "\t\tdirection \: input\;\n";
+  #   print WRITE "\t\tcapacitance \: $CAPACITANCE\;\n";
+  #   print WRITE "\t\}\n";
+  #}
+
+  #print WRITE "\}\n";
+
+  #close WRITE;
+
+  my $x = 11;
+  liberty::si2drPIInit(\$x);
+
+  my $lib_name = "test_lib";
+
+  $group1 = liberty::si2drPICreateGroup($lib_name, "library", \$x);
+  my $attr = liberty::si2drGroupCreateAttr($group1, "delay_model", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr, "table_lookup", \$x);
+
+  my $attr1 = liberty::si2drGroupCreateAttr($group1, "in_place_swap_mode", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr1, "match_footprint", \$x);
+
+  my $attr2 = liberty::si2drGroupCreateAttr($group1, "revision", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr2, "21.1", \$x);
+
+  my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time); 
+  my @months = ("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec");
+  my $date = sprintf("%02d-%s-%04d",$mday,$months[$mon],$year+1900);
+  my $time = sprintf("%02d:%02d:%02d",$hour,$min,$sec);
+  my $localtime = "$date, $time";
+
+  my $attr3 = liberty::si2drGroupCreateAttr($group1, "date", $liberty::SI2DR_SIMPLE, \$x);
+  #liberty::si2drSimpleAttrSetStringValue($attr3, "Friday April 01 14:54:29 2021", \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr3, "$localtime", \$x);
+
+  #my $attr4 = liberty::si2drGroupCreateAttr($group1, "comment", $liberty::SI2DR_SIMPLE, \$x);
+  #liberty::si2drSimpleAttrSetStringValue($attr4, "Copyright 2021 by webchip semiconductor", \$x);
+
+  my $attr5 = liberty::si2drGroupCreateAttr($group1, "time_unit", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr5, "1ns", \$x);
+
+  my $attr6 = liberty::si2drGroupCreateAttr($group1, "voltage_unit", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr6, "1V", \$x);
+
+  my $attr7 = liberty::si2drGroupCreateAttr($group1, "current_unit", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr7, "1uA", \$x);
+
+  my $attr8 = liberty::si2drGroupCreateAttr($group1, "pulling_resistance_unit", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr8, "1kohm", \$x);
+
+  my $attr9 = liberty::si2drGroupCreateAttr($group1, "leakage_power_unit", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr9, "1nW", \$x);
+
+  $group1_2 = liberty::si2drGroupCreateGroup($group1,"delay_template", "lu_table_template", \$x);
+
+  my $attr10 = liberty::si2drGroupCreateAttr($group1_2, "variable_1", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr10, "input_net_transition", \$x);
+
+  my $attr11 = liberty::si2drGroupCreateAttr($group1_2, "variable_2", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr11, "total_output_net_capacitance", \$x);
+
+  ############################### writing bus_type definition #################################
+  foreach my $pin (@inPins){
+     my $type = $MODULE_ALREADY{$moduleName}->dbVNOMGetInputType($pin);
+     if($type == 1){
+        my $busWidth = $MODULE_ALREADY{$moduleName}->dbVNOMGetInputBits($pin);
+        $busWidth =~ s/\[|\]//g;
+        my @bits = split(/\:/, $busWidth);
+        my @sortedBits = sort{$a<=>$b} @bits;
+
+        my $busType = $pin."_".$moduleName."_BUS";
+        my $bitWidth = $sortedBits[-1] - $sortedBits[0] + 1; 
+
+        my $group1_0 = liberty::si2drGroupCreateGroup($group1,$busType, "type", \$x);
+        my $attr11 = liberty::si2drGroupCreateAttr($group1_0, "base_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr11, "array", \$x);
+        my $attr12 = liberty::si2drGroupCreateAttr($group1_0, "data_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr12, "bit", \$x);
+        my $attr13 = liberty::si2drGroupCreateAttr($group1_0, "bit_width", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr13, $bitWidth, \$x);
+        my $attr14 = liberty::si2drGroupCreateAttr($group1_0, "bit_from", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr14, $sortedBits[0], \$x);
+        my $attr15 = liberty::si2drGroupCreateAttr($group1_0, "bit_to", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr15, $sortedBits[-1], \$x);
+        my $attr16 = liberty::si2drGroupCreateAttr($group1_0, "downto", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr16, "false", \$x);
+     }
+  }
+
+  foreach my $pin (@outPins){
+     my $type = $MODULE_ALREADY{$moduleName}->dbVNOMGetOutputType($pin);
+     if($type == 1){
+        my $busWidth = $MODULE_ALREADY{$moduleName}->dbVNOMGetOutputBits($pin);
+        $busWidth =~ s/\[|\]//g;
+        my @bits = split(/\:/, $busWidth);
+        my @sortedBits = sort{$a<=>$b} @bits;
+
+        my $busType = $pin."_".$moduleName."_BUS";
+        my $bitWidth = $sortedBits[-1] - $sortedBits[0] + 1; 
+
+        my $group1_0 = liberty::si2drGroupCreateGroup($group1,$busType, "type", \$x);
+        my $attr11 = liberty::si2drGroupCreateAttr($group1_0, "base_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr11, "array", \$x);
+        my $attr12 = liberty::si2drGroupCreateAttr($group1_0, "data_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr12, "bit", \$x);
+        my $attr13 = liberty::si2drGroupCreateAttr($group1_0, "bit_width", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr13, $bitWidth, \$x);
+        my $attr14 = liberty::si2drGroupCreateAttr($group1_0, "bit_from", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr14, $sortedBits[0], \$x);
+        my $attr15 = liberty::si2drGroupCreateAttr($group1_0, "bit_to", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr15, $sortedBits[-1], \$x);
+        my $attr16 = liberty::si2drGroupCreateAttr($group1_0, "downto", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr16, "false", \$x);
+     }
+  }
+
+  foreach my $pin (@bidiPins){
+     my $type = $MODULE_ALREADY{$moduleName}->dbVNOMGetBidiType($pin);
+     if($type == 1){
+        my $busWidth = $MODULE_ALREADY{$moduleName}->dbVNOMGetBidiBits($pin);
+        $busWidth =~ s/\[|\]//g;
+        my @bits = split(/\:/, $busWidth);
+        my @sortedBits = sort{$a<=>$b} @bits;
+
+        my $busType = $pin."_".$moduleName."_BUS";
+        my $bitWidth = $sortedBits[-1] - $sortedBits[0] + 1; 
+
+        my $group1_0 = liberty::si2drGroupCreateGroup($group1,$busType, "type", \$x);
+        my $attr11 = liberty::si2drGroupCreateAttr($group1_0, "base_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr11, "array", \$x);
+        my $attr12 = liberty::si2drGroupCreateAttr($group1_0, "data_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr12, "bit", \$x);
+        my $attr13 = liberty::si2drGroupCreateAttr($group1_0, "bit_width", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr13, $bitWidth, \$x);
+        my $attr14 = liberty::si2drGroupCreateAttr($group1_0, "bit_from", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr14, $sortedBits[0], \$x);
+        my $attr15 = liberty::si2drGroupCreateAttr($group1_0, "bit_to", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr15, $sortedBits[-1], \$x);
+        my $attr16 = liberty::si2drGroupCreateAttr($group1_0, "downto", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr16, "false", \$x);
+     }
+  }
+   
+  #############################################################################################
+  $group1_1 = liberty::si2drGroupCreateGroup($group1,$moduleName, "cell", \$x);
+  my $attr12 = liberty::si2drGroupCreateAttr($group1_1, "area", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetFloat64Value($attr12, $area, \$x);
+  my $attr13 = liberty::si2drGroupCreateAttr($group1_1, "dont_use", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr13, "TRUE", \$x);
+  my $attr14 = liberty::si2drGroupCreateAttr($group1_1, "dont_touch", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr14, "TRUE", \$x);
+  my $attr15 = liberty::si2drGroupCreateAttr($group1_1, "interface_timing", $liberty::SI2DR_SIMPLE, \$x);
+  liberty::si2drSimpleAttrSetStringValue($attr15, "TRUE", \$x);
+  
+  foreach my $pin (@inPins){
+     my $dir = "input";
+     my $type = $MODULE_ALREADY{$moduleName}->dbVNOMGetInputType($pin);
+     if($type == 1){
+        my $busWidth = $MODULE_ALREADY{$moduleName}->dbVNOMGetInputBits($pin);
+        my $busType = $pin."_".$moduleName."_BUS";
+
+        $group1_1_1 = liberty::si2drGroupCreateGroup($group1_1,$pin, "bus", \$x);  
+        my $attr = liberty::si2drGroupCreateAttr($group1_1_1, "bus_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr, $busType, \$x);
+
+        my $attr1 = liberty::si2drGroupCreateAttr($group1_1_1, "direction", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr1, $dir, \$x);
+
+        my $attr2 = liberty::si2drGroupCreateAttr($group1_1_1, "capacitance", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr2, $CAPACITANCE, \$x);
+     }else{
+        $group1_1_1 = liberty::si2drGroupCreateGroup($group1_1,$pin, "pin", \$x);  
+        my $attr = liberty::si2drGroupCreateAttr($group1_1_1, "direction", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr, $dir, \$x);
+
+        my $attr1 = liberty::si2drGroupCreateAttr($group1_1_1, "capacitance", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr1, $CAPACITANCE, \$x);
+
+        my $attr2 = liberty::si2drGroupCreateAttr($group1_1_1, "max_transition", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr2, 2.0, \$x);
+     }
+  }
+  foreach my $pin (@outPins){
+     my $dir = "output";
+     my $type = $MODULE_ALREADY{$moduleName}->dbVNOMGetOutputType($pin);
+     if($type == 1){
+        my $busWidth = $MODULE_ALREADY{$moduleName}->dbVNOMGetOutputBits($pin);
+        my $busType = $pin."_".$moduleName."_BUS";
+
+        $group1_1_1 = liberty::si2drGroupCreateGroup($group1_1,$pin, "bus", \$x);  
+        my $attr = liberty::si2drGroupCreateAttr($group1_1_1, "bus_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr, $busType, \$x);
+
+        my $attr1 = liberty::si2drGroupCreateAttr($group1_1_1, "direction", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr1, $dir, \$x);
+
+        my $attr2 = liberty::si2drGroupCreateAttr($group1_1_1, "capacitance", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr2, $CAPACITANCE, \$x);
+     }else{
+        $group1_1_1 = liberty::si2drGroupCreateGroup($group1_1,$pin, "pin", \$x);  
+        my $attr = liberty::si2drGroupCreateAttr($group1_1_1, "direction", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr, $dir, \$x);
+     }
+  }
+  foreach my $pin (@bidiPins){
+     my $dir = "input";
+     my $type = $MODULE_ALREADY{$moduleName}->dbVNOMGetBidiType($pin);
+     if($type == 1){
+        my $busWidth = $MODULE_ALREADY{$moduleName}->dbVNOMGetBidiBits($pin);
+        my $busType = $pin."_".$moduleName."_BUS";
+
+        $group1_1_1 = liberty::si2drGroupCreateGroup($group1_1,$pin, "bus", \$x);  
+        my $attr = liberty::si2drGroupCreateAttr($group1_1_1, "bus_type", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr, $busType, \$x);
+
+        my $attr1 = liberty::si2drGroupCreateAttr($group1_1_1, "direction", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr1, $dir, \$x);
+
+        my $attr2 = liberty::si2drGroupCreateAttr($group1_1_1, "capacitance", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr2, $CAPACITANCE, \$x);
+     }else{
+        $group1_1_1 = liberty::si2drGroupCreateGroup($group1_1,$pin, "pin", \$x);  
+        my $attr = liberty::si2drGroupCreateAttr($group1_1_1, "direction", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetStringValue($attr, $dir, \$x);
+
+        my $attr1 = liberty::si2drGroupCreateAttr($group1_1_1, "capacitance", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr1, $CAPACITANCE, \$x);
+
+        my $attr2 = liberty::si2drGroupCreateAttr($group1_1_1, "max_transition", $liberty::SI2DR_SIMPLE, \$x);
+        liberty::si2drSimpleAttrSetFloat64Value($attr2, 2.0, \$x);
+     }
+  }
+
+  liberty::si2drWriteLibertyFile($libFile, $group1, \$x);
+  liberty::si2drPIQuit(\$x);
+  #------------- Reporting Error --------------#
+  #liberty::si2drPIInit(\$x);
+  #liberty::si2drReadLibertyFile($libFile, \$x);
+  #liberty::si2drPIQuit(\$x); 
+  #--------------------------------------------#
+
+}#sub verilog2lib
+
+##########################################################################################################
+
 1;
 

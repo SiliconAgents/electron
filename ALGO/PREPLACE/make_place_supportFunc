@@ -27,7 +27,7 @@ elsif ( $TYPE eq "all") {
                      }
 
 open(WRITE, ">matlab.txt");
-print WRITE "#MATLAB FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE "#MATLAB FILE written from electron verion-$TOOL_VERSION\n";
 &dbPlaceWriteMatlabDatFile($max_row,$max_col);
 close(WRITE);
 open(WRITE, ">Sgraph.txt");
@@ -87,9 +87,10 @@ for (my $xx = 1; $xx <= $max_row; $xx++ ) { # row
                my $yName = $PLACE{$TOP_MODULE}->dbPlaceGetNameByNumber($yy);
                my @loc1 = $PLACE{$TOP_MODULE}->dbPlaceGetFlopLoc($xName);
                my @loc2 = $PLACE{$TOP_MODULE}->dbPlaceGetFlopLoc($yName);
-               my $xdist =  ($loc1[0]/2000 - $loc2[0]/2000);
+               my $dbu = $GLOBAL->dbfGlobalGetDBU();
+               my $xdist =  ($loc1[0]/$dbu - $loc2[0]/$dbu);
                my $xdistSq =  $xdist*$xdist;
-               my $ydist =  ($loc1[1]/2000 - $loc2[1]/2000);
+               my $ydist =  ($loc1[1]/$dbu - $loc2[1]/$dbu);
                my $ydistSq =  $ydist*$ydist;
 ### eucledian distance
                my $eDist = sprintf("%.2f",sqrt($xdistSq + $ydistSq));
@@ -114,7 +115,7 @@ for (my $xx = 1; $xx <= $max_row; $xx++ ) { # row
 
 sub write_metis {
 open(WRITE, ">metis.txt");
-print WRITE "#MATIS FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE "#MATIS FILE written from electron verion-$TOOL_VERSION\n";
 &dbPlaceWriteMetisDatFile;
 close(WRITE);
 }#sub write_metis
@@ -534,7 +535,6 @@ system "gnuplot ./_tmp_apna_tool_x_y_slack_do_file";
                             }# if correct arguments
 }#sub plot_analysis_graph
 
-1;
 #****f* /delete_buffer_tree
 #  delete_buffer_tree
 # FUNCTION
@@ -767,3 +767,361 @@ print "INFO-ALGO_PREPL-DEL_BUFR_TREE : 018 : $delInvCnt inverters in inverter-pa
 
                                     }#if correct number of arguments
 }# sub delete_buffer_tree
+
+#########################################################################################################
+################################### io ports placement using json file ##################################
+#########################################################################################################
+sub place_io_ports {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+
+  my $noOfArg = @_;
+  if($noOfArg < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: place_io_ports -f <json file>\n";
+     print"                      -minLayer < Min Routing Layer >\n";
+     print"                      -maxLayer < Min Routing Layer >\n";
+     return;
+  }else{
+     my ($jsonFile, $minRLayer, $maxRLayer) = ("", $GLOBAL->dbGlobalGetMinRoutingLayer, $GLOBAL->dbGlobalGetMaxRoutingLayer);
+     my @hLayers = ();
+     my @vLayers = ();
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-f")       {$jsonFile = $_[$i+1]; }
+         if($_[$i] eq "-minLayer"){$minRLayer = $_[$i+1];}
+         if($_[$i] eq "-maxLayer"){$maxRLayer = $_[$i+1];}
+     }
+
+     my $minRLayerNum = $PTDB{$minRLayer}->dbTechGetLayerNum;
+     my $maxRLayerNum = $PTDB{$maxRLayer}->dbTechGetLayerNum;
+     foreach my $layerName ( keys %PTDB){
+        my $type = $PTDB{$layerName}->dbTechGetLayerType;
+        my $num = $PTDB{$layerName}->dbTechGetLayerNum;
+        if($type eq "ROUTING" && $num >= $minRLayerNum && $num <= $maxRLayerNum) {
+           my $dir = $PTDB{$layerName}->dbTechGetLayerDir;
+           if ($dir eq "HORIZONTAL"){push(@hLayers, $layerName);}
+           elsif($dir eq "VERTICAL"){push(@vLayers, $layerName);}    
+        }#if routing type
+     }#foreach layer
+     my $hLayerLen = @hLayers;
+     my $vLayerLen = @vLayers;
+
+     if(!-e $jsonFile){
+        print "\nWARN-TST-PL_IO_PORTS : 001 : file $jsonFile does not exists !\n";
+        return;
+     }
+     my $data;
+     if(open (my $json_str, $jsonFile)){
+       local $/ = undef;
+       my $json = JSON->new;
+       $data = $json->decode(<$json_str>);
+       close($json_str);
+     }
+     #print Dumper($data);
+     #print Dumper($data->{"pins"}[0]);
+     if(exists $DIE_ALREADY{dieArea}){
+        my $diellx = $DIE_ALREADY{dieArea}[0];
+        my $dielly = $DIE_ALREADY{dieArea}[1];
+        my $dieurx = $DIE_ALREADY{dieArea}[2];
+        my $dieury = $DIE_ALREADY{dieArea}[3];
+     
+        my $dieWidth = abs($dieurx - $diellx) ;
+        my $dieHeight = abs($dieury - $dielly) ;
+     
+        foreach my $element (@{$data->{"pins"}}){
+           my $side = $element->{"side"};
+           my @pins = @{$element->{"pin"}};
+           my $numOfPins = @pins;
+           #print "side:$side numPins:$numOfPins\n";
+           my ($pinX, $pinY) = (0, 0);
+           my $dis = 1;
+           if($side eq "E" || $side eq "W"){
+              $dis = $dieHeight/($numOfPins + 1);
+           }elsif($side eq "N" || $side eq "S"){
+              $dis = $dieWidth/($numOfPins + 1);
+           }
+           my $count = 1;
+           foreach my $pinEle (@{$element->{"pin"}}){
+              my $pinName = $pinEle->{"name"};
+              my $pinStatus = $pinEle->{"status"};
+              my $pinLayer = $pinEle->{"layer"};
+              #print "pin:$pinName status:$pinStatus layer:$pinLayer\n";
+              if($side eq "E"){
+                 $pinX = $dieurx;
+                 $pinY = $dielly + $count*$dis;
+              }elsif($side eq "W"){
+                 $pinX = $diellx;
+                 $pinY = $dielly + $count*$dis;
+              }elsif($side eq "N"){
+                 $pinX = $diellx + $count*$dis;
+                 $pinY = $dieury; 
+              }elsif($side eq "S"){
+                 $pinX = $diellx + $count*$dis;
+                 $pinY = $dielly; 
+              }
+              if(exists $PORTS_ALREADY{$TOP_MODULE}{$pinName}){
+                 $PORTS_ALREADY{$TOP_MODULE}{$pinName}->dbPortSetLoc($pinX, $pinY);
+                 $PORTS_ALREADY{$TOP_MODULE}{$pinName}->dbPortSetSide($side);
+                 if($pinStatus){
+                    $PORTS_ALREADY{$TOP_MODULE}{$pinName}->dbPortSetStatus($pinStatus);
+                 }else{
+                    $PORTS_ALREADY{$TOP_MODULE}{$pinName}->dbPortSetStatus('PLACED');
+                 }
+                 if($pinLayer){ 
+                    $PORTS_ALREADY{$TOP_MODULE}{$pinName}->dbPortSetLayer($pinLayer);
+                 }else{
+                    if($side eq 'N' || $side eq 'S'){ 
+                       my $pinLayerN = int(rand($vLayerLen));
+                       $pinLayer = $vLayers[$pinLayerN]; 
+                    }elsif($side eq 'E' || $side eq 'W'){
+                       my $pinLayerN = int(rand($hLayerLen));
+                       $pinLayer = $hLayers[$pinLayerN]; 
+                    }
+                    $PORTS_ALREADY{$TOP_MODULE}{$pinName}->dbPortSetLayer($pinLayer);
+                 }#if pin layer not in json
+              }
+              #print "$count- pin:$pinName status:$pinStatus layer:$pinLayer Loc:$pinX,$pinY\n";
+              $count++;
+           }#foreach pin
+        }#foreach pins
+        &prePlaceData( "--noTrace", "--noLevel");
+        &snapPlace( "--iosOnly");
+        &remove_pins_overlap;
+     }#if die area exists
+  }#if correct num of arg
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command place_io_ports took:",timestr($td),"\n";
+}#sub place_io_ports
+
+##############################################################################################
+################################### add buffer in given net ##################################
+##############################################################################################
+sub add_buffer {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+
+  my $noOfArg = @_;
+  if($noOfArg < 4 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: add_buffer -buf <cell name>\n";
+     print"                  -net < net name >\n";
+     return;
+  }else{
+     my ($bufCell, $netName) = ("", "");
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-buf"){$bufCell = $_[$i+1];}
+         if($_[$i] eq "-net"){$netName = $_[$i+1];}
+     }
+      
+     my $totalNumNets = keys %NETS_ALREADY;
+     my $netCnt = $totalNumNets++;
+     my $totalNumInsts = keys %CADB;
+     my $bufInst = "INST_".$totalNumInsts++;
+     if(exists $NETS_ALREADY{$netName}){
+	my ($driverInst, $driverInstPin) = &getNetDriver($netName);
+	#print "driverInst:$driverInst pin:$driverInstPin\n";
+	delete $NETS_ALREADY{$netName}{$driverInst}; #deleting previous driver inst
+        delete $COMP_ALREADY{$driverInst}{$driverInstPin}; # deleting previous driver entry 
+	########################### Adding new net data #####################
+	my @pins = $PLDB{$bufCell}->dbMdbGetPins;
+	my ($bufCellInPin, $bufCellOutPin) = ("", "");
+  	foreach my $pinName ( @pins ) {
+	   my $pinDir  = $PLDB{$bufCell}->dbMdbGetPinDir($pinName);
+  	   if ($pinDir == 1){ 
+               $bufCellOutPin = $pinName;
+           }elsif($pinDir == 0){
+               $bufCellInPin = $pinName;
+           }		   
+	}
+	$NETS_ALREADY{$netName}{$bufInst} = $bufCellOutPin;
+        $COMP_ALREADY{$bufInst}{$bufCellOutPin} = $netName;   
+
+	my $newNet = $driverInst."_".$netCnt;
+
+	$NETS_ALREADY{$newNet} = NetDB::new();
+	$NETS_ROUTING_ALREADY{$newNet} = NetRoutingDB::new();
+        $NADB{$newNet} = NetsAttrDB::new();
+        $NADB{$newNet}->dbNadbSetNetType(0);
+	$NETS_ALREADY{$newNet}{$driverInst} = $driverInstPin;
+	$NETS_ALREADY{$newNet}{$bufInst} = $bufCellInPin;
+
+        $COMP_ALREADY{$driverInst}{$driverInstPin} = $newNet; 
+        $CADB{$bufInst} = CompAttDB::new();
+        $CADB{$bufInst}->dbCadbSetCellref($bufCell);
+        $CADB{$bufInst}->dbCadbSetStatus("UNPLACED");
+        $CADB{$bufInst}->dbCadbSetOrient(N);
+        $COMP_ALREADY{$bufInst}{$bufCellInPin} = $newNet;   
+
+	#my @drv1 = getNetDriver($netName); 
+        #my @sink1 = getNetSink($netName); 
+        #my @drv2 = getNetDriver($newNet); 
+        #my @sink2 = getNetSink($newNet); 
+        #print "net:$netName drv:@drv1 sink:@sink1\n";
+        #print "net:$newNet drv:@drv2 sink:@sink2\n";
+     }
+  }#if correct num of arg
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command add_buffer took:",timestr($td),"\n";
+}#sub add_buffer
+
+##############################################################################################
+#################################### delete buffer command ###################################
+##############################################################################################
+sub delete_buffer {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+
+  my $noOfArg = @_;
+  if($noOfArg < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: delete_buffer -buf <buffer Instance>\n";
+     return;
+  }else{
+     my $bufInst = "";
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-buf"){$bufInst = $_[$i+1];}
+     }
+      
+     if(exists $CADB{$bufInst}){
+        my $bufCell = $CADB{$bufInst}->dbCadbGetCellref;
+	my @pins = $PLDB{$bufCell}->dbMdbGetPins;
+	my ($bufCellInPin, $bufCellOutPin) = ("", "");
+  	foreach my $pinName ( @pins ) {
+	   my $pinDir  = $PLDB{$bufCell}->dbMdbGetPinDir($pinName);
+  	   if ($pinDir == 1){ 
+               $bufCellOutPin = $pinName;
+           }elsif($pinDir == 0){
+               $bufCellInPin = $pinName;
+           }		   
+	}
+        my $netToBeDeleted = $COMP_ALREADY{$bufInst}{$bufCellInPin};   
+        my $netToBeContinued = $COMP_ALREADY{$bufInst}{$bufCellOutPin};   
+	my ($driverInst, $driverInstPin) = &getNetDriver($netToBeDeleted);
+	#print "netDel:$netToBeDeleted drv:$driverInst drvPin:$driverInstPin\n";
+
+	$NETS_ALREADY{$netToBeContinued}{$driverInst} = $driverInstPin;
+        $COMP_ALREADY{$driverInst}{$driverInstPin} = $netToBeContinued; 
+
+	delete $NADB{$netToBeDeleted};
+	delete $NETS_ALREADY{$netToBeContinued}{$bufInst};
+	delete $NETS_ALREADY{$netToBeDeleted}; #deleting buffer sink
+
+	delete $CADB{$bufInst};
+        delete $COMP_ALREADY{$bufInst}; # deleting buffer driver entry 
+
+	#my @drv1 = getNetDriver($netToBeContinued); 
+        #my @sink1 = getNetSink($netToBeContinued); 
+	#print "net:$netToBeContinued drv:@drv1 sink:@sink1\n";
+     }
+  }#if correct num of arg
+
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command delete_buffer took:",timestr($td),"\n";
+}#sub delete_buffer
+
+##############################################################################################
+##################################### add endcap command ###################################
+##############################################################################################
+sub add_endcap {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+
+  my $noOfArg = @_;
+  if($noOfArg < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: add_endcap -cell <cell name>\n";
+     return;
+  }else{
+     my $endcapCell = "";
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-cell"){$endcapCell = $_[$i+1];}
+     }
+      
+     my $dbu = $GLOBAL->dbfGlobalGetDBU;
+     if(exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}){
+	my @size = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetSize;
+        my @rows = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetRows;
+	my @cellSize = $PLDB{$endcapCell}->dbMdbGetSize;
+	my $instCnt = keys %CADB;
+        foreach my $tag ( @rows ){
+          my ($x,$y) = (split(/\s+/, $tag))[2,3];
+	  my $sEndCapInst = "endCapInst_".$instCnt;
+          $CADB{$sEndCapInst} = CompAttDB::new();
+          $CADB{$sEndCapInst}->dbCadbSetCellref($endcapCell);
+	  $CADB{$sEndCapInst}->dbCadbSetLoc($x,$y);
+	  $CADB{$sEndCapInst}->dbCadbSetbBox($x,$y,$x+$cellSize[0]*$dbu, $y+$cellSize[1]*$dbu);
+          $CADB{$sEndCapInst}->dbCadbSetStatus("PLACED");
+          $CADB{$sEndCapInst}->dbCadbSetOrient(N);
+	  $instCnt++;
+	  my $endCapInst = "endCapInst_".$instCnt;
+          $CADB{$endCapInst} = CompAttDB::new();
+          $CADB{$endCapInst}->dbCadbSetCellref($endcapCell);
+	  $x = $size[2] - $cellSize[0]*$dbu;
+	  $CADB{$endCapInst}->dbCadbSetLoc($x,$y);
+	  $CADB{$endCapInst}->dbCadbSetbBox($x,$y,$x+$cellSize[0]*$dbu, $y+$cellSize[1]*$dbu);
+          $CADB{$endCapInst}->dbCadbSetStatus("PLACED");
+          $CADB{$endCapInst}->dbCadbSetOrient(N);
+	  $instCnt++;
+	}
+     }
+  }#if correct num of arg
+     
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command add_endcap took:",timestr($td),"\n";
+}#sub add_endcap
+
+##############################################################################################
+##################################### add wellties command ###################################
+##############################################################################################
+sub add_wellties {
+  use Benchmark;
+  my $t0 = new Benchmark; 
+
+  my $noOfArg = @_;
+  if($noOfArg < 4 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print"Usage: add_wellties -cell <cell name>\n";
+     print"                    -x < distance in micron between two wellties>\n";
+     return;
+  }else{
+     my ($welltiesCell, $disX) = ("", 0);
+     for(my $i=0; $i<$noOfArg; $i++){
+         if($_[$i] eq "-cell"){$welltiesCell = $_[$i+1];}
+         if($_[$i] eq "-x"){$disX = $_[$i+1];}
+     }
+      
+     my $dbu = $GLOBAL->dbfGlobalGetDBU;
+     if(exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}){
+	my @size = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetSize;
+        my @rows = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}}->dbFlplanGetRows;
+	my @cellSize = $PLDB{$welltiesCell}->dbMdbGetSize;
+	my $instCnt = keys %CADB;
+        foreach my $tag ( @rows ){
+          my ($x,$y) = (split(/\s+/, $tag))[2,3];
+	  #print "$x,$y,$size[2],$y\n";
+	  $x = $x + $disX*$dbu;
+	  while (($x+$cellSize[0]*$dbu) < $size[2]){
+	     my $welltiesInst = "welltiesInst_".$instCnt;
+             $CADB{$welltiesInst} = CompAttDB::new();
+             $CADB{$welltiesInst}->dbCadbSetCellref($welltiesCell);
+	     $CADB{$welltiesInst}->dbCadbSetLoc($x,$y);
+	     $CADB{$welltiesInst}->dbCadbSetbBox($x,$y,$x+$cellSize[0]*$dbu, $y+$cellSize[1]*$dbu);
+             $CADB{$welltiesInst}->dbCadbSetStatus("PLACED");
+             $CADB{$welltiesInst}->dbCadbSetOrient(N);
+	     $instCnt++;
+	     $x = $x + $disX*$dbu;
+          }
+	}
+     }
+  }#if correct num of arg
+     
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command add_wellties took:",timestr($td),"\n";
+}#sub add_wellties
+
+#########################################################################################################
+
+
+1;
