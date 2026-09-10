@@ -48,7 +48,7 @@ set the following environment variables
 
 	export ELECTRON_HOME=/<your-install-dir>/electron
 	cd $ELECTRON_HOME
-	./UTILS/make_tool
+	make
 
 Proton can be invoked using the following commands
 export PATH=$ELECTRON_HOME:$PATH

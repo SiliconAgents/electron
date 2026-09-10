@@ -1,0 +1,14 @@
+# Build products of "make" (UTILS/make_tool, make_tool_hier, make_tool_proto).
+# These are UTILS/*.nopath with $BEEHOME and a use lib line prepended, so they
+# are specific to the directory they were built in and they embed the git commit
+# count as the release-ID.  That means they change on every commit whether or not
+# any source changed -- run make after cloning rather than tracking them.
+/electron
+/electron_hier
+/electron_proto
+/electron_auth
+/electron.lnx.bin
+
+# Session logs and command logs written next to the tool, and by the tests.
+electron.log*
+electron.cmd*
