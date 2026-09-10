@@ -1,0 +1,58 @@
+FROM ubuntu:22.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+#export FLEX_INCLUDE_DIR=/usr/local/include
+ENV FLEX_INCLUDE_DIR=/usr/local/include
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        flex \
+        bison \
+        libcairo2-dev \
+        libboost-all-dev \
+        vim \
+        vim-gtk3 \
+        less \
+        python3-pip \
+        python3-dev \
+        rsync \
+        libfl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install CMake 3.21
+ADD https://cmake.org/files/v3.21/cmake-3.21.0-linux-x86_64.sh /cmake-3.21.0-linux-x86_64.sh
+RUN mkdir /opt/cmake && \
+    sh /cmake-3.21.0-linux-x86_64.sh --prefix=/opt/cmake --skip-license && \
+    ln -s /opt/cmake/bin/cmake /usr/local/bin/cmake && \
+    cmake --version
+
+# RUN     pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+# RUN     pip3 install torch>=1.6.0
+RUN pip install torch==2.0.1+cpu --index-url https://download.pytorch.org/whl/cpu
+
+RUN git clone --recursive https://github.com/limbo018/DREAMPlace.git
+RUN apt-get update && \
+    apt-get install -y tclsh
+
+RUN rsync -avz /proj_pd/user_dev/rsrivastava/DreamPlace/fix_sigstksz.py .
+RUN python3 fix_sigstksz.py
+
+RUN    cd DREAMPlace && \ 
+    pip3 install -r requirements.txt && \
+    mkdir build && \
+    cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=../ -DPython_EXECUTABLE=$(which python3) -DFLEX_INCLUDE_DIR=/usr/include && \
+    make && \
+    make install && \
+    cd ../
+
+RUN apt-get update && \
+    apt-get install -y python3-tk
+
+
+
+# Default command

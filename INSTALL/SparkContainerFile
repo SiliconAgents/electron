@@ -1,0 +1,40 @@
+# Use the official Ubuntu 22.04 base image
+FROM ubuntu:22.04
+#FROM openjdk:11-jdk-slim
+
+# Set environment variables (optional)
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update package lists and install necessary packages
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends perl-tk && \
+    apt install default-jdk -y wget
+
+# Use a base image with Java installed
+
+# Set environment variables for Spark
+ENV SPARK_VERSION=4.0.1
+ENV HADOOP_VERSION=3
+ENV SPARK_HOME=/opt/spark
+
+# Download and extract Spark
+WORKDIR /tmp
+#RUN wget https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz \
+RUN wget https://dlcdn.apache.org/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz \
+    && tar -xzf spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz \
+    && mv spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} ${SPARK_HOME} \
+    && rm spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz
+
+# Add Spark to PATH
+ENV PATH="${SPARK_HOME}/bin:${PATH}"
+
+# Expose Spark UI port (optional, adjust as needed)
+EXPOSE 8080 7077
+
+# Set default command (optional, can be overridden)
+
+ENV PROTON_HOME=/proj_pd/user_dev/rsrivastava/potato
+ENV PATH=$PROTON_HOME:$PATH
+
+# Define the command to run when the container starts
+# CMD /home/rsrivastava/potato/proton

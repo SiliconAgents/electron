@@ -1,0 +1,32 @@
+FROM ubuntu:22.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+#export FLEX_INCLUDE_DIR=/usr/local/include
+ENV FLEX_INCLUDE_DIR=/usr/local/include
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN apt-get update && \
+    apt-get install -y python3-tk python3-pip python3-dev
+
+RUN apt-get update && \
+    apt install openjdk-17-jdk -y
+
+RUN pip install pyqtgraph PyQt5
+
+RUN pip install pyspark
+
+RUN apt-get update && \
+    apt-get install -y libx11-xcb1 libqt5gui5
+
+RUN apt install -y pigz less
+
+RUN apt install -y gzip apt cpanminus vim
+
+RUN pip install matplotlib
+RUN pip install pandas
+# Default command

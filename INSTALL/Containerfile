@@ -1,0 +1,29 @@
+# Use the official Ubuntu 22.04 base image
+FROM centos:latest
+
+LABEL maintainer="Rajeev Srivastava <rajeev.srivastava@gmail.com>"
+
+    RUN yum update -y && \
+        yum install -y httpd && \
+        yum install -y vim-X11.x86_64 && \
+        yum install -y less.x86_64 && \
+        yum install -y xhost.x86_64 && \
+        yum install -y perl && \
+        yum install -y perl-Tk && \
+        yum install -y xterm-389-3.el10.x86_64 libXmu.x86_64 libXmu-devel.x86_64 libXpm-devel.x86_64 libXrandr-devel.x86_64 libXext-devel.x86_64 libXfont2.x86_64 libXt-devel.x86_64 && \
+        yum install -y cpanminus && \
+        cpanm Tk::WorldCanvas Verilog::Netlist Bit::Vector Verilog::VCD Graphics::ColorNames GDS2 Spreadsheet::Read Spreadsheet::WriteExcel File::Data PDF::Create CGI && \
+        cpanm Proc::ProcessTable Spreadsheet::ParseExcel && \ 
+        cpanm File::ReadBackwards JSON Switch Graph::Directed DBI Math::Polygon Math::Clipper Git::Repository Proc::Simple && \
+        cpanm --force Tk::DynaTabFrame && \
+        yum clean all
+
+
+# Copy application files into the image
+# COPY . /app
+
+# Set the working directory
+# WORKDIR /app
+
+# Define the command to run when the container starts
+# CMD ["perl /home/rsrivastava/potato/proton"]

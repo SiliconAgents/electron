@@ -1,0 +1,56 @@
+# Use the official Ubuntu 22.04 base image
+FROM ubuntu:22.04
+
+# Set environment variables (optional)
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update package lists and install necessary packages
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends perl-tk && \
+    apt install -y cpanminus vim less xterm flex byacc bison build-essential && \
+    apt-get install -y libxml-sax-expat-perl && \
+    apt-get install -y  libtk-tablematrix-perl && \
+    apt-get install -y libgd-perl && \
+    cpanm Tk::WorldCanvas && \
+    cpanm Spreadsheet::Read && \
+    cpanm Spreadsheet::WriteExcel && \
+    cpanm Verilog::Netlist Bit::Vector Verilog::VCD && \
+    cpanm Graphics::ColorNames && \
+    cpanm Spreadsheet::ParseExcel && \
+    cpanm Switch && \
+    cpanm Tk::ProgressBar::Mac && \
+    cpanm GDS2 Git::Repository DBI PDF::Create && \
+    cpanm File::Data CGI Proc::Simple Proc::ProcessTable JSON File::ReadBackwards Graph::Directed Math::Polygon Math::Clipper && \
+    cpanm --force Tk::DynaTabFrame && \
+    apt-get install -y iverilog yosys gtkwave && \
+    apt install -y libeigen3-dev swig autoconf libtool && \
+    apt-get install -y git && \
+    apt install -y cmake && \
+    apt install -y build-essential tcl-dev libffi-dev libtool&& \
+    git clone https://github.com/ivmai/cudd.git && \
+    cd cudd && \
+    autoreconf -i && \
+    ./configure --prefix=/usr/local && \
+    make install && \
+    cd && \
+    git clone --recursive https://github.com/The-OpenROAD-Project/OpenSTA.git && \
+    cd OpenSTA && \
+    mkdir build && cd build && \
+    cmake .. && \
+    make -j$(nproc) && \
+
+
+    rm -rf /var/lib/apt/lists/*
+    
+
+# Copy application files into the image
+# COPY . /app
+
+# Set the working directory
+# WORKDIR /app
+#
+ENV PROTON_HOME=/proj_pd/user_dev/rsrivastava/potato
+ENV PATH=$PROTON_HOME:$PATH
+
+# Define the command to run when the container starts
+# CMD /home/rsrivastava/potato/proton
