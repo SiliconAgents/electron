@@ -11,7 +11,7 @@ package Global;
 sub new {
 my $design = {
                     SCH => -1,
-                    DBU => 2000,
+                    DBU => 4000,
                     u2db => 0,
                     db2u => 0,
                     micron2gui => 0,
@@ -84,10 +84,17 @@ my $design = {
                     RTL_FILES => [],
                     RTL_DIR => "",
                     LIB_FILES => [],
-                    TECH_LEF => "",
+                    #TECH_LEF => "",
+                    TECH_LEF => [],
                     LEF_FILES => [],
                     V_MODELS => [],
                     CORE_BBOX => [],
+                    PWR_NET => "",
+                    GND_NET => "",
+                    STD_CELL_RAIL_WIDTH => 0,
+                    STD_CELL_METAL => "",
+                    MIN_ROUTING_LAYER => "",
+                    MAX_ROUTING_LAYER => "",
                     };
 bless $design, 'Global';
 return $design;
@@ -136,14 +143,14 @@ return($i);
 #-----------------------------------------------#
 
 sub dbfGlobalSetTOP {
-my ($self, $top) = @_;
-$self->{TOP} = $top;
+my ($self, $topModule) = @_;
+$self->{TOP} = $topModule;
 }#sub dbfGlobalSetTOP
 
 sub dbfGlobalGetTOP {
 my ($self) = @_;
-my $top = $self->{TOP};
-return($top);
+my $topModule = $self->{TOP};
+return($topModule);
 }#sub dbfGlobalGetTOP
 #-----------------------------------------------#
 
@@ -993,14 +1000,19 @@ return(@files);
 
 #----------------------------------------------#
 sub dbGlobalSetTechLef {
-my ($self,$i) = @_;
-$self->{TECH_LEF} = $i;
+#my ($self,$i) = @_;
+#$self->{TECH_LEF} = $i;
+my ($self, @files) = @_;
+while (defined ($f = shift @files ) ) { push(@{$self->{TECH_LEF}}, $f); }
 }#sub dbGlobalSetTechLef
 
 sub dbGlobalGetTechLef {
-my($self) = @_;
-my $i = $self->{TECH_LEF};
-return($i);
+#my($self) = @_;
+#my $i = $self->{TECH_LEF};
+#return($i);
+my ($self) = @_;
+my @files = @{$self->{TECH_LEF}};
+return(@files);
 }#sub dbGlobalGetTechLef
 
 #----------------------------------------------#
@@ -1038,6 +1050,79 @@ my ($self) = @_;
 my @bbox = @{$self->{CORE_BBOX}};
 return(@bbox);
 }#sub dbGlobalGetCoreBBox
+
+#-----------------------------------------------#
+sub dbGlobalSetPowerNet{
+my ($self, $pwrNet) = @_;
+   $self->{PWR_NET} = $pwrNet;
+}#sub dbGlobalSetPowerNet
+
+sub dbGlobalGetPowerNet{
+my ($self) = @_;
+my $pwrNet = $self->{PWR_NET};
+return($pwrNet);
+}#sub dbGlobalGetPowerNet
+
+#-----------------------------------------------#
+sub dbGlobalSetGroundNet{
+my ($self, $i) = @_;
+   $self->{GND_NET} = $i;
+}#sub dbGlobalSetGroundNet
+
+sub dbGlobalGetGroundNet{
+my ($self) = @_;
+my $i = $self->{GND_NET};
+return($i);
+}#sub dbGlobalGetGroundNet
+
+#-----------------------------------------------#
+sub dbGlobalSetStdCellRailWidth{
+my ($self, $i) = @_;
+   $self->{STD_CELL_RAIL_WIDTH} = $i;
+}#sub dbGlobalSetStdCellRailWidth
+
+sub dbGlobalGetStdCellRailWidth{
+my ($self) = @_;
+my $i = $self->{STD_CELL_RAIL_WIDTH};
+return($i);
+}#sub dbGlobalGetStdCellRailWidth
+
+#-----------------------------------------------#
+sub dbGlobalSetStdCellMetal{
+my ($self, $i) = @_;
+   $self->{STD_CELL_METAL} = $i;
+}#sub dbGlobalSetStdCellMetal
+
+sub dbGlobalGetStdCellMetal{
+my ($self) = @_;
+my $i = $self->{STD_CELL_METAL};
+return($i);
+}#sub dbGlobalGetStdCellMetal
+
+#-----------------------------------------------#
+sub dbGlobalSetMinRoutingLayer{
+my ($self, $i) = @_;
+   $self->{MIN_ROUTING_LAYER} = $i;
+}#sub dbGlobalSetMinRoutingLayer
+
+sub dbGlobalGetMinRoutingLayer{
+my ($self) = @_;
+my $i = $self->{MIN_ROUTING_LAYER};
+return($i);
+}#sub dbGlobalGetMinRoutingLayer
+
+#-----------------------------------------------#
+sub dbGlobalSetMaxRoutingLayer{
+my ($self, $i) = @_;
+   $self->{MAX_ROUTING_LAYER} = $i;
+}#sub dbGlobalSetMaxRoutingLayer
+
+sub dbGlobalGetMaxRoutingLayer{
+my ($self) = @_;
+my $i = $self->{MAX_ROUTING_LAYER};
+return($i);
+}#sub dbGlobalGetMaxRoutingLayer
+
 #----------------------------------------------#
 
 
