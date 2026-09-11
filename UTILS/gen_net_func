@@ -28,19 +28,27 @@ sub getNetDriver {
   		    }
                   } elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$instance} ) {
                     print "\nDBG-UTS : 007 : net $netName connected to a PIN " if($debug);
-  		    foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
-  		    	my @port_nets = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetConn;
-  		    	if ($netName eq $port_nets[0]){
-                           print "\nDBG-UTS : 008 : net $netName connected to a PIN $port" if($debug);
-                           my $dir = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetDir;
-                           if ( $dir eq "input" ) { 
-                             $driverInst = $port; 
-  	                     push(@driverList,$driverInst); 
-  	                     push(@driverList,"PIN");
-  	                     return(@driverList); 
-                           } 
-                        }
-  		    }
+  		    #<!-- $instance already IS the port on this net: it came from
+  		    #     keys %{$NETS_ALREADY{$netName}}.  This used to throw that
+  		    #     away and scan every port in the design looking for one
+  		    #     whose net matched, once per net per port connected
+  		    #     instance, and getNetSink calls this again on top.  That
+  		    #     made writing a graph quadratic in the port count: 250
+  		    #     ports 0.06s, 500 0.15s, 1000 0.61s, 2000 2.53s.  Ask the
+  		    #     port we already have.  It also removes a hash order
+  		    #     dependency, since the old scan returned whichever
+  		    #     matching port came first. -->
+  		    my @port_nets = $PORTS_ALREADY{$TOP_MODULE}{$instance}->dbPortGetConn;
+  		    if ( @port_nets > 0 && $netName eq $port_nets[0] ) {
+                       print "\nDBG-UTS : 008 : net $netName connected to a PIN $instance" if($debug);
+                       my $dir = $PORTS_ALREADY{$TOP_MODULE}{$instance}->dbPortGetDir;
+                       if ( $dir eq "input" ) {
+                         $driverInst = $instance;
+  	                 push(@driverList,$driverInst);
+  	                 push(@driverList,"PIN");
+  	                 return(@driverList);
+                       }
+                    }
                   } elsif ( $instance eq "PIN" ) {
                     print "\nDBG-UTS : 009 : net $netName connected to a PIN " if($debug);
   		    foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
@@ -63,7 +71,12 @@ sub getNetDriver {
      } else { 
        print "\nERR-UTS : 012 : net $netName does not exist in the database\n"; 
      }
-     return($driverList);
+     #<!-- reached only when no driving pin was found.  This used to return the
+     #     scalar $driverList, which is never declared, so the no driver case
+     #     came back as a one element list holding undef rather than an empty
+     #     list.  Callers that measure the length still worked, but any caller
+     #     testing the list for truth would have seen a driver that is not there. -->
+     return(@driverList);
 }#sub getNetDriver
 
 #-------------------------------------------------------------------------------------------------------------------------------------------------#
@@ -104,18 +117,18 @@ sub getNetSink {
   		    }
                   } elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$instance} ) {
                     print "\nDBG-UTS : 008 : net $netName connected to a PIN " if($debug);
-  		    foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
-  		    	my @port_nets = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetConn;
-  		    	if ($netName eq $port_nets[0]){
-                             print "\nDBG-UTS : 009 : net $netName connected to a PIN $port" if($debug);
-  		             if (($port ne $driverInst) || ("PIN" ne $driverPin)) {
-                               print "\nDBG-UTS : 010 : Adding net $netName connected to a PIN $port" if($debug);
-                               $sinkInst = $port; 
-  	                       push(@sinkList,$sinkInst); 
-  	                       push(@sinkList,"PIN");
-                             } 
-                        }
-  		    }
+  		    #<!-- as in getNetDriver: $instance is already the port on this
+  		    #     net, so ask it directly instead of scanning every port -->
+  		    my @port_nets = $PORTS_ALREADY{$TOP_MODULE}{$instance}->dbPortGetConn;
+  		    if ( @port_nets > 0 && $netName eq $port_nets[0] ) {
+                         print "\nDBG-UTS : 009 : net $netName connected to a PIN $instance" if($debug);
+  		         if (($instance ne $driverInst) || ("PIN" ne $driverPin)) {
+                           print "\nDBG-UTS : 010 : Adding net $netName connected to a PIN $instance" if($debug);
+                           $sinkInst = $instance;
+  	                   push(@sinkList,$sinkInst);
+  	                   push(@sinkList,"PIN");
+                         }
+                    }
                   } elsif ( $instance eq "PIN" ) {
                     print "\nDBG-UTS : 011 : net $netName connected to a PIN " if($debug);
   		    foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {

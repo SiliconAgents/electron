@@ -12,7 +12,7 @@ sub gen_footprint {
   my (@args) =  @_;
   my $args = join(' ',@args);
   my $parseResult = Getopt::Long::GetOptionsFromString
-    ($args , 
+    ($args ,
      # read args here
      "lib=s"      => \$libfile,
      "fp=s"       => \$fpfile,  #footprint file
@@ -24,25 +24,76 @@ sub gen_footprint {
     );
 
   $verbose = 1 if ($debug);
+
+  # Check for parsing errors
+  if (!$parseResult) {
+    print "Error: Invalid command line arguments for gen_footprint\n";
+    &gen_footprint_usage;
+    return(0);
+  }
+
   if ($help) {
     &gen_footprint_usage;
     return(1);
   }
-  open(LIBFILE," $libfile") or die( "$! : $libfile",__LINE__);
-  open(FPFILE, "> $fpfile") or die( "$! : $fpfile" ,__LINE__);
+
+  # Validate required arguments
+  if (!defined($libfile) || $libfile eq '') {
+    print "Error: Missing required argument -lib (library file)\n";
+    &gen_footprint_usage;
+    return(0);
+  }
+
+  if (!defined($fpfile) || $fpfile eq '') {
+    print "Error: Missing required argument -fp (footprint file)\n";
+    &gen_footprint_usage;
+    return(0);
+  }
+
+  # Check if library file exists and is readable
+  if (!-r $libfile) {
+    print "Error: Cannot read library file '$libfile'\n";
+    return(0);
+  }
+
+  # Try to open files with better error handling
+  if (!open(LIBFILE, "<", $libfile)) {
+    print "Error: Cannot open library file '$libfile': $!\n";
+    return(0);
+  }
+
+  if (!open(FPFILE, "> $fpfile")) {
+    print "Error: Cannot create footprint file '$fpfile': $!\n";
+    close(LIBFILE);
+    return(0);
+  }
 
   my ($linecount) = (0);
   my %lib;
   my ($cell, $pin, %pin);
 
-  while (my $line = <LIBFILE>) {
+  if ($verbose) {
+    print "Starting to parse library file: $libfile\n";
+  }
+
+  while (<LIBFILE>) {
+    chomp($_);
+    my $line = $_ ;
+    print "$line\n";
     $linecount++;
-    if ($line =~ /^cell\s*\((\w+)/) { #starting a new cell
+
+    if ($line =~ /^cell\s*\(([\w_]+)\)/) { #starting a new cell
       $cell = $1;
+      if ($verbose) {
+        print "Found cell: $cell (line $linecount)\n";
+      }
       $lib{$cell}{'type'}='comb';
     }
-    if ($line =~ /^\s*pin\s*\((\w+)/) { #starting a new pin
+    if ($line =~ /^\s*pin\s*\(([\w\d_]+)\)/) { #starting a new pin
       $pin = $1;
+      if ($verbose) {
+        print "  Found pin: $pin in cell $cell\n";
+      }
     }
     if ($line =~ /^\s*direction\s*:\s*(\w+)\s*;/) { #get direction
       $lib{$cell}{'pin'}{$pin}{'dir'} = $1;
@@ -62,8 +113,12 @@ sub gen_footprint {
       $lib{$cell}{'subtype'}='latch';
       $lib{$cell}{'po'}=$1;
     }
-    if ($line =~ /^\s*function\s*:\W*(\w+)\W*;/) { #get primary output name
-      $lib{$cell}{'func'}{$1}=$pin;
+    if ($line =~ /^\s*function\s*:\s*"([^"]+)"\s*;/) { #get function expression
+      my $func_expr = $1;
+      $lib{$cell}{'func'}{$pin} = $func_expr;
+      if ($verbose) {
+        print "    Function for pin $pin: $func_expr\n";
+      }
     }
     if ($line =~ /^\s*timing_type\s*:\s*setup/) { #primary input
       if ($lib{$cell}{'pin'}{$pin}{'dir'} =~ /in/) {
@@ -103,7 +158,7 @@ sub gen_footprint {
     } elsif ($type eq "seq") {
       $subtype = $lib{$cell}{subtype};
       $clk = join(',',@{$lib{$cell}{'clk'}});
-      my $po = $lib{$cell}{'func'}{$lib{$cell}{'po'}};
+      my $po = $lib{$cell}{'po'};
       if ($subtype eq "reg") {
 	if (defined($lib{$cell}{'pi'}{RN})) {
 	  delete $lib{$cell}{'pi'}{RN};
@@ -117,7 +172,12 @@ sub gen_footprint {
   }
   close(LIBFILE);
   close(FPFILE);
-  print "gen_footprint: Finished generating footprint file $fpfile";
+
+  if ($verbose) {
+    print "Processed $linecount lines\n";
+    print "Found " . (scalar keys %lib) . " cells\n";
+  }
+  print "gen_footprint: Finished generating footprint file $fpfile\n";
 }
 
 sub gen_footprint_usage {

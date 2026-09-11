@@ -49,14 +49,15 @@ if ( exists $FLOORPLAN_LOOKUP{"$moduleName/_self_"} ) {
                  if ( exists $PLDB{$cellref} ) {
                     my $class = $PLDB{$cellref}->dbMdbGetClass;
                     print "DBG-WR_HR_FLP : 002 : $linst : $cellref : $class\n" if ($DEBUG >=1);
-                    next if ($class eq "CORE");
+    #                next if ($class eq "CORE");
                  my @rBox = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetLeafInstBbox($linst);
          my $llx = $rBox[0]*$mulFactor; 
          my $lly = $rBox[1]*$mulFactor; 
          my $urx = $rBox[2]*$mulFactor; 
          my $ury = $rBox[3]*$mulFactor; 
                  my $orientation = $PSEUDO_VINST_ALREADY{$moduleName}{$linst}->dbPimDBGetInstOrient;
-                 print WRITE "$linst $cellref + PLACED ( $llx $lly ) ( $urx $ury )  $orientation \;\n";
+                 #print WRITE "$linst $cellref + PLACED ( $llx $lly ) ( $urx $ury )  $orientation \;\n";
+                 print WRITE "$linst ( $llx $lly ) ( $urx $ury ) \;\n";
                  #print WRITE "- $linst $cellref + PLACED ( $llx $lly ) $orientation \;\n";
                                                }# if the leaf cell exists 
                                        }#foreach linst
@@ -151,32 +152,43 @@ sub write_hier_floorplan_readArgs {
 
 } #sub write_hier_floorplan
 
-#sub write_hier_floorplan {
-#
-#my $moduleName = $TOP_MODULE;
-#
-#print "$moduleName\n";
-#if ( exists $FLOORPLAN_LOOKUP{"$moduleName/_self_"} ) {
-#     my $fpPntr = $FLOORPLAN_LOOKUP{"$moduleName/_self_"} ;
-#     if ( exists $FLOORPLAN_ALREADY{$fpPntr} ) {
-#         print "DESIGN $moduleName \;\n";
-#
-#         my @bBox = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetSize;
-##         print "DIEAREA ( $bBox[0] $bBox[1] $bBox[2] $bBox[3] ) \;\n";
-#
-#         my @hInsts = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstList;
-#         foreach my $hinst ( @hInsts ) {
-#                 my @rBox = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstBbox($hinst);
-#                 print "$hinst ( $rBox[0] $rBox[1] ) ( $rBox[2] $rBox[3] ) \;\n";
-#                                       }#foreach hinst
-#         print "END DESIGN\n";
-#                                               }# if the floorplan entry exists
-#                                             }
-#
-#
-#}#sub write_hier_floorplan
 
 
+
+#<!-- Apply the -status of a move/resize command to an instance.
+#
+#     The move and resize commands below all default $status to "" and none of
+#     their GUI callers pass -status, so writing it unconditionally wiped the
+#     instance's placement status on every drag.  That is not cosmetic: the
+#     placer skips instances whose status is FIXED (see place_hier_inst_at_zero
+#     and the graywolf writer), and write_hpv emits an instance as UNPLACED
+#     unless its status is exactly PLACED, so a dragged block would quietly
+#     become placeable again and get written out as unplaced.
+#
+#     With no -status the instance keeps what it had, so FIXED and FIRM survive
+#     a drag.  One exception: an instance that was never placed has just been
+#     given real coordinates, so it becomes PLACED -- the same rule
+#     createPseudoInstance uses when it decides between PLACED and UNPLACED. -->
+sub dbfTstgenApplyInstStatus {
+
+my ($parent, $instName, $status) = @_;
+
+unless ( exists $PSEUDO_VINST_ALREADY{$parent}{$instName} ) {
+  return;
+}
+
+if ( defined $status && $status ne "" ) {
+  $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstStatus($status);
+  return;
+}
+
+my $current = $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBGetInstStatus;
+unless ( defined $current && $current ne "" &&
+         $current ne "UNPLACED" && $current ne "UND" ) {
+  $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstStatus("PLACED");
+}
+
+}# sub dbfTstgenApplyInstStatus
 
 
 sub movePseudoInst {
@@ -210,7 +222,7 @@ my $W = $bBox[2] - $bBox[0];
 my ($llx, $lly, $urx, $ury) = &utilLocToBbox($loc[0],$loc[1],"N",$W,$H);
 print "INFO-TST : 001 : moved $instName from @bBox to $llx, $lly, $urx, $ury\n";
 $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstRelBbox($llx,$lly,$urx,$ury);
-$PSEUDO_VINST_ALREADY{$parent}{$instName}-> dbPimDBSetInstStatus($status);
+&dbfTstgenApplyInstStatus($parent, $instName, $status);
 &create_RedoUndo_array($instName,$bBox[0],$bBox[1],$bBox[2],$bBox[3],$llx,$lly,$urx,$ury);
                                                             }
                              }#if correct arguments
@@ -243,7 +255,7 @@ if($_[0] eq '-h') {
        my @bBox = $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBGetInstRelBbox;
        print "INFO-TST : 001 : moved $instName from @bBox to @loc\n";
        $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstRelBbox(@loc);
-       $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstStatus($status);
+       &dbfTstgenApplyInstStatus($parent, $instName, $status);
        ### need some changes due to change of polygon in place of rectangel ######   
        #&create_RedoUndo_array($instName,$bBox[0],$bBox[1],$bBox[2],$bBox[3],$llx,$lly,$urx,$ury);
    }
@@ -276,7 +288,7 @@ elsif($_[$i] eq "-bBox"){  $boxStr = $_[$i+1];
 if ( exists $PSEUDO_VINST_ALREADY{$parent}{$instName} ) {
 my @bBox_old = $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBGetInstRelBbox;
 $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstRelBbox(@bBox);
-$PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstStatus($status);
+&dbfTstgenApplyInstStatus($parent, $instName, $status);
 
 #----------------------------------------------------------------------------------#
 my $topModule = $GLOBAL->dbfGlobalGetTOP;
@@ -307,7 +319,7 @@ print "usage : read_hier_floorplan -fpdef <file name> \n";
   my $parent = "";
   my $instName = "";
   my $readComps = 0;
-  my $dbu = 2000;
+  my $dbu = $GLOBAL->dbfGlobalGetDBU();
   for(my $i = 0 ; $i < $noOfArguments ;  $i++){
     if($_[$i] eq "-fpdef"){
       $fpdef = $_[$i+1];
@@ -329,7 +341,8 @@ print "usage : read_hier_floorplan -fpdef <file name> \n";
       $readComps = 1;
       while ($readComps) {
       $line = <FPDEF>; $lineCount++; 
-        if ($line =~ /^\s*([A-Za-z]\w*)\s+\(\s*(.*)\s*\)\s*\(\s*(.*)\s*\)\s*;/ ) {
+      #print "$line\n";
+        if ($line =~ /^\s*(.*\w*)\s+\(\s*(.*)\s*\)\s*\(\s*(.*)\s*\)\s*;/ ) {
             my  $instName = $1;
             my  @lower_coords = split/\s+/,$2;
             my  @upper_coords = split/\s+/,$3;
@@ -337,8 +350,8 @@ print "usage : read_hier_floorplan -fpdef <file name> \n";
             my  $lly = $lower_coords[1]/$dbu;
             my  $urx = $upper_coords[0]/$dbu;
             my  $ury = $upper_coords[1]/$dbu;
-         #print "parent \"$parent\", inst  \"$instName\", loc \"$llx,$lly,$urx,$ury\"\n";
-         #$PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstRelBbox($llx,$lly,$urx,$ury);
+         print "parent \"$parent\", inst  \"$instName\", loc \"$llx,$lly,$urx,$ury\"\n";
+         $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstRelBbox($llx,$lly,$urx,$ury);
         }#if 
         elsif ($line =~ /^\s*END COMPONENTS/ ) {
            $readComps = 0;
