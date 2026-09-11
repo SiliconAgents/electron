@@ -1,4 +1,52 @@
 
+#****f* /dbfTstgenParseCoordList
+#  dbfTstgenParseCoordList
+# FUNCTION
+#  Normalise a coordinate-list argument such as -loc or -bbox.  Accepts
+#  {x,y}, (x,y), [x,y] or a bare x,y -- users type all of these -- and
+#  tolerates whitespace around the delimiters and the commas.  Returns the
+#  numeric list.
+#
+#  This exists because the old inline parsers stripped only braces.  Given
+#  "-loc (800,0)" the split on comma yielded "(800" and "0)", and Perl
+#  numifies those from their leading characters: "0)" becomes 0 but "(800"
+#  also becomes 0.  Every X silently collapsed to 0 while Y came through
+#  correctly.  A non-numeric token now warns instead of failing quietly.
+#
+# SYNOPSIS
+#  &dbfTstgenParseCoordList($argValue, $optionName);
+#
+# OUTPUTS
+#  list of numbers
+#****
+sub dbfTstgenParseCoordList {
+my $str = $_[0];
+my $optName = $_[1];
+$optName = "coordinate" unless(defined $optName);
+
+unless ( defined $str ) {
+  return ();
+}
+$str =~ s/^\s+|\s+$//g;
+$str =~ s/^[\{\(\[]\s*//;   #<!-- leading  { ( [ -->
+$str =~ s/\s*[\}\)\]]$//;   #<!-- trailing } ) ] -->
+
+my @vals = ();
+foreach my $tok ( split(/\,/, $str) ) {
+  $tok =~ s/^\s+|\s+$//g;
+  if ( $tok eq "" ) {
+    next;
+  }
+  unless ( $tok =~ /^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/ ) {
+    print "WARN-TST-PARSE_COORD : 001 : $optName value \"$tok\" is not a number, using 0\n";
+    $tok = 0;
+  }
+  push(@vals, $tok+0);
+}
+return (@vals);
+}# sub dbfTstgenParseCoordList
+
+
 #****f* /createPseudoHierModuleInst
 #  createPseudoHierModuleInst
 # FUNCTION
@@ -39,20 +87,33 @@ my $noOfArguments = @_;
 my $instName; undef $instName;
 my $parent; undef $parent;
 my $cellref; undef $cellref;
+my $stdCellsArea; undef $stdCellsArea;
+my $color; undef $color;
 my @bbox = ();
 
 if( $noOfArguments < 1 || $_[0] eq '-h') { print "Usage : createPseudoHierModuleInst \n";
                            print "                           -inst <a new instance name>\n";
                            print "                           -cellref <hier module>\n";
                            print "                           -parent <top module name>\n";
+                           print "                           -bbox <{llx,lly,urx,ury}>\n";
                            print "                           -loc <{llx,lly}>\n";
+                           print "                           -area <std cells area>\n";
                          }
 else {
 for(my $i = 0; $i < $noOfArguments; $i++){
 if($_[$i] eq "-parent"){$parent = $_[$i+1];}
 if($_[$i] eq "-cellref"){$cellref = $_[$i+1];}
 if($_[$i] eq "-inst"){$instName = $_[$i+1];}
-if($_[$i] eq "-bbox"){ my $box = $_[$i+1]; $box =~ s/\{(.*)\}/\1/; @bbox = split(/\,/, $box); }
+if($_[$i] eq "-area"){$stdCellsArea = $_[$i+1];}
+if($_[$i] eq "-color"){$color = $_[$i+1];}
+if($_[$i] eq "-loc"){
+   my @loc = &dbfTstgenParseCoordList($_[$i+1], "-loc");
+   my @size = $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetSize;
+   my $width = $size[2] - $size[0];
+   my $height = $size[3] - $size[1];
+   @bbox = ($loc[0], $loc[1], $loc[0]+$width, $loc[1]+$height);
+}
+if($_[$i] eq "-bbox"){ @bbox = &dbfTstgenParseCoordList($_[$i+1], "-bbox"); }
                                          } # for
 
 #--------------- setting up the default behaviour -----------------#
@@ -82,7 +143,7 @@ elsif ( exists $MODULE_ALREADY{$cellref} ) {
 }
 else { print "WARN-TST-CR_PSUDO_HR_MOD_INST : 003 : Module $cellref does not exist ... please create it first\n"; }
 
-&dbfTstgenCreateHierModuleInst($parent, $instName, $cellref, @bbox);
+&dbfTstgenCreateHierModuleInst($parent, $instName, $cellref, $stdCellsArea, $color, @bbox);
 
 return($instName);
      }#if correct arguments
@@ -152,7 +213,7 @@ if($_[$i] eq "-parent"){$parent = $_[$i+1];}
 if($_[$i] eq "-module"){$moduleName = $_[$i+1];}
 if($_[$i] eq "--blackbox"){$moduleType = 11;}
 if($_[$i] eq "--rtl"){$moduleType = 8;}
-if($_[$i] eq "-bbox"){ my $rect = $_[$i+1]; $rect =~ s/\{\s*//; $rect =~ s/\s*\}//; @modsize = split(/\,/,$rect);}
+if($_[$i] eq "-bbox"){ @modsize = &dbfTstgenParseCoordList($_[$i+1], "-bbox"); }
                                          } # for
 my $thisModArea = sprintf("%.3f",(($modsize[0]-$modsize[2])*($modsize[1]-$modsize[3])));
 unless ( defined $moduleName ) {
@@ -644,6 +705,14 @@ if($_[$i] eq "-H"){$dieHeight = $_[$i+1];}
 if($_[$i] eq "-W"){$dieWidth = $_[$i+1];}
                                          } # for
 
+#<!-- -W/-H come straight from the Specify table / xls top row, which the
+#     user can leave blank; without this the 500/$dieHeight below dies -->
+unless ( defined $dieWidth  && $dieWidth  =~ /^\s*\d*\.?\d+\s*$/ && $dieWidth  > 0 &&
+         defined $dieHeight && $dieHeight =~ /^\s*\d*\.?\d+\s*$/ && $dieHeight > 0 ) {
+  print "ERR-TST-CR_PSUDO_TOP_MOD : 001 : top module $TOP_MODULE needs a positive -W and -H (got W=\"$dieWidth\", H=\"$dieHeight\")\n";
+  return;
+}
+
 $DIE_ALREADY{dieArea}[0] = 0;
 $DIE_ALREADY{dieArea}[1] = 0;
 $DIE_ALREADY{dieArea}[2] = $dieWidth;
@@ -856,7 +925,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
 if($_[$i] eq "-inst"){ $prefix = $_[$i+1]; }
 if($_[$i] eq "-parent"){ $parent = $_[$i+1]; }
 if($_[$i] eq "-cell"){ $cellref = $_[$i+1]; }
-if($_[$i] eq "-loc"){ $loc_str = $_[$i+1];  $loc_str =~ s/\{//; $loc_str =~ s/\}//; $status = "PLACED"; }
+if($_[$i] eq "-loc"){ $loc_str = $_[$i+1]; $status = "PLACED"; }
 if($_[$i] eq "-orient"){ $orient = $_[$i+1]; }
 if($_[$i] eq "-array"){ $array = $_[$i+1]; }
                                          }#for all arguments
@@ -866,8 +935,8 @@ unless ( exists $PLDB{$cellref} ) {
   return "";
 } else {
        my @size = $PLDB{$cellref}->dbMdbGetSize;
-       
-       my ($llx,$lly) = (split(/\,/,$loc_str))[0,1];
+
+       my ($llx,$lly) = &dbfTstgenParseCoordList($loc_str, "-loc");
        my $urx = $llx+$size[0];
        my $ury = $lly+$size[1];
        @bbox = ($llx,$lly,$urx,$ury);
@@ -1072,38 +1141,55 @@ return(1);
 #
 #****
 sub commitModule {
-my $noOfArguments = @_;
-#----------------- Defaults --------------------#
-my $moduleName; undef $moduleName;
-my $flplanName; undef $flplanName;
+  my $noOfArguments = @_;
+  #----------------- Defaults --------------------#
+  my $moduleName; undef $moduleName;
+  my $flplanName; undef $flplanName;
+  my $physOnly = 0;
 
-if ( $noOfArguments < 1 || $_[0] eq '-h' ) { print "Usage : commit_module \n";
-                           print "                   -module <module name>\n";
-}
-else {
-  for ( my $i = 0; $i < $noOfArguments; $i++ ) {
-    if ( $_[$i] eq "-module" ) { $moduleName = $_[$i+1]; }
-    if ( $_[$i] eq "-floorplan" ) { $flplanName = $_[$i+1]; }
-  } # for
+  if($noOfArguments < 0 || $_[0] eq '-h' || $_[0] eq '-help' ||  $_[0] eq '-HELP'){
+     print "Usage : commit_module  -module <module name>\n";
+     print "                       -floorplan <floorplan name>\n";
+     print "                       --physical_only\n";
+  }else{
+     for(my $i = 0; $i < $noOfArguments; $i++){
+         if($_[$i] eq "-module")    { $moduleName = $_[$i+1]; }
+         if($_[$i] eq "-floorplan") { $flplanName = $_[$i+1]; }
+         if($_[$i] eq "--physical_only" || $_[$i] eq "--no_nets") { $physOnly = 1; }
+     }#for
 
-  unless ( defined $moduleName ) {
-    $moduleName = $TOP_MODULE;
-  }
+     unless(defined $moduleName){
+        $moduleName = $TOP_MODULE;
+     }
 
-  unless ( exists $PSEUDO_MODULE_ALREADY{$moduleName} ) {
-    print "WARN-TST-COMMIT_MOD : 001 : module $moduleName is not being edited\n";
-    return;
-  }
+     unless(exists $PSEUDO_MODULE_ALREADY{$moduleName}){
+        print "WARN-TST-COMMIT_MOD : 001 : module $moduleName is not being edited\n";
+        return;
+     }
 
-  print "INFO-TST-COMMIT_MOD : 002 : Commiting module $moduleName\n";
+     #<!-- A module loaded by "edit_module --physical_only" has no nets in
+     #     PSEUDO_VNET_ALREADY.  Writing connectivity back from it would rebuild
+     #     its conn lines from empty pin tables and erase the netlist in VNOM,
+     #     so force the physical-only path regardless of what was asked for. -->
+     unless ( $physOnly ) {
+        if ( $PSEUDO_MODULE_ALREADY{$moduleName}->dbaTstgenGetPhysicalOnly ) {
+           print "WARN-TST-COMMIT_MOD : 003 : module $moduleName was loaded with --physical_only\n";
+           print "WARN-TST-COMMIT_MOD : 004 : connectivity will not be written, committing physical data only\n";
+           print "WARN-TST-COMMIT_MOD : 005 : re-run edit_module without --physical_only to commit connectivity\n";
+           $physOnly = 1;
+        }
+     }
 
-  &dbfTstgenSetupPseudoConn($moduleName);
-  &dbfTstgenUpdateVNOMFromPseudo($moduleName);
-  &dbfTstgenGuidePinLocs($moduleName);
-  &dbfTstgenUpdateChildrenSizes($moduleName);
-  &dbfTstgenUpdateFlplanFromPseudo($moduleName, $flplanName);
+     print "INFO-TST-COMMIT_MOD : 002 : Commiting module $moduleName\n";
 
-}#if correct number of arguments
+     unless ( $physOnly ) {
+        &dbfTstgenSetupPseudoConn($moduleName);
+        &dbfTstgenUpdateVNOMFromPseudo($moduleName);
+        &dbfTstgenGuidePinLocs($moduleName);
+     }
+     &dbfTstgenUpdateChildrenSizes($moduleName);
+     &dbfTstgenUpdateFlplanFromPseudo($moduleName, $flplanName, $physOnly);
+  }#if correct number of arguments
 }# sub commitModule
 
 
@@ -1147,18 +1233,21 @@ my $noOfArguments = @_;
 my $moduleName; undef $moduleName;
 my $flplanName; undef $flplanName;
 my $util; undef $util;
+my $physOnly = 0;
 
 if ( $noOfArguments < 1 || $_[0] eq '-h' ) { print "Usage : edit_module \n";
                            print "                   -module <module name>\n";
                            print "                   -floorplan <floorplan name>\n";
                            print "                   -util <chip utilization>\n";
                            print "                   --top\n";
+                           print "                   --physical_only\n";
 }
 else {
   for ( my $i = 0; $i < $noOfArguments; $i++ ) {
     if ( $_[$i] eq "-module" ) { $moduleName = $_[$i+1]; }
     if ( $_[$i] eq "-floorplan" ) { $flplanName = $_[$i+1]; }
     if ( $_[$i] eq "-util" ) { $util = $_[$i+1]; }
+    if ( $_[$i] eq "--physical_only" || $_[$i] eq "--no_nets" ) { $physOnly = 1; }
     if ( $_[$i] eq "--top" ) { if ( $TOP_MODULE ne "" ) {
                                  $moduleName = $TOP_MODULE; } }
   } # for
@@ -1177,7 +1266,7 @@ else {
     $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenSetIsModuleTop(0);
   }
   print "INFO-TST-EDIT_MOD : 001 : Editing module $moduleName ...\n";
-  &dbfTstgenEditModule($moduleName);
+  &dbfTstgenEditModule($moduleName, $physOnly);
 
   my $flplanID = &dbfTstgenLoadVNOMFlplan($moduleName, $flplanName);
   if ( $flplanID == 0 ) {

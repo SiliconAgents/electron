@@ -14,15 +14,16 @@ if($noOfArguments < 0 || $_[0] eq "-h"){ print "Usage : write_sdef\n";
                         
 }
 else {
+my $nodeNum = 1;
 my $OUTPUT = $TOP_MODULE;
-my $diearea = 0;
-my $write_row = 0;
+my $diearea = 1;
+my $write_row = 1;
 my $write_track = 0;
-my $write_comp = 0;
+my $write_comp = 1;
 my $write_net = 0;
 my $write_via = 0;
 my $write_pin = 0;
-my $default = 1;
+my $default = 0;
 for(my $i=0;$i<$noOfArguments;$i++){
   if($_[$i] =~ /-output/){$OUTPUT = $_[$i+1];}
   if($_[$i] =~ /--diearea/){$diearea = 1;$default = 0;}
@@ -37,6 +38,7 @@ print "Writing sdef for $TOP_MODULE\n";
 
 # ---- setting the instance box for all instances ----#
 open(WRITE,">$OUTPUT.sdef");
+print WRITE "DESIGN $TOP_MODULE\n";
 if(!exists $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"}){
   &set_floorplan("-partition","$TOP_MODULE");
 }
@@ -59,20 +61,22 @@ if($write_row == 1 || $default == 1){
 }
 #------------------------------------------------INST SECTION---------------------------------------------#
 if($write_comp == 1 || $default == 1){
-&set_inst_box("--all") ; 
+# Rajeev commeneted it out on Oct 1 2025 , it is not needed for faster processing 
+# &set_inst_box("--all") ; 
+
   foreach $instance ( keys %COMP_ALREADY ) {
     if( exists $CADB{$instance} ){
       my $cellref =  $CADB{$instance}->dbCadbGetCellref;
       print WRITE "INST $instance $cellref ";
-      if( exists $CADB{$instance} ){
         my @loc = $CADB{$instance}->dbCadbGetLoc;
         my $status = $CADB{$instance}->dbCadbGetStatus;
         my $orient = $CADB{$instance}->dbCadbGetOrient;
-        my @box = $CADB{$instance}->dbCadbGetbBox;
+    #    my @box = $CADB{$instance}->dbCadbGetbBox;
         if ( $status eq "PLACED" || $status eq "FIXED" ) {
-          print WRITE "@box $status "; 
-        }
-      }
+          print WRITE "$status @loc"; 
+        } else { 
+          print WRITE "UNPLACED"; 
+               }
       print WRITE "\n";
     }
   }#foreach component db
@@ -103,6 +107,7 @@ if($write_track == 1 || $default == 1){
 }
 #------------------------------------------------NETS SECTION---------------------------------------------#
 if($write_net == 1 || $default == 1){
+my $segCount = 0;
   foreach my $net (keys %NETS_ALREADY){
     my $netType = 0;
     if ( exists $NADB{$net} ) {$netType = $NADB{$net}->dbNadbGetNetType;}
@@ -111,16 +116,17 @@ if($write_net == 1 || $default == 1){
         my @routes = $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBGetRegularRoute;
         my @fixed_routes = $NETS_ROUTING_ALREADY{$net}->dbNetRoutingDBGetFixedRoute;
         if ( @fixed_routes > 0 ) {
-#            print WRITE "-NET ROUTED $net\n";
+          print "@fixed_routes\n";
           foreach my $l ( @fixed_routes ) {
             my ($layer,$via) = (split(/\s+/,$l))[0,-1];
             my @fixed_routeBox = &xformNetSegToPathSeg($l,"--via");
             my $num_of_coord = @fixed_routeBox;
             if($num_of_coord == 4){
-              print WRITE "NETS ROUTED $net $layer @fixed_routeBox\n";
+              $segCount++;
+              print WRITE "NETS $net seg$segCount $layer @fixed_routeBox\n";
             }else {
-              print WRITE "NETS ROUTED $net $layer $fixed_routeBox[0] $fixed_routeBox[1] $fixed_routeBox[2] $fixed_routeBox[3]\n";
-              print WRITE "NETS ROUTED $net $layer $fixed_routeBox[4] $fixed_routeBox[5] $fixed_routeBox[4] $fixed_routeBox[5]\n"; 
+              #print WRITE "NETS $net $layer $fixed_routeBox[0] $fixed_routeBox[1] $fixed_routeBox[2] $fixed_routeBox[3]\n";
+              #print WRITE "NETS $net $layer $fixed_routeBox[4] $fixed_routeBox[5] $fixed_routeBox[4] $fixed_routeBox[5]\n"; 
             }
           }
         }#if routing information exists
@@ -131,10 +137,11 @@ if($write_net == 1 || $default == 1){
             my @routeBox = &xformNetSegToPathSeg($l,"--via");
             my $num_of_coord = @routeBox;
             if( $num_of_coord == 4){
-              print WRITE "NETS ROUTED $net $layer @routeBox\n";
+              $segCount++;
+              print WRITE "NETS $net seg$segCount $layer @routeBox\n";
             }else {
-              print WRITE "NETS ROUTED $net $layer $routeBox[0] $routeBox[1] $routeBox[2] $routeBox[3]\n";
-              print WRITE "NETS ROUTED $net $layer $routeBox[4] $routeBox[5] $routeBox[4] $routeBox[5]\n";
+              #print WRITE "NETS ROUTED $net $layer $routeBox[0] $routeBox[1] $routeBox[2] $routeBox[3]\n";
+              #print WRITE "NETS ROUTED $net $layer $routeBox[4] $routeBox[5] $routeBox[4] $routeBox[5]\n";
             }
           }
         }#if routing information exists
@@ -154,15 +161,34 @@ if($write_net == 1 || $default == 1){
     #        print WRITE "-NET ROUTED $net\n";
         if ( @routes > 0 ) {
           foreach my $l ( @routes ) {
-            my ($layer,$via) = (split(/\s+/,$l))[0,-1];
+          print "$l\n";
+            my ($layer,$width,$via) = (split(/\s+/,$l))[0,1,-1];
+               if ( $width >0 ) {
             my @special_routeBox = &xformNetSegToPathSeg($l,"--via");
             my $num_of_coord = @special_routeBox;
             if($num_of_coord == 4){
-              print WRITE "NETS ROUTED $net $layer @special_routeBox\n";
+              $segCount++;
+              print WRITE "NETS $net seg$segCount $layer $width @special_routeBox\n";
             }else {
-              print WRITE "NETS ROUTED $net $layer $special_routeBox[0] $special_routeBox[1] $special_routeBox[2] $special_routeBox[3]\n";
-              print WRITE "NETS ROUTED $net $layer $special_routeBox[4] $special_routeBox[5] $special_routeBox[4] $special_routeBox[5]\n";
+              #print WRITE "NETS ROUTED $net $layer $special_routeBox[0] $special_routeBox[1] $special_routeBox[2] $special_routeBox[3]\n";
+              #print WRITE "NETS ROUTED $net $layer $special_routeBox[4] $special_routeBox[5] $special_routeBox[4] $special_routeBox[5]\n";
             }
+                               }
+              elsif ( $width == 0 ) {
+              my @via_data = split(/\s+/,$l);
+              while ( defined ( $token = shift @via_data )) {
+                      if ( $token =~ /\(/ ) {
+                      $viaX = shift @via_data ;
+                      $viaY = shift @via_data ;
+                                           }
+                                                            }
+              if ( exists $DEFVIAS_ALREADY{$via} ) {
+                   my @defViaGuts = $DEFVIAS_ALREADY{$via}->dbGetViaCutBox;
+                   print WRITE "VIA $net $via $viaX $viaY : @defViaGuts\n";
+                              } else { 
+                   print "SDEF WARN : The special via is missing from DEF\n";
+                                    }
+                                    }
           }
         }# if routing information exists
       }
@@ -183,7 +209,7 @@ if($write_via == 1 || $default == 1){
           foreach my $l ( @routes ) {
             my ($layer,$via) = (split(/\s+/,$l))[0,-1];
             if($via =~ /\)/){next;}
-            print WRITE "VIAS $net $via\n";
+            print WRITE "VIAS $net $via @routes\n";
           }
         }
         if ( @fixed_routes > 0 ) {
@@ -191,7 +217,7 @@ if($write_via == 1 || $default == 1){
           foreach my $l ( @fixed_routes ) {
             my ($layer,$via) = (split(/\s+/,$l))[0,-1];
             if($via =~ /\)/){next;}
-            print WRITE "VIAS $net $via\n";
+            print WRITE "VIAS $net $via @routes\n";
           }
         }
       }#if exists routing already
@@ -204,7 +230,7 @@ if($write_via == 1 || $default == 1){
           foreach my $l ( @routes ) {
             my ($layer,$via) = (split(/\s+/,$l))[0,-1];
             if($via =~ /\)/){next;}
-            print WRITE "VIAS $net $via\n"; 
+            print WRITE "VIAS $net $via @routes\n"; 
           }
         }# if routing information exists
       }
@@ -700,8 +726,9 @@ if($noOfArguments < 0 || $_[0] eq "-h"){ print "Usage : write_slef\n";
 #}#for
 
 print "Writing slef file\n"; 
-open(WRITE,">output.slef");
+open(WRITE,">allCell.slef");
 foreach my $cell (keys %PLDB){
+#    print "processing $cell\n";
   my @size = $PLDB{$cell}->dbMdbGetSize; 
   my $class = $PLDB{$cell}->dbMdbGetClass;
   my @pins = $PLDB{$cell}->dbMdbGetPins;
@@ -711,50 +738,55 @@ foreach my $cell (keys %PLDB){
     if ( $dir == 0 ) { $pinDir = 'INPUT'; } 
     elsif ( $dir == 1 ) { $pinDir = 'OUTPUT'; }
     elsif ( $dir == 2 ) { $pinDir = 'INOUT'; }
-#    print WRITE "Cell $cell $pin ";
-    my @rects = $PLDB{$cell}->dbMdbGetPinRect($pin);
-    my @polygon = $PLDB{$cell}->dbMdbGetPinPolygon($pin);
-    if(@rects > 0){
-      foreach my $l ( @rects ) {
-        $l =~ s/\s*RECT//;
-        $l =~ s/\s*;//;
+    print WRITE "CellPin $cell $pin $pinDir\n";
+#  the code below has a memory issue where it seems to be processing the polygons into RECTS 
+#  is this required ?
+#
+#    my @rects = $PLDB{$cell}->dbMdbGetPinRect($pin);
+#    my @polygon = $PLDB{$cell}->dbMdbGetPinPolygon($pin);
+#    if(@rects > 0){
+#      foreach my $l ( @rects ) {
+#        $l =~ s/\s*RECT//;
+#        $l =~ s/\s*;//;
 #        my @L  = split(/\s+/,$l);
-        print WRITE "Cell $cell $pin $l $pinDir\n";
-      }
-    }
-    if(@polygon > 0){
-      foreach  my $plgn ( @polygon){
-        $plgn =~ s/\s*POLYGON//g;
-        my @pl_data = split(/\s+/,$plgn);
-        my $pl_layer_Name = shift (@pl_data);
-        my @rectangles = &break_polygon_into_rects(\@pl_data);
-        foreach my $rect(@rectangles){
-          print WRITE "Cell $cell $pin $pl_layer_Name @$rect $pinDir\n";
-        }
-      }
-    }
+#        print WRITE "CellPin $cell $pin $l $pinDir\n";
+#      }
+#    }
+#    if(@polygon > 0){
+#      foreach  my $plgn ( @polygon){
+#        $plgn =~ s/\s*POLYGON//g;
+#        my @pl_data = split(/\s+/,$plgn);
+#        my $pl_layer_Name = shift (@pl_data);
+#        my @rectangles = &break_polygon_into_rects(\@pl_data);
+#        foreach my $rect(@rectangles){
+#          print WRITE "Cell $cell $pin $pl_layer_Name @$rect $pinDir\n";
+#        }
+#      }
+#    }
   }#foreach pin
-  my @obs = $PLDB{$cell}->dbMdbGetObs;
-  my @obs_polygon = $PLDB{$cell}->dbMdbGetObsPolygon; 
-  if(@obs > 0 ){
-    foreach my $obs (@obs){
-      $obs =~ s/\s*RECT//;
-      $obs =~ s/\s*;//;
-      print WRITE "Cell $cell OBS $obs\n";
-    }
-  }
-  if(@obs_polygon > 0){
-    foreach my $obs_plgn (@obs_polygon){
-      $obs_plgn =~ s/\s*POLYGON//;
-      my @obs_pl_data = split(/\s+/,$obs_plgn);
-      my $obs_pl_layer_Name = shift(@obs_pl_data);
-      my @obs_rectangles =  &break_polygon_into_rects(\@obs_pl_data);
-      foreach my $rect(@obs_rectangles){
-        print WRITE "Cell $cell OBS $obs_pl_layer_Name @$rect\n";
-      }
-    }
-  }
+ # my @obs = $PLDB{$cell}->dbMdbGetObs;
+ # my @obs_polygon = $PLDB{$cell}->dbMdbGetObsPolygon; 
+ # if(@obs > 0 ){
+ #   foreach my $obs (@obs){
+ #     $obs =~ s/\s*RECT//;
+ #     $obs =~ s/\s*;//;
+ #     print WRITE "CellObs $cell $obs\n";
+ #   }
+ # }
+ # if(@obs_polygon > 0){
+ #   foreach my $obs_plgn (@obs_polygon){
+ #     $obs_plgn =~ s/\s*POLYGON//;
+ #     my @obs_pl_data = split(/\s+/,$obs_plgn);
+ #     my $obs_pl_layer_Name = shift(@obs_pl_data);
+ #     my @obs_rectangles =  &break_polygon_into_rects(\@obs_pl_data);
+ #     foreach my $rect(@obs_rectangles){
+ #       print WRITE "CellObs $cell $obs_pl_layer_Name @$rect\n";
+ #     }
+ #   }
+ # }
 }#foreach
+
+close(WRITE);
 }
 my $t1 = new Benchmark;
 my $td = timediff($t1, $t0);
@@ -770,23 +802,33 @@ if($noOfArguments < 0 || $_[0] eq "-h"){ print "Usage : write_slib\n";
   print "Writing slib file\n";
   open(WRITE,">output.slib");
   foreach my $cell (keys %TLDB){
-    print "Timing Cell $cell \n";
+    print "processing Cell $cell \n";
+    my $maxLeakage = $TLDB{$cell}->dbTimingLibGetCellMaxLeakage;
+    my $minLeakage = $TLDB{$cell}->dbTimingLibGetCellMinLeakage;
+    my $cellArea = $TLDB{$cell}->dbTimingLibGetCellArea;
+    print WRITE "CELL_DATA $cell $cellArea $minLeakage $maxLeakage\n";
+
     my @pins = $TLDB{$cell}->dbTimingLibGetPins; 
     foreach my $pin (@pins){
       my $pinDir = $TLDB{$cell}->dbTimingLibGetPinDir($pin);  
+         #print "\t pin : $pin $pinDir\n";
       if($pinDir eq ""){next;}     
       if($pinDir =~ /output/i){
-        #print WRITE "$pin $pinDir ";
+        #print WRITE "\t\t$pin $pinDir \n";
         my $pinFunc = $TLDB{$cell}->dbTimingLibGetPinFunc($pin);
         my @reltdPins = $TLDB{$cell}->dbTimingLibGetPinRPin($pin);
         foreach my $reltdPin(@reltdPins){
+          #  print  WRITE "related pin loop $pin $reltdPin\n";
           my @conds = $TLDB{$cell}->dbTimingLibGetPinCond($pin,$reltdPin);
-          push (@conds, "NONE");     
+          if (@conds == 0) { push (@conds, "UNDEF");     }
           foreach my $condition (@conds){
-            my @cellRiseIndexVal = $TLDB{$cell}->dbTimingLibGetPinDelayIndex($pin,$reltdPin,$condition,"riseDelay");
+            # print "my condition $condition\n";
+            #my @cellRiseIndexVal = $TLDB{$cell}->dbTimingLibGetPinDelayIndex($pin,$reltdPin,$condition,"riseDelay");
             my @cellRiseDelayVal = $TLDB{$cell}->dbTimingLibGetPinDelay($pin,$reltdPin,$condition,"riseDelay");
-            my @cellFallIndexVal = $TLDB{$cell}->dbTimingLibGetPinDelayIndex($pin,$reltdPin,$condition,"fallDelay");
-            my @cellFallDelayVal = $TLDB{$cell}->dbTimingLibGetPinDelay($pin,$reltdPin,$condition,"fallDelay");
+            # print "MY cell delay @cellRiseDelayVal\n";
+            #my @cellFallIndexVal = $TLDB{$cell}->dbTimingLibGetPinDelayIndex($pin,$reltdPin,$condition,"fallDelay");
+            #my @cellFallDelayVal = $TLDB{$cell}->dbTimingLibGetPinDelay($pin,$reltdPin,$condition,"fallDelay");
+                print WRITE "TIMING_DATA $cell $pin $reltdPin condition $condition riseDelay @cellRiseDelayVal";
 
             my @cellRisePowerIndexVal = $TLDB{$cell}->dbTimingLibGetPinIndexPower($pin,$reltdPin,$condition,"risePower"); 
             my @cellRisePowerVal = $TLDB{$cell}->dbTimingLibGetPinPower($pin,$reltdPin,$condition,"risePower");

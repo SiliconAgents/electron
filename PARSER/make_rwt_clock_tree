@@ -112,11 +112,6 @@ print "INFO-PAR : 001 : using the backward trace\n";
 
 
 
-sub build_clock_tree {
-
-
-
-}#sub build_clock_tree
 
 
 
@@ -304,5 +299,118 @@ foreach( keys %{$NETS_ALREADY{$netName}}){
 
 }#sub trace_for_ctgen
 
+##############################################################################################################
+################################## function to generate the list of flops ####################################
+##############################################################################################################
+sub build_clock_tree {
+  # build clock tree command is the wraper command that generates the list of flops and its locations in a text file
+  # the text file is then given to a rest service to create the clock tree for the design. 
+  # this will be a flat implementation of the design  in a Htree
+  use Benchmark;
+  my $t0 = new Benchmark;
 
+  my $noOfArguments = @_;
+
+  if($noOfArguments < 2 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP'){
+     print "Usage : build_clock_tree -net <net Name>\n";
+  }else{
+     my $topModule = $GLOBAL->dbfGlobalGetTOP;
+     my $netName;
+     for(my $x = 0; $x < $noOfArguments ; $x++){
+         if($_[$x] eq "-net"){$netName = $_[$x+1];}
+     }#for all the arguments
+
+     open(WRITE,">$topModule-cts-input.txt");
+     if(exists $NETS_ALREADY{$netName}){
+        foreach $instance (keys %{$NETS_ALREADY{$netName}}){
+           if(exists $PORTS_ALREADY{$topModule}{$instance}){ 
+              print WRITE "$netName PIN $NETS_ALREADY{$netName}{$instance}\n";
+           }else{
+              print WRITE "$netName $instance $NETS_ALREADY{$netName}{$instance}\n";
+           }
+         }# for each instance attached
+      }else{
+         print "WARN-BLD-CLKTR : 001 : net $netName does not exists\n";
+      }
+      close(WRITE);
+      
+      ########################## executing python script ############################
+      system("python /apps/clktree_v3.py '$topModule-cts-input.txt'");
+      &add_clock_tree("-f", "clk_tree.txt", "-net", $netName, "-buffer", "BUF_X1");
+  }
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command build_clock_tree  took:",timestr($td),"\n";
+}#sub build_clock_tree
+
+##############################################################################################################
+################################## function to generate the list of flops ####################################
+##############################################################################################################
+sub add_clock_tree{
+  # add clock tree command reads the clock tree info and updates electron DB
+  # the text file is then given to a rest service to create the clock tree for the design. 
+  # this will be a flat implementation of the design  in a Htree
+  use Benchmark;
+  my $t0 = new Benchmark;
+
+  my $noOfArguments = @_;
+
+  if($noOfArguments < 2 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP'){
+     print "Usage : add_clock_tree -f <fileName>\n";
+     print "                       -net <clock net name>\n";
+     print "                       -buffer <buffer cell>\n";
+  }else{
+     my $topModule = $GLOBAL->dbfGlobalGetTOP;
+     my ($fileName, $clkNet, $bufferCell);
+     for(my $x = 0; $x < $noOfArguments ; $x++){
+         if($_[$x] eq "-f"){$fileName = $_[$x+1];}
+         if($_[$x] eq "-net"){$clkNet = $_[$x+1];}
+         if($_[$x] eq "-buffer"){$bufferCell = $_[$x+1];}
+     }#for all the arguments
+
+     open(READ, "$fileName");
+     my $cnt = 0;
+     while(<READ>){
+        chomp($_);
+        $_ =~ s/^\s+//;
+        if($_ =~ /^\s*#/){ next; }
+        my ($level, $srcInst, $srcPin, $sinkInst, $sinkPin) = (split(/\,/, $_))[0,1,2,3,4];
+        #print "$level, $srcInst, $srcPin, $sinkInst, $sinkPin\n";
+
+        if(!exists $CADB{$sinkInst}){
+           $CADB{$sinkInst} = CompAttDB::new();
+           $CADB{$sinkInst}->dbCadbSetCellref($bufferCell);
+           $CADB{$sinkInst}->dbCadbSetStatus("UNPLACED");
+           $CADB{$sinkInst}->dbCadbSetOrient(N);
+           $COMP_ALREADY{$sinkInst} = \%{$srcInst};
+        }
+        if($level eq 'level0' && $srcInst eq 'PIN'){
+           if(exists $NETS_ALREADY{$clkNet}){
+              $NETS_ALREADY{$clkNet}{$sinkInst} = $sinkPin;
+           }
+        }else{
+           if(exists $NETS_ALREADY{$clkNet}{$sinkInst}){
+              delete $NETS_ALREADY{$clkNet}{$sinkInst};
+           }
+           my $netName = "clk_".$level."_".$srcInst;
+           if(!exists $NADB{$netName}){
+              $NETS_ALREADY{$netName} = NetDB::new();
+              $NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
+              $NADB{$netName} = NetsAttrDB::new();
+              $NADB{$netName}->dbNadbSetNetType(0);
+              $NETS_ALREADY{$netName}{$srcInst} = $srcPin;
+              $COMP_ALREADY{$srcInst}{$srcPin} = $netName;
+           }
+           $NETS_ALREADY{$netName}{$sinkInst} = $sinkPin;
+           $COMP_ALREADY{$sinkInst}{$sinkPin} = $netName;
+        }
+     }
+     close(READ);
+  }
+  my $t1 = new Benchmark;
+  my $td = timediff($t1, $t0);
+  print "command add_clock_tree  took:",timestr($td),"\n";
+}#sub add_clock_tree
+
+##############################################################################################################
 1;
