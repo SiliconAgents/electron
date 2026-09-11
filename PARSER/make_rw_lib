@@ -922,7 +922,7 @@ if($#cellList < 0){
 
 open (WRITE,">$OUTPUT_LIB");
 print "INFO-PAR-LIB : 001 : Writing lib file $OUTPUT_LIB \n";
-print WRITE "\/\* #LIB written from proton verion-$TOOL_VERSION \*\/\n";
+print WRITE "\/\* #LIB written from electron verion-$TOOL_VERSION \*\/\n";
 print WRITE "\n\n";
 
 print WRITE "library\(typical\) \{\n";
@@ -3573,7 +3573,7 @@ sub dbDisplaySMatrix3DPlot
     print WRITE_DO_FILE "set xlabel \"Flop From\"\n";
     print WRITE_DO_FILE "set ylabel \"Flop To \"\n";
     print WRITE_DO_FILE "set zlabel \"Cell Val\"\n";
-    print WRITE_DO_FILE "set title \"proton : Analysis Graph\"\n";
+    print WRITE_DO_FILE "set title \"electron : Analysis Graph\"\n";
     print WRITE_DO_FILE "set pm3d scansbackward\n";
     print WRITE_DO_FILE "set dgrid3d 10,10,3\n";
     print WRITE_DO_FILE "splot './eqator_sort_tmp.txt' with pm3d\n";

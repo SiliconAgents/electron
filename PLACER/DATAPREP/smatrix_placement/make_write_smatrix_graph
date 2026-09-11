@@ -5,7 +5,7 @@ sub write_graph_smatrix_old{
 %TEMP = ();
 print "INFO-PL_DATAPRP_SMTRX_PL : 001 : Writing the graph file of the design in $TOP_MODULE\.txt\n";
 open(WRITE,">$TOP_MODULE.txt");
-print WRITE "#GRAPH FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE "#GRAPH FILE written from electron verion-$TOOL_VERSION\n";
 
 #$PLACE{$TOP_MODULE}->dbgPlaceGetTpath ;
 

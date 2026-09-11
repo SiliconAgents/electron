@@ -17,7 +17,7 @@ else { # if correct no. of inputs
 }
 
 open (WRITE_RTL , ">$rtl_file");
-print WRITE_RTL "#RTL written from proton verion-$TOOL_VERSION\n";
+print WRITE_RTL "#RTL written from electron verion-$TOOL_VERSION\n";
 &get_module_definition;
 &get_cell_definition;
 

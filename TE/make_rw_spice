@@ -35,7 +35,7 @@ if($_[$i] eq "-outfile"){$REPORT_FILE = $_[$i+1];}
 print "INFO-TE-FRCTRE : 001 : Writing timing report to file \"timingReport.rpt\"\n";
 open (WRITE_REPORT,">$REPORT_FILE");
 open (WRITE_PKS_STA,">$PKS_CMD_FILE");
-print WRITE_REPORT "Report of Dynamic Timing Analysis from proton tool\n";
+print WRITE_REPORT "Report of Dynamic Timing Analysis from electron tool\n";
 print WRITE_REPORT "----------------------------------------\n";
 print WRITE_REPORT "\n";
 print WRITE_REPORT "\n";
@@ -435,7 +435,7 @@ if ( $FORMAT eq "hspice" ) {
 
 print "INFO-TE-WRTE_SPCE : 001 : Begin writing the netlist in hspice file format : $OUTPUT_SPICE_FILE : \n";
 open ( WRITE, ">$OUTPUT_SPICE_FILE");
-print WRITE "#HSPICE FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE "#HSPICE FILE written from electron verion-$TOOL_VERSION\n";
 &hspiceOut;
 close(WRITE);
 print "INFO-TE-WRTE-SPCE : 002 : End writing hspice file\n";
@@ -444,7 +444,7 @@ else {
 
 print "INFO-TE-WRTE-SPCE : 003 : Begin writing the netlist in spice3 file format : $OUTPUT_SPICE_FILE : \n";
 open ( WRITE, ">$OUTPUT_SPICE_FILE");
-print WRITE "#SPICE3 FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE "#SPICE3 FILE written from electron verion-$TOOL_VERSION\n";
 &spice3Out;
 close(WRITE);
 print "INFO-TE-WRTE-SPCE : 004 : End writing spice3 file\n";

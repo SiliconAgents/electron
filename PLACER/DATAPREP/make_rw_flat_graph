@@ -263,7 +263,7 @@ unless ( open(WRITE_FLAT_NODE, ">$nodeFile") ) {
   print "ERR-PL_FLAT_GRPH : 008 : cannot open $nodeFile for writing\n";
   return;
 }
-print WRITE_FLAT_NODE "# flat placement nodes for $TOP_MODULE, written by proton\n";
+print WRITE_FLAT_NODE "# flat placement nodes for $TOP_MODULE, written by electron\n";
 print WRITE_FLAT_NODE "# all coordinates and dimensions are in microns\n";
 print WRITE_FLAT_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<node type>\n";
 print WRITE_FLAT_NODE "# a status of FIXED means the placer must not move the node\n";

@@ -319,7 +319,7 @@ sub plot_activity_heat_map {
   }
   
   my $moduleName = $GLOBAL->dbfGlobalGetTOP;
-  $top->title (" Proton (mcu_top)");
+  $top->title (" Electron (mcu_top)");
   my $bllx = $chip_llx*$MulFactor + 20;
   my $blly = $chip_lly*$MulFactor + 20;
   my $burx = $chip_urx*$MulFactor + 20;
@@ -551,7 +551,7 @@ sub plot_leakage_power_heat_map {
   }
   
   my $moduleName = $GLOBAL->dbfGlobalGetTOP;
-  $top->title (" Proton (mcu_top)");
+  $top->title (" Electron (mcu_top)");
   my $bllx = $chip_llx*$MulFactor + 20;
   my $blly = $chip_lly*$MulFactor + 20;
   my $burx = $chip_urx*$MulFactor + 20;

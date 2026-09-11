@@ -1,6 +1,6 @@
-sub reset_proton {
+sub reset_electron {
 my $noOfArguments = @_;
-if($noOfArguments < 0 || $_[0] eq '-h'){ print "Usage : reset_proton\n";
+if($noOfArguments < 0 || $_[0] eq '-h'){ print "Usage : reset_electron\n";
                                          print "      : --pldb\n";
                                          print "      : --flatdb\n";
                                          print "      : --vnom\n";
@@ -37,7 +37,7 @@ if(($flatdb == 1) || ($all == 1)){
   &delete_flatdb
 }
 }
-}#reset_proton
+}#reset_electron
 #-----------------------------------------------------------------------------------------------------------------------------------------#
 sub delete_pldb {
 foreach my $cellName(keys %PLDB){

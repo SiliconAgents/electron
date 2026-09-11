@@ -282,7 +282,7 @@ print IN "set autoscale\n";
 print IN "set xlabel \"Flop From\"\n";
 print IN "set ylabel \"Flop To \"\n";
 print IN "set zlabel \"Cell Val\"\n";
-print IN "set title \"proton : Analysis Graph\"\n";
+print IN "set title \"electron : Analysis Graph\"\n";
 print IN "set pm3d scansbackward\n";
 #print IN "splot 'test.dat' notitle with dots 2\n";
 print IN "splot 'test.dat' notitle with points 5\n";
@@ -309,7 +309,7 @@ print IN "set output \'plot.pl\'\n";
 print IN "set autoscale\n";
 print IN "set xlabel \"Flop From\"\n";
 print IN "set ylabel \"Flop To \"\n";
-print IN "set title \"proton : Analysis Graph\"\n";
+print IN "set title \"electron : Analysis Graph\"\n";
 print IN "plot 'test.dat' using 1:2 notitle with points 5\n";
 }#sub generate_2d_plot_file
 

@@ -252,7 +252,7 @@ require "$BEEHOME/UTILS/make_test_pseudo_command_for_casey";
 require "$BEEHOME/UTILS/make_test_final";
 require "$BEEHOME/UTILS/make_spider_script";
 require "$BEEHOME/UTILS/make_Robi_read_graph";
-require "$BEEHOME/UTILS/make_reset_proton";
+require "$BEEHOME/UTILS/make_reset_electron";
 require "$BEEHOME/UTILS/make_def_2_gds";
 require "$BEEHOME/UTILS/make_run_app_only";
 require "$BEEHOME/UTILS/make_spice_place";

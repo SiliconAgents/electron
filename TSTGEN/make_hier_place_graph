@@ -501,7 +501,7 @@ if ( $reportOnly ) {
 
 print "INFO-TST-HIER_PL : 009 : opening hier_place on $module\n";
 print "INFO-TST-HIER_PL : 010 : place the blocks and pins, press Save, then close the window\n";
-print "INFO-TST-HIER_PL : 011 : proton is waiting; the default save name is $placedFile\n";
+print "INFO-TST-HIER_PL : 011 : electron is waiting; the default save name is $placedFile\n";
 my $rc = system($cmd);
 if ( $rc != 0 ) {
   print "ERR-TST-HIER_PL : 012 : hier_place exited with status $rc, nothing read back\n";
@@ -1079,7 +1079,7 @@ unless ( open(WRITE_PSEUDO_NODE, ">$nodeFile") ) {
   print "ERR-TST-WR_PS_GRPH : 006 : cannot open $nodeFile for writing\n";
   return;
 }
-print WRITE_PSEUDO_NODE "# hierarchical placement nodes for $module, written by proton\n";
+print WRITE_PSEUDO_NODE "# hierarchical placement nodes for $module, written by electron\n";
 print WRITE_PSEUDO_NODE "# all coordinates and dimensions are in microns\n";
 print WRITE_PSEUDO_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<node type>\n";
 print WRITE_PSEUDO_NODE "# a status of FIXED means the placer must not move the node\n";

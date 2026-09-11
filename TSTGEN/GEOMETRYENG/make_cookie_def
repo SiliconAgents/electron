@@ -378,7 +378,7 @@ if($_[$i] eq "-debug") {$debug = 1;}
 
 
   open (WRITE, ">$OUTPUT_DEF_COOKIE");
-  print WRITE "#DEF written from proton verion-$TOOL_VERSION\n";
+  print WRITE "#DEF written from electron verion-$TOOL_VERSION\n";
   print WRITE "\n";
   print WRITE "VERSION 5.6 \;\n";
   print WRITE "NAMESCASESENSITIVE ON \;\n";

@@ -74,7 +74,7 @@ print "INFO-TST_GEOM-CRTE_DES : 004 : End running the program\n";
 sub write_def_sub {
 my $OUTPUT_DEF = "test.def";
 open (WRITE, ">$OUTPUT_DEF");
-print WRITE "#DEF written from proton verion-212\n"; 
+print WRITE "#DEF written from electron verion-212\n"; 
 print WRITE "\n";
 print WRITE "VERSION 5.5 \;\n";
 print WRITE "NAMESCASESENSITIVE ON \;\n";

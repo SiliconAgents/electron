@@ -101,20 +101,20 @@ Design Functionality :-
 ===================================================
 TYPE(A) ON/OFF Display
 **********************
-1.Instance display ON/OFF:- We can ON/OFF the display of Instances with the Help of "Instance" button in left side of proton GUI.
-2.Net display ON/OFF:- We can ON/OFF the display of Nets with the Help of "Net" button in left side of proton GUI.
-3.Special Net display ON/OFF:- We can ON/OFF the display of Special Nets with the Help of "SNet" button in left side of proton GUI.
-4.Pin display ON/OFF:- We can ON/OFF the display of Pins with the Help of "PinRects" button in left side of proton GUI.
-5.Obstracion display ON/OFF:- We can ON/OFF the display of Obstractions with the Help of "ObsRects" button in left side of proton GUI.
-6.Pin Text display ON/OFF:- We can ON/OFF the Pins name with the Help of "PinText" button in left side of proton GUI.
-7.Port display ON/OFF:- We can ON/OFF the display of In/Out Ports with the Help of "Pin" button in left side of proton GUI.
-8.Row display ON/OFF:- We can ON/OFF the display of Rows with the Help of "Rows" button in left side of proton GUI.
-9.Track display ON/OFF(not implemented):- We can ON/OFF the display of tracks with the Help of "Track" button in left side of proton GUI.
+1.Instance display ON/OFF:- We can ON/OFF the display of Instances with the Help of "Instance" button in left side of electron GUI.
+2.Net display ON/OFF:- We can ON/OFF the display of Nets with the Help of "Net" button in left side of electron GUI.
+3.Special Net display ON/OFF:- We can ON/OFF the display of Special Nets with the Help of "SNet" button in left side of electron GUI.
+4.Pin display ON/OFF:- We can ON/OFF the display of Pins with the Help of "PinRects" button in left side of electron GUI.
+5.Obstracion display ON/OFF:- We can ON/OFF the display of Obstractions with the Help of "ObsRects" button in left side of electron GUI.
+6.Pin Text display ON/OFF:- We can ON/OFF the Pins name with the Help of "PinText" button in left side of electron GUI.
+7.Port display ON/OFF:- We can ON/OFF the display of In/Out Ports with the Help of "Pin" button in left side of electron GUI.
+8.Row display ON/OFF:- We can ON/OFF the display of Rows with the Help of "Rows" button in left side of electron GUI.
+9.Track display ON/OFF(not implemented):- We can ON/OFF the display of tracks with the Help of "Track" button in left side of electron GUI.
 10.Pcell display ON/OFF:- This is not yet implemented.
 12.Gcell display ON/OFF:- This is not yet implemented.
-13.Vcong display ON/OFF:- We can ON/OFF the display of Vertical congestion with the Help of "Vcong" button in left side of proton GUI.
-14.Hcong display ON/OFF:- We can ON/OFF the display of Horizontal congestion with the Help of "Hcong" button in left side of proton GUI.
-15.Description display ON/OFF:- We can ON/OFF the descriptions associated with instances with the Help of "Description" button in left side of proton GUI.
+13.Vcong display ON/OFF:- We can ON/OFF the display of Vertical congestion with the Help of "Vcong" button in left side of electron GUI.
+14.Hcong display ON/OFF:- We can ON/OFF the display of Horizontal congestion with the Help of "Hcong" button in left side of electron GUI.
+15.Description display ON/OFF:- We can ON/OFF the descriptions associated with instances with the Help of "Description" button in left side of electron GUI.
 
 TYPE(B) Query For Nets/Instances
 ********************************

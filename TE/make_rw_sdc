@@ -32,7 +32,7 @@ else { # if correct no. of inputs
 }
 
 open (WRITE_SDC, ">$OUTPUT_SDC_FILE");
-print WRITE_SDC "#SDC FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE_SDC "#SDC FILE written from electron verion-$TOOL_VERSION\n";
 my @clockPortList = ();
 my $clock_name;
 ######  get all the clock ports #####

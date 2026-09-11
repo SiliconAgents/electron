@@ -113,7 +113,7 @@ if($_[$i] eq "-outfile"){$REPORT_FILE = $_[$i+1];}
 
 print "INFO-TE-RPT_TMNG : 001 : Writing timing report to file \"$REPORT_FILE\"\n";
 open (WRITE,">$REPORT_FILE");
-print WRITE "Report of Dynamic Timing Analysis from proton tool\n";
+print WRITE "Report of Dynamic Timing Analysis from electron tool\n";
 print WRITE "----------------------------------------\n";
 print WRITE "\n";
 print WRITE "\n";

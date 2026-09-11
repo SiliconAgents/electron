@@ -268,7 +268,7 @@ if ( $noOfArguments < 2 || $_[0] eq '-h') { print "Usage : write_hspice_deck  -o
 
 print "INFO-TE-WTE_HSPCE_DCK : 001 : Begin writing the spice file\n";
 open ( WRITE, ">$OUTPUT_SPICE_FILE");
-print WRITE "#SPICE FILE written from proton verion-$TOOL_VERSION\n"; 
+print WRITE "#SPICE FILE written from electron verion-$TOOL_VERSION\n"; 
 print WRITE "* spice subckt\n";
 
 
@@ -361,7 +361,7 @@ if ( $noOfArguments < 2 || $_[0] eq '-h') { print "Usage : write_spice3_deck  -o
 
 print "INFO-TE-WTE_SPCE3_DCK : 001 : Begin writing the spice file\n";
 open ( WRITE, ">$OUTPUT_SPICE_FILE");
-print WRITE "#SPICE FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE "#SPICE FILE written from electron verion-$TOOL_VERSION\n";
 print WRITE "* spice subckt\n";
 
 

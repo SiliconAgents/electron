@@ -214,7 +214,7 @@ sub rpcCmdViewGds {
 ############################################
 sub rpcCmdPingTool {
   return "<root><cmd>pingTool</cmd>" .
-         "<infomsg>Proton is alive</infomsg></root>";
+         "<infomsg>Electron is alive</infomsg></root>";
 }#sub rpcCmdPingTool
 
 ############################################
@@ -254,7 +254,7 @@ my $port = 1200;
     }
     
  
-    print "running proton daemon on $host at $port ... OK\n";
+    print "running electron daemon on $host at $port ... OK\n";
     my $server = Frontier::Daemon->new(
                            methods => {
                                       serGetLefMacroList => \&serGetLefMacroList,
@@ -458,8 +458,8 @@ sub rpcCmdPlaceGraphDetailPlan3 {
 }#sub rpcCmdPlaceGraphDetailPlan3
 ############################################
 sub rpcCmdReset {
-  reset_proton(("--all"));  # double parentheses!
-  return "<root><infomsg>Proton has been reset</infomsg></root>";
+  reset_electron(("--all"));  # double parentheses!
+  return "<root><infomsg>Electron has been reset</infomsg></root>";
 }#sub rpcCmdReset
 ############################################
 sub rpcCmdReportVerilogArea {

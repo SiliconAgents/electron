@@ -14,7 +14,7 @@ if($_[$x] =~ /-cellList/){$CELLLIST = $_[$x+1];}
                                          }#for correct no of Arguments
 
 open(WRITE,">$OUTFILE");
-print WRITE "#FILE written from proton verion-$TOOL_VERSION\n";
+print WRITE "#FILE written from electron verion-$TOOL_VERSION\n";
 open(READ,"$CELLLIST");
 while(<READ>){
 

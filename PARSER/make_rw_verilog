@@ -547,7 +547,7 @@ return;
                        }#if output verilog file exists
 open (WRITE,">$OUTPUT_VERILOG");
 print "INFO-PAR-VERI : 003 : Begin writing the Verilog in file $OUTPUT_VERILOG !\n";
-print WRITE "/* VERILOG written from proton version-$TOOL_VERSION */\n";
+print WRITE "/* VERILOG written from electron version-$TOOL_VERSION */\n";
 #------------------------------------------------ flat : begin : writing from the DEF database  ---------------------------------------------------------------------#
 if ( $flat == 1 ) {
   print WRITE "module $moduleName\(";

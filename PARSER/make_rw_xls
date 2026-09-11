@@ -178,7 +178,7 @@ sub run_xls_cmd {
             }#foreach column
             if(($cmd !~ /^#/) && $cmd ne ""){
                if(!exists $cmds{$cmd}){
-                 print "ERR : PAR-RUN_XLS_CMD : 001 : $cmd command is not exists in proton\n";
+                 print "ERR : PAR-RUN_XLS_CMD : 001 : $cmd command is not exists in electron\n";
                }else {
                  &{$cmd}(@arg);
                  print "#<CMD> $cmd @arg\n";

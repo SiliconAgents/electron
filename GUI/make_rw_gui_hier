@@ -51,7 +51,7 @@ $top = MainWindow->new();
 
      
 
-$top->title (" Proton (".$GLOBAL->dbfGlobalGetTOP.")");
+$top->title (" Electron (".$GLOBAL->dbfGlobalGetTOP.")");
 #$top->geometry("700x590+0+0");
 $box = [0,0,540,540];
   $guiCanvasHeight = 500;
@@ -219,7 +219,7 @@ $Filemenu->command(-label => "Clone from Git",
     -command => \&clone_from_git_popup,
     -underline => 0);  # "C" in Convert
 $Filemenu->separator();
-$Filemenu->command(-label => "Exit proton",
+$Filemenu->command(-label => "Exit electron",
     -command => \&win_kill,
     -underline => 0);  # "C" in Close
 
@@ -1149,7 +1149,7 @@ my $redo_baloon = $rightFrame->Balloon();
 #---------------------------------------------------------------------#
 #my $uphier_image = $rightFrame->Photo(-file => "$path2eq/ETC/hierup.gif");               
 my $uphier_image = $rightFrame->Photo(-file => "$path2eq/PNG/hierup_32.png");               
-my $uphierButton = $rightFrame->Button(-image=> $uphier_image,-command=>sub{&upHier;$top->configure(-title => " Proton (".$TOP_MODULE.")");$hier_canvas->delete('all');&display_hierarchy;})->pack(-side=>'top');
+my $uphierButton = $rightFrame->Button(-image=> $uphier_image,-command=>sub{&upHier;$top->configure(-title => " Electron (".$TOP_MODULE.")");$hier_canvas->delete('all');&display_hierarchy;})->pack(-side=>'top');
 my $uphier_baloon = $rightFrame->Balloon();
    $uphier_baloon->attach($uphierButton, -balloonmsg => 'Up Hierarchy');
 
@@ -2099,7 +2099,7 @@ MainLoop();
 sub exit_choice {
 
     print "You chose the Exit choice!\n";
-    print "Exiting the proton system ....\n";
+    print "Exiting the electron system ....\n";
     $GLOBAL->dbGlobalSetGuiStatus(0);
     exit;
 }#sub exit_choice
