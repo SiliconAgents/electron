@@ -2132,4 +2132,325 @@ sub get_x_region_occupied_in_row
   return -1;
 }#sub get_x_region_occupied_in_row
 
+###############################################################################################
+############################## boundary checker with pseudo inst ##############################
+###############################################################################################
+sub boundary_checker_pseudo {
+  my $noOfArg = @_;
+  my $cmd = $GLOBAL->dbfGlobalGetCurrCommand;
+  if($noOfArg < 3 || $_[0] eq '-h' ||  $_[0] eq '-help' || $_[0] eq '-HELP') { 
+     print "Usage : $cmd -top <top module name>\n"; 
+     print "             -W   <module width  (default value is 1000 micron>\n";
+     print "             -H   <module height (default value is 1000 micron>\n";
+     print "             -num_of_inst   <num of instances (default value is 500)>\n";
+  }else{
+     my $t0 = new Benchmark;
+     my ($topModule, $modWidth, $modHeight, $numOfInst, $instPrefix) = ("", 1000, 1000, 500, "u_INST"); 
+     for(my $i = 0 ; $i < $noOfArg ;  $i++){
+         if($_[$i] eq "-top"){ $topModule = $_[$i+1];}
+         if($_[$i] eq "-W")  { $modWidth = $_[$i+1]; }
+         if($_[$i] eq "-H")  { $modHeight = $_[$i+1];}
+         if($_[$i] eq "-num_of_inst")  { $numOfInst = $_[$i+1];}
+         if($_[$i] eq "-inst_prefix")  { $instPrefix = $_[$i+1];}
+     }# for no of arguments
+
+     &generatePseudoInstList("-top", $topModule, "-W", $modWidth, "-H", $modHeight, "-num_of_inst", $numOfInst, "-inst_prefix", $instPrefix);
+     &commitModule("-module", $topModule);
+     &hier2flat("--logical", "--physical");
+     &create_rows;
+     ##------ refine the port placement and assign them metal layer ----#
+     #&prePlaceData( "--noTrace", "--noLevel");
+     #&snapPlace( "--iosOnly");
+     #&remove_pins_overlap;
+     ## the place_output_fine_tune snaps the std cells to rows and fixes the X pitch as well as matches the row orientation
+     #&place_output_fine_tune ;
+
+     #print "start legalizing placement ....\n";
+     #&legalizeFlatPlace; #&prePlaceData("--noTrace");#&snapPlace;#&syncPlace;#&remove_overlap;
+     #print "done legalizing placement ....\n";
+    
+
+     my $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "command $cmd took:",timestr($td),"\n";
+  }#if correct num of arg
+}#sub boundary_checker_pseudo
+
+###############################################################################################
+############# simple command to generate pseudo inst list for given num of instances ##########
+###############################################################################################
+sub generatePseudoInstList{
+  my $noOfArg = @_;
+  my $cmd = $GLOBAL->dbfGlobalGetCurrCommand;
+  if($noOfArg < 3 || $_[0] eq '-h' ||  $_[0] eq '-help' || $_[0] eq '-HELP') { 
+     print "Usage : $cmd -top <top module name>\n"; 
+     print "             -W  <module width  (default value is 1000 micron>\n";
+     print "             -H  <module height (default value is 1000 micron>\n";
+     print "             -num_of_inst  <num of instances (default value is 500)>\n";
+     print "             -inst_prefix  <instance prefix (default value is 'u_INST')>\n";
+  }else{
+     my $t0 = new Benchmark;
+     my ($topModule, $modWidth, $modHeight, $numOfInst, $instPrefix) = ("", 1000, 1000, 500, "u_INST"); 
+     for(my $i = 0 ; $i < $noOfArg ;  $i++){
+         if($_[$i] eq "-top"){ $topModule = $_[$i+1];}
+         if($_[$i] eq "-W")  { $modWidth = $_[$i+1]; }
+         if($_[$i] eq "-H")  { $modHeight = $_[$i+1];}
+         if($_[$i] eq "-num_of_inst")  { $numOfInst = $_[$i+1];}
+         if($_[$i] eq "-inst_prefix")  { $instPrefix = $_[$i+1];}
+     }# for no of arguments
+
+     &createPseudoTopModule("-top", $topModule, "-H", $modHeight, "-W", $modWidth);  
+     print "#<CMD> createPseudoTopModule -top $topModule -H $modHeight -W $modWidth\n";
+
+     my @lefCellList = keys %PLDB; 
+     for(my $i = 0; $i < $numOfInst; $i++) {
+         my $item = int(rand($#lefCellList));
+         my $cellref = $lefCellList[$item];
+         my $instName = $instPrefix."_".$i;
+         &createPseudoInstance("-parent", $topModule, "-cell", $cellref, "-inst", $instName, "-orient", "N", "-loc", "{0,0}");
+         print "#<CMD> createPseudoInstance -parent $topModule -cell $cellref -inst $instName -orient N -loc {0,0}\n";
+     }
+     my $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "command $cmd took:",timestr($td),"\n";
+  }#if correct num of arg
+}#sub generatePseudoInstList
+
+###############################################################################################
+################ simple command to generate netlist for given num of instances ################
+###############################################################################################
+sub boundary_checker{
+  my $noOfArg = @_;
+  my $cmd = $GLOBAL->dbfGlobalGetCurrCommand;
+  if($noOfArg < 3 || $_[0] eq '-h' ||  $_[0] eq '-help' || $_[0] eq '-HELP') { 
+     print "Usage : $cmd -top <top module name>\n"; 
+     print "             -W  <module width  (default value is 1000 micron>\n";
+     print "             -H  <module height (default value is 1000 micron>\n";
+     print "             -utilization  <chip utilization in percent (default value is 70)>\n";
+     print "             -num_of_inst  <num of instances (default value is 500)>\n";
+     print "             -inst_prefix  <instance prefix (default value is 'u_INST')>\n";
+     print "             -must_include_cell  < {cell1,cell2,cell3......} >\n";
+     print "             -include_cell_count  <number of inst created for each must_include_cell>\n";
+  }else{
+     my $t0 = new Benchmark;
+     my ($topModule, $modWidth, $modHeight, $utilization, $numOfInst, $instPrefix) = ("", 1000, 1000, 70, 500, "u_INST"); 
+     my @incCellList = ();
+     my $incCellCount = 1;
+
+     for(my $i = 0 ; $i < $noOfArg ;  $i++){
+         if($_[$i] eq "-top")               { $topModule = $_[$i+1];}
+         if($_[$i] eq "-W")                 { $modWidth = $_[$i+1]; }
+         if($_[$i] eq "-H")                 { $modHeight = $_[$i+1];}
+         if($_[$i] eq "-utilization")       { $utilization = $_[$i+1];}
+         if($_[$i] eq "-num_of_inst")       { $numOfInst = $_[$i+1];}
+         if($_[$i] eq "-inst_prefix")       { $instPrefix = $_[$i+1];}
+         if($_[$i] eq "-must_include_cell") { my $cellListStr = $_[$i+1]; 
+                                              $cellListStr =~ s/\{|\}//g; 
+                                              @incCellList = split(/\,/,$cellListStr);
+                                            }
+         if($_[$i] eq "-include_cell_count"){ $incCellCount = $_[$i+1];} 
+     }# for no of arguments
+
+     $TOP_MODULE = $topModule;
+     $GLOBAL->dbfGlobalSetTOP($topModule);
+     &set_floorplan_parameters("-HEIGHT",$modHeight,"-WIDTH",$modWidth,"-ADVNC_UTILIZATION",$utilization);
+     &set_floorplan('-partition', $topModule);
+
+     my @lefCellList = keys %PLDB; 
+     my $incCellListLenght = @incCellList;
+     my $cellName;
+     for(my $i = 0; $i < $numOfInst; $i++) {
+         if(@incCellList > 0 || $i < ($incCellCount*$incCellListLenght)){
+            if($i == ($incCellCount *($incCellListLenght - @incCellList))){  ###Multiple of 'num of inst created for each cell'=incCellCount 
+               $cellName = shift @incCellList;
+               if(!exists $PLDB{$cellName}){
+                  print "WARN-TST-GENRTE_NETLIST_NEW : 001 : cell $cellName does not exists in lef ... please use correct cell\n"; 
+                  ################### if cell does not exists go to next cell ###################
+                  #my $item = int(rand($#lefCellList));
+                  #$cellName = $lefCellList[$item];
+                  $cellName = shift @incCellList;
+                  $i--;
+                  next;
+               } 
+            } 
+         }else{
+            my $item = int(rand($#lefCellList));
+            $cellName = $lefCellList[$item];
+         }     
+         my $instName = $instPrefix."_".$i;
+       
+         $CADB{$instName} = CompAttDB::new();
+         $CADB{$instName}->dbCadbSetCellref($cellName);
+         $COMP_ALREADY{$instName} = \%{$instName};
+         $CADB{$instName}->dbCadbSetStatus("PLACED");
+         $CADB{$instName}->dbCadbSetLoc(0, 0); 
+         $CADB{$instName}->dbCadbSetOrient(N);
+     }
+     &set_inst_box;
+
+     my $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "command $cmd took:",timestr($td),"\n";
+  }#if correct num of arg
+}#sub boundary_checker
+
+###############################################################################################
+################ simple command to generate netlist for given num of instances ################
+###############################################################################################
+sub generate_netlist_new{
+  use List::Util qw(shuffle);
+  my $noOfArg = @_;
+  my $cmd = $GLOBAL->dbfGlobalGetCurrCommand;
+  if($noOfArg < 3 || $_[0] eq '-h' ||  $_[0] eq '-help' || $_[0] eq '-HELP') { 
+     print "Usage : $cmd -top <top module name>\n"; 
+     print "             -W  <module width  (default value is 1000 micron>\n";
+     print "             -H  <module height (default value is 1000 micron>\n";
+     print "             -utilization  <chip utilization in percent (default value is 70)>\n";
+     print "             -num_of_inst  <num of instances (default value is 500)>\n";
+     print "             -inst_prefix  <instance prefix (default value is 'u_INST')>\n";
+     print "             -must_include_cell  < {cell1,cell2,cell3......} >\n";
+     print "             -include_cell_count  <number of inst created for each must_include_cell>\n";
+     print "             -out  <output file name (default value is 'proton_out.v')>\n";
+  }else{
+     my $t0 = new Benchmark;
+     my ($topModule, $modWidth, $modHeight, $utilization, $numOfInst, $instPrefix, $outFile) = ("", 1000, 1000, 70, 500, "u_INST", "proton_out.v"); 
+     my @incCellList = ();
+     my $incCellCount = 1;
+
+     for(my $i = 0 ; $i < $noOfArg ;  $i++){
+         if($_[$i] eq "-top")               { $topModule = $_[$i+1];}
+         if($_[$i] eq "-W")                 { $modWidth = $_[$i+1]; }
+         if($_[$i] eq "-H")                 { $modHeight = $_[$i+1];}
+         if($_[$i] eq "-utilization")       { $utilization = $_[$i+1];}
+         if($_[$i] eq "-num_of_inst")       { $numOfInst = $_[$i+1];}
+         if($_[$i] eq "-inst_prefix")       { $instPrefix = $_[$i+1];}
+         if($_[$i] eq "-out")               { $outFile = $_[$i+1];}
+         if($_[$i] eq "-must_include_cell") { my $cellListStr = $_[$i+1]; 
+                                              $cellListStr =~ s/\{|\}//g; 
+                                              @incCellList = split(/\,/,$cellListStr);
+                                            }
+         if($_[$i] eq "-include_cell_count"){ $incCellCount = $_[$i+1];} 
+     }# for no of arguments
+
+     $TOP_MODULE = $topModule;
+     $GLOBAL->dbfGlobalSetTOP($topModule);
+     &set_floorplan_parameters("-HEIGHT",$modHeight,"-WIDTH",$modWidth,"-ADVNC_UTILIZATION",$utilization);
+     &set_floorplan('-partition', $topModule);
+
+     ####### making list of std-cells #########
+     #my @lefCellList = keys %PLDB; 
+     my @lefCellList = (); 
+     foreach my $cell (keys %PLDB){
+        if($cell eq "lc_m2m_hp_i1_4x" || $cell eq "lc_m2m_hp_i1_8x"){next;}
+        if($PLDB{$cell}->dbMdbGetClass eq "CORE"){ 
+           push (@lefCellList, $cell);
+        }
+     }
+
+     ########## addin instances of std-cell ##########
+     my $incCellListLenght = @incCellList;
+     my $cellName;
+     for(my $i = 0; $i < $numOfInst; $i++) {
+         if(@incCellList > 0 || $i < ($incCellCount*$incCellListLenght)){
+            if($i == ($incCellCount *($incCellListLenght - @incCellList))){  ###Multiple of 'num of inst created for each cell'=incCellCount 
+               $cellName = shift @incCellList;
+               if(!exists $PLDB{$cellName}){
+                  print "WARN-TST-GENRTE_NETLIST_NEW : 001 : cell $cellName does not exists in lef ... please use correct cell\n"; 
+                  ################### if cell does not exists go to next cell ###################
+                  #my $item = int(rand($#lefCellList));
+                  #$cellName = $lefCellList[$item];
+                  $cellName = shift @incCellList;
+                  $i--;
+                  next;
+               } 
+            } 
+         }else{
+            my $item = int(rand($#lefCellList));
+            $cellName = $lefCellList[$item];
+         }     
+
+         my $instName = $instPrefix."_".$i;
+       
+         $CADB{$instName} = CompAttDB::new();
+         $CADB{$instName}->dbCadbSetCellref($cellName);
+         $COMP_ALREADY{$instName} = \%{$instName};
+         $CADB{$instName}->dbCadbSetStatus("PLACED");
+         $CADB{$instName}->dbCadbSetLoc(0, 0); 
+         $CADB{$instName}->dbCadbSetOrient(N);
+     }
+     &set_inst_box;
+
+     ###################### adding connectivity #######################
+     my $netCnt = 0;
+     my @instList = keys %CADB;
+     foreach my $inst (keys %CADB){
+        my $cellref = $CADB{$inst}->dbCadbGetCellref;
+        my @pins = $PLDB{$cellref}->dbMdbGetPins;
+        foreach my $pinName ( @pins ){
+           if($pinName eq "SI" || $pinName eq "SE"){next;} ## making pins SE & SI unconnected
+           my $pinType = $PLDB{$cellref}->dbMdbGetPinType($pinName); 
+           if($pinType == 1 || $pinType == 2){next;} 
+           my $pinDir = $PLDB{$cellref}->dbMdbGetPinDir($pinName); 
+           if($pinDir == 1){
+              my $netName = "NET_".$netCnt; 
+              $COMP_ALREADY{$inst}{$pinName} = $netName;
+              $NETS_ALREADY{$netName}{$inst} = $pinName;
+              my @sinkList = (shuffle grep {!/$inst/}@instList)[0..int rand(4)];
+              foreach my $sinkInst (@sinkList){
+                 my $sinkCellref = $CADB{$sinkInst}->dbCadbGetCellref;
+                 my @sinkPins = $PLDB{$sinkCellref}->dbMdbGetPins;
+                 foreach my $sinkPinName ( (shuffle @sinkPins)[0..int rand(4)]){
+                    if($sinkPinName eq "SI" || $sinkPinName eq "SE"){next;} ## making pins SE & SI unconnected
+                    my $sinkPinDir = $PLDB{$sinkCellref}->dbMdbGetPinDir($sinkPinName); 
+                    if($sinkPinDir == 0){
+                       if(!exists $COMP_ALREADY{$sinkInst}{$sinkPinName}){
+                          $COMP_ALREADY{$sinkInst}{$sinkPinName} = $netName;
+                          $NETS_ALREADY{$netName}{$sinkInst} = $sinkPinName;
+                       }
+                    }
+                 }
+              }
+              $netCnt++;
+           }
+        }   
+     }
+
+     my $numOfNet = keys %NETS_ALREADY;
+     foreach my $inst (@instList){
+        my $cellref = $CADB{$inst}->dbCadbGetCellref;
+        my @pins = $PLDB{$cellref}->dbMdbGetPins;
+        foreach my $pinName ( @pins ){
+           if($pinName eq "SI" || $pinName eq "SE"){next;} ## making pins SE & SI unconnected
+           my $pinType = $PLDB{$cellref}->dbMdbGetPinType($pinName); 
+           if($pinType == 1 || $pinType == 2){next;} 
+           my $pinDir = $PLDB{$cellref}->dbMdbGetPinDir($pinName); 
+           if($pinDir == 0){
+              if(!exists $COMP_ALREADY{$inst}{$pinName}){
+                 my $chooseRandNet = (keys %NETS_ALREADY)[int rand($numOfNet)];
+                 $COMP_ALREADY{$inst}{$pinName} = $chooseRandNet;
+                 $NETS_ALREADY{$chooseRandNet}{$inst} = $pinName;
+              }
+           }
+        }   
+     }
+
+     &write_verilog("-output","$outFile","--overwrite");
+     ##################################################################
+
+     my $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "command $cmd took:",timestr($td),"\n";
+  }#if correct num of arg
+}#sub generate_netlist_new
+
+###############################################################################################
+# potato has place_lram_ambiq, place_lram_ambiq_old and place_mspi_ambiq here: 333 lines of
+# semi-custom placement hardcoded to one Ambiq design (u_sdio_dual_port_lram_512x32 instance
+# paths, AMBIQ_DT_* cell names).  Left out of this repo deliberately, so this file is 333
+# lines shorter than potato's on purpose -- nothing called them, they were only reachable as
+# the place_lram_ambiq and place_mspi_ambiq commands, which are not registered here.
+###############################################################################################
+
+###############################################################################################
+
 1;

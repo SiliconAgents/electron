@@ -85,6 +85,7 @@ if($_[$i] eq "-floorplan") { $flplanName = $_[$i+1]; }
 if($_[$i] eq "--force"){  $forced = 1;}
                               }# for no of arguments
 if($partitionName eq ""){$partitionName = $TOP_MODULE;}
+$GLOBAL->dbfGlobalSetTOP($partitionName);
 
 if ( defined $flplanName ) {
   $flplanName =~ s(^/*(.*)/*$)(\1);  # remove leading and trailing slashes

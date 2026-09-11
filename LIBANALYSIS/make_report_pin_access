@@ -70,4 +70,35 @@ $o_rw->prepend(join"\n", @data2prepend) if ($print2File == 1 && $printSummary ==
                         }#if correct arguments
 }#sub report_cell_pin_access
 
+########################################################################
+####################### Reporting Cell Power ###########################
+########################################################################
+sub report_cell_power{
+  my $noOfArguments = @_;
+  
+  if($_[0] eq "-h" || $_[0] eq "-H" || $_[0] eq "-help" || $_[0] eq "-HELP"){
+     print "Usage :  report_cell_power\n";
+     print "                     --leakage\n";
+     print "                     --internal\n";
+     print "                     -output <filename>\n";
+  }else{
+     my ($RPTFILE, $DEFAULT, $printLeakagePowr, $printInternalPowr) = ("cell_power.rpt", 1, 0, 0); 
+     for(my $i = 0; $i < $noOfArguments; $i++){
+         if($_[$i] eq "-output")   { $RPTFILE = $_[$i+1];}
+         if($_[$i] eq "--leakage") { $printLeakagePowr = 1; $DEFAULT = 0;}
+         if($_[$i] eq "--internal"){ $printInternalPowr = 1; $DEFAULT = 0;}
+     }#for
+     open(WRITE, ">$RPTFILE");
+     foreach my $cell (keys %TLDB){
+        if($DEFAULT == 1 || $printLeakagePowr == 1){
+           my $cell_leakage_power = $TLDB{$cell}->dbTimingLibGetCellLeakagePower; 
+           print WRITE "$cell $cell_leakage_power\n";
+        }
+     }
+     close(WRITE);
+  }
+}#sub report_cell_power
+
+########################################################################
+
 1;

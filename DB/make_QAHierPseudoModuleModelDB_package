@@ -642,6 +642,24 @@ my $bit = $self->{PDirty};
 return($bit)
 }#sub dbaTstgenGetPhysicalDirty
 
+#<!-- PhysOnly marks a module loaded by "edit_module --physical_only", whose
+#     nets were never parsed into PSEUDO_VNET_ALREADY.  Committing such a
+#     module logically would rebuild its conn lines from empty pin tables and
+#     wipe its connectivity in VNOM, so commitModule refuses to do that. -->
+sub dbaTstgenSetPhysicalOnly {
+my($self,$bit) = @_;
+unless ( defined $bit ) {
+  $bit = 1;
+}
+$self->{PhysOnly} = $bit;
+}#sub dbaTstgenSetPhysicalOnly
+
+sub dbaTstgenGetPhysicalOnly {
+my($self) = @_;
+my $bit = $self->{PhysOnly} ? 1 : 0;
+return($bit)
+}#sub dbaTstgenGetPhysicalOnly
+
 #-----------------------------------------#
 
 sub dbaTstgenSetFloorplan {

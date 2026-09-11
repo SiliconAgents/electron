@@ -63,6 +63,43 @@ sub utilLocToBbox {
  return ($llx, $lly, $urx, $ury);
 }#sub utilLocToBbox
 
+
+sub utilLocToPoly {
+ my ($xorigin, $yorigin, $orient, @poly) = @_;
+ my @newPoly = (); 
+ 
+ if ( $orient eq "N" || $orient eq "FN" ||
+      $orient eq "S" || $orient eq "FS" ) {
+      for(my $j=0; $j<=$#poly; $j=$j+2){
+          push(@newPoly, $xorigin+$poly[$j] , $yorigin+$poly[$j+1]);
+      }
+ }
+ elsif ( $orient eq "W" || $orient eq "FW" ||
+         $orient eq "E" || $orient eq "FE" ) {
+      my @p = ();
+      for(my $j=0; $j<=$#poly; $j=$j+2){
+          push(@p,[$poly[$j],$poly[$j+1]]);
+      }
+      my $polygon = Math::Polygon->new(points => \@p); 
+
+      my $rpolygon = $polygon->rotate(degrees=>-90);
+      my ($xmin, $ymin, $xmax, $ymax) = $rpolygon->bbox;
+      my @points = $rpolygon->points;
+      foreach my $p (@points){
+         $p->[0] -= ($xmin - $xorigin);
+         $p->[1] -= ($ymin - $yorigin);
+         push(@newPoly, @$p);
+      } 
+         
+ }
+ else {
+      print "WARN-UTIL-LOC-BBOX : 001 : Illegal orientation $orient\n";
+      }
+ 
+ return (@newPoly);
+}#sub utilLocToPoly
+
+
 #
 # Arguments are references to array, example call with (\@box1, \@box2);
 #

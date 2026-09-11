@@ -26,6 +26,8 @@ sub new {
 	      S => 0,
               MM => [],
 	      PID=> -1,
+	      ACT=> 0,
+	      LP=> 0,
               NFLOPS => 0,
               FL => [],
               DL => [],
@@ -264,6 +266,39 @@ my ($self) = @_;
 my @list = @{$self->{DL}};
 return(@list);
 }#sub dbgGcellGetDisplayedList
+
+#-------------------------------------------------#
+sub dbgGcellSetPinActivity{
+  my ($self,$act) = @_;
+  $self->{ACT} = $act;
+}#sub dbgGcellSetPinActivity
+
+sub dbgGcellAddPinActivity{
+  my ($self,$act) = @_;
+  $self->{ACT} += $act;
+}#sub dbgGcellAddPinActivity
+
+sub dbgGcellGetPinActivity{
+  my ($self) = @_;
+  return($self->{ACT});
+}#sub dbgGcellGetPinActivity
+
+#-------------------------------------------------#
+sub dbgGcellSetLeakagePower{
+  my ($self,$lpwr) = @_;
+  $self->{LP} = $lpwr;
+}#sub dbgGcellSetLeakagePower
+
+sub dbgGcellAddLeakagePower{
+  my ($self,$lpwr) = @_;
+  $self->{LP} += $lpwr;
+}#sub dbgGcellAddLeakagePower
+
+sub dbgGcellGetLeakagePower{
+  my ($self) = @_;
+  return($self->{LP});
+}#sub dbgGcellGetLeakagePower
+
 #-------------------------------------------------#
 
 

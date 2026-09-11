@@ -80,5 +80,179 @@ return($netName);
 
 }#sub dbLibqaGetNewNet
 
+###############################################################################################
+######################################### Comapare Models #####################################
+###############################################################################################
+sub compare_models {
+  use Benchmark;
+
+  my $noOfArg = @_;
+  if($noOfArg < 0 || $_[0] eq '-h' ||  $_[0] eq '-help' || $_[0] eq '-HELP'){
+     print "Usage : compare_models -output <report file>\n";
+  }else{
+     my $t0 = new Benchmark;
+     my %pin_dir = (0=>"input", 1=>"output", 2=>"inout"); 
+     my ($reportFile, $compareVerilog, $compareLib, $compareCdl) = ("models.rpt", 0, 0, 0);
+     my @lef_macro_list = ();
+     for(my $i = 0; $i < $noOfArg; $i++){
+         if($_[$i] eq "-output")  {$reportFile = $_[$i+1];}
+         if($_[$i] eq "--verilog"){$compareVerilog = 1;}
+         if($_[$i] eq "--lib")    {$compareLib = 1;}
+         if($_[$i] eq "--cdl")    {$compareCdl = 1;}
+         if($_[$i] eq "--all")    {$compareLib = 1; $compareVerilog = 1; $compareCdl = 1;}
+         if($_[$i] eq "-cell")  {
+            my $cellListStr = $_[$i+1]; $cellListStr =~ s/\{|\}//g;
+            @lef_macro_list = split(/\,/, $cellListStr);
+         }
+     }#for
+
+     open(WRITE,">$reportFile"); 
+
+     if(@lef_macro_list < 1){ 
+        @lef_macro_list = @{&serGetLefMacroList};
+     }
+     foreach my $lef_macro (@lef_macro_list){
+        #print "LEF_MACRO: $lef_macro\n";
+        if($compareLib == 1){
+           my @lef_macro_pin_list = sort @{&serGetLefMacroAttr($lef_macro,"pins")};
+           #print "  LEF_PINS: @lef_macro_pin_list\n";
+           if(exists $TLDB{$lef_macro}){
+              my @lib_macro_pin_list = sort $TLDB{$lef_macro}->dbTimingLibGetPins;
+              #print "  LIB_PINS: @lib_macro_pin_list\n";
+              foreach my $lef_macro_pin (@lef_macro_pin_list){
+                 my $lef_macro_pin_dir = &serGetLefPinAttr($lef_macro, $lef_macro_pin, "dir");
+                 ######################### adding for busses ######################### 
+                 my $busWidth = $PLDB{$lef_macro}->dbMdbGetPinBusWidth($lef_macro_pin);
+                 if($busWidth == 1){
+                    my $lef_macro_pin_base = $PLDB{$lef_macro}->dbMdbGetPinBusBaseName($lef_macro_pin);  
+                    $lef_macro_pin =  $lef_macro_pin_base;
+                 }
+                 ##################################################################### 
+               
+                 if($lef_macro_pin ~~ @lib_macro_pin_list){
+                    my $lib_macro_pin_dir = $TLDB{$lef_macro}->dbTimingLibGetPinDir($lef_macro_pin); 
+                    #print "    LEF_PIN_DIR: $lef_macro_pin $pin_dir{$lef_macro_pin_dir}\n";
+                    #print "    LIB_PIN_DIR: $lef_macro_pin $lib_macro_pin_dir\n";
+                    if($lib_macro_pin_dir ne $pin_dir{$lef_macro_pin_dir}){
+                        print WRITE "WARN-LIB-PIN-DIR : CELL=>$lef_macro PIN=>$lef_macro_pin dir is $pin_dir{$lef_macro_pin_dir} in LEF but $lib_macro_pin_dir in lib\n";
+                    }
+                 }else{
+                    print WRITE "WARN-LIB-PIN : CELL=>$lef_macro does not have PIN=>$lef_macro_pin in lib\n";
+                 }
+              }
+           }else{
+              print WRITE "WARN-LIB-CELL : CELL=>$lef_macro does not exists in lib\n";
+           } 
+        }
+
+        if($compareVerilog == 1){
+           my @lef_macro_pin_list = sort @{&serGetLefMacroAttr($lef_macro,"pins")};
+           #print "  LEF_PINS: @lef_macro_pin_list\n";
+           if(exists $MODULE_ALREADY{$lef_macro}){
+              #my @inPorts = sort $MODULE_ALREADY{$lef_macro}->dbVNOMGetInput;
+              #my @outPorts = sort $MODULE_ALREADY{$lef_macro}->dbVNOMGetOutput;
+              #my @bidiPorts = sort $MODULE_ALREADY{$lef_macro}->dbVNOMGetBidi;
+              ######################## adding for busses ######################### 
+              my @inPorts = ();
+              my @outPorts = ();
+              my @bidiPorts = ();
+              foreach my $inPort (sort $MODULE_ALREADY{$lef_macro}->dbVNOMGetInput){
+                 my $inputType = $MODULE_ALREADY{$lef_macro}->dbVNOMGetInputType($inPort);
+                 if($inputType == 1){
+                    my $bits = $MODULE_ALREADY{$lef_macro}->dbVNOMGetInputBits($inPort);
+                    $bits =~ s/\[|\]//g;
+                    my ($maxBit, $minBit) = split(/\:/, $bits);  
+                    for(my $i=$minBit; $i<=$maxBit; $i++){
+                        push(@inPorts, $inPort."[$i]");
+                    }
+                 }else{
+                    push(@inPorts, $inPort);
+                 }   
+              } 
+
+              foreach my $outPort (sort $MODULE_ALREADY{$lef_macro}->dbVNOMGetOutput){
+                 my $outputType = $MODULE_ALREADY{$lef_macro}->dbVNOMGetOutputType($outPort);
+                 if($outputType == 1){
+                    my $bits = $MODULE_ALREADY{$lef_macro}->dbVNOMGetOutputBits($outPort);
+                    $bits =~ s/\[|\]//g;
+                    my ($maxBit, $minBit) = split(/\:/, $bits);  
+                    for(my $i=$minBit; $i<=$maxBit; $i++){
+                        push(@outPorts, $outPort."[$i]");
+                    }
+                 }else{
+                    push(@outPorts, $outPort);
+                 }   
+              } 
+
+              foreach my $bidiPort (sort $MODULE_ALREADY{$lef_macro}->dbVNOMGetBidi){
+                 my $bidiType = $MODULE_ALREADY{$lef_macro}->dbVNOMGetBidiType($bidiPort);
+                 if($bidiType == 1){
+                    my $bits = $MODULE_ALREADY{$lef_macro}->dbVNOMGetBidiBits($bidiPort);
+                    $bits =~ s/\[|\]//g;
+                    my ($maxBit, $minBit) = split(/\:/, $bits);  
+                    for(my $i=$minBit; $i<=$maxBit; $i++){
+                        push(@bidiPorts, $bidiPort."[$i]");
+                    }
+                 }else{
+                    push(@bidiPorts, $bidiPort);
+                 }   
+              } 
+              #################################################################### 
+
+              #print "verilog_ports: @inPorts|@outPorts|@bidiPorts\n";
+              foreach my $lef_macro_pin (@lef_macro_pin_list){
+                 #print "  LEF_MACRO_PIN: $lef_macro_pin\n";
+                 if($lef_macro_pin ~~ @inPorts || $lef_macro_pin ~~ @outPorts || $lef_macro_pin ~~ @bidiPorts){
+                    my $lef_macro_pin_dir = &serGetLefPinAttr($lef_macro, $lef_macro_pin, "dir");
+                    #print "    LEF_PIN_DIR: $lef_macro_pin $pin_dir{$lef_macro_pin_dir}\n";
+                    if(($lef_macro_pin_dir == 0 && !($lef_macro_pin ~~ @inPorts)) || ($lef_macro_pin_dir == 1 && !($lef_macro_pin ~~ @outPorts)) || ($lef_macro_pin_dir == 2 && !($lef_macro_pin !~ @bidiPorts))){
+                       print WRITE "WARN-VERILOG-PIN-DIR : CELL=>$lef_macro PIN=>$lef_macro_pin dir is $pin_dir{$lef_macro_pin_dir} in LEF but not same in verilog\n";
+                    }
+                 }else{
+                    print WRITE "WARN-VERILOG-PIN : CELL=>$lef_macro does not have PIN=>$lef_macro_pin in verilog\n";
+                 }
+              }
+           }else{
+              print WRITE "WARN-VERILOG-CELL : CELL=>$lef_macro does not exists in verilog\n";
+           } 
+        }
+
+        if($compareCdl == 1){
+           my @lef_macro_pin_list = sort @{&serGetLefMacroAttr($lef_macro,"pins")};
+           #print "  LEF_PINS: @lef_macro_pin_list\n";
+           if(exists $CDLDB{$lef_macro}){
+              my @cdl_macro_pin_list = sort $CDLDB{$lef_macro}->dbCdldbGetPins;
+              #print "  CDL_PINS: @cdl_macro_pin_list\n";
+              foreach my $lef_macro_pin (@lef_macro_pin_list){
+                 #print "  LEF_MACRO_PIN: $lef_macro_pin\n";
+                 my $lef_macro_pin_dir = &serGetLefPinAttr($lef_macro, $lef_macro_pin, "dir");
+                 if($lef_macro_pin ~~ @cdl_macro_pin_list){
+                    my $cdl_macro_pin_dir = $CDLDB{$lef_macro}->dbCdldbGetPinDir($lef_macro_pin); 
+                    #print "    LEF_PIN_DIR: $lef_macro_pin $pin_dir{$lef_macro_pin_dir}\n";
+                    #print "    CDL_PIN_DIR: $lef_macro_pin $cdl_macro_pin_dir\n";
+                    if($cdl_macro_pin_dir ne $pin_dir{$lef_macro_pin_dir}){
+                        print WRITE "WARN-CDL-PIN-DIR : CELL=>$lef_macro PIN=>$lef_macro_pin dir is $pin_dir{$lef_macro_pin_dir} in LEF but $cdl_macro_pin_dir in cdl\n";
+                    }
+                 }else{
+                    print WRITE "WARN-CDL-PIN : CELL=>$lef_macro does not have PIN=>$lef_macro_pin in cdl\n";
+                 }
+              }
+           }else{
+              print WRITE "WARN-CDL-CELL : CELL=>$lef_macro does not exists in cdl\n";
+           } 
+        }
+
+     }
+
+     close(WRITE);
+
+     my $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "Command compare_models took:",timestr($td),"\n";
+  }
+}#sub compare_models
+
+###############################################################################################
+
 
 1;

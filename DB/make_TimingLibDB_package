@@ -10,6 +10,8 @@ my $cell = {
                     CELL_NAME => "UND",
                     AREA => 0,
                     CELL_FOOTPRINT => "UND", 
+                    MAX_LEAKAGE_POWER => "UND", 
+                    MIN_LEAKAGE_POWER => "UND", 
                     };
 bless $cell, 'TimingLibDB';
 return $cell;
@@ -122,7 +124,12 @@ return(@timing_type);
 #-----------------------------------------------------#
 sub dbTimingLibSetPinRPin {
 my ($self,$pin,$rpin)  = @_;
+#check if rpin exists
+my @rpins = @{${$self->{PINS}}{$pin}->{rpin_name}};
+my %params = map { $_ => 1 } @rpins;
+if ( exists $params{$rpin} ) { } else {
 push(@{${$self->{PINS}}{$pin}->{rpin_name}} ,$rpin);
+}
 }#sub dbTimingLibSetPinRPin
 
 sub dbTimingLibGetPinRPin {
@@ -503,6 +510,31 @@ my ($self) = @_;
 my $cell_footprint = $self->{CELL_FOOTPRINT};
 return($cell_footprint);
 }#sub dbTimingLibGetCellFootPrint
+
+#-------------------------------------------------------------------------------#
+sub dbTimingLibSetCellMaxLeakage{
+my ($self,$leakage) = @_;
+$self->{MAX_LEAKAGE_POWER} = $leakage;
+}#sub dbTimingLibSetCellMaxLeakage 
+#-------------------------------------------------------------------------------#
+sub dbTimingLibGetCellMaxLeakage{
+my ($self) = @_;
+my $leakage = $self->{MAX_LEAKAGE_POWER};
+return($leakage);
+}#sub dbTimingLibGetCellMaxLeakage
+#-------------------------------------------------------------------------------#
+sub dbTimingLibSetCellMinLeakage{
+my ($self,$leakage) = @_;
+$self->{MIN_LEAKAGE_POWER} = $leakage;
+}#sub dbTimingLibSetCellMinLeakage 
+#-------------------------------------------------------------------------------#
+sub dbTimingLibGetCellMinLeakage{
+my ($self) = @_;
+my $leakage = $self->{MIN_LEAKAGE_POWER};
+return($leakage);
+}#sub dbTimingLibGetCellMinLeakage
+
+
 #---------------------------------function of internal power--------------------#
 sub dbTimingLibSetPinPower {
 my ($self,$pin,$rpin,$cond,$type,@Ddata)  = @_;

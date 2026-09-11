@@ -278,4 +278,113 @@ return $temp_area;
 }
 }
 
+######################################################################################################
+######################################## Writing PG Net List #########################################
+######################################################################################################
+sub write_pg_net {
+#  use Spreadsheet::XLSX;
+#  use Spreadsheet::XLSX::Fmt2007;
+  use Benchmark;
+  
+  my $t0 = new Benchmark;
+  
+  my %ORIENT = ("R0"=>"N", "R90"=>"E", "R180"=>"S", "R270"=>"W", "MY"=>"FN", "MX"=>"FS", "MX90"=>"FW", "MY90"=>"FE"); 
+  #my %ORIENT = ("R180"=>"N", "R90"=>"E", "R0"=>"S", "R270"=>"W", "MY"=>"FN", "MX"=>"FS", "MX90"=>"FW", "MY90"=>"FE"); 
+  my ($xlsxFile, $outFile) = ("", "PG_net.txt");
+  my $noOfArg = @_;
+  
+  if($noOfArg < 1 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP') {
+     print "\nUsage : ./write_pg_net.pl -xls < xlsx file >\n";
+     print "                            -out <output fie>\n";
+  }else {
+     for(my $i=0 ; $i<$noOfArg; $i++){
+         if($_[$i] eq "-xls"){$xlsxFile = $_[$i+1];} 
+         if($_[$i] eq "-out"){$outFile = $_[$i+1];} 
+     }#for correct no.of Arguments
+     if(-e $xlsxFile){
+        print "reading xlsx file $xlsxFile .....\n";
+        my $excel = Spreadsheet::XLSX -> new ($xlsxFile, $converter); 
+        print "parsing of xlsx file is ok.....\n";
+
+        my $dbu = $GLOBAL->dbfGlobalGetDBU;
+        if(exists $DIE_ALREADY{dieArea}){
+           my $diellx = $DIE_ALREADY{dieArea}[0];
+           my $dielly = $DIE_ALREADY{dieArea}[1];
+           my $dieurx = $DIE_ALREADY{dieArea}[2];
+           my $dieury = $DIE_ALREADY{dieArea}[3];
+           #print "dieArea is:@{$DIE_ALREADY{dieArea}} \n";
+             
+           if(-e $outFile){ system("rm -rf $outFile");}
+           open (WRITE, ">$outFile");#|| die("Cannot open file for writing");
+           if(-w $outFile ){
+              my $cnt = 0;
+              for(my $iSheet=0; $iSheet < 4 ; $iSheet++){
+                  my $sheet = $excel->{Worksheet}[$iSheet]; 
+                  printf("#Sheet %d : Writing %s PG Net \n", $cnt, $sheet->{Name});
+                   
+                  for(my $row=$sheet->{MinRow}+1; defined $sheet->{MaxRow} && $row <= $sheet->{MaxRow}; $row++ ) {
+                      my $instName = $sheet->{Cells}[$row][0]->{Val};
+                      if($instName =~ /^\s*#/ ) { next; }
+                      if($instName eq "" ) { next; }
+                      my $pgNet = $sheet->{Cells}[$row][21]->{Val};       
+                      if($pgNet eq "" || $pgNet eq "NA"){
+                          next; #ignoring if PG net not found
+                      }
+                      if($instName =~ /PAD_[0-9]+/){
+                         if($pgNet =~ /\$X/){
+                            my $num = (split(/\_/, $instName))[1];
+                            $pgNet =~ s/\$X/$num/g;
+                         }
+                      }
+
+                      my $cellName = $sheet->{Cells}[$row][5]->{Val};
+                      if($sheet->{Cells}[$row][6]->{Val} ne ""){
+                         $cellName = $cellName.'_'.$sheet->{Cells}[$row][6]->{Val};
+                      }
+                      my $offset = $sheet->{Cells}[$row][13]->{Val};
+                      my $orient = $ORIENT{$sheet->{Cells}[$row][8]->{Val}};
+
+                      my @cellSize = $PLDB{$cellName}->dbMdbGetSize; 
+                      my $width = $cellSize[0]*$dbu;
+                      my $height = $cellSize[1]*$dbu;
+
+                      my ($locX, $locY) = (0, 0);
+                      if($sheet->{Name} eq "left"){
+                         $locX = $diellx;
+                         $locY = $dielly+$offset*$dbu;
+                      }elsif($sheet->{Name} eq "top"){
+                         $locX = $diellx + $offset*$dbu; 
+                         $locY = $dieury - $height;
+                      }elsif($sheet->{Name} eq "bottom"){
+                         $locX = $diellx + $offset*$dbu; 
+                         $locY = $dielly; 
+                      }elsif($sheet->{Name} eq "right"){
+                         $locX = $dieurx - $height; 
+                         $locY = $dielly + $offset*$dbu;  
+                      }
+                      my ($llx,$lly,$urx,$ury) = &utilLocToBbox($locX, $locY, $orient, $width, $height);  
+                      #print "inst:$instName loc:$locX $locY  bbox:$llx,$lly,$urx,$ury\n";
+                      my $midX = ($llx+$urx)/2;
+                      my $midY = ($lly+$ury)/2;
+     
+                      print WRITE "$pgNet $midX $midY\n";
+           
+                  } 
+                 $cnt++;
+              } 
+           }#if file is writable 
+        }#if dieArea found 
+        close(WRITE);
+     }else{
+        print "WARN: $xlsxFile file not found !\n";
+     }
+  }
+  
+  my $tfinal = new Benchmark;
+  my $tdfinal = timediff($tfinal, $t0);
+  print "command write_pg_net took:",timestr($tdfinal),"\n";
+}#sub write_pg_net 
+
+######################################################################################################
+
 1;

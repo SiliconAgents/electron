@@ -609,5 +609,58 @@ return($new_wl_in_microns);
 }
 }#sub report_net_wl_old_1
 
+#######################################################################################
+########################### get net driver pin location ###############################
+#######################################################################################
+sub get_nets_driver_pin_loc {
+  my $t0 = new Benchmark;
+  my $noOfArguments = @_;
+  
+  if($noOfArguments < 0 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq '-HELP'){ 
+     print "Usage : get_nets_driver_pin_loc -out < output text file (default value is nets_driver.txt) >\n";
+  }else{
+     my $outFile = "nets_driver.txt";
+     for(my $x = 0; $x < $noOfArguments ; $x++){
+         if($_[$x] eq "-out"){$outFile = $_[$x+1];}
+     } 
+     open(WRITE, ">$outFile");
+     foreach my $netName ( keys %NETS_ALREADY ) {
+        my $netType = $NADB{$netName}->dbNadbGetNetType;
+        if($netType == 0 ){
+           foreach my $instance ( keys %{$NETS_ALREADY{$netName}}){
+              if($instance eq "PIN"){
+              }else{  
+                 if(exists $COMP_ALREADY{$instance}){
+                    my $cellref = $CADB{$instance}->dbCadbGetCellref;
+                    my $pinName = $NETS_ALREADY{$netName}{$instance};
+                    my $pinDir = $PLDB{$cellref}->dbMdbGetPinDir($pinName);
+                    if($pinDir == 1){          
+                       my @instLoc = $CADB{$instance}->dbCadbGetLoc;
+                       my $orient = $CADB{$instance}->dbCadbGetOrient;
+                       if(exists $PLDB{$cellref} ) {
+                          my @cellSize = $PLDB{$cellref}->dbMdbGetSize;
+                          my @cellOrigin = $PLDB{$cellref}->dbMdbGetOrigin;
+                          my @pinRects = $PLDB{$cellref}->dbMdbGetPinRect($pinName);
+                          my ($layer, $rllx1, $rlly1, $rurx1, $rury1)=(split(/\s+/,$pinRects[0]))[0,2,3,4,5];
+                          my @rectCoords = &xformCellPinToInstPin($instLoc[0],$instLoc[1],$cellOrigin[0],$cellOrigin[1],$orient,$cellSize[0],$cellSize[1],$rllx1,$rlly1,$rurx1,$rury1);
+                          my $midX = ($rectCoords[0] + $rectCoords[2])/2;
+                          my $midY = ($rectCoords[1] + $rectCoords[3])/2;
+                          print WRITE "$netName $instance/$pinName $midX,$midY\n";
+                       }
+                    }
+                 }
+              }
+           }
+        }
+     }
+     close(WRITE);
+     $t1 = new Benchmark;
+     my $td = timediff($t1, $t0);
+     print "command get_nets_driver_pin_loc took:",timestr($td),"\n";
+  }
+}#sub get_nets_driver_pin_loc
+
+#######################################################################################
+
 
 1;
