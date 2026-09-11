@@ -12,3 +12,8 @@
 # Session logs and command logs written next to the tool, and by the tests.
 electron.log*
 electron.cmd*
+
+# Container images built by INSTALL/podman/Makefile.  Each pair is a couple of
+# GB: podman save writes oci-*.tar, apptainer build turns it into a .sif.
+*.sif
+INSTALL/podman/oci-*.tar

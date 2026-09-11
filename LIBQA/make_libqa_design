@@ -129,7 +129,7 @@ sub compare_models {
                  }
                  ##################################################################### 
                
-                 if($lef_macro_pin ~~ @lib_macro_pin_list){
+                 if(grep { $_ eq $lef_macro_pin } @lib_macro_pin_list){
                     my $lib_macro_pin_dir = $TLDB{$lef_macro}->dbTimingLibGetPinDir($lef_macro_pin); 
                     #print "    LEF_PIN_DIR: $lef_macro_pin $pin_dir{$lef_macro_pin_dir}\n";
                     #print "    LIB_PIN_DIR: $lef_macro_pin $lib_macro_pin_dir\n";
@@ -202,10 +202,10 @@ sub compare_models {
               #print "verilog_ports: @inPorts|@outPorts|@bidiPorts\n";
               foreach my $lef_macro_pin (@lef_macro_pin_list){
                  #print "  LEF_MACRO_PIN: $lef_macro_pin\n";
-                 if($lef_macro_pin ~~ @inPorts || $lef_macro_pin ~~ @outPorts || $lef_macro_pin ~~ @bidiPorts){
+                 if(grep { $_ eq $lef_macro_pin } @inPorts, @outPorts, @bidiPorts){
                     my $lef_macro_pin_dir = &serGetLefPinAttr($lef_macro, $lef_macro_pin, "dir");
                     #print "    LEF_PIN_DIR: $lef_macro_pin $pin_dir{$lef_macro_pin_dir}\n";
-                    if(($lef_macro_pin_dir == 0 && !($lef_macro_pin ~~ @inPorts)) || ($lef_macro_pin_dir == 1 && !($lef_macro_pin ~~ @outPorts)) || ($lef_macro_pin_dir == 2 && !($lef_macro_pin !~ @bidiPorts))){
+                    if(($lef_macro_pin_dir == 0 && !(grep { $_ eq $lef_macro_pin } @inPorts)) || ($lef_macro_pin_dir == 1 && !(grep { $_ eq $lef_macro_pin } @outPorts)) || ($lef_macro_pin_dir == 2 && !(grep { $_ eq $lef_macro_pin } @bidiPorts))){
                        print WRITE "WARN-VERILOG-PIN-DIR : CELL=>$lef_macro PIN=>$lef_macro_pin dir is $pin_dir{$lef_macro_pin_dir} in LEF but not same in verilog\n";
                     }
                  }else{
@@ -226,7 +226,7 @@ sub compare_models {
               foreach my $lef_macro_pin (@lef_macro_pin_list){
                  #print "  LEF_MACRO_PIN: $lef_macro_pin\n";
                  my $lef_macro_pin_dir = &serGetLefPinAttr($lef_macro, $lef_macro_pin, "dir");
-                 if($lef_macro_pin ~~ @cdl_macro_pin_list){
+                 if(grep { $_ eq $lef_macro_pin } @cdl_macro_pin_list){
                     my $cdl_macro_pin_dir = $CDLDB{$lef_macro}->dbCdldbGetPinDir($lef_macro_pin); 
                     #print "    LEF_PIN_DIR: $lef_macro_pin $pin_dir{$lef_macro_pin_dir}\n";
                     #print "    CDL_PIN_DIR: $lef_macro_pin $cdl_macro_pin_dir\n";
