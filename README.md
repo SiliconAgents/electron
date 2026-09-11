@@ -20,14 +20,63 @@
       |                                                                                	|
       \--------------------------------------------------------------------------------------/
 
-Note :
-Electron is the fork of unmaintained open source code at https://github.com/efabless/proton. proton is released under AGPL3 license as listed in License.txt file. Since Efabless closed down in 2025, we are unable to confirm the ownership and hence assume proton code is in the public domain.
+## About this fork
 
-This is our attempt to bring Proton back to life as we were the original contributors. Our belief that proton was designed ground up since inception in a way that blends very well for Agentic era of chip design. 
+Electron is a fork of [efabless/proton](https://github.com/efabless/proton), a hierarchical
+ASIC place-and-route suite published by efabless corporation under the
+[GNU Affero General Public License, version 3](https://www.gnu.org/licenses/agpl-3.0.en.html).
 
-We have fixed some known bugs, improved installation using containers and enhanced its LEF/DEF parsers to handle advanced technology nodes. 
+Proton is Copyright &copy; 2014–2018 efabless corporation. efabless ceased operations in 2025,
+and we have not been able to determine who holds the copyright in the original work today.
+**We make no claim that Proton is in the public domain, and we do not treat it as unowned.**
+The AGPL-3.0 grant that efabless published with Proton is irrevocable and runs with the code
+regardless of who currently owns it, so Electron is distributed under AGPL-3.0 on the strength of
+that grant. The original `LICENSE.txt` and all upstream copyright and license headers are
+preserved unchanged.
 
-If you are interested in enhancing electron please feel free to clone and contribute back. Also let us know of any bugs you find or ask for enhancements.
+If you hold or have acquired rights in the Proton codebase and believe anything here is
+inaccurate, please open an issue — we will correct the record promptly.
+
+## Modifications
+
+Electron is an effort to bring Proton back into active use. Changes to date:
+
+- fixes for a number of long-standing bugs
+- containerized installation
+- LEF/DEF parser support for advanced technology nodes
+
+Some of the people working on Electron contributed to Proton originally. That history informs the
+work but confers no rights beyond the AGPL-3.0 grant above.
+
+Modifications and additions in this fork are Copyright &copy; 2025–2026 Tenstorrent AI ULC and
+are licensed under AGPL-3.0, the same terms as the upstream work. Individual and third-party
+contributions are copyright their respective authors.
+
+## Relationship to Tenstorrent
+
+Electron is an independent open-source project. Tenstorrent holds copyright in contributions made
+by its employees and licenses them under AGPL-3.0, but:
+
+- Electron is **not a Tenstorrent product**. It is not part of, bundled with, or a dependency of
+  any Tenstorrent product, SDK, or software distribution.
+- Electron is **not supported by Tenstorrent**. There is no warranty, no service commitment, and
+  no roadmap obligation. See the warranty disclaimer in AGPL-3.0 §§ 15–16.
+- No Tenstorrent proprietary code, confidential information, or internal tooling is included in
+  this repository.
+- Nothing here grants any license to Tenstorrent trademarks, and no patent license is granted
+  beyond what AGPL-3.0 § 11 itself provides for the code contributed.
+
+## Contributing
+
+Contributions are welcome. Contributions are accepted under AGPL-3.0; by opening a pull request
+you confirm you have the right to submit the code under that license. Bug reports and enhancement
+requests are welcome in the issue tracker.
+
+## Trademarks
+
+"Proton" and "efabless" are used here solely to identify the upstream project and its original
+publisher. "Tenstorrent" is a trademark of Tenstorrent AI ULC, used here only to identify the
+copyright holder in this fork's contributions.
 
 Original Readme text :
 
