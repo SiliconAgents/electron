@@ -567,7 +567,7 @@ foreach $module ( keys %{MODULE_ALREADY} ) {
     my $place = "";
     if ( defined $flplanID && exists $FLOORPLAN_ALREADY{$flplanID} ) {
       my @bbox = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstBbox($inst);
-      $place = ( @bbox == 4 ) ?  " \[@bbox\]" : " UNPLACED";
+      $place = ( @bbox >= 4 ) ?  " \[@bbox\]" : " UNPLACED";
     }
     print WRITE "// HIER $inst : $cellref$place\;\n";
   }
@@ -623,7 +623,7 @@ foreach my $flplanID ( keys %{FLOORPLAN_ALREADY} ) {
               "\[@size\]" : "UNPLACED";
   print WRITE "{$flplanID}{$cellref $key unit=$dbu $place\n";
   foreach my $inst ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstList ) {
-    my @bbox = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstBbox($inst);
+    my @bbox = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstExtent($inst);
     my $place = ( @bbox == 4 && $bbox[0] ne $bbox[2] && $bbox[1] ne $bbox[3] ) ?
                 "\[@bbox\]" : "UNPLACED";
     print WRITE "    $inst $place\n";

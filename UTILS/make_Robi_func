@@ -1378,7 +1378,7 @@ sub get_location_of_flat_inst_from_pseudo_db
       my $curr_inst_y_val = 0;
       my @curr_inst_rel_loc_and_orient = (0,0,"UND");
       if($FLOORPLAN_ALREADY{$temp_parent_floorplanID}->dbFlplanHasHierInst($curr_inst_name)){
-        my @hierBbox = $FLOORPLAN_ALREADY{$temp_parent_floorplanID}->dbFlplanGetHierInstBbox($curr_inst_name);
+        my @hierBbox = $FLOORPLAN_ALREADY{$temp_parent_floorplanID}->dbFlplanGetHierInstExtent($curr_inst_name);
         my @orient = $FLOORPLAN_ALREADY{$temp_parent_floorplanID}->dbFlplanGetHierInstOrient($curr_inst_name);
         @curr_inst_rel_loc_and_orient = ($hierBbox[0], $hierBbox[1], $orient);
       }elsif($FLOORPLAN_ALREADY{$temp_parent_floorplanID}->dbFlplanHasLeafInst($curr_inst_name)){

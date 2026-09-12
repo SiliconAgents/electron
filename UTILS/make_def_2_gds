@@ -613,7 +613,7 @@ sub fpdef2gds {
         ####################### for Hier Instances ######################
         my @hInsts = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstList;
         foreach my $hinst ( @hInsts ) {
-          my @rBox = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstBbox($hinst);
+          my @rBox = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstExtent($hinst);
           my $cellref = $MODULE_ALREADY{$moduleName}->dbVNOMGetHierInstCell($hinst);
  
           if(!exists $temp_mod{$cellref}){

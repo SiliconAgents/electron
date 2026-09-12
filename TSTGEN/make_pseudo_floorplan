@@ -35,7 +35,10 @@ if ( exists $FLOORPLAN_LOOKUP{"$moduleName/_self_"} ) {
         #---------------------- soft modules -----------------------------------#
          my @hInsts = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstList;
          foreach my $hinst ( @hInsts ) {
-                 my @rBox = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstBbox($hinst);
+                   #<!-- the record is two corners, so write the extent of
+                   #     whatever shape the inst has; a polygon would
+                   #     otherwise emit its first two vertices -->
+                   my @rBox = $FLOORPLAN_ALREADY{$fpPntr}->dbFlplanGetHierInstExtent($hinst);
          my $llx = $rBox[0]*$mulFactor; 
          my $lly = $rBox[1]*$mulFactor; 
          my $urx = $rBox[2]*$mulFactor; 

@@ -2789,7 +2789,7 @@ sub get_location_of_parent_instance
   my $curr_lower_left_y_val = 0;
   for(my $i = 1 ; $i <= $#inst_names;$i++) {
     if (exists $FLOORPLAN_ALREADY{$curr_hier_floor_plan_name}) {
-      my @bbox = $FLOORPLAN_ALREADY{$curr_hier_floor_plan_name}->dbFlplanGetHierInstBbox($inst_names[$i]);
+      my @bbox = $FLOORPLAN_ALREADY{$curr_hier_floor_plan_name}->dbFlplanGetHierInstExtent($inst_names[$i]);
       if ( @bbox == 4 ) {
         my $llx_curr = $bbox[0]; 
         my $lly_curr = $bbox[1]; 

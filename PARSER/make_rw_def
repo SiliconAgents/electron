@@ -2204,7 +2204,7 @@ else {
              my ($region, $llx, $lly, $urx, $ury) = @region_data[0..4]; 
              if ( $MODULE_ALREADY{$TOP_MODULE}->dbVNOMHasHierInst($region) ) {
                 $FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddHierInst($region,
-                                                    $llx, $lly, $urx, $ury);
+                                                    $llx, $lly, $urx, $ury, "N");
              }
           }
                                             }# while analyzing placement
@@ -3209,9 +3209,13 @@ foreach my $moduleName (keys %MODULE_ALREADY){
     if($class == 11 ){next;}
     my $flplanID = $FLOORPLAN_LOOKUP{"$cellref/_self_"};
     my @size = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
-    if($bbox[3] eq "" && $bbox[4] eq ""){
+    #<!-- "no usable box" is a length question now that a box can be a polygon;
+    #     the old test read $bbox[3]/[4] which are undef when there is no box at
+    #     all.  Orientation is passed explicitly so AddHierInst cannot mistake a
+    #     trailing coordinate for one. -->
+    if(@bbox < 4){
       @bbox = ($bbox[0],$bbox[1],$size[2],$size[3]); 
-      $FLOORPLAN_ALREADY{$module_flplanId}->dbFlplanAddHierInst($hier_inst,@bbox);
+      $FLOORPLAN_ALREADY{$module_flplanId}->dbFlplanAddHierInst($hier_inst,@bbox,"N");
     }#if  
   }#foreach hierInst 
 }#foreach

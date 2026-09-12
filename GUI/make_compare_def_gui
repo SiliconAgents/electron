@@ -1092,7 +1092,7 @@ sub read_2nd_def{
                              if($region_token eq "-"){ 
                                 my($region, $llx, $lly, $urx, $ury) = @region_data[0..4]; 
                                 if($MODULE_ALREADY{$TOP_MODULE}->dbVNOMHasHierInst($region)){
-                                   $FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddHierInst($region,$llx, $lly, $urx, $ury);
+                                   $FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddHierInst($region,$llx, $lly, $urx, $ury, "N");
                                 }
                              }
                           }# while analyzing placement

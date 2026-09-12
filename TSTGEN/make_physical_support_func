@@ -481,7 +481,10 @@ if ( !defined $inst ) {
 }
 
 my $dbu = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetDBUnit;
-my @size = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstBbox($inst);
+#<!-- extent, not [0..3]: a moved inst is stored as a polygon, whose first
+#     two points are one edge, so the old indexing gave height 0 and the hier
+#     view refused to draw the module. -->
+my @size = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstExtent($inst);
 $size[2] = ($size[2] - $size[0]) / $dbu;
 $size[3] = ($size[3] - $size[1]) / $dbu;
 $size[0] = $size[1] = 0;
@@ -669,8 +672,14 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   $size[0] = $size[1] = 0;
   my @bbox = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox;
   my $orient = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstOrient;
-  @bbox = &utilLocToBbox($bbox[0], $bbox[1], $orient, $size[2], $size[3]);
-  $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBSetInstRelBbox(@bbox);
+  #<!-- An inst that has been shaped into a polygon keeps that shape.  Rebuilding
+  #     it from the child module's die, which is only ever a rectangle, is what
+  #     made a rectilinear inst come back square after commit.  A plain
+  #     rectangular inst is still resized to match its child, as before. -->
+  if ( @bbox <= 4 ) {
+    @bbox = &utilLocToBbox($bbox[0], $bbox[1], $orient, $size[2], $size[3]);
+    $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBSetInstRelBbox(@bbox);
+  }
 
   #<!-- setting child module size most likely has no effect on floorplan,
   #     it is a gauge for the flow and consistency of our mechanism -->
@@ -911,7 +920,11 @@ foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   unless ( $cellref ne $module && $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetPhysicalDirty ) {
     next;
   }
-  my @bbox = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox;
+  #<!-- reduce whatever shape the inst has to its extent; this used to bail out
+  #     on anything that was not exactly four values, so a rectilinear inst never
+  #     propagated its size to the child module -->
+  my @bbox = &dbfTstgenBboxFromCoords(
+               $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox );
   if ( @bbox != 4 ) {
     next;
   }
@@ -942,7 +955,10 @@ if ( $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetPinStatus($pin) > 1 ) {
 }
 
 if ( $module ne $cellref ) {
-  my @bbox = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox;
+  #<!-- the inst origin is the lower left of its extent; [0],[1] on a polygon is
+  #     just the first vertex, which need not be the corner -->
+  my @bbox = &dbfTstgenBboxFromCoords(
+               $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox );
   $x -= $bbox[0];
   $y -= $bbox[1];
 }

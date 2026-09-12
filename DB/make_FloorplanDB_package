@@ -170,9 +170,17 @@ return($dbu);
 }#sub dbFlplanGetDBUnit
 
 sub dbFlplanAddHierInst {
-my ($self, $name, $llx, $lly, $urx, $ury, $orient) = @_;
-$self->{HChild}{$name}{BBOX} = [ $llx, $lly, $urx, $ury ];
-$self->{HChild}{$name}{O} = ( defined $orient ) ? $orient : "N";
+#<!-- A hier inst is not always a rectangle: the hier view draws every one as a
+#     polygon, so a move hands back 8 coordinates for a plain box and more for a
+#     rectilinear one.  Keep the whole coordinate list.  Orientation is optional
+#     and comes last; coordinates arrive in x,y pairs, so an odd count of
+#     remaining arguments means the last one is the orientation.  Popping
+#     unconditionally would eat ury from the callers that omit it. -->
+my $self = shift @_;
+my $name = shift @_;
+my $orient = ( @_ % 2 ) ? pop @_ : "N";
+$self->{HChild}{$name}{BBOX} = [ @_ ];
+$self->{HChild}{$name}{O} = ( defined $orient && $orient ne "" ) ? $orient : "N";
 }# sub dbFlplanAddHierInst
 
 sub dbFlplanGetHierInstList {
@@ -190,6 +198,27 @@ unless ( exists $self->{HChild}{$name} ) {
 }
 return @{$self->{HChild}{$name}{BBOX}};
 }# sub dbFlplanGetHierInstBbox
+
+sub dbFlplanGetHierInstExtent {
+#<!-- the bounding box of whatever shape the inst has: (minx,miny,maxx,maxy).
+#     Consumers that need a rectangle must use this rather than indexing
+#     [0..3], which on a polygon is the first two vertices, not opposite
+#     corners -- that is what made a moved inst come back zero height. -->
+my ($self, $name) = @_;
+my @c = $self->dbFlplanGetHierInstBbox($name);
+if ( @c < 4 ) {
+  return ();
+}
+my @x = ();
+my @y = ();
+for (my $i = 0; $i + 1 <= $#c; $i += 2) {
+  push(@x, $c[$i]);
+  push(@y, $c[$i+1]);
+}
+my @sx = sort { $a <=> $b } @x;
+my @sy = sort { $a <=> $b } @y;
+return ($sx[0], $sy[0], $sx[-1], $sy[-1]);
+}# sub dbFlplanGetHierInstExtent
 
 sub dbFlplanGetHierInstOrient {
 my ($self, $name) = @_;
