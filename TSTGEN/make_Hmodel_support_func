@@ -41,10 +41,12 @@ sub dbfTstgenCreateHierModuleInst {
 my $parent = $_[0];
 my $instName = $_[1];
 my $moduleName = $_[2];
-my $llx = $_[3];
-my $lly = $_[4];
-my $urx = $_[5];
-my $ury = $_[6];
+my $stdCellsArea = $_[3];
+my $instColor = $_[4];
+my $llx = $_[5];
+my $lly = $_[6];
+my $urx = $_[7];
+my $ury = $_[8];
 my $status;
 
 if($llx eq "" && $lly eq ""){
@@ -55,6 +57,11 @@ if($llx eq "" && $lly eq ""){
 #print "llx $llx, lly $lly, urx $urx, ury $ury, status $status\n";
 
 $PSEUDO_MODULE_ALREADY{$parent}->dbaTstgenSetLogicalDirty(1);
+#<!-- placing an inst changes the parent physically too, else a commit of
+#     the grandparent skips this module's floorplan (PDirty gate) -->
+if ( $status eq "PLACED" ) {
+  $PSEUDO_MODULE_ALREADY{$parent}->dbaTstgenSetPhysicalDirty(1);
+}
 #--------------------------- populate the instance hash table --------------------------#
 print "INFO-TST : 002 : Creating hier instance $instName of cell $moduleName in $parent at $llx,$lly,$urx,$ury\n";
 $PSEUDO_VINST_ALREADY{$parent}{$instName} = PseudoInstanceModelDB::new();
@@ -63,6 +70,8 @@ $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstCellref($moduleName);
 $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstRelBbox($llx,$lly,$urx,$ury);
 $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstName($instName);
 $PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstStatus($status);
+$PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstCellArea($stdCellsArea);
+$PSEUDO_VINST_ALREADY{$parent}{$instName}->dbPimDBSetInstColor($instColor);
 }#sub dbfTstgenCreateHierModuleInst
 
 sub dbfTstgenCreateTopModule {
@@ -970,6 +979,10 @@ if($bbox[0] eq "" && $bbox[1] eq ""){
 print "INFO-TST : 001 : llx $bbox[0], lly $bbox[1], urx $bbox[2], ury $bbox[3], status $status\n";
 print "INFO-TST : 002 : Creating instance $inst of cell $cellref in $parent at @bbox\n";
 $PSEUDO_MODULE_ALREADY{$parent}->dbaTstgenSetLogicalDirty(1);
+#<!-- see dbfTstgenCreateHierModuleInst: a placed inst is a physical change -->
+if ( $status eq "PLACED" ) {
+  $PSEUDO_MODULE_ALREADY{$parent}->dbaTstgenSetPhysicalDirty(1);
+}
 $PSEUDO_VINST_ALREADY{$parent}{$inst} = PseudoInstanceModelDB::new();
 $PSEUDO_VINST_ALREADY{$parent}{$inst}->dbPimDBSetParentModule($parent);
 $PSEUDO_VINST_ALREADY{$parent}{$inst}->dbPimDBSetInstName($inst);
@@ -1581,8 +1594,20 @@ foreach my $net ( keys %{$PSEUDO_VNET_ALREADY{$module}} ) {
 sub dbfTstgenEditModule {
 
 my $moduleName = $_[0];
+my $physOnly = $_[1];   #<!-- skip connectivity, load physical attributes only -->
 
 unless ( exists $MODULE_ALREADY{$moduleName} ) {
+  #<!-- A module created in the pseudo DB but not yet committed has no VNOM
+  #     entry.  Do NOT hand it to dbfTstgenCreateTopModule(): called without
+  #     width/height it installs a fresh object sized (0,0,undef,undef), so
+  #     the module loses the size it was created with and Hier-View then
+  #     divides by zero.  Just mark it as the module being edited. -->
+  if ( exists $PSEUDO_MODULE_ALREADY{$moduleName} ) {
+    $TOP_MODULE = $moduleName;
+    $GLOBAL->dbfGlobalSetTOP($moduleName);
+    $PSEUDO_MODULE_ALREADY{$moduleName}->dbaTstgenSetIsModuleTop();
+    return;
+  }
   &dbfTstgenCreateTopModule($moduleName);
   return;
 }
@@ -1611,6 +1636,17 @@ foreach $inst ( @insts ) {
 }
 
 &dbfTstgenLoadVNOMInsts($moduleName);
+
+if ( $physOnly ) {
+  #<!-- dbfTstgenLoadVNOMNets regex-parses every conn line of the module and is
+  #     the bulk of the cost here.  Skip it, and mark the module so that a full
+  #     commitModule will not try to write connectivity back out of the empty
+  #     PSEUDO_VNET_ALREADY it leaves behind. -->
+  print "INFO-TST : 002 : Module $moduleName loaded physical-only, nets not parsed\n";
+  $PSEUDO_MODULE_ALREADY{$moduleName}->dbaTstgenSetPhysicalOnly(1);
+  return;
+}
+
 &dbfTstgenLoadVNOMNets($moduleName);
 
 }#sub dbfTstgenEditModule
