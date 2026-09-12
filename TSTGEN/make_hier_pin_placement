@@ -92,10 +92,11 @@ foreach my $pin ( @pins ) {
   foreach my $pin ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetPinList ) {
 ####Hard coding done for pad block###
 if ($pin eq "pad") {
-my $llx = $bbox[0]+2000;
-my $lly = $bbox[3]-40000;
-my $urx = $bbox[2] - 2000;
-my $ury = $bbox[3] - 4000;
+my $dbu = $GLOBAL->dbfGlobalGetDBU();
+my $llx = $bbox[0]+$dbu;
+my $lly = $bbox[3]-20*$dbu;
+my $urx = $bbox[2] - $dbu;
+my $ury = $bbox[3] - 2*$dbu;
 my $rect = "$topLayer $llx $lly $urx $ury  ";
 print "INFO-TST-PN_PL_HR : 004 : Bbox:@bbox, Pin size: $rect\n" if ($debug);
 $FLOORPLAN_ALREADY{$flplanID}->dbFlplanSetPinStatus($pin, "PLACED");

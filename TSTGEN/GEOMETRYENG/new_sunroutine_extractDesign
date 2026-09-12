@@ -66,10 +66,11 @@ sub extractDesign() {
   } # for
   } # end else
   my ($llx_cut, $lly_cut, $urx_cut, $ury_cut);
-  $llx_cut = $cookiesize[0] * 2000;
-  $lly_cut = $cookiesize[1] * 2000;
-  $urx_cut = $cookiesize[2] * 2000;
-  $ury_cut = $cookiesize[3] * 2000;
+  my $dbu = $GLOBAL->dbfGlobalGetDBU();
+  $llx_cut = $cookiesize[0] * $dbu;
+  $lly_cut = $cookiesize[1] * $dbu;
+  $urx_cut = $cookiesize[2] * $dbu;
+  $ury_cut = $cookiesize[3] * $dbu;
   
   
   my (@loc,@loc_mod, $instName,$size);
@@ -284,14 +285,15 @@ if($_[$i] eq "-debug") {$debug = 1;}
 
 
   open (WRITE, ">$OUTPUT_DEF_COOKIE");
-  print WRITE "#DEF written from proton verion-212\n";
+  print WRITE "#DEF written from electron verion-212\n";
   print WRITE "\n";
   print WRITE "VERSION 5.6 \;\n";
   print WRITE "NAMESCASESENSITIVE ON \;\n";
   print WRITE "DIVIDERCHAR \"\/\" \;\n";
   print WRITE "BUSBITCHARS \"\[ \]\" \;\n";
   print WRITE "DESIGN $COOKIE_NAME \;\n";
-  print WRITE "UNITS DISTANCE MICRONS 2000 \;\n";  
+  my $dbu_units = $GLOBAL->dbfGlobalGetDBU();
+  print WRITE "UNITS DISTANCE MICRONS $dbu_units \;\n";  
   
   
   print WRITE "DIEAREA ( $cookieInfo{dieArea}[0] $cookieInfo{dieArea}[1] ) ( $cookieInfo{dieArea}[2] $cookieInfo{dieArea}[3] ) \;\n";

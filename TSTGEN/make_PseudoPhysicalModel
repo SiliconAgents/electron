@@ -167,8 +167,7 @@ elsif ($_[$i] eq "-floorplan") {$flplanName = $_[$i+1];}
 elsif ($_[$i] eq "-pin") {$pinName = $_[$i+1];}
 elsif ($_[$i] eq "-layer") {$layerName = $_[$i+1];}
 elsif ($_[$i] eq "-status") {$status = $_[$i+1];}
-elsif ($_[$i] eq "-bbox") { my $rect = $_[$i+1]; $rect =~ s/\{\s*//;
-                            $rect =~ s/\s*\}//; @bbox = split(/\,/,$rect);}
+elsif ($_[$i] eq "-bbox") { @bbox = &dbfTstgenParseCoordList($_[$i+1], "-bbox"); }
 elsif ($_[$i] eq "--clear") {$clear = 1;}
 elsif ( $_[$i] =~ m/^-+\w/) { print "WARN-TST-SET_PSUDO_FLP : 001 : invalid option $_[$i]\n"; }
 } # for
@@ -274,7 +273,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
 elsif ($_[$i] eq "-module") {$module = $_[$i+1];}
 elsif ($_[$i] eq "-type") {$guideType = $_[$i+1];}
 elsif ($_[$i] eq "-layer") {$layer = $_[$i+1];}
-elsif ($_[$i] eq "-bbox") { my $box = $_[$i+1]; $box =~ s/\{(.*)\}/\1/; @bbox = split(/\,/, $box); }
+elsif ($_[$i] eq "-bbox") { @bbox = &dbfTstgenParseCoordList($_[$i+1], "-bbox"); }
 elsif ($_[$i] =~ m/^-\w/) { print "WARN-TST-CR_PN_GUIDE : 001 : invalid option $_[$i]\n"; }
 } # for
 
