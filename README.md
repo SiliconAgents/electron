@@ -107,7 +107,7 @@ export PATH=$ELECTRON_HOME:$PATH
 	: electron --help           ===> prints the launch help message
 	: electron -f run.tcl       ===> executes the commands in run.tcl and returns to shell prompt
 
-By default, proton open in non-gui mode. To open GUI from shell mode type "win" or "gui" 
+By default, electron open in non-gui mode. To open GUI from shell mode type "win" or "gui" 
 
 
 
@@ -121,7 +121,7 @@ Features
 Proton has the many of the features of commercial Place and Route tools. We are developing many more actively and ask for community help in giving us feedback and also pitchin to help develop new features
 Currently following features have been tested to work
 
-import/read LEF(5.7) , DEF, gate level verilog ( hierarchical and flat), GDS2
+import/read LEF(5.8) , DEF, gate level verilog ( hierarchical and flat), GDS2
 export/write  LEF, DEF, gate level verilog, GDS2
 
 	RTL Simulation
