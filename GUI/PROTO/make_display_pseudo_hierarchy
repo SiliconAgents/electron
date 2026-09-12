@@ -1106,6 +1106,14 @@ $canvas->CanvasBind('<m><B1-Motion>' => sub {
                     }
   });
 $canvas->CanvasBind('<m><B1-ButtonRelease>' => sub {
+        #<!-- The press handler arms a move only when a HIER_MOD was under the
+        #     cursor, and the motion handler honours that, but this one did not:
+        #     pressing m+1 on the die outline, a leaf inst or empty canvas left
+        #     $inst empty, and the cellref lookup below then died on undef with
+        #     "Can't call method dbPimDBGetInstCellref on an undefined value". -->
+        unless ( $moving_start == 1 ) {
+          return;
+        }
         my @coords = $canvas->coords($inst);
         my @poly_coords = ();
         for(my $i=0; $i<=$#coords; $i=$i+2){
@@ -1115,8 +1123,15 @@ $canvas->CanvasBind('<m><B1-ButtonRelease>' => sub {
         print "calling move inst from here\n";
         &movePseudoHierInst("-inst", $inst, "-coords", "{@poly_coords}");
         #----------------updating specify table ---------------------------------------#
-        my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$inst}->dbPimDBGetInstCellref;
-        &update_specifyTable_ifResizeOrMove_hierInst($inst, $cellref,\@poly_coords,"move");
+        #<!-- a canvas tag is not proof of a database entry: the inst can belong to
+        #     another parent, or have been deleted since the view was drawn -->
+        if ( exists $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$inst} ) {
+          my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$inst}->dbPimDBGetInstCellref;
+          &update_specifyTable_ifResizeOrMove_hierInst($inst, $cellref,\@poly_coords,"move");
+        }
+        else {
+          print "WARN-GUI-HIER_VIEW : 002 : \"$inst\" is not an instance of $TOP_MODULE, move not recorded\n";
+        }
         #-------- if assist mode floorplan os ON--- then call prachi's block placer----#
         #<!-- the gate that comment always described, finally wired up.  A manual
         #     move is a manual move: movePseudoHierInst above has already written
