@@ -1118,11 +1118,18 @@ $canvas->CanvasBind('<m><B1-ButtonRelease>' => sub {
         my $cellref = $PSEUDO_VINST_ALREADY{$TOP_MODULE}{$inst}->dbPimDBGetInstCellref;
         &update_specifyTable_ifResizeOrMove_hierInst($inst, $cellref,\@poly_coords,"move");
         #-------- if assist mode floorplan os ON--- then call prachi's block placer----#
-        print "compacting the block placement\n";
-        #<!-- parentheses matter: "&sub;" passes the caller's @_ through, and a Tk
-        #     callback's @_ holds the widget, which ends up in write_hier_floorplan's
-        #     option string as "Tk::WorldCanvas=HASH(0x...)". -->
-        &update_hier_floorplan_loc();
+        #<!-- the gate that comment always described, finally wired up.  A manual
+        #     move is a manual move: movePseudoHierInst above has already written
+        #     the new bbox to the pseudo DB, so skipping the compactor loses
+        #     nothing except the compactor moving the instance again.  Turn it
+        #     back on with "set_floorplan_mode --assist" (or --auto). -->
+        if ( $GLOBAL->dbfGlobalGetFlplanMode != 0 ) {
+           print "compacting the block placement\n";
+           #<!-- parentheses matter: "&sub;" passes the caller's @_ through, and a Tk
+           #     callback's @_ holds the widget, which ends up in write_hier_floorplan's
+           #     option string as "Tk::WorldCanvas=HASH(0x...)". -->
+           &update_hier_floorplan_loc();
+        }
         $canvas->delete('TEMP');
         $canvas->configure(-cursor => 'top_left_arrow');
         $moving_start = 0;

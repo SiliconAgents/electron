@@ -64,7 +64,8 @@ my $design = {
                     BUF_FOR_ASSIGN_GND => "",
                     BUF_FOR_ASSIGN_INST => 1,
                     WRITE_ASSIGN_AS_BUFFER => 0,
-                    FLPLAN_MODE => "1",
+                    FLPLAN_MODE => "0",   #<!-- manual: a hand move is not followed by the block compactor -->
+
                     FLINE_MODE => "Regular",
                     CURR_CMD => "UND",
                     open_instance_pop_up => 0,
