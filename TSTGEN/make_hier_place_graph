@@ -130,15 +130,21 @@ foreach my $conn ( $MODULE_ALREADY{$module}->dbVNOMGetConn ) {
       next;
     }
 
-    #<!-- a {a,b,c} concatenation ties every net in it to this instance -->
-    my @netList = ();
-    if ( $net =~ m/\{.*\}/ ) {
-      $net =~ s/^\{//;
-      $net =~ s/\}$//;
-      @netList = split(/,/, $net);
-    }
-    else {
-      push(@netList, $net);
+    #<!-- Blast the expression to one name per bit.
+    #
+    #     Matching net names as written does not work: an instance that takes a
+    #     bus writes .sum(q6) while whatever reads a bit of it writes q6[11], so
+    #     the two never meet and the signal looks unconnected.  That is not a
+    #     corner case -- it is how every bussed connection between a block and
+    #     the logic around it is written, and it is why the output ports of a
+    #     module came out of the graph with no edges at all.
+    #
+    #     array_of_blasted_expr is the same expansion read_verilog uses for an
+    #     assign: it splits a {a,b} concatenation, expands a[3:0] to its bits,
+    #     and looks a bare bus name up in the module's wire and port widths. -->
+    my @netList = &array_of_blasted_expr($net, $module);
+    unless ( @netList ) {
+      push(@netList, $net);   #<!-- nothing known about it, take it as written -->
     }
 
     foreach my $subNet ( @netList ) {
@@ -176,6 +182,136 @@ foreach my $conn ( $MODULE_ALREADY{$module}->dbVNOMGetConn ) {
 return (\%NET_TO_INST, \%NET_TO_PIN);
 
 }# sub dbfTstgenHierNetToInst
+
+
+#<!-- Union-find over the net/instance incidence graph, used to collapse cones
+#     of combinational logic.  Keys are tagged "N:<net>" or "I:<inst>" so the
+#     two name spaces cannot collide: a net and an instance may share a name. -->
+sub dbfTstgenUFFind {
+
+my ($parent, $key) = @_;
+unless ( exists $parent->{$key} ) {
+  $parent->{$key} = $key;
+  return ($key);
+}
+#<!-- iterative, with path compression: a long buffer chain would otherwise
+#     recurse as deep as the chain is long -->
+my $root = $key;
+while ( $parent->{$root} ne $root ) {
+  $root = $parent->{$root};
+}
+while ( $parent->{$key} ne $root ) {
+  my $next = $parent->{$key};
+  $parent->{$key} = $root;
+  $key = $next;
+}
+return ($root);
+
+}# sub dbfTstgenUFFind
+
+sub dbfTstgenUFUnion {
+
+my ($parent, $a, $b) = @_;
+my $ra = &dbfTstgenUFFind($parent, $a);
+my $rb = &dbfTstgenUFFind($parent, $b);
+if ( $ra ne $rb ) {
+  $parent->{$rb} = $ra;
+}
+return ($ra);
+
+}# sub dbfTstgenUFUnion
+
+
+#<!-- Which port nodes does a net name stand for?
+#
+#     The nodefile blasts every bussed port to bits, a[0] .. a[7], because that
+#     is what a placer has to put somewhere.  A conn line does not have to name
+#     the net that way: a child instantiation writes .a(a[3:0]) and a module
+#     that passes a bus straight through writes .a(a), so the net is a range or
+#     a bare base name and matches no port node at all.
+#
+#     That is not cosmetic.  The port member of such a net used to be looked up
+#     as the net's own name, found nothing, and was dropped, so in any module
+#     whose children take buses -- which is most of them -- every port came out
+#     of the graph with no edges whatsoever.
+#
+#     Resolve the three forms: an exact bit, a range which covers the bits in
+#     it, and a bare base name which covers the whole bus. -->
+sub dbfTstgenPortNodesForNet {
+
+my ($net, $nodeNum, $bitsByBase) = @_;
+
+#<!-- a plain net, or a bit that is a port in its own right -->
+if ( exists $nodeNum->{$net} ) {
+  return ($net);
+}
+
+my ($base, $range) = ($net, "");
+if ( $net =~ m/^(.*)\[([^\]]*)\]$/ ) {
+  ($base, $range) = ($1, $2);
+}
+
+#<!-- a[3:0], and a[0:3] means the same set of bits -->
+if ( $range =~ m/^\s*(\d+)\s*:\s*(\d+)\s*$/ ) {
+  my ($hi, $lo) = ($1, $2);
+  ($hi, $lo) = ($lo, $hi) if ( $lo > $hi );
+  my @out = ();
+  for ( my $i = $lo ; $i <= $hi ; $i++ ) {
+    if ( exists $bitsByBase->{$base}{$i} ) {
+      push(@out, $bitsByBase->{$base}{$i});
+    }
+  }
+  return (@out);
+}
+
+#<!-- the bare base name of a bus: every bit of it -->
+if ( $range eq "" && exists $bitsByBase->{$base} ) {
+  my @out = ();
+  foreach my $i ( sort { $a <=> $b } keys %{$bitsByBase->{$base}} ) {
+    push(@out, $bitsByBase->{$base}{$i});
+  }
+  return (@out);
+}
+
+return ();
+
+}# sub dbfTstgenPortNodesForNet
+
+
+#<!-- Is this pseudo instance something whose position matters in its own right?
+#
+#     A hierarchical instance always is: it is a block with a floorplan.  A leaf
+#     is one when the library says it holds state or is a hard block -- seq, mem
+#     and block in dbfFlatNodeType's vocabulary.  Everything else, which in
+#     practice means combinational logic and the physical-only cells, is what
+#     gets collapsed away.
+#
+#     und is deliberately NOT an anchor.  A cell nothing described could be a
+#     flop, so treating it as one would invent anchors, and treating it as combi
+#     silently hides them; the caller counts them and says so rather than
+#     guessing either way. -->
+sub dbfTstgenPseudoIsAnchor {
+
+my ($module, $inst) = @_;
+
+unless ( exists $PSEUDO_VINST_ALREADY{$module}{$inst} ) {
+  return (0);
+}
+my $cellref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+unless ( defined $cellref && $cellref ne "" ) {
+  return (0);
+}
+#<!-- a hierarchical child: known to the pseudo database or to VNOM -->
+if ( exists $PSEUDO_MODULE_ALREADY{$cellref} || exists $MODULE_ALREADY{$cellref} ) {
+  return (1);
+}
+my $type = &dbfFlatNodeType($cellref);
+if ( $type eq "seq" || $type eq "mem" || $type eq "block" ) {
+  return (1);
+}
+return (0);
+
+}# sub dbfTstgenPseudoIsAnchor
 
 
 sub hier_connectivity {
@@ -402,6 +538,7 @@ my $layer;
 my $origin = "lower_left";
 my $fanoutLimit = 0;
 my ($writeOnly, $reportOnly, $keepFiles, $noSize, $noPorts) = (0, 0, 0, 0, 0);
+my $hierOnly = 0;
 my $extra = "";
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
@@ -420,6 +557,9 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                         write the graph and stop\n";
   print "                   --no_size    do not apply reshaped block sizes\n";
   print "                   --no_ports   do not apply pin locations\n";
+  print "                   --hier_only\n";
+  print "                         the old graph: hierarchical instances only, with\n";
+  print "                         every net that runs through a leaf cell dropped\n";
   print "                   --keep\n";
   return;
 }
@@ -436,6 +576,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--write_only")   { $writeOnly = 1; }
   elsif ($_[$i] eq "--no_size")      { $noSize = 1; }
   elsif ($_[$i] eq "--no_ports")     { $noPorts = 1; }
+  elsif ($_[$i] eq "--hier_only")    { $hierOnly = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HIER_PL : 001 : invalid option $_[$i]\n"; }
 }
@@ -466,8 +607,22 @@ if ( -e $inFile ) {
   unlink($inFile);
 }
 
+#<!-- Read the connectivity in full and thin it afterwards, rather than asking
+#     for hierarchical instances only.
+#
+#     --hier_only drops the leaf cells while the nets are still being collected,
+#     so a connection running hier_A -> buffer -> hier_B is two separate nets,
+#     neither of which has two hierarchical members, and it is not collapsed but
+#     lost.  In a netlist where the blocks talk to each other through any glue
+#     logic at all that is most of the connectivity, and the placer was being
+#     handed a graph far emptier than the design.
+#
+#     --anchors keeps the same blocks, plus the sequential cells, memories and
+#     hard blocks whose position matters in its own right, plus the ports, and
+#     turns each cone of combinational logic between them into one hyperedge --
+#     the same reduction anchor_hypergraph.py does for the flat flow. -->
 my @writeArgs = ("-module", $module, "-nodefile", $nodeFile,
-                 "-graph", $graphFile, "--hier_only");
+                 "-graph", $graphFile, ($hierOnly ? "--hier_only" : "--anchors"));
 if ( $fanoutLimit > 0 ) {
   push(@writeArgs, "-fanout_limit", $fanoutLimit);
 }
@@ -872,6 +1027,7 @@ my $graphFile;
 my $fanoutLimit = 0;
 my $nodeFileOnly = 0;
 my $hierOnly = 0;
+my $anchorMode = 0;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : write_pseudo_graph -module <module name>\n";
@@ -879,7 +1035,13 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                           -graph <file name>\n";
   print "                           -fanout_limit <high fan out threshold>\n";
   print "                           --hier_only\n";
-  print "                                 only hierarchical instances, no leaf cells\n";
+  print "                                 only hierarchical instances, no leaf cells.\n";
+  print "                                 Nets through a leaf cell are LOST: prefer --anchors\n";
+  print "                           --anchors\n";
+  print "                                 keep hierarchical instances, sequential cells,\n";
+  print "                                 memories, hard blocks and ports, and collapse each\n";
+  print "                                 cone of combinational logic between them into one\n";
+  print "                                 hyperedge, so connectivity through logic survives\n";
   print "                           --nodefile_only\n";
   return;
 }
@@ -889,6 +1051,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-graph")         { $graphFile = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "--hier_only")    { $hierOnly = 1; }
+  elsif ($_[$i] eq "--anchors")      { $anchorMode = 1; }
   elsif ($_[$i] eq "--nodefile_only"){ $nodeFileOnly = 1; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-WR_PS_GRPH : 001 : invalid option $_[$i]\n"; }
 }
@@ -927,6 +1090,8 @@ my %typeCnt = ();
 my $nodeCnt = 0;
 my $noSizeCnt = 0;
 my $polyCnt = 0;
+my $collapsedCnt = 0;
+my $undCollapsedCnt = 0;
 
 #<!-- Ports.
 #
@@ -962,9 +1127,16 @@ foreach my $port ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetInput,
   }
 }
 
+#<!-- bits of each bussed port, keyed by base name, so that a net written as the
+#     whole bus or as a range can be resolved back to the port nodes it covers -->
+my %PORT_BITS_BY_BASE = ();
+
 my $portLocCnt = 0;
 foreach my $pin ( sort @ports ) {
   $PSEUDO_NODE_NUM{$pin} = $nodeCnt;
+  if ( $pin =~ m/^(.*)\[(\d+)\]$/ ) {
+    $PORT_BITS_BY_BASE{$1}{$2} = $pin;
+  }
   my $line = "$nodeCnt $pin PORT 0 0 ";
   #<!-- the pseudo pin status is a number: 3 FIXED, 2 PLACED, 1 GUIDED -->
   my $st = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinStatus($pin);
@@ -998,6 +1170,15 @@ foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   my $cellref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
   if ( $hierOnly && ! exists $PSEUDO_MODULE_ALREADY{$cellref} &&
        ! exists $MODULE_ALREADY{$cellref} ) {
+    next;
+  }
+  #<!-- anchor mode keeps the same hierarchical instances plus the leaf cells
+  #     whose position matters on its own: seq, mem and hard blocks.  The rest
+  #     stay out of the nodefile and are collapsed into hyperedges below. -->
+  if ( $anchorMode && ! &dbfTstgenPseudoIsAnchor($module, $inst) ) {
+    $collapsedCnt++;
+    my $t = &dbfFlatNodeType($cellref);
+    $undCollapsedCnt++ if ( $t eq "und" );
     next;
   }
 
@@ -1099,6 +1280,14 @@ foreach my $t ( sort keys %typeCnt ) {
   push(@typeSummary, "$t $typeCnt{$t}");
 }
 print "INFO-TST-WR_PS_GRPH : 008 : node types: ", join(", ", @typeSummary), "\n";
+if ( $anchorMode ) {
+  print "INFO-TST-WR_PS_GRPH : 023 : $collapsedCnt instance(s) are not anchors and were collapsed into hyperedges\n";
+  if ( $undCollapsedCnt > 0 ) {
+    print "WARN-TST-WR_PS_GRPH : 024 : $undCollapsedCnt of them have a cell nothing described (und), so\n";
+    print "WARN-TST-WR_PS_GRPH : 025 : a sequential cell among them would be collapsed away instead of\n";
+    print "WARN-TST-WR_PS_GRPH : 026 : anchored.  Read a liberty or a cell function map to type them.\n";
+  }
+}
 if ( exists $typeCnt{port} && $portLocCnt < $typeCnt{port} ) {
   my $noLoc = $typeCnt{port} - $portLocCnt;
   print "INFO-TST-WR_PS_GRPH : 019 : $noLoc of $typeCnt{port} port(s) have no location and are written UNPLACED\n";
@@ -1123,8 +1312,13 @@ if ( $nodeFileOnly ) {
 }
 
 #-------------------------------- write the graph ---------------------------------#
+#<!-- Anchor mode reads the connectivity in FULL -- hierOnly 0 -- and does its
+#     thinning afterwards.  That is the whole point of it: --hier_only drops the
+#     leaf cells while the nets are being collected, so a connection that runs
+#     hier_A -> buffer -> hier_B is two different nets, neither with two hier
+#     members, and it disappears rather than being collapsed. -->
 my ($netToInst, $netToPin) =
-    &dbfTstgenHierNetToInst($module, $hierOnly, 1);
+    &dbfTstgenHierNetToInst($module, ($anchorMode ? 0 : $hierOnly), 1);
 
 unless ( open(WRITE_PSEUDO_GRAPH, ">$graphFile") ) {
   print "ERR-TST-WR_PS_GRPH : 009 : cannot open $graphFile for writing\n";
@@ -1142,23 +1336,72 @@ my %modInput = map { $_ => 1 }
       $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetBidi );
 
 my ($netCnt, $edgeCnt, $skipCnt, $noNodeCnt, $synthCnt, $unknownCnt) = (0,0,0,0,0,0);
-foreach my $net ( sort keys %$netToInst ) {
-  #<!-- only members that made it into the nodefile: --hier_only drops leaf
-  #     cells from the nodes, so their connections have nowhere to land -->
+my $noPortNodeCnt = 0;
+
+#-------------------------- group the nets into hyperedges ------------------------#
+#<!-- Normally one net is one hyperedge.  In anchor mode a hyperedge is a whole
+#     CONE: the nets and non-anchor instances reachable from each other, which
+#     is one connected component of the net/instance incidence graph once the
+#     anchors are removed from it.  Union the nets with the non-anchor instances
+#     they touch, and every net that shares a buffer, an inverter or a chain of
+#     them ends up under one root.
+#
+#     The anchors themselves are never unioned, so they terminate a cone instead
+#     of merging the cones on either side of them -- otherwise the whole design
+#     would collapse to a single hyperedge. -->
+my @groups = ();
+if ( $anchorMode ) {
+  my %parent = ();
+  foreach my $net ( sort keys %$netToInst ) {
+    &dbfTstgenUFFind(\%parent, "N:$net");
+    foreach my $inst ( sort keys %{$netToInst->{$net}} ) {
+      next if ( $inst eq "PIN" );
+      next if ( exists $PSEUDO_NODE_NUM{$inst} );   #<!-- an anchor, stop here -->
+      &dbfTstgenUFUnion(\%parent, "N:$net", "I:$inst");
+    }
+  }
+  my %cone = ();
+  foreach my $net ( sort keys %$netToInst ) {
+    my $root = &dbfTstgenUFFind(\%parent, "N:$net");
+    push(@{$cone{$root}}, $net);
+  }
+  foreach my $root ( sort keys %cone ) {
+    push(@groups, $cone{$root});
+  }
+}
+else {
+  foreach my $net ( sort keys %$netToInst ) {
+    push(@groups, [$net]);
+  }
+}
+
+foreach my $group ( @groups ) {
+  my @groupNets = @$group;
+  #<!-- only members that made it into the nodefile.  In anchor mode that is the
+  #     anchors, and the non-anchor instances of the cone are what got us here
+  #     rather than being endpoints themselves. -->
   my @members = ();
-  foreach my $inst ( sort keys %{$netToInst->{$net}} ) {
-    if ( exists $PSEUDO_NODE_NUM{$inst} ) {
-      push(@members, $inst);
-    }
-    elsif ( $inst eq "PIN" ) {
-      #<!-- the net is tied to a port of this module, and the port carries the
-      #     net's own name in the nodefile -->
-      if ( exists $PSEUDO_NODE_NUM{$net} ) {
-        push(@members, $net);
+  foreach my $net ( @groupNets ) {
+    foreach my $inst ( sort keys %{$netToInst->{$net}} ) {
+      if ( exists $PSEUDO_NODE_NUM{$inst} ) {
+        push(@members, $inst);
       }
-    }
-    else {
-      $noNodeCnt++;
+      elsif ( $inst eq "PIN" ) {
+        #<!-- the net is tied to a port of this module.  The net may be a bit,
+        #     a range or the whole bus, so ask which port nodes it covers
+        #     rather than assuming it is named like one. -->
+        my @portNodes = &dbfTstgenPortNodesForNet($net, \%PSEUDO_NODE_NUM,
+                                                  \%PORT_BITS_BY_BASE);
+        if ( @portNodes ) {
+          push(@members, @portNodes);
+        }
+        else {
+          $noPortNodeCnt++;
+        }
+      }
+      elsif ( ! $anchorMode ) {
+        $noNodeCnt++;
+      }
     }
   }
   #<!-- one instance twice on a net is one node, and one node is no edge -->
@@ -1192,10 +1435,16 @@ foreach my $net ( sort keys %$netToInst ) {
       next;
     }
     my $cellref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
-    foreach my $pin ( sort keys %{$netToPin->{$net}{$inst}} ) {
-      my $drives = &dbfTstgenHierPinDrives($cellref, $pin);
-      if ( $drives == 1 ) { $centre = $node; last; }
-      if ( $drives < 0 )  { $sawUnknown = 1; }
+    #<!-- a cone spans several nets, and the anchor drives it if it drives any
+    #     one of them; outside anchor mode this is the single net as before -->
+    foreach my $gnet ( @groupNets ) {
+      next unless ( exists $netToPin->{$gnet}{$inst} );
+      foreach my $pin ( sort keys %{$netToPin->{$gnet}{$inst}} ) {
+        my $drives = &dbfTstgenHierPinDrives($cellref, $pin);
+        if ( $drives == 1 ) { $centre = $node; last; }
+        if ( $drives < 0 )  { $sawUnknown = 1; }
+      }
+      last if ( defined $centre );
     }
     last if ( defined $centre );
   }
@@ -1214,7 +1463,12 @@ foreach my $net ( sort keys %$netToInst ) {
 }
 close(WRITE_PSEUDO_GRAPH);
 
-print "INFO-TST-WR_PS_GRPH : 010 : wrote $edgeCnt edges from $netCnt nets of $module to $graphFile\n";
+my $groupWord = ( $anchorMode ? "logic cones" : "nets" );
+print "INFO-TST-WR_PS_GRPH : 010 : wrote $edgeCnt edges from $netCnt $groupWord of $module to $graphFile\n";
+if ( $anchorMode ) {
+  my $totalNets = keys %$netToInst;
+  print "INFO-TST-WR_PS_GRPH : 027 : $totalNets net(s) of the full graph collapsed into $netCnt cone(s)\n";
+}
 if ( $synthCnt > 0 ) {
   print "INFO-TST-WR_PS_GRPH : 011 : $synthCnt net(s) had no identifiable driver, ",
         "the first member was used as the star centre\n";
@@ -1228,6 +1482,10 @@ if ( $skipCnt > 0 ) {
 }
 if ( $noNodeCnt > 0 ) {
   print "INFO-TST-WR_PS_GRPH : 014 : $noNodeCnt connection(s) are to instances not in the nodefile\n";
+}
+if ( $noPortNodeCnt > 0 ) {
+  print "WARN-TST-WR_PS_GRPH : 028 : $noPortNodeCnt net(s) reach a port of $module whose bits are\n";
+  print "WARN-TST-WR_PS_GRPH : 029 : not in the nodefile, so those connections were dropped\n";
 }
 
 my $t1 = new Benchmark;

@@ -556,6 +556,7 @@ foreach $module ( keys %{MODULE_ALREADY} ) {
     my $instName = ( split(/\s+/, $cellName_and_instName ))[1];
     if (( $MODULE_ALREADY{$module}->dbVNOMHasHierInst($instName) ) 
        || ( $MODULE_ALREADY{$module}->dbVNOMHasLeafInst($instName) )) {
+      $conn =~ s/\s*\;\s*$//;   # conn lines already end in " ;" -- do not double it
       print WRITE "$conn\;\n";
     }
   }

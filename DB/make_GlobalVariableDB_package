@@ -58,6 +58,8 @@ my $design = {
                     GDS_FACTOR =>1,   
                     XY_REF => [],
                     BUF_FOR_ASSIGN => "",
+                    TIE_HIGH_CELL => "",
+                    TIE_LOW_CELL => "",
                     BUF_FOR_ASSIGN_IN => "",
                     BUF_FOR_ASSIGN_OUT => "",
                     BUF_FOR_ASSIGN_POWER => "",
@@ -677,6 +679,28 @@ return($x,$y);
 #----------------------------------------------# 
 
 #-----------------------------------------------#
+
+sub dbfGlobalSetTieHighCell {
+my ($self, $cell) = @_;
+$self->{TIE_HIGH_CELL} = $cell;
+}#sub dbfGlobalSetTieHighCell
+
+sub dbfGlobalGetTieHighCell {
+my ($self) = @_;
+my $cell = $self->{TIE_HIGH_CELL};
+return($cell);
+}#sub dbfGlobalGetTieHighCell
+
+sub dbfGlobalSetTieLowCell {
+my ($self, $cell) = @_;
+$self->{TIE_LOW_CELL} = $cell;
+}#sub dbfGlobalSetTieLowCell
+
+sub dbfGlobalGetTieLowCell {
+my ($self) = @_;
+my $cell = $self->{TIE_LOW_CELL};
+return($cell);
+}#sub dbfGlobalGetTieLowCell
 
 sub dbfGlobalSetBufForAssign {
 my ($self, $buf_for_assign) = @_;

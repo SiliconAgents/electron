@@ -177,7 +177,11 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                     $net =~ s/\{//; $net =~ s/\}//;
                     $net =~ s/\s+//g;
                     print "DBG-PAR-ELA : 018 : After subs $net\n" if($DEBUG == 300);
-                    my @allnets = split(/\s*\,\s*/, $net);
+#<!-- one entry per BIT, not one per comma separated term: a term may be a
+#     constant or a sub range that stands for several bits, and counting terms
+#     made the width test below reject the whole connection -->
+                    my @allnets = &dbfVerilogBlastConnExpr("\{".$net."\}", $TOP_MODULE);
+                    unless ( @allnets ) { @allnets = split(/\s*\,\s*/, $net); }
                     my $len = @allnets;
                     print "DBG-PAR-ELA : 019 : $len nets connect to this bus\n" if($DEBUG == 300);
                     if ( exists $MODULE_ALREADY{$cell}->{ins}{$pin} ) {
@@ -200,7 +204,7 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                               my $cnt = 0;
                               for (my $xx = $W[0] ; $xx <=$W[1]; $xx++ ) {
                                my $pinName = $pin."[".$xx."]";
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt];
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt] if ( defined $allnets[$cnt] );
                                print "DBG-PAR-ELA : 024 : $pinName connects $allnets[$cnt]\n" if($DEBUG == 300);
                                  $cnt++;
                                                                          }
@@ -209,7 +213,7 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                                my $cnt = 0;
                               for (my $xx = $W[0] ; $xx >=$W[1]; $xx-- ) {
                                my $pinName = $pin."[".$xx."]";
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt];
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt] if ( defined $allnets[$cnt] );
                                print "DBG-PAR-ELA : 025 : $pinName connects $allnets[$cnt]\n" if($DEBUG == 300);
                                   $cnt++;
                                                                           }
@@ -241,7 +245,7 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                               my $cnt = 0;
                               for (my $xx = $W[0] ; $xx <=$W[1]; $xx++ ) {
                                my $pinName = $pin."[".$xx."]";
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt];
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt] if ( defined $allnets[$cnt] );
                                print "DBG-PAR-ELA : 031 : $pinName connects $allnets[$cnt]\n" if($DEBUG == 300);
                                  $cnt++;
                                                                          }
@@ -250,7 +254,7 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                                my $cnt = 0;
                               for (my $xx = $W[0] ; $xx >=$W[1]; $xx-- ) {
                                my $pinName = $pin."[".$xx."]";
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt];
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt] if ( defined $allnets[$cnt] );
                                print "DBG-PAR-ELA : 032 : $pinName connects $allnets[$cnt]\n" if($DEBUG == 300);
                                   $cnt++;
                                                                           }
@@ -283,7 +287,7 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                               my $cnt = 0;
                               for (my $xx = $W[0] ; $xx <=$W[1]; $xx++ ) {
                                my $pinName = $pin."[".$xx."]";
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt];
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt] if ( defined $allnets[$cnt] );
                                print "DBG-PAR-ELA : 031 : $pinName connects $allnets[$cnt]\n" if($DEBUG == 300);
                                  $cnt++;
                                                                          }
@@ -292,7 +296,7 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                                my $cnt = 0;
                               for (my $xx = $W[0] ; $xx >=$W[1]; $xx-- ) {
                                my $pinName = $pin."[".$xx."]";
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt];
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $allnets[$cnt] if ( defined $allnets[$cnt] );
                                print "DBG-PAR-ELA : 032 : $pinName connects $allnets[$cnt]\n" if($DEBUG == 300);
                                   $cnt++;
                                                                           }
@@ -850,7 +854,10 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                     $net =~ s/\{//; $net =~ s/\}//;
                     $net =~ s/\s+//g;
                     print "DBG-PAR : 009 : After subs $net\n" if($DEBUG == 300);
-                    my @allnets = split(/\s*\,\s*/, $net);
+#<!-- one entry per BIT: see the matching comment in elaborate.  The conn lines
+#     here belong to $cellName, so that is the scope the names resolve in -->
+                    my @allnets = &dbfVerilogBlastConnExpr("\{".$net."\}", $cellName);
+                    unless ( @allnets ) { @allnets = split(/\s*\,\s*/, $net); }
                     my $len = @allnets;
                     print "DBG-PAR : 010 : $len nets connect to this bus\n" if($DEBUG == 300);
                     if ( exists $MODULE_ALREADY{$cell}->{ins}{$pin} ) {
@@ -875,7 +882,7 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                                my $pinName = $pin."[".$xx."]";
                                #$netName = $hierPath."/".$allnets[$cnt];
                                $netName = $allnets[$cnt];
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName;
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName if ( defined $netName );
                                print "DBG-PAR : 015 : $pinName connects $netName\n" if($DEBUG == 300);
                                  $cnt++;
                                                                          }
@@ -886,7 +893,7 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                                my $pinName = $pin."[".$xx."]";
                                #$netName = $hierPath."/".$allnets[$cnt];
                                $netName = $allnets[$cnt];
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName;
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName if ( defined $netName );
                                print "DBG-PAR : 016 : $pinName connects $netName\n" if($DEBUG == 300);
                                   $cnt++;
                                                                           }
@@ -919,7 +926,7 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                                my $pinName = $pin."[".$xx."]";
                                #$netName = $hierPath."/".$allnets[$cnt];
                                $netName = $allnets[$cnt];
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName;
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName if ( defined $netName );
                                print "DBG-PAR : 022 : $pinName connects $netName\n" if($DEBUG == 300);
                                  $cnt++;
                                                                          }
@@ -930,7 +937,7 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                                my $pinName = $pin."[".$xx."]";
                                #$netName = $hierPath."/".$allnets[$cnt];
                                $netName = $allnets[$cnt];
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName;
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName if ( defined $netName );
                                print "DBG-PAR : 023 : $pinName connects $netName\n" if($DEBUG == 300);
                                   $cnt++;
                                                                           }
@@ -964,7 +971,7 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                                my $pinName = $pin."[".$xx."]";
                                #$netName = $hierPath."/".$allnets[$cnt];
                                $netName = $allnets[$cnt];
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName;
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName if ( defined $netName );
                                print "DBG-PAR : 022 : $pinName connects $netName\n" if($DEBUG == 300);
                                  $cnt++;
                                                                          }
@@ -975,7 +982,7 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                                my $pinName = $pin."[".$xx."]";
                                #$netName = $hierPath."/".$allnets[$cnt];
                                $netName = $allnets[$cnt];
-                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName;
+                               $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$pinName} = $netName if ( defined $netName );
                                print "DBG-PAR : 023 : $pinName connects $netName\n" if($DEBUG == 300);
                                   $cnt++;
                                                                           }

@@ -173,6 +173,23 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
     if (@func_maps) {
         print "Read " . scalar(@func_maps) . " cell function map(s) from the config\n";
     }
+
+    #<!-- The library is loaded now, so choose the assign buffer.  Without one,
+    #     read_verilog drops every assign statement and only says so at
+    #     $DEBUG == 101.  A cell named explicitly by an earlier
+    #     set_buffer_for_assign is left alone. -->
+    if ( $GLOBAL->dbfGlobalGetBufForAssign eq "" ) {
+        &set_buffer_for_assign();
+    }
+    else {
+        print "INFO-PAR-CONFIG : 001 : assign buffer already set to " .
+              $GLOBAL->dbfGlobalGetBufForAssign . ", leaving it\n";
+    }
+
+    #<!-- and the tie cells, which the constant side of an assign needs -->
+    if ( $GLOBAL->dbfGlobalGetTieHighCell eq "" || $GLOBAL->dbfGlobalGetTieLowCell eq "" ) {
+        &set_tie_cells();
+    }
     # &source($output_file);
     return;
 

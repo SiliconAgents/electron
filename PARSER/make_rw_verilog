@@ -1157,6 +1157,12 @@ if ( $assignBufName ne "" ) {
    my $assignOut = $GLOBAL->dbfGlobalGetBufForAssignOut();
    my $power  = $GLOBAL->dbfGlobalGetBufForAssignPower();
    my $gnd = $GLOBAL->dbfGlobalGetBufForAssignGnd();
+#--- tie cells drive the constant bits of an assign; they may be "" if the
+#--- library has none, in which case those bits are left unconnected as before
+   my $tieHighCell = $GLOBAL->dbfGlobalGetTieHighCell();
+   my $tieLowCell  = $GLOBAL->dbfGlobalGetTieLowCell();
+   my $tieHighOut  = &dbfVerilogGetCellSingleOutputPin($tieHighCell);
+   my $tieLowOut   = &dbfVerilogGetCellSingleOutputPin($tieLowCell);
                            my ($left_expr ,$right_expr) = (split(/=/,$assign_line))[0,1];
                            $left_expr =~ s/\s+//;
                            $right_expr =~ s/\s+//;
@@ -1175,6 +1181,11 @@ if ( $assignBufName ne "" ) {
                                  $temp_conn_line =~ s/^\s*//;
                                  
                                  $temp_conn_line =~ s/\(/ \(/;
+# A conn line must be a complete verilog statement ending in ") ;".  The parsers
+# that read it back (make_elaborate) strip the closing paren of the port list via
+# s/\)\s*\;// -- without the semicolon that never fires, and the last pin's net
+# keeps a stray ")", so the buffer input lands on a dangling net in the DEF.
+                                 $temp_conn_line = $temp_conn_line." \;";
                                  print "\nDBG-PAR-VERI : 003 : Added conn line $temp_conn_line to module $moduleName" if ($DEBUG == 300);
                                  $MODULE_ALREADY{$moduleName}->dbVNOMAddConn($temp_conn_line);
                                  my $area = $MODULE_ALREADY{$moduleName}->dbVNOMGetArea;
@@ -1186,7 +1197,34 @@ if ( $assignBufName ne "" ) {
                                  $MODULE_ALREADY{$moduleName}->dbVNOMAddLeafInst($temp_assign_component_name);
                                  $MODULE_ALREADY{$moduleName}->dbVNOMSetLeafInstCell($temp_assign_component_name,$assignBufName);
                                }
+#-----------------------------------------------------------------------------#
+# Constant on the right, a real net on the left -- drive it from a tie cell.
+# Without this the bit is dropped and the left hand net ends up with no driver.
+#-----------------------------------------------------------------------------#
+                               elsif (( $temp_left_bit !~ /\'b/ ) && ( $temp_right_bit =~ /\'b([01])/ )) {
+                                 my $bitValue = $1;
+                                 my $tieCell = ( $bitValue eq "1" ) ? $tieHighCell : $tieLowCell;
+                                 my $tieOut  = ( $bitValue eq "1" ) ? $tieHighOut  : $tieLowOut;
+                                 if (( $tieCell ne "" ) && ( $tieOut ne "" )) {
+                                   my $temp_tie_component_name = "bt_assign_tie"."_".$no_of_added_inst;
+                                   $no_of_added_inst++;
+                                   my $temp_conn_line = $tieCell." ".$temp_tie_component_name." \(\.".$tieOut."\(".$temp_left_bit."\)\) \;";
+                                   print "\nDBG-PAR-VERI : 005 : Added tie conn line $temp_conn_line to module $moduleName" if ($DEBUG == 300);
+                                   $MODULE_ALREADY{$moduleName}->dbVNOMAddConn($temp_conn_line);
+                                   my $area = $MODULE_ALREADY{$moduleName}->dbVNOMGetArea;
+                                   my @size = $PLDB{$tieCell}->dbMdbGetSize if(exists $PLDB{$tieCell}) ;
+                                   $area = $area + $size[0]*$size[1];
+                                   $MODULE_ALREADY{$moduleName}->dbVNOMSetArea($area);
+                                   $MODULE_ALREADY{$moduleName}->dbVNOMAddLeafInst($temp_tie_component_name);
+                                   $MODULE_ALREADY{$moduleName}->dbVNOMSetLeafInstCell($temp_tie_component_name,$tieCell);
+                                 } else {
+                                   print "WARN-PAR-VERI : 006 : no tie cell for $temp_right_bit, leaving $temp_left_bit undriven in $moduleName\n";
+                                 }
+                               }
                              }
+                           }
+                           else {
+                             print "WARN-PAR-VERI : 007 : assign \"$assign_line\" in $moduleName has ".($#left_pins_or_nets_array+1)." bits on the left and ".($#right_pins_or_nets_array+1)." on the right, skipping it\n";
                            }
 #print "$line\n" if ($DEBUG == 101);
                                   }#if assign buffer exists

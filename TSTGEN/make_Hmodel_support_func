@@ -940,7 +940,10 @@ for (my $i = 0; $i < $pinListLen; $i += 2) {
   $instPinCount++;
 }
 
-$line = $line . ")";
+#<!-- close the port list as a complete verilog statement.  Readers strip the
+#     closing paren of the port list with s/\)\s*\;// and need the semicolon to
+#     be present, else the last pin's net keeps a stray ")". -->
+$line = $line . "\) \;";
 return $line;
 
 }# sub dbfTstgenCreateConnForPseudoVInst

@@ -361,6 +361,234 @@ close(WRITE);
 
 }# sub write_controlFile
 
+#<!-- Smallest tie high or tie low cell in the library, by LEF area.
+#
+#     $want is "high" or "low".  Two independent signals say a cell is a tie, and
+#     both are used:
+#
+#       the LEF CLASS, CORE TIEHIGH or CORE TIELOW, which is standard LEF and is
+#       there whether or not a cell function map was read; and
+#
+#       the function from a cell function map, which is what distinguishes a
+#       plain TIE_HIGH from the power domain TIE_HIGH_EP and TIE_HIGH_AON.  The
+#       class cannot: GPTIEHI, the always-on tie, also carries CLASS CORE TIEHIGH.
+#
+#     So the class decides whether a cell is a tie at all and of which polarity,
+#     and the function ranks the candidates.  Structure is checked too: a tie is
+#     one signal output and no signal input.  ECO and spare ties are skipped,
+#     being reserved for later edits.
+#
+#     Returns "" when nothing qualifies. -->
+sub dbfLibPickSmallestTieCell {
+
+my $want = $_[0];
+unless ( defined $want && ( $want =~ /^high$/i || $want =~ /^low$/i ) ) {
+  print "WARN-UTS-TIE_CELL : 001 : ask for \"high\" or \"low\", not \"$want\"\n";
+  return ("");
+}
+my $high = ( $want =~ /^high$/i ) ? 1 : 0;
+
+my $best = "";
+my $bestArea = 0;
+my $bestRank = 0;
+
+foreach my $cell ( sort keys %PLDB ) {
+
+  #<!-- reserved for ECO, not ours to consume -->
+  if ( $cell =~ /^eco/i || $cell =~ /spare/i ) {
+    next;
+  }
+
+  my $class = $PLDB{$cell}->dbMdbGetClass;
+  $class = "" unless ( defined $class );
+
+  my $func = $PLDB{$cell}->dbMdbGetFunction;
+  my $known = ( defined $func && $func ne "" && $func !~ /^und$/i ) ? 1 : 0;
+  $func = "" unless ( $known );
+  if ( $known && $func =~ /spare/i ) {
+    next;
+  }
+
+  #<!-- is it a tie of the polarity asked for -->
+  my $rank = 0;
+  if ( $high ) {
+    if    ( $known && $func =~ /^tie_high$/i )  { $rank = 4; }
+    elsif ( $class =~ /TIEHIGH/i )              { $rank = 3; }
+    elsif ( $known && $func =~ /^tie_high/i )   { $rank = 2; }
+    elsif ( !$known && $cell =~ /tie ?hi/i )    { $rank = 1; }
+    else  { next; }
+  }
+  else {
+    if    ( $known && $func =~ /^tie_low$/i )   { $rank = 4; }
+    elsif ( $class =~ /TIELOW/i )               { $rank = 3; }
+    elsif ( $known && $func =~ /^tie_low/i )    { $rank = 2; }
+    elsif ( !$known && $cell =~ /tie ?lo/i )    { $rank = 1; }
+    else  { next; }
+  }
+
+  #<!-- and it has to look like one: one signal output, no signal input -->
+  my $out = "";
+  my $bad = 0;
+  foreach my $pin ( $PLDB{$cell}->dbMdbGetPins ) {
+    unless ( $PLDB{$cell}->dbMdbGetPinIsSignal($pin) ) {
+      next;
+    }
+    my $dir = $PLDB{$cell}->dbMdbGetPinDir($pin);
+    if ( $dir == 1 && $out eq "" ) { $out = $pin; }
+    else                           { $bad = 1; last; }
+  }
+  if ( $bad || $out eq "" ) {
+    next;
+  }
+
+  my @size = $PLDB{$cell}->dbMdbGetSize;
+  unless ( @size >= 2 && $size[0] > 0 && $size[1] > 0 ) {
+    next;
+  }
+  my $area = $size[0] * $size[1];
+
+  if ( $best eq "" || $rank > $bestRank ||
+       ( $rank == $bestRank && $area < $bestArea ) ) {
+    $best = $cell;
+    $bestArea = $area;
+    $bestRank = $rank;
+  }
+}
+
+return ($best);
+
+}# sub dbfLibPickSmallestTieCell
+
+
+sub set_tie_cells {
+
+my $noOfArguments = @_;
+my $hiCell = "";
+my $loCell = "";
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if    ($_[$i] eq "-tie_high") { $hiCell = $_[$i+1]; }
+  elsif ($_[$i] eq "-tie_low")  { $loCell = $_[$i+1]; }
+  elsif ($_[$i] eq "-h" || $_[$i] eq "-help") {
+    print "Usage : set_tie_cells\n";
+    print "                         -tie_high <cell_name>\n";
+    print "                         -tie_low <cell_name>\n";
+    print "                         with neither, the smallest tie cell of each\n";
+    print "                         polarity in the library is chosen\n";
+    return;
+  }
+}
+
+if ( $hiCell eq "" ) { $hiCell = &dbfLibPickSmallestTieCell("high"); }
+if ( $loCell eq "" ) { $loCell = &dbfLibPickSmallestTieCell("low"); }
+
+foreach my $pair ( ["high", $hiCell], ["low", $loCell] ) {
+  my ($which, $cell) = @$pair;
+  if ( $cell eq "" ) {
+    print "WARN-UTS-TIE_CELL : 002 : no tie $which cell found in the library\n";
+    next;
+  }
+  unless ( exists $PLDB{$cell} ) {
+    print "WARN-UTS-TIE_CELL : 003 : tie $which cell $cell is not in the library\n";
+    next;
+  }
+  my @size = $PLDB{$cell}->dbMdbGetSize;
+  if ( $which eq "high" ) { $GLOBAL->dbfGlobalSetTieHighCell($cell); }
+  else                    { $GLOBAL->dbfGlobalSetTieLowCell($cell); }
+  printf "INFO-UTS-TIE_CELL : 004 : using %s as the tie %s cell, area %g\n", $cell, $which, $size[0]*$size[1];
+}
+
+}# sub set_tie_cells
+
+
+#<!-- Smallest buffer in the library, by LEF area.
+#
+#     Structure alone cannot identify a buffer: an inverter is also one signal
+#     input and one signal output, and using one to carry an assign would quietly
+#     invert the net.  So a candidate has to say it is a buffer, either through
+#     the function a cell function map stamped on it, or failing that through its
+#     name.  Anything that says inverter is rejected outright.  When nothing
+#     qualifies this returns "", and the caller warns rather than guessing.
+#
+#     Preference order, then smallest LEF area within a tier:
+#       2  function says buf   (a cell function map was read)
+#       1  name says buf       (no map, but the library follows the usual naming)
+#  -->
+sub dbfLibPickSmallestBuffer {
+
+my $best = "";
+my $bestArea = 0;
+my $bestRank = 0;
+
+#<!-- sorted, not hash order: this library has 96 buffers sharing the smallest
+#     area, and with "keys" the winner changed from run to run, so two runs of
+#     the same script inserted different cells.  Sorted, plus a strict < on
+#     area, the alphabetically first of the smallest always wins. -->
+foreach my $cell ( sort keys %PLDB ) {
+
+  #<!-- MacroDB::new defaults the function to "UND", not empty, and a LEF read
+  #     leaves it that way: read_lib or read_cell_func_map are what fill it in.
+  #     So "unknown" is undef, empty or UND, and only then does the name decide. -->
+  my $func = $PLDB{$cell}->dbMdbGetFunction;
+  my $known = ( defined $func && $func ne "" && $func !~ /^und$/i ) ? 1 : 0;
+  $func = "" unless ( $known );
+
+  #<!-- never an inverter, however it is spelled, and never a spare: spares are
+  #     placed deliberately for ECO and are not ours to consume -->
+  if ( ( $known && $func =~ /^inv/i ) || ( !$known && $cell =~ /inv/i ) ) {
+    next;
+  }
+  if ( ( $known && $func =~ /spare/i ) || ( !$known && $cell =~ /spare/i ) ) {
+    next;
+  }
+
+  #<!-- A map can name several kinds of buffer.  The SF4 map for instance has
+  #     BUF and BUF_H as ordinary combinational buffers, and BUF_EP, BUF_AON and
+  #     BUF_PBK for the power domain ones, which carry always-on or pmk rails and
+  #     are the wrong thing to drop onto an ordinary assign.  Prefer a plain
+  #     buffer; fall back to a domain specific one only if that is all there is.
+  #     Clock buffers do not arise here: the SF4 map calls them CLK_BUF. -->
+  my $rank = 0;
+  if    ( $known && $func =~ /^buf(_h)?$/i ) { $rank = 3; }
+  elsif ( $known && $func =~ /^buf/i )       { $rank = 2; }
+  elsif ( !$known && $cell =~ /buf/i )       { $rank = 1; }
+  else  { next; }
+
+  #<!-- and it still has to look like one: exactly one signal in, one signal out -->
+  my $in = "";
+  my $out = "";
+  my $extra = 0;
+  foreach my $pin ( $PLDB{$cell}->dbMdbGetPins ) {
+    unless ( $PLDB{$cell}->dbMdbGetPinIsSignal($pin) ) {
+      next;
+    }
+    my $dir = $PLDB{$cell}->dbMdbGetPinDir($pin);
+    if    ( $dir == 0 && $in  eq "" ) { $in  = $pin; }
+    elsif ( $dir == 1 && $out eq "" ) { $out = $pin; }
+    else                              { $extra = 1; last; }
+  }
+  if ( $extra || $in eq "" || $out eq "" ) {
+    next;
+  }
+
+  my @size = $PLDB{$cell}->dbMdbGetSize;
+  unless ( @size >= 2 && $size[0] > 0 && $size[1] > 0 ) {
+    next;
+  }
+  my $area = $size[0] * $size[1];
+
+  if ( $best eq "" || $rank > $bestRank ||
+       ( $rank == $bestRank && $area < $bestArea ) ) {
+    $best = $cell;
+    $bestArea = $area;
+    $bestRank = $rank;
+  }
+}
+
+return ($best);
+
+}# sub dbfLibPickSmallestBuffer
+
+
 sub set_buffer_for_assign {
   my $noOfArguments = @_;
   if( $noOfArguments > 10 || $_[0] eq '-h'){
@@ -373,6 +601,8 @@ sub set_buffer_for_assign {
     print "                         -buf_out <output>\n";
     print "                         -power <power>\n";
     print "                         -gnd <gnd>\n";
+    print "                         with no -cell_name the smallest buffer in the\n";
+    print "                         library is chosen; see dbfLibPickSmallestBuffer\n";
     return ;
   }
 
@@ -394,6 +624,19 @@ sub set_buffer_for_assign {
     } elsif($_[$i] eq "-gnd"){
       $gnd = $_[$i+1];
     }
+  }
+  #<!-- Nothing to pick from until a LEF has been read, and no cell named means
+  #     "choose one for me": the smallest buffer in the library.  read_config_file
+  #     calls this with no arguments once the LEFs and any cell function maps are
+  #     in, so an assign turns into a real buffer without the user naming a cell. -->
+  if ( $cell_name eq "" ) {
+    $cell_name = &dbfLibPickSmallestBuffer();
+    if ( $cell_name eq "" ) {
+      print "WARN-UTS-ASSIGN_BUF : 001 : no buffer found in the library, assign statements will be dropped by read_verilog\n";
+      return;
+    }
+    my @size = $PLDB{$cell_name}->dbMdbGetSize;
+    printf "INFO-UTS-ASSIGN_BUF : 002 : using %s as the assign buffer, area %g\n", $cell_name, $size[0]*$size[1];
   }
   if(exists $PLDB{$cell_name}){
     if(($buf_in eq "")

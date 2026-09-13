@@ -97,6 +97,65 @@ if ( exists $MODULE_ALREADY{$mod}  ) {
                                                }
 }
 
+#-----------------------------------------------------------------------------#
+# Return the name of the single signal output pin of a cell, or "" if the cell
+# is unknown or does not have exactly one.  Used to find the driver pin of a
+# tie cell, which carries no signal input.
+#-----------------------------------------------------------------------------#
+sub dbfVerilogGetCellSingleOutputPin
+{
+   my $cellName = $_[0];
+   unless ( defined $cellName && $cellName ne "" && exists $PLDB{$cellName} ) {
+     return ("");
+   }
+   my $out = "";
+   foreach my $pin ( $PLDB{$cellName}->dbMdbGetPins ) {
+     unless ( $PLDB{$cellName}->dbMdbGetPinIsSignal($pin) ) {
+       next;
+     }
+     if ( $PLDB{$cellName}->dbMdbGetPinDir($pin) == 1 ) {
+       if ( $out ne "" ) { return (""); }
+       $out = $pin;
+     }
+   }
+   return ($out);
+}
+#-----------------------------------------------------------------------------#
+# Blast a connection expression to one entry per bit, so that it can be matched
+# against the width of the bus pin it connects to.
+#
+# make_elaborate used to split a concatenation on commas and call the result the
+# connection list, so .a({ 4'h0, q4 }) counted as 2 connections for a 24 bit pin
+# and the width test rejected it -- WARN-PAR-ELA : 026 -- discarding the whole
+# connection, q4 included.  Blasting makes the count right and the existing
+# bit-to-bit mapping then works unchanged.
+#
+# A constant bit comes back as undef rather than as a name.  Naming it would
+# mean either the literal, which merges every pin tied to the same literal into
+# a single net -- { 4'h0, q4 } on three adders really did tie them together --
+# or an invented unique name, which fills the DEF with one pin nets.  undef says
+# what is true: there is no net there, so the caller leaves the pin unconnected.
+#
+# The order is MSB first, matching both verilog concatenation order and the way
+# the callers walk a bus from dbVNOMGet*Bits.
+#-----------------------------------------------------------------------------#
+sub dbfVerilogBlastConnExpr
+{
+   my $expr = $_[0];
+   my $module = $_[1];
+
+   my @bits = &array_of_blasted_expr($expr, $module);
+   my @out = ();
+   foreach my $bit ( @bits ) {
+     if ( ! defined $bit || $bit eq "" ) { push(@out, undef); next; }
+     #<!-- a sized constant in any base, which array_of_blasted_expr has already
+     #     reduced to one 1'b0 or 1'b1 per bit -->
+     if ( $bit =~ m/^\d*\'[sS]?[bodhBODH]/ ) { push(@out, undef); next; }
+     push(@out, $bit);
+   }
+   return (@out);
+}
+#-----------------------------------------------------------------------------#
 sub array_of_blasted_expr
 {
    my $curr_expr = $_[0] ;
@@ -109,12 +168,12 @@ sub array_of_blasted_expr
        $curr_expr =~ s/\}//;
        @connList = split(/\s*\,\s*/, $curr_expr);
                              } else { push(@connList,$curr_expr); }
-   print "PAR-VERI : assign : expression conn list @connList\n";
+   print "DBG-UTS-VERI : 002 : expression conn list @connList\n" if ($DEBUG == 101);
 
 
    my @temp_array_bits = () ;
    while ( defined ( $conn = shift @connList ) ) {  
-      print "processing $conn\n";
+      print "DBG-UTS-VERI : 003 : processing $conn\n" if ($DEBUG == 101);
 
    if ( $conn =~ /\[\s*[0-9]+\s*\:\s*[0-9]+\s*\]/ ) {
      $conn =~ s/\[/ /; $conn =~ s/\]//; $conn =~ s/\:/ /;
@@ -132,7 +191,7 @@ sub array_of_blasted_expr
      } 
    }elsif (( exists $MODULE_ALREADY{$curr_module}->{wire}{$conn}) 
        && ($MODULE_ALREADY{$curr_module}->dbVNOMGetWireType($conn) == 1)) {
-       print "I AM A WIRE\n";
+       print "DBG-UTS-VERI : 004 : WIRE\n" if ($DEBUG == 101);
        my $width = $MODULE_ALREADY{$curr_module}->dbVNOMGetWireBits($conn);
        $width =~ s/\[//; $width =~ s/\]//;
        my @W = split(/\s*\:\s*/,$width);
@@ -149,7 +208,7 @@ sub array_of_blasted_expr
        }
    }elsif (( exists $MODULE_ALREADY{$curr_module}->{ins}{$conn})
        && ($MODULE_ALREADY{$curr_module}->dbVNOMGetInputType($conn) == 1)){
-       print "I AM A INS\n";
+       print "DBG-UTS-VERI : 004 : INS\n" if ($DEBUG == 101);
        my $width = $MODULE_ALREADY{$curr_module}->dbVNOMGetInputBits($conn);
        $width =~ s/\[//; $width =~ s/\]//;
        my @W = split(/\s*\:\s*/,$width);
@@ -166,7 +225,7 @@ sub array_of_blasted_expr
        }
    }elsif (( exists $MODULE_ALREADY{$curr_module}->{outs}{$conn})
        && ($MODULE_ALREADY{$curr_module}->dbVNOMGetOutputType($conn) == 1)){
-       print "I AM A OUTS\n";
+       print "DBG-UTS-VERI : 004 : OUTS\n" if ($DEBUG == 101);
        my $width = $MODULE_ALREADY{$curr_module}->dbVNOMGetOutputBits($conn);
        $width =~ s/\[//; $width =~ s/\]//;
        my @W = split(/\s*\:\s*/,$width);
@@ -183,7 +242,7 @@ sub array_of_blasted_expr
        }
    }elsif (( exists $MODULE_ALREADY{$curr_module}->{bidis}{$conn})
        && ($MODULE_ALREADY{$curr_module}->dbVNOMGetBidiType($conn) == 1)){
-       print "I AM A BIDI\n";
+       print "DBG-UTS-VERI : 004 : BIDI\n" if ($DEBUG == 101);
        my $width = $MODULE_ALREADY{$curr_module}->dbVNOMGetBidiBits($conn);
        $width =~ s/\[//; $width =~ s/\]//;
        my @W = split(/\s*\:\s*/,$width);
@@ -198,19 +257,56 @@ sub array_of_blasted_expr
            push(@temp_array_bits,$pinName);
          }
        }
-   }elsif ( $conn =~ /[1-9]+\'b/) {
-        print "add TIE cell or connect to power and ground\n";
-        $conn =~ s/[1-9]+\'b//;
-        @bits = split(/\s*/,$conn);
-        while ( defined ( $bit = shift @bits ) ) {
-              if ( $bit == 0 ) { push(@temp_array_bits,"gnd");}
-              if ( $bit == 1 ) { push(@temp_array_bits,"vdd");}
-                                                 } 
+#-----------------------------------------------------------------------------#
+# A sized constant -- 1'b0, 8'h00, 2'h0, 4'd10.  Blast it to one 1'b0 / 1'b1
+# token per bit so that the expression length matches the width of the other
+# side of the assign.  Only binary used to be handled here, so any assign
+# carrying a hex or decimal constant failed the width check at the call site
+# and was dropped whole, leaving its nets unconnected.
+#-----------------------------------------------------------------------------#
+   }elsif ( $conn =~ /^(\d*)\s*\'\s*[sS]?\s*([bBoOdDhH])\s*([0-9a-fA-FxXzZ_\?]+)$/ ) {
+        my ($width,$base,$digits) = ($1,$2,$3);
+        $digits =~ s/\_//g;
+        my $bitsPerDigit = 0;
+        if    ( $base =~ /b/i ) { $bitsPerDigit = 1; }
+        elsif ( $base =~ /o/i ) { $bitsPerDigit = 3; }
+        elsif ( $base =~ /h/i ) { $bitsPerDigit = 4; }
+
+        my $binary = "";
+        if ( $bitsPerDigit > 0 ) {
+          foreach my $digit ( split(//,$digits) ) {
+            if ( $digit =~ /[xXzZ\?]/ ) { $binary = $binary . ( $digit x $bitsPerDigit ); }
+            else { $binary = $binary . sprintf("%0*b",$bitsPerDigit,hex($digit)); }
+          }
+        } else {
+#--- decimal: x and z are not expressible, tie the whole thing low ---#
+          if ( $digits =~ /^[0-9]+$/ ) { $binary = sprintf("%b",$digits); }
+          else { $binary = "0"; }
+        }
+
+#--- pad or truncate to the declared width, MSB first ---#
+        if ( $width ne "" && $width > 0 ) {
+          if ( length($binary) < $width ) {
+            my $pad = ( $binary =~ /^[xXzZ\?]/ ) ? substr($binary,0,1) : "0";
+            $binary = ( $pad x ( $width - length($binary) ) ) . $binary;
+          } elsif ( length($binary) > $width ) {
+            $binary = substr($binary, length($binary) - $width);
+          }
+        }
+
+        foreach my $bit ( split(//,$binary) ) {
+          if ( $bit eq "1" ) { push(@temp_array_bits,"1\'b1"); }
+          elsif ( $bit eq "0" ) { push(@temp_array_bits,"1\'b0"); }
+          else {
+            print "WARN-UTS-VERI : 001 : $conn has an x or z bit, tying it low\n";
+            push(@temp_array_bits,"1\'b0");
+          }
+        }
    }else{
      push(@temp_array_bits,$conn);
    }
                                       } #while connList has data
-   print "PAR-VERI : assign : expression expanded conn list @temp_array_bits\n";
+   print "DBG-UTS-VERI : 005 : expanded conn list @temp_array_bits\n" if ($DEBUG == 101);
    return @temp_array_bits;
 }
 #-----------------------------------------------------------------------------------------------------------------------------#
