@@ -66,7 +66,7 @@ sub doHierPnR {
   print "MPL done\n";
   &commitModule(qw/ -module mychip/);
   print "post place commit done\n";
-  &pin_place_hier("--honorbus");
+  &hier_place_pins("--honorbus");
   print "pin refine done\n";
   
   # TODO : fix the edit_module command to get the pin location of child instances 

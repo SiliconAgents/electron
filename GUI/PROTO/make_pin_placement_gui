@@ -203,7 +203,7 @@ return (@out);
 #     TOP_MODULE it lists the real ports out of PORTS_ALREADY.
 #
 #     The popup only records pin guides, through createPinGuide and guidePin.
-#     Turning them into pin locations is pin_place_hier --honorPinGuide, which
+#     Turning them into pin locations is hier_place_pins --honorPinGuide, which
 #     ignores the guides without that switch, so say so on the way in. -->
 sub hier_pin_planner {
 
@@ -217,7 +217,7 @@ unless ( exists $PSEUDO_MODULE_ALREADY{$TOP_MODULE} ) {
 }
 
 print "INFO-GUI-PIN_PLAN : 003 : planning pins of $TOP_MODULE\n";
-print "INFO-GUI-PIN_PLAN : 004 : guides are applied by pin_place_hier --honorPinGuide\n";
+print "INFO-GUI-PIN_PLAN : 004 : guides are applied by hier_place_pins --honorPinGuide\n";
 &create_pinPlace_popup($TOP_MODULE);
 
 }#sub hier_pin_planner

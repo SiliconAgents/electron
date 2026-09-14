@@ -520,7 +520,9 @@ sub initiallize_commands {
          "getNetSink"=>"getNetSink",
          "getNetDriver"=>"getNetDriver",
          "dbPlaceCreatePinBySide"=>"dbPlaceCreatePinBySide",
-	 "pin_place_hier"=>"pin_place_hier",
+	 "hier_place_pins"=>"hier_place_pins",
+#<!-- the name this had before it was made to match hier_place -->
+	 "pin_place_hier"=>"hier_place_pins",
 	 "print_design_hierarchy"=>"print_design_hierarchy",
 	 "place_design_hierarchy_from_earlyProto_DB"=>"place_design_hierarchy_from_earlyProto_DB",
 	 "new_command_testing"=>"new_command_testing",
@@ -1230,6 +1232,7 @@ sub initiallize_commands {
          "getNetSink"=>"0",
          "getNetDriver"=>"0",
          "dbPlaceCreatePinBySide"=>"0",
+         "hier_place_pins"=>"0",
          "pin_place_hier"=>"0",
          "print_design_hierarchy"=>"0",
 	 "place_design_hierarchy_from_earlyProto_DB"=>"0",

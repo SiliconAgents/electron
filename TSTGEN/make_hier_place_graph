@@ -810,7 +810,7 @@ unless ( defined $layer && $layer ne "" ) {
 }
 #<!-- With no tech read there is no routing layer to name, and an empty one
 #     would make the shape string start with a space and parse as garbage.
-#     NONE is the placeholder pin_place_hier already uses. -->
+#     NONE is the placeholder hier_place_pins already uses. -->
 unless ( defined $layer && $layer ne "" ) {
   $layer = "NONE";
   print "WARN-TST-RD_PS_ND : 010 : no routing layer is known, pin shapes will say NONE\n";

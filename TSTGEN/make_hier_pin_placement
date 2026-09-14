@@ -1,4 +1,4 @@
-sub pin_place_hier {
+sub hier_place_pins {
 my $flplanName;
 my $topLayer;
 my $bottomLayer;
@@ -14,7 +14,7 @@ my $pin_assignment=0;
  %pinGuideHash = ();
 ($topLayer,$bottomLayer) = &pldb_layer_info;
 
-if( $_[0] eq '-h') { print "\nUsage : pin_place_hier \n";
+if( $_[0] eq '-h') { print "\nUsage : hier_place_pins \n";
                      print "        -topLayer <topLayerName>\n";
                      print "              default taken as $topLayer\n";
                      print "        -bottomLayer <bottomLayerName>\n";
@@ -69,7 +69,7 @@ $topLayerNum = $PTDB{$topLayer}->dbTechGetLayerNum;
 $bottomLayerNum = $PTDB{$bottomLayer}->dbTechGetLayerNum;
 
 if ($bottomLayerNum > $topLayerNum) {
-	print "\nERR-TST-PN_PL_HR : 001 : Please specify the topLayer greater than the bottom layer\n";
+	print "\nERR-TST-HR_PL_PN : 001 : Please specify the topLayer greater than the bottom layer\n";
 	$flag = 1;
 }
 
@@ -100,11 +100,11 @@ foreach (keys %FLOORPLAN_LOOKUP) {
 $flplanName = $_ ;
 %bus_pins = ();
 my ($flplanID, $flplan) = &dbfTstgenGetInstFlplanID($flplanName);
-  print "INFO-TST-PN_Pl_HR : 002 : ID: $flplanID , Flplan: $flplan \n";
+  print "INFO-TST-HR_PL_PN : 002 : ID: $flplanID , Flplan: $flplan \n";
   my ($module, $test) = split ("/",$flplan);
 	if ($module eq 'mychip') { next;}	
   if ( $flplanID == 0 ) {
-	print "ERR-TST-PN_PL_HR : 003 : Floorplan does not exist \n";	  
+	print "ERR-TST-HR_PL_PN : 003 : Floorplan does not exist \n";	  
   }
 
   my @bbox = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
@@ -128,15 +128,15 @@ my $lly = $bbox[3]-20*$dbu;
 my $urx = $bbox[2] - $dbu;
 my $ury = $bbox[3] - 2*$dbu;
 my $rect = "$topLayer $llx $lly $urx $ury  ";
-print "INFO-TST-PN_PL_HR : 004 : Bbox:@bbox, Pin size: $rect\n" if ($debug);
+print "INFO-TST-HR_PL_PN : 004 : Bbox:@bbox, Pin size: $rect\n" if ($debug);
 $FLOORPLAN_ALREADY{$flplanID}->dbFlplanSetPinStatus($pin, "PLACED");
 $FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddPinRect($pin, $rect);
 }
         if ($pin =~ m/\[.+\]/) {
-	print "DBG-TST-PN_PL_HR : 005 : $pin is bus pin\n" if ($debug);
+	print "DBG-TST-HR_PL_PN : 005 : $pin is bus pin\n" if ($debug);
 	my @pin_info = split(/\[/, $pin);
 	$pin_info[1] =~ s/\]// ;
-	print "DBG-TST-PN_PL_HR : 006 : @pin_info \n" if ($debug);
+	print "DBG-TST-HR_PL_PN : 006 : @pin_info \n" if ($debug);
 	push(@{$bus_pins{$pin_info[0]}{bits}} , $pin_info[1]);
 	
     }
@@ -147,8 +147,8 @@ $FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddPinRect($pin, $rect);
  foreach (keys %bus_pins){
 	my @sorted_list;
 	@sorted_list = sort {$a <=> $b} @{$bus_pins{$_}{bits}};
-	print "DBG-TST-PN_PL_HR : 007 : Sorted list is @sorted_list \n" if ($debug);	
-	print "DBG-TST-PN_PL_HR : 008 : LSB: $sorted_list[0] , MSB: $sorted_list[$#sorted_list]\n " if ($debug);
+	print "DBG-TST-HR_PL_PN : 007 : Sorted list is @sorted_list \n" if ($debug);	
+	print "DBG-TST-HR_PL_PN : 008 : LSB: $sorted_list[0] , MSB: $sorted_list[$#sorted_list]\n " if ($debug);
 	@{$bus_pins{$_}{bits}} = @sorted_list;
 	$bus_pins{$_}{LSB} = $sorted_list[0];
 	$bus_pins{$_}{MSB} = $sorted_list[$#sorted_list];
@@ -173,22 +173,22 @@ foreach my $guide ( @guides ) {
    if ($pin =~ m/\[.+:.+\]/) {
 	my @pin_info = split(/\[/, $pin);
 	$pin_info[1] =~ s/\]// ;
-	print "DBG-TST-PN_PL_HR : 009 : @pin_info \n" if ($debug);
+	print "DBG-TST-HR_PL_PN : 009 : @pin_info \n" if ($debug);
 	$pin = $pin_info[0];
     }
     if (exists $bus_pins{$pin}) { 
-	print "DBG-TST-PN_PL_HR : 010 : $pin is a bus\n" if ($debug);
+	print "DBG-TST-HR_PL_PN : 010 : $pin is a bus\n" if ($debug);
 	foreach (@{$bus_pins{$pin}{bits}}) {
 		my $buspin_name = $pin."[".$_."]";
-		print "DBG-TST-PN_PL_HR : 011 : $buspin_name \n" if ($debug);	
+		print "DBG-TST-HR_PL_PN : 011 : $buspin_name \n" if ($debug);	
 		 $FLOORPLAN_ALREADY{$flplanID}->dbFlplanWipePinRect($buspin_name);
-	 	print "DBG-TST-PN_PL_HR : 012 : Pinrect : $rect\n\n" if ($debug);
+	 	print "DBG-TST-HR_PL_PN : 012 : Pinrect : $rect\n\n" if ($debug);
     	 	$FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddPinRect($buspin_name, $rect);
 	} 
     next;
     }
 	 $FLOORPLAN_ALREADY{$flplanID}->dbFlplanWipePinRect($pin);
-	 print "DBG-TST-PN_PL_HR : 013 : Pinrect : $rect\n\n" if ($debug);
+	 print "DBG-TST-HR_PL_PN : 013 : Pinrect : $rect\n\n" if ($debug);
     	 $FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddPinRect($pin, $rect);
   }
 }# foreach guide
@@ -196,16 +196,16 @@ foreach my $guide ( @guides ) {
 #####Checking if the pin rect exists for a pin####
 foreach my $pin ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetPinList ) {
     my @shapes = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetPinRect($pin);
-    print "INFO-TST-PN_PL_HR : 014 : Pin:$pin, Shapes: $shapes[0]\n" if ($debug);
+    print "INFO-TST-HR_PL_PN : 014 : Pin:$pin, Shapes: $shapes[0]\n" if ($debug);
     if ($shapes[0] eq '') {
-	print "WARN-TST-PN_PL_HR : 015 : Pin location not defined for the pin $pin, Setting the pin to origin\n";
+	print "WARN-TST-HR_PL_PN : 015 : Pin location not defined for the pin $pin, Setting the pin to origin\n";
 	$FLOORPLAN_ALREADY{$flplanID}->dbFlplanWipePinRect($pin);
     	my $rect = "'NONE' 0 0 0 0 ";
     	$FLOORPLAN_ALREADY{$flplanID}->dbFlplanAddPinRect($pin, $rect);
 	$FLOORPLAN_ALREADY{$flplanID}->dbFlplanSetPinStatus($pin, "PLACED");
     }
 	my $status = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetPinStatus($pin);
-	print "DBG-TST-PN_PL_HR : 016 : Pin: $pin, Status: $status \n" if ($debug);
+	print "DBG-TST-HR_PL_PN : 016 : Pin: $pin, Status: $status \n" if ($debug);
     	if ( $status < 3 ) {
     push(@legalizedPins, $pin);
       		next;
@@ -265,7 +265,7 @@ foreach my $pin ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetPinList ) {
 }#end else
  %pinGuideHash = ();
 %bus_pins = ();
-}#sub pin_place_hier
+}#sub hier_place_pins
 
 
 
