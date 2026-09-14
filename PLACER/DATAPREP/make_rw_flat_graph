@@ -1372,6 +1372,28 @@ return (1, $known, $und, $stateful);
 }# sub dbfFlatTypesAreTrustworthy
 
 
+#<!-- How many of the top level ports have a location, and how many there are.
+#
+#     PortDB keeps status as a number: 3 FIXED, 2 PLACED, anything less has no
+#     coordinates and write_flat_graph writes it UNPLACED.  Nothing in this flow
+#     places the I/O unless a placement was read back, so on a first run the
+#     answer is none of them, and every placer that is told to hold the ports
+#     fixed then has nothing to hold them at. -->
+sub dbfFlatPortsWithLocation {
+
+my ($withLoc, $total) = (0, 0);
+foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
+  $total++;
+  my $status = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetStatus;
+  if ( defined $status && $status >= 2 ) {
+    $withLoc++;
+  }
+}
+return ($withLoc, $total);
+
+}# sub dbfFlatPortsWithLocation
+
+
 #****f* /seedPlace
 #  seedPlace
 # FUNCTION
@@ -1541,6 +1563,34 @@ if ( $trust < 0 ) {
     print "WARN-PL_SEED : 012 : no cell is typed sequential or memory, so the TYPE= column is not trusted\n";
     print "WARN-PL_SEED : 013 : anchors will be found by instance name and area instead\n";
   }
+}
+
+#<!-- Say up front whether the ports have anywhere to be held.
+#
+#     AnkorPlace holds the I/O fixed by default (--fix block+port) and then has
+#     to decide what to do with a port that carries no coordinates.  Its own
+#     default, --ports free, releases them to the solver; --ports require stops.
+#     Either way the user should hear it from here rather than from three
+#     programs down, and "65 port(s) have no coordinates" is a great deal less
+#     useful than knowing that nothing in the flow ever placed them. -->
+my ($portsWithLoc, $portsTotal) = &dbfFlatPortsWithLocation();
+if ( $portsTotal > 0 && $portsWithLoc < $portsTotal ) {
+  my $noLoc = $portsTotal - $portsWithLoc;
+  print "INFO-PL_SEED : 023 : $noLoc of $portsTotal port(s) have no location\n";
+  if ( defined $ports && $ports =~ /^require$/i ) {
+    print "ERR-PL_SEED : 024 : -ports require was given, so the placer will refuse to run.\n";
+    print "ERR-PL_SEED : 025 : place the I/O first, or use -ports free to let the solver\n";
+    print "ERR-PL_SEED : 026 : move them, or -ports perimeter to spread them round the die.\n";
+    print "ERR-PL_SEED : 027 : $nodeFile and $graphFile have been written, nothing was placed\n";
+    return;
+  }
+  my $mode = ( defined $ports && $ports ne "" ) ? $ports : "free";
+  print "INFO-PL_SEED : 028 : they are handled as -ports $mode";
+  if    ( $mode =~ /^free$/i )      { print " -- released to the solver, so they\n";
+                                      print "INFO-PL_SEED : 029 : inform a later pin assignment but are not one\n"; }
+  elsif ( $mode =~ /^perimeter$/i ) { print " -- spread round the die edge in an\n";
+                                      print "INFO-PL_SEED : 030 : arbitrary order, which pulls the placement toward invented pins\n"; }
+  else                              { print "\n"; }
 }
 
 my $cmd = "$placer $graphFile $nodeFile $xyFile --prefix $prefix";
