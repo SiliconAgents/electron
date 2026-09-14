@@ -543,14 +543,15 @@ my $extra = "";
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : hier_place -module <module name>\n";
-  print "                   -placer <path to hier_place.py>\n";
+  print "                   -placer <path to hier_place>\n";
+  print "                         defaults to ELECTRON_HOME/3RDBIN/hier_place\n";
   print "                   -kinds <\"INST PORT\" | INST>\n";
   print "                   -input <nodefile to read back, if not the default>\n";
   print "                   -layer <layer for pin shapes that have none>\n";
   print "                   -origin <lower_left|center>\n";
   print "                         what hier_place writes; lower_left\n";
   print "                   -fanout_limit <high fan out threshold for the graph>\n";
-  print "                   -args <extra options passed straight to hier_place.py>\n";
+  print "                   -args <extra options passed straight to hier_place>\n";
   print "                   --report_only\n";
   print "                         parse and summarise without opening a window\n";
   print "                   --write_only\n";
@@ -589,8 +590,13 @@ unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$modu
 unless ( defined $placer && $placer ne "" ) {
   $placer = $ENV{HIER_PLACE};
 }
+#<!-- Shipped with the tool, like every other placer this flow drives: 3RDBIN
+#     holds eplacer, mincut_placer, seed_placer and the rest, all resolved the
+#     same way off ELECTRON_HOME.  It used to default to a path in somebody's
+#     home area, which meant hier_place worked only for that one person. -->
 unless ( defined $placer && $placer ne "" ) {
-  $placer = "/proj_pd/user_dev/rsrivastava/pyspark_cad/graphs/hier_place.py";
+  my $electronHome = $GLOBAL->dbfGlobalGetElectronHome;
+  $placer = "$electronHome/3RDBIN/hier_place";
 }
 
 my $nodeFile = "$module.pseudo.nodefile";
@@ -637,13 +643,17 @@ if ( $writeOnly ) {
   return;
 }
 unless ( -e $placer ) {
-  print "WARN-TST-HIER_PL : 005 : hier_place.py not found at $placer\n";
+  print "WARN-TST-HIER_PL : 005 : hier_place not found at $placer\n";
   print "WARN-TST-HIER_PL : 006 : $nodeFile and $graphFile have been written, nothing was placed\n";
   print "WARN-TST-HIER_PL : 007 : set HIER_PLACE or pass -placer, then read_pseudo_nodefile -input $inFile\n";
   return;
 }
 
-my $cmd = "python3 $placer $nodeFile $graphFile";
+#<!-- 3RDBIN/hier_place carries a python3 shebang and is executable, so run it
+#     the way the other placers are run.  A file handed over with -placer need
+#     not be either of those, so fall back to the interpreter for that case. -->
+my $cmd = ( -x $placer ) ? "$placer $nodeFile $graphFile"
+                         : "python3 $placer $nodeFile $graphFile";
 if ( defined $kinds && $kinds ne "" ) { $cmd .= " --kinds $kinds"; }
 if ( $reportOnly )                    { $cmd .= " --report-only"; }
 if ( defined $extra && $extra ne "" ) { $cmd .= " $extra"; }

@@ -1,0 +1,2825 @@
+#!/usr/bin/env python3
+"""
+Interactive hierarchical block placer.
+
+Adapted from graph_visualizer.py for real hierarchical placement data: a nodefile
+describing blocks and ports, and an edge file listing connections between them.
+
+    hier_place.py <design>.pseudo.nodefile <design>.pseudo.txt
+
+Nodefile format (written by proton):
+    DBU 4000
+    DIEAREA 0 0 503.845 503.845
+    ROWHEIGHT 0.2
+    NODES 9518
+    <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<type>
+
+<x> <y> is the LOWER LEFT corner, as proton and DEF give it. It is read and written
+that way so a placed nodefile goes straight back into the flow; the conversion to and
+from the centre the physics works in happens only in the reader and the writer.
+
+Edge file: one connection per line, two node indices referring to the <node> column.
+
+Two things differ from the generic visualizer and drive the whole design:
+
+  * World coordinates are microns, not pixels. The die box is drawn to scale and blocks
+    keep their real footprint, so what you see is a placement rather than a diagram.
+
+  * The edge file lists every connection separately, so a pair of blocks appears
+    thousands of times over. Those are aggregated into one weighted spring per pair -
+    treating them as thousands of independent springs would both crawl and let raw
+    net count swamp the geometry.
+
+  * Pins are placed, not simulated. A pin sits on a die edge and the only question is
+    where along it, so each pin goes to the point on its edge nearest the blocks it
+    connects to, and the pins of a layer are then packed in that order. Blocks feel
+    their pins through one aggregated pull per block per edge. Giving every pin its own
+    spring instead means thousands of springs acting on a handful of blocks: they
+    outweigh the block-to-block connectivity, the blocks oscillate, and the pins chase
+    them without ever settling.
+
+Pins are spread over the routing layers of their edge (--layers, half serving the
+horizontal edges and half the vertical), so with L layers per edge the pins on any one
+layer are L apart and the usable pitch is L times the pin pitch.
+
+Controls:
+  Left-click drag a block to move it, mouse wheel to zoom, right-click drag to pan.
+  FIXED nodes are drawn hatched and never move. 'Save' writes a placed nodefile.
+"""
+
+import argparse
+import math
+import re
+import os
+import random
+import sys
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
+
+# Qt is imported lazily so --report-only works on a host with no Qt and no display.
+try:
+    from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                                 QHBoxLayout, QPushButton, QLabel, QSlider, QCheckBox,
+                                 QFileDialog, QGroupBox, QComboBox, QSpinBox,
+                                 QGridLayout)
+    from PyQt5.QtCore import Qt, QTimer, QPoint
+    from PyQt5.QtGui import (QPainter, QPen, QBrush, QColor, QFont, QWheelEvent,
+                             QMouseEvent)
+    HAVE_QT = True
+except ImportError as _qt_err:  # noqa: F841
+    HAVE_QT = False
+    # Stubs so the class bodies below still parse; annotations are evaluated at
+    # class-definition time, so the event types need names too.
+    QWidget = object
+    QMainWindow = object
+    QMouseEvent = object
+    QWheelEvent = object
+
+# Node type -> RGB fill. 'und' is what the writer emits when nothing described the
+# cell, so it is deliberately drab: it means the type is unknown, not that it is special.
+# Pin fill by direction, so which way a bus faces is visible without reading a name
+DIR_RGB = {
+    "input":   (120, 200, 255),
+    "output":  (255, 170, 110),
+    "bidir":   (200, 150, 255),
+    "unknown": (190, 190, 140),
+}
+
+def flyline_rgb(norm: float) -> Tuple[int, int, int]:
+    """
+    Colour a fly line by how much connectivity it stands for.
+
+    A grey ramp cannot be read against a dark canvas once the lines overlap, so this
+    runs cool to hot: a faint blue pair carries a handful of nets, a red one carries
+    thousands. norm is the log-normalised weight, already in 0..1.
+    """
+    t = max(0.0, min(1.0, norm))
+    if t < 0.5:
+        u = t * 2.0
+        return (int(70 + 60 * u), int(110 + 90 * u), int(190 + 40 * u))   # blue -> cyan
+    u = (t - 0.5) * 2.0
+    return (int(130 + 125 * u), int(200 - 60 * u), int(230 - 190 * u))    # cyan -> hot
+
+
+TYPE_RGB = {
+    "block": (90, 140, 220),
+    "seq":   (200, 120, 200),
+    "mem":   (220, 160, 80),
+    "combi": (110, 190, 140),
+    "phys":  (120, 120, 120),
+    "port":  (200, 200, 120),
+    "und":   (150, 150, 150),
+}
+
+
+class Node:
+    """A placeable object. Width and height are microns."""
+
+    def __init__(self, index: int, name: str, kind: str, width: float, height: float,
+                 status: str, ntype: str, x: float = 0.0, y: float = 0.0):
+        self.index = index
+        self.name = name
+        self.kind = kind          # INST or PORT
+        self.width = width
+        self.height = height
+        # The size the file declared, kept apart from `width`/`height` because a port is
+        # declared with no size and is given a footprint here only so it can be seen,
+        # clicked and spaced. Writing the declared size back means a zero-size pin comes
+        # out as the point it went in as, rather than shifted by half a synthetic box.
+        self.decl_width = width
+        self.decl_height = height
+        self.status = status
+        self.ntype = ntype
+        self.x = x
+        self.y = y
+        self.dx = 0.0             # accumulated displacement for this step
+        self.dy = 0.0
+        self.vx = 0.0
+        self.vy = 0.0
+        # The nodefile says FIXED means the placer must not move the node
+        self.fixed = (status.upper() == "FIXED")
+        self.dragging = False
+        # Which die edge this node is confined to: N, S, E, W, or None for free.
+        # Ports are pins on the boundary, so they slide along one edge and never
+        # move into the core.
+        self.edge: Optional[str] = None
+        # Which routing layer of that edge the pin sits on. Layers are stacked in Z, so
+        # pins on different layers of the same edge share an x/y position freely - only
+        # pins on the same layer have to keep out of each other's way.
+        self.layer: int = 0
+        # Bus this pin is a bit of, and which bit. Nearly every pin in a real design is
+        # bussed, and the bits of one bus want to stay together and in order.
+        self.bus, self.bit = parse_bus(name)
+        # input / output / bidir / unknown, from which column of the edge file this
+        # port appears in; only meaningful for ports
+        self.direction: str = "unknown"
+        self._hd_key: Tuple[float, float] = (-1.0, -1.0)
+        self._hd: float = 0.0
+
+    @property
+    def movable(self) -> bool:
+        return not self.fixed and not self.dragging
+
+    @property
+    def area(self) -> float:
+        return self.width * self.height
+
+    @property
+    def half_diagonal(self) -> float:
+        # Memoised on the size it was computed from. It is read a few million times a
+        # second during the relaxation, and a tuple compare is far cheaper than a hypot;
+        # keying on the size means a reshape invalidates it without anything to remember.
+        key = (self.width, self.height)
+        if key != self._hd_key:
+            self._hd_key = key
+            self._hd = 0.5 * math.hypot(self.width, self.height)
+        return self._hd
+
+    def bounds(self) -> Tuple[float, float, float, float]:
+        return (self.x - self.width / 2, self.y - self.height / 2,
+                self.x + self.width / 2, self.y + self.height / 2)
+
+    def contains(self, px: float, py: float) -> bool:
+        l, t, r, b = self.bounds()
+        return l <= px <= r and t <= py <= b
+
+    def short_name(self) -> str:
+        """Instance paths are long; keep the leaf for the on-screen label."""
+        return self.name.rsplit("/", 1)[-1]
+
+    def corners(self) -> List[Tuple[str, float, float]]:
+        """Named corners, for grabbing to reshape."""
+        l, t, r, b = self.bounds()
+        return [("sw", l, t), ("se", r, t), ("nw", l, b), ("ne", r, b)]
+
+
+class WeightedEdge:
+    """One spring per block pair, carrying how many connections it stands for."""
+
+    def __init__(self, a: Node, b: Node, weight: float):
+        self.a = a
+        self.b = b
+        self.weight = weight
+        self.norm = 1.0  # log-normalised weight, filled in once the range is known
+
+
+def parse_nodefile(path: str) -> Tuple[Dict[int, Node], Dict[str, float]]:
+    """Return (nodes by index, header values)."""
+    nodes: Dict[int, Node] = {}
+    header: Dict[str, float] = {}
+
+    with open(path) as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            key = parts[0].upper()
+
+            if key == "DBU" and len(parts) >= 2:
+                header["dbu"] = float(parts[1])
+                continue
+            if key == "DIEAREA" and len(parts) >= 5:
+                header["die_x1"], header["die_y1"] = float(parts[1]), float(parts[2])
+                header["die_x2"], header["die_y2"] = float(parts[3]), float(parts[4])
+                continue
+            if key == "ROWHEIGHT" and len(parts) >= 2:
+                header["row_height"] = float(parts[1])
+                continue
+            if key == "NODES" and len(parts) >= 2:
+                header["declared_nodes"] = float(parts[1])
+                continue
+
+            # <node> <name> kind <w> <h> <status> [<x> <y>] TYPE=<type>
+            if len(parts) < 6 or not parts[0].isdigit():
+                print(f"  skipping unparsed line {lineno}: {line[:70]}")
+                continue
+
+            ntype = "und"
+            fields = []
+            for tok in parts:
+                if tok.upper().startswith("TYPE="):
+                    ntype = tok.split("=", 1)[1]
+                else:
+                    fields.append(tok)
+
+            index = int(fields[0])
+            name, kind = fields[1], fields[2]
+            width, height = float(fields[3]), float(fields[4])
+            status = fields[5]
+            # Coordinates are optional; present only for already-placed nodes.
+            # The file gives the lower left corner, which is what proton and DEF use;
+            # everything inside works from the centre, so the two are converted here and
+            # in the writer and nowhere else.
+            if len(fields) >= 8:
+                x = float(fields[6]) + width / 2.0
+                y = float(fields[7]) + height / 2.0
+            else:
+                x, y = 0.0, 0.0
+
+            nodes[index] = Node(index, name, kind, width, height, status, ntype, x, y)
+
+    return nodes, header
+
+
+def parse_edges(path: str) -> List[Tuple[int, int]]:
+    edges = []
+    with open(path) as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                edges.append((int(parts[0]), int(parts[1])))
+    return edges
+
+
+# Bus bit in a pin name: foo[12]
+BUS_RE = re.compile(r"^(.*)\[(\d+)\]$")
+
+
+NAME_IN_RE = re.compile(r"(^|_)i_")
+NAME_OUT_RE = re.compile(r"(^|_)o_")
+
+
+def infer_port_directions(raw_edges: List[Tuple[int, int]],
+                          nodes: Dict[int, Node]) -> Dict[str, int]:
+    """
+    Work out which ports are inputs and which are outputs, from the edge file.
+
+    The edge list is driver -> sink, so a port in the first column is driving logic
+    inside the block and is therefore an input; a port in the second column is being
+    driven and is an output. Checked against the i_/o_ naming on this design that
+    agrees for every one of 6539 ports it can classify and contradicts none.
+
+    A port with no edges at all cannot be told apart this way, so its name is used as
+    the fallback and it is counted separately - guessing silently would be worse than
+    saying the direction is unknown.
+    """
+    drives = set()
+    sunk = set()
+    for a, b in raw_edges:
+        if a in nodes and nodes[a].kind.upper() == "PORT":
+            drives.add(a)
+        if b in nodes and nodes[b].kind.upper() == "PORT":
+            sunk.add(b)
+
+    tally: Dict[str, int] = defaultdict(int)
+    for i, n in nodes.items():
+        if n.kind.upper() != "PORT":
+            continue
+        d, s = i in drives, i in sunk
+        if d and not s:
+            n.direction = "input"
+            tally["input"] += 1
+        elif s and not d:
+            n.direction = "output"
+            tally["output"] += 1
+        elif d and s:
+            n.direction = "bidir"
+            tally["bidir"] += 1
+        else:
+            # No edges to judge from, so fall back to how it is named
+            if NAME_IN_RE.search(n.name):
+                n.direction = "input"
+                tally["input by name"] += 1
+            elif NAME_OUT_RE.search(n.name):
+                n.direction = "output"
+                tally["output by name"] += 1
+            else:
+                n.direction = "unknown"
+                tally["unknown"] += 1
+    return dict(tally)
+
+
+def parse_bus(name: str) -> Tuple[Optional[str], int]:
+    """Split foo[12] into ("foo", 12); a scalar name gives (None, -1)."""
+    m = BUS_RE.match(name)
+    if not m:
+        return None, -1
+    return m.group(1), int(m.group(2))
+
+
+EDGE_NAMES = {
+    "N": "N", "NORTH": "N", "TOP": "N", "T": "N",
+    "S": "S", "SOUTH": "S", "BOTTOM": "S", "BOT": "S", "B": "S",
+    "E": "E", "EAST": "E", "RIGHT": "E", "R": "E",
+    "W": "W", "WEST": "W", "LEFT": "W", "L": "W",
+    "ANY": "ANY", "AUTO": "ANY", "*": "ANY",
+}
+
+
+def glob_to_regex(pattern: str):
+    """
+    Shell-style glob, not a regular expression: * and ? are wildcards and everything
+    else is literal. Worth being explicit about, because a regex habit costs silence -
+    '.*' escapes to a literal dot followed by anything, matches no real pin name, and
+    every port then falls through to automatic assignment with no error anywhere.
+    """
+    import re
+    escaped = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+    return re.compile(f"^{escaped}$")
+
+
+def warn_regex_like(pattern: str, origin: str):
+    """Point out a pattern that looks like it was written as a regex."""
+    if pattern in (".*", "^.*$", ".+"):
+        print(f"  NOTE: {origin} pattern '{pattern}' is a glob, not a regex, so it "
+              f"matches a literal '.' followed by anything. Use '*' to match every port.")
+    elif pattern.startswith(".*") or pattern.endswith(".*"):
+        print(f"  NOTE: {origin} pattern '{pattern}' contains '.*'. Patterns are globs, "
+              f"so '.' is literal here; '*' alone is the wildcard.")
+
+
+def parse_port_edge_rules(path: Optional[str], cli_rules: List[str]
+                          ) -> List[Tuple[str, object, str, Optional[int]]]:
+    """
+    Read "<name glob> <N|S|E|W|ANY> [<layer>]" rules, first match wins.
+
+    File rules are read first, then --port-edge rules are appended, so a command-line
+    rule acts as a fallback for anything the file did not already claim. Both accept
+    the long spellings (NORTH/TOP/LEFT/...) since nobody remembers which letter set a
+    given flow used. The layer is optional; without it the pin is dealt onto whichever
+    layer of its edge keeps the pins furthest apart.
+    """
+    rules: List[Tuple[str, object, str, Optional[int]]] = []
+
+    def add(pattern: str, side: str, layer: Optional[str], origin: str):
+        key = EDGE_NAMES.get(side.strip().upper())
+        if key is None:
+            print(f"  ignoring {origin} rule '{pattern} {side}': "
+                  f"edge must be one of N S E W ANY")
+            return
+        lyr = None
+        if layer is not None:
+            try:
+                lyr = int(layer)
+            except ValueError:
+                print(f"  ignoring layer '{layer}' in {origin} rule '{pattern}': "
+                      f"not an integer")
+        warn_regex_like(pattern, origin)
+        rules.append((pattern, glob_to_regex(pattern), key, lyr))
+
+    if path:
+        with open(path) as fh:
+            for lineno, raw in enumerate(fh, 1):
+                line = raw.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    print(f"  ignoring {path}:{lineno}: expected "
+                          f"'<glob> <edge> [<layer>]'")
+                    continue
+                add(parts[0], parts[1], parts[2] if len(parts) > 2 else None,
+                    f"{path}:{lineno}")
+
+    for spec in cli_rules:
+        # Accept "glob:EDGE" and "glob:EDGE:LAYER", with = as an alternative separator
+        sep = ":" if ":" in spec else ("=" if "=" in spec else None)
+        if sep is None:
+            print(f"  ignoring --port-edge '{spec}': expected GLOB:EDGE[:LAYER]")
+            continue
+        bits = spec.split(sep)
+        if len(bits) == 2:
+            add(bits[0], bits[1], None, "--port-edge")
+        else:
+            # A glob may itself contain the separator, so the tail is what matters
+            add(sep.join(bits[:-2]), bits[-2], bits[-1], "--port-edge")
+
+    return rules
+
+
+def assign_port_layers(ports: List[Node], layers_per_edge: int,
+                       explicit: Dict[int, int], order: str = "interleave") -> None:
+    """
+    Spread the pins of each edge across that edge's routing layers.
+
+    interleave deals them round-robin in the order they sit along the edge, so
+    neighbours land on different layers. That is what buys capacity: with L layers the
+    pins on any one layer are L apart, so the usable pitch is L times the pin pitch.
+
+    group instead fills a layer at a time, keeping a run of adjacent pins together on
+    one layer. It packs tighter per layer and is what you want if a layer is reserved
+    for a particular interface, but it does nothing for pitch.
+    """
+    if layers_per_edge <= 0:
+        return
+    by_edge: Dict[str, List[Node]] = defaultdict(list)
+    for p in ports:
+        if p.edge:
+            by_edge[p.edge].append(p)
+
+    for side, group in by_edge.items():
+        vertical = side in ("W", "E")
+        group.sort(key=lambda n: n.y if vertical else n.x)
+        free = [p for p in group if p.index not in explicit]
+
+        for p in group:
+            if p.index in explicit:
+                # An explicit layer is honoured, clamped to what the stack allows
+                p.layer = max(0, min(layers_per_edge - 1, explicit[p.index]))
+
+        if order == "group":
+            per = max(1, math.ceil(len(free) / layers_per_edge))
+            for i, p in enumerate(free):
+                p.layer = min(layers_per_edge - 1, i // per)
+        else:
+            for i, p in enumerate(free):
+                p.layer = i % layers_per_edge
+
+
+def assign_port_edges(ports: List[Node],
+                      rules: List[Tuple[str, object, str, Optional[int]]],
+                      die: Tuple[float, float, float, float],
+                      block_centroid: Dict[int, Tuple[float, float]],
+                      method: str = "rules") -> Dict[str, int]:
+    """
+    Give every port an edge.
+
+    method picks how:
+      rules       a matching --port-edge rule wins, anything unmatched falls through
+                  to nearest (this is the default and the only one the CLI used)
+      nearest     ignore the rules; every pin goes to the edge closest to the blocks
+                  it connects to, which is the placement the router wants and which
+                  stops the relaxation dragging a pin across the die to reach a block
+      roundrobin  deal them N, S, E, W in index order, for an even spread
+      N S E W     put every pin on that one edge
+
+    Pins with no placed neighbour fall back to the edge nearest their current position,
+    or to a round-robin deal when the design has no positions at all to judge from.
+    """
+    x1, y1, x2, y2 = die
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    sides = ("W", "E", "S", "N")
+    counts: Dict[str, int] = defaultdict(int)
+
+    hits = [0] * len(rules)
+    forced = method if method in sides else None
+
+    for order, p in enumerate(sorted(ports, key=lambda n: n.index)):
+        side = None
+
+        if forced is not None:
+            # One edge for everything, chosen in the interface
+            side = forced
+        elif method == "rules":
+            for ri, (pattern, regex, want, _layer) in enumerate(rules):
+                if regex.match(p.name):
+                    hits[ri] += 1
+                    side = None if want == "ANY" else want
+                    break
+        elif method == "roundrobin":
+            side = sides[order % len(sides)]
+        elif method == "bydir":
+            # Inputs down the west and north, outputs down the east and south, which is
+            # the arrangement that keeps a block's in and out traffic from crossing
+            if p.direction == "input":
+                side = "W" if order % 2 == 0 else "N"
+            elif p.direction == "output":
+                side = "E" if order % 2 == 0 else "S"
+            # anything unknown falls through to nearest, below
+
+        if side is None:
+            # Pick the edge whose direction best matches where the port's blocks sit
+            ref = block_centroid.get(p.index)
+            rx, ry = ref if ref is not None else (p.x, p.y)
+            dists = {"W": rx - x1, "E": x2 - rx, "S": ry - y1, "N": y2 - ry}
+            spread = max(dists.values()) - min(dists.values())
+            if spread < 1e-6 or (rx == 0.0 and ry == 0.0):
+                # Degenerate reference - an unplaced design leaves every block at the
+                # origin, so "nearest edge" would send every port to the same side.
+                # Deal them round-robin instead and let Re-edge fix it once the blocks
+                # have somewhere to be.
+                side = sides[order % len(sides)]
+            else:
+                side = min(dists, key=lambda k: dists[k])
+
+        p.edge = side
+        counts[side] += 1
+
+    # A rule that matched nothing is almost always a pattern mistake, and it is silent
+    # otherwise: the ports just get assigned automatically as if the rule were absent
+    for (pattern, _rx, want, _lyr), n in zip(rules, hits):
+        if n == 0:
+            print(f"  WARNING: rule '{pattern} -> {want}' matched no port. Patterns are "
+                  f"globs, so '*' is the wildcard and '.' is literal.")
+
+    return dict(counts)
+
+
+def build_weighted_edges(raw_edges: List[Tuple[int, int]], nodes: Dict[int, Node],
+                         placeable: Dict[int, Node], port_fanout_limit: int
+                         ) -> Tuple[List[WeightedEdge], Dict[str, int]]:
+    """
+    Collapse the raw connection list into one weighted spring per placeable pair.
+
+    Direct pairs accumulate a weight of 1 each. A connection through a node that is not
+    being placed (a port) carries no position of its own, so a port touching several
+    blocks is reduced to a clique between them, its weight divided by the number of pairs
+    it creates - otherwise one high-fanout port would outvote all the real connectivity.
+    """
+    pair_weight: Dict[Tuple[int, int], float] = defaultdict(float)
+    via_node: Dict[int, set] = defaultdict(set)
+    stats = {"direct": 0, "via": 0, "dangling": 0, "self": 0, "unknown": 0}
+
+    for a, b in raw_edges:
+        if a == b:
+            stats["self"] += 1
+            continue
+        if a not in nodes or b not in nodes:
+            stats["unknown"] += 1
+            continue
+
+        a_place, b_place = a in placeable, b in placeable
+        if a_place and b_place:
+            pair_weight[(min(a, b), max(a, b))] += 1.0
+            stats["direct"] += 1
+        elif a_place:
+            via_node[b].add(a)
+        elif b_place:
+            via_node[a].add(b)
+        else:
+            stats["dangling"] += 1
+
+    for hub, members in via_node.items():
+        if len(members) < 2:
+            # Touches a single block, so it says nothing about relative position
+            stats["dangling"] += 1
+            continue
+        if len(members) > port_fanout_limit:
+            # A near-global net pulls everything together and washes the layout out
+            stats["dangling"] += 1
+            continue
+        ordered = sorted(members)
+        pair_count = len(ordered) * (len(ordered) - 1) / 2
+        share = 1.0 / pair_count
+        for i, m in enumerate(ordered):
+            for n in ordered[i + 1:]:
+                pair_weight[(m, n)] += share
+                stats["via"] += 1
+
+    edges = [WeightedEdge(placeable[a], placeable[b], w)
+             for (a, b), w in pair_weight.items()]
+
+    if edges:
+        max_w = max(e.weight for e in edges)
+        for e in edges:
+            # Log so a 1000-connection pair pulls harder than a 10-connection pair
+            # without pulling 100x harder
+            e.norm = math.log1p(e.weight) / math.log1p(max_w)
+
+    return edges, stats
+
+
+class PlaceWidget(QWidget):
+    """Displays and relaxes the block placement. World units are microns."""
+
+    def __init__(self, nodefile: str, edgefile: str, kinds: List[str],
+                 port_fanout_limit: int, seed: int,
+                 port_edge_rules: Optional[List[Tuple[str, object, str]]] = None,
+                 port_size: float = 0.0, port_weight: float = 0.1,
+                 layers: int = 6, port_update: int = 8, bus_gap: float = 1.0):
+        super().__init__()
+        self.setMinimumSize(800, 600)
+        # Needed for hover: without it mouseMoveEvent only fires while a button is held
+        self.setMouseTracking(True)
+        self.hover_text: Optional[str] = None
+        self.hover_pos: Optional[Tuple[int, int]] = None
+        self.nodefile_path = nodefile
+        self.port_size = port_size
+
+        print(f"Reading nodes: {nodefile}")
+        self.all_nodes, self.header = parse_nodefile(nodefile)
+        print(f"  {len(self.all_nodes)} nodes")
+
+        wanted = {k.upper() for k in kinds}
+        self.nodes = {i: n for i, n in self.all_nodes.items() if n.kind.upper() in wanted}
+        by_kind = defaultdict(int)
+        for n in self.all_nodes.values():
+            by_kind[n.kind] += 1
+        print("  by kind: " + ", ".join(f"{k}={v}" for k, v in sorted(by_kind.items())))
+        print(f"  placing {len(self.nodes)} of kind {'/'.join(sorted(wanted))}")
+
+        print(f"Reading edges: {edgefile}")
+        raw = parse_edges(edgefile)
+        self.edges, stats = build_weighted_edges(raw, self.all_nodes, self.nodes,
+                                                 port_fanout_limit)
+        dirs = infer_port_directions(raw, self.all_nodes)
+        if dirs:
+            print("  port direction: " +
+                  ", ".join(f"{k}={v}" for k, v in sorted(dirs.items())))
+        print(f"  {len(raw)} connections -> {len(self.edges)} weighted pairs")
+        print(f"  direct={stats['direct']}  via-port={stats['via']}  "
+              f"ignored={stats['dangling']}  self={stats['self']}  unknown={stats['unknown']}")
+        if self.edges:
+            ws = sorted(e.weight for e in self.edges)
+            print(f"  pair weight: min {ws[0]:.2f}  median {ws[len(ws)//2]:.2f}  max {ws[-1]:.2f}")
+
+        self.die = (self.header.get("die_x1", 0.0), self.header.get("die_y1", 0.0),
+                    self.header.get("die_x2", 1000.0), self.header.get("die_y2", 1000.0))
+        die_w = self.die[2] - self.die[0]
+        die_h = self.die[3] - self.die[1]
+        placed_area = sum(n.area for n in self.nodes.values())
+        util = 100.0 * placed_area / (die_w * die_h) if die_w * die_h > 0 else 0.0
+        print(f"Die {die_w:.3f} x {die_h:.3f} um, block area {placed_area:.0f} um2, "
+              f"utilisation {util:.1f}%")
+        if util > 100.0:
+            print("  WARNING: blocks do not fit in the die; overlap cannot be removed")
+
+        # Half the routing layers serve the horizontal edges and half the vertical ones,
+        # so each edge gets layers/2 tracks to put pins on.
+        self.layers_per_edge = max(1, layers // 2)
+        if layers > 0:
+            print(f"Routing layers: {layers} total -> {self.layers_per_edge} per edge "
+                  f"({self.layers_per_edge} horizontal, {self.layers_per_edge} vertical)")
+
+        # Ports are boundary pins with zero width and height in this data, so give them
+        # a footprint or they cannot be seen, clicked, or separated from each other.
+        # A pin is a fraction of a row height by default, which is the only length scale
+        # in the file that relates to the technology.
+        port_nodes = [n for n in self.nodes.values() if n.kind.upper() == "PORT"]
+        if port_nodes:
+            row = self.header.get("row_height", 0.0)
+            if port_size > 0.0:
+                effective = port_size
+                origin = "given"
+            elif row > 0.0:
+                effective = row / 4.0
+                origin = f"ROWHEIGHT {row:g} / 4"
+            else:
+                # No row height in the file, so fall back to the pitch the perimeter
+                # and layer count actually allow
+                perimeter = 2 * ((self.die[2] - self.die[0]) + (self.die[3] - self.die[1]))
+                effective = 0.8 * perimeter * self.layers_per_edge / len(port_nodes)
+                origin = "perimeter / port count"
+
+            # Check it fits: capacity is edge length x layers, per edge
+            self.port_footprint = effective
+            for p in port_nodes:
+                if p.width <= 0.0:
+                    p.width = effective
+                if p.height <= 0.0:
+                    p.height = effective
+            print(f"Port footprint: {effective:g} um ({origin})")
+        else:
+            self.port_footprint = port_size
+
+        # Relaxation parameters. Forces are accumulated as displacements in microns,
+        # which keeps behaviour the same whether the die is 500 um or 5000 um.
+        # Defaults chosen by sweeping this design: attraction and overlap removal pull
+        # against each other, and resolving overlap fully each step (1.0) with gentler
+        # attraction gives 3x less overlap for ~4% worse wirelength than the reverse.
+        self.spring_strength = 0.02
+        self.overlap_strength = 1.00   # fraction of the overlap removed per step
+        self.spread_strength = 0.02    # mild push between non-overlapping blocks
+        self.center_strength = 0.004
+        self.damping = 0.85
+        # The spread term is all-pairs, so it is skipped past this many blocks rather
+        # than quietly making the frame rate collapse
+        self.spread_pair_limit = 1500
+        self.port_weight = port_weight
+        self.port_update_interval = max(1, port_update)
+        self._since_port_update = 0
+        self.fix_on_drop = True
+        # Off by default. It is only useful when the blocks leave channels between them:
+        # on a tiled floorplan the die edge is fully shadowed, there is nowhere to snap
+        # to, and it costs twice the pin-placement time for no change. It is also the
+        # wrong model when routes are allowed over hierarchical blocks rather than
+        # having to squeeze between them.
+        self.blocks_are_blockage = False
+        # Remembered so "Unfix all" releases only what was fixed by hand, not what the
+        # nodefile declared FIXED
+        self.originally_fixed = {n.index for n in self.nodes.values() if n.fixed}
+        # Pin-to-block lines are off by default: there are thousands of them and they
+        # obscure the block connectivity that the layout is actually driven by
+        self.show_port_edges = False
+        self.show_labels = True
+        self.show_edges = True
+        self.animation_running = True
+
+        self.port_edge_rules = port_edge_rules or []
+        # How pins pick an edge and a layer. Both are changed from the interface, so
+        # they live here rather than only in the command line.
+        self.port_edge_method = "rules" if self.port_edge_rules else "nearest"
+        self.layer_order = "interleave"
+        # Bits of one bus placed together and in order, which is what a router wants and
+        # what makes 9490 pins legible as 48 objects
+        self.group_buses = True
+        # Guard band between neighbouring buses, in microns
+        self.bus_gap = bus_gap
+        self._gap_warned: Dict[str, bool] = {}
+        # (edge, bus) -> along-edge start put there by hand. An anchored bus keeps its
+        # place through every re-place; the free ones flow around it.
+        # 0 keeps pins and buses where wirelength wants them, 1 spreads them evenly
+        # over the whole edge
+        self.pin_spread = 0.0
+        # Fraction of the heaviest block-to-block pairs drawn as fly lines
+        self.flyline_fraction = 0.25
+        self.flyline_grab_px = 3.0
+        self.hover_edge: Optional[WeightedEdge] = None
+        self.bus_anchor: Dict[Tuple[str, str], float] = {}
+        self.dragging_bus: Optional[Tuple[str, str, float, float]] = None
+        self._bus_drag_origin: Optional[Tuple[float, bool]] = None
+
+        # Pins are not force bodies.
+        #
+        # Treating every pin-to-block connection as its own spring means thousands of
+        # springs acting on 28 blocks; they sum to more than the block-to-block
+        # connectivity, the blocks oscillate, and the pins chase them. A pin has no
+        # freedom worth simulating anyway - it sits on a boundary and the only question
+        # is where along it. So the pins of a block are treated as one multi-pin net:
+        # each pin is placed at the point on its edge nearest the blocks it connects to,
+        # then legalised along that edge. That is a direct solve, not a relaxation.
+        #
+        # Blocks still feel their pins, but through one aggregated pull per block per
+        # edge rather than one per pin.
+        self.port_nets: Dict[int, List[Node]] = defaultdict(list)
+        self.block_edges: List[WeightedEdge] = []
+        for e in self.edges:
+            a_port = e.a.kind.upper() == "PORT"
+            b_port = e.b.kind.upper() == "PORT"
+            if not a_port and not b_port:
+                self.block_edges.append(e)
+            elif a_port and not b_port:
+                self.port_nets[e.a.index].append(e.b)
+            elif b_port and not a_port:
+                self.port_nets[e.b.index].append(e.a)
+        if self.port_nets:
+            total_ports = sum(1 for n in self.nodes.values() if n.kind.upper() == "PORT")
+            loose = total_ports - len(self.port_nets)
+            print(f"  {len(self.block_edges)} block-to-block springs, "
+                  f"{len(self.port_nets)} pins placed by projection")
+            if loose:
+                print(f"  {loose} pins have no connection in the edge file, so they keep "
+                      f"their position and are only spaced apart")
+
+        self.dragging_node: Optional[Node] = None
+        self._drag_origin: Optional[Tuple[float, float]] = None
+        self.resizing: Optional[Tuple[Node, str]] = None
+        self.resize_origin: Optional[Tuple[float, float, float, float]] = None
+        self.allow_reshape = True
+        self._did_initial_fit = False
+        self.handle_px = 7            # grab radius for a corner, in pixels
+        self.aspect_limit = 4.0       # widest allowed width:height, or its inverse
+        self.last_mouse_pos = None
+        self.zoom = 1.0
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+
+        self.initialize_positions(seed)
+        # Edges are assigned after the blocks have positions, so "nearest edge to my
+        # blocks" means something. Doing it before would send every port to one side.
+        self.assign_ports(quiet=False)
+        self.reset_view()
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.step)
+        self.timer.start(16)
+
+    # ------------------------------------------------------------------ setup
+
+    def _port_block_centroids(self) -> Dict[int, Tuple[float, float]]:
+        """
+        Average position of the blocks each port connects to.
+
+        Called before the relaxation starts, so it uses whatever positions the nodefile
+        supplied. With an unplaced design every block sits at the origin and this yields
+        nothing useful - which is why the edge assignment falls back to position, and
+        why re-assigning after a relax is offered separately.
+        """
+        acc: Dict[int, List[float]] = defaultdict(lambda: [0.0, 0.0, 0])
+        blocks = {i: n for i, n in self.nodes.items() if n.kind.upper() != "PORT"}
+        for e in self.edges:
+            for src, dst in ((e.a, e.b), (e.b, e.a)):
+                if src.kind.upper() == "PORT" and dst.index in blocks:
+                    slot = acc[src.index]
+                    slot[0] += dst.x
+                    slot[1] += dst.y
+                    slot[2] += 1
+        return {i: (v[0] / v[2], v[1] / v[2]) for i, v in acc.items() if v[2] > 0}
+
+    def assign_ports(self, quiet: bool = True):
+        """Confine every port to a die edge and a layer of that edge, then snap it."""
+        ports = [n for n in self.nodes.values() if n.kind.upper() == "PORT"]
+        if not ports:
+            return
+        centroid = self._port_block_centroids()
+        counts = assign_port_edges(ports, self.port_edge_rules, self.die, centroid,
+                                   self.port_edge_method)
+
+        # A rule may name a layer as well as an edge
+        explicit_layer: Dict[int, int] = {}
+        for p in ports:
+            for _pattern, regex, _side, layer in self.port_edge_rules:
+                if regex.match(p.name):
+                    if layer is not None:
+                        explicit_layer[p.index] = layer
+                    break
+        if self.group_buses:
+            self._unify_bus_edges(ports)
+
+        assign_port_layers(ports, self.layers_per_edge, explicit_layer, self.layer_order)
+
+        for p in ports:
+            self.project_to_edge(p)
+
+        label = "Re-assigned ports" if quiet else "Ports on edges"
+        print(f"{label}: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+        if not quiet:
+            matched = sum(1 for p in ports
+                          if any(rx.match(p.name) for _, rx, _, _ in self.port_edge_rules))
+            print(f"  {matched} matched an explicit rule, "
+                  f"{len(ports) - matched} assigned automatically "
+                  f"({len(centroid)} from connected blocks)")
+            if explicit_layer:
+                print(f"  {len(explicit_layer)} pins had a layer named explicitly")
+            self.report_edge_capacity()
+
+    def report_edge_capacity(self):
+        """Say whether the pins fit, per edge and per layer, instead of silently piling."""
+        x1, y1, x2, y2 = self.die
+        groups: Dict[Tuple[str, int], List[Node]] = defaultdict(list)
+        for n in self.nodes.values():
+            if n.edge:
+                groups[(n.edge, n.layer)].append(n)
+        if not groups:
+            return
+        print(f"  {'edge':<6}{'layer':>6}{'pins':>7}{'used um':>10}{'avail um':>10}{'fill':>8}")
+        for (side, layer) in sorted(groups):
+            group = groups[(side, layer)]
+            vertical = side in ("W", "E")
+            avail = (y2 - y1) if vertical else (x2 - x1)
+            used = sum((n.height if vertical else n.width) for n in group)
+            fill = 100.0 * used / avail if avail > 0 else 0.0
+            flag = "  OVER" if fill > 100.0 else ""
+            print(f"  {side:<6}{layer:>6}{len(group):>7}{used:>10.1f}{avail:>10.1f}"
+                  f"{fill:>7.1f}%{flag}")
+
+    def reassign_port_edges(self):
+        """Re-pick each free port's edge from where its blocks ended up."""
+        self.assign_ports(quiet=True)
+        self.update()
+
+    def set_port_edge_method(self, method: str):
+        """Change how pins choose an edge and re-run the assignment now."""
+        self.port_edge_method = method
+        self.assign_ports(quiet=True)
+        self.place_ports()
+        self.update()
+
+    def set_layers(self, total: int):
+        """Set the routing layer count; half serve each orientation, as on the CLI."""
+        self.layers_per_edge = max(1, total // 2)
+        self.assign_ports(quiet=True)
+        self.place_ports()
+        self.update()
+
+    def set_pin_spread(self, spread: float):
+        """Between packed at the wirelength optimum and evenly spread along the edge."""
+        self.pin_spread = max(0.0, min(1.0, spread))
+        self.place_ports()
+        self.update()
+
+    def set_bus_gap(self, gap: float):
+        """Change the guard band between buses and re-place them now."""
+        self.bus_gap = gap
+        self._gap_warned.clear()
+        self.place_ports()
+        self.update()
+
+    def set_layer_order(self, order: str):
+        """interleave for pitch, group to keep a run of pins on one layer."""
+        self.layer_order = order
+        self.assign_ports(quiet=True)
+        self.place_ports()
+        self.update()
+
+    def project_to_edge(self, n: Node):
+        """
+        Snap a node onto its assigned die edge, leaving it free along that edge.
+
+        Measured against the declared size, not the display footprint. A pin declared
+        with no size belongs exactly on the boundary, and insetting it by half of the
+        box drawn to make it visible would put it there in the written nodefile too -
+        a pin at x=0 would come back as x=0.025 and the flow would have to undo it.
+        """
+        x1, y1, x2, y2 = self.die
+        half_w = n.decl_width / 2
+        half_h = n.decl_height / 2
+        if n.edge == "W":
+            n.x = x1 + half_w
+        elif n.edge == "E":
+            n.x = x2 - half_w
+        elif n.edge == "S":
+            n.y = y1 + half_h
+        elif n.edge == "N":
+            n.y = y2 - half_h
+
+    def initialize_positions(self, seed: int):
+        """Keep any coordinates the nodefile supplied; scatter the rest inside the die."""
+        rnd = random.Random(seed)
+        x1, y1, x2, y2 = self.die
+        kept = 0
+        for n in self.nodes.values():
+            if n.x != 0.0 or n.y != 0.0 or n.fixed:
+                kept += 1
+            else:
+                n.x = rnd.uniform(x1 + n.width / 2, max(x1 + n.width / 2, x2 - n.width / 2))
+                n.y = rnd.uniform(y1 + n.height / 2, max(y1 + n.height / 2, y2 - n.height / 2))
+            # An edge-constrained node starts on its edge, so the first frame already
+            # shows a legal boundary position rather than a port floating in the core
+            if n.edge:
+                self.project_to_edge(n)
+        if kept:
+            print(f"  kept {kept} pre-existing or fixed positions")
+
+    # ------------------------------------------------------------------ physics
+
+    def step(self):
+        if not self.animation_running:
+            return
+
+        nodes = list(self.nodes.values())
+        blocks = [n for n in nodes if not n.edge]
+
+        # Overlap removal for the free nodes, bucketed on a uniform grid. Each node is
+        # inserted into every cell its bounding box covers, so two nodes can only
+        # overlap if they share a cell and no neighbour scan is needed.
+        #
+        # Edge-constrained nodes are deliberately excluded: pins are orders of magnitude
+        # smaller than blocks, so any single cell size is wrong for both. Thousands of
+        # sub-micron pins land in one block-sized cell and the per-cell pair count grows
+        # as they cluster, which makes the frame cost climb the longer it runs. They are
+        # separated in one dimension instead, below.
+        if blocks:
+            span = max(self.die[2] - self.die[0], self.die[3] - self.die[1], 1.0)
+            max_dim = max(max(n.width, n.height) for n in blocks)
+            cell = max(max_dim / 16.0, span / 128.0, 1e-6)
+
+            grid: Dict[Tuple[int, int], List[Node]] = defaultdict(list)
+            for n in blocks:
+                l, t, r, b = n.bounds()
+                for gx in range(int(l // cell), int(r // cell) + 1):
+                    for gy in range(int(t // cell), int(b // cell) + 1):
+                        grid[(gx, gy)].append(n)
+
+            # A large node appears in many cells, so a pair can come up repeatedly; the
+            # separation must be applied once per step or it over-corrects
+            seen = set()
+            for bucket in grid.values():
+                if len(bucket) < 2:
+                    continue
+                for i, a in enumerate(bucket):
+                    for b in bucket[i + 1:]:
+                        key = (a.index, b.index) if a.index < b.index else (b.index, a.index)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        self._separate(a, b)
+
+            # The spread force reaches past a bounding box, so it needs its own grid:
+            # each block is bucketed by its box grown by the reach, and only blocks
+            # sharing a cell can be within it. All-pairs is fine for a couple of dozen
+            # blocks but costs 45000 pairs a step at three hundred, which is most of the
+            # frame - and a few hundred blocks is the case this tool is for.
+            # Sized to the reach the spread force actually has, not to the biggest
+            # block: a cell much larger than the reach puts dozens of blocks in one
+            # bucket and the pair count goes back up quadratically.
+            mean_hd = sum(n.half_diagonal for n in blocks) / len(blocks)
+            reach_cell = max(mean_hd * 2.2, span / 256.0, 1e-6)
+            sgrid: Dict[Tuple[int, int], List[Node]] = defaultdict(list)
+            for n in blocks:
+                margin = n.half_diagonal * 1.1
+                l, t, r, b = n.bounds()
+                for gx in range(int((l - margin) // reach_cell), int((r + margin) // reach_cell) + 1):
+                    for gy in range(int((t - margin) // reach_cell), int((b + margin) // reach_cell) + 1):
+                        sgrid[(gx, gy)].append(n)
+            seen_spread = set()
+            for bucket in sgrid.values():
+                if len(bucket) < 2:
+                    continue
+                for i, a in enumerate(bucket):
+                    for b in bucket[i + 1:]:
+                        key = (a.index, b.index) if a.index < b.index else (b.index, a.index)
+                        if key in seen_spread:
+                            continue
+                        seen_spread.add(key)
+                        self._spread(a, b)
+
+        # Only block-to-block springs act; pin connectivity arrives as an aggregated
+        # pull instead, so a block with many pins on one edge drifts that way without
+        # thousands of individual springs fighting each other
+        for e in self.block_edges:
+            self._attract(e)
+        self._apply_port_pull(blocks)
+
+        cx = (self.die[0] + self.die[2]) / 2
+        cy = (self.die[1] + self.die[3]) / 2
+        for n in blocks:
+            n.dx += (cx - n.x) * self.center_strength
+            n.dy += (cy - n.y) * self.center_strength
+
+        for n in blocks:
+            self._integrate(n)
+
+        # Pins follow: placed where they minimise length to their nets, then spaced out.
+        # This is the most expensive part of a step by far - a sort of every pin on every
+        # layer - and it does not need to run at frame rate, because the blocks it tracks
+        # move by a fraction of a pin pitch per step. Running it every Nth step is
+        # visually identical and takes the cost off the interactive path.
+        self._since_port_update += 1
+        if self._since_port_update >= self.port_update_interval:
+            self._since_port_update = 0
+            self.place_ports()
+        self.update()
+
+    def _apply_port_pull(self, blocks: List[Node]):
+        """
+        Pull each block toward the edges its pins live on, once per edge.
+
+        A block with 400 pins on the west edge should drift west, but not 400 times as
+        hard as a block with one. The count is log-compressed and applied as a single
+        force per (block, edge), which is bounded and cannot swamp the block-to-block
+        connectivity the way per-pin springs did.
+        """
+        if not self.port_nets or self.port_weight <= 0.0:
+            return
+        x1, y1, x2, y2 = self.die
+        tally: Dict[Tuple[int, str], int] = defaultdict(int)
+        for pi, targets in self.port_nets.items():
+            port = self.nodes.get(pi)
+            if port is None or not port.edge:
+                continue
+            for blk in targets:
+                tally[(blk.index, port.edge)] += 1
+
+        for (bi, side), count in tally.items():
+            blk = self.nodes.get(bi)
+            if blk is None or not blk.movable:
+                continue
+            strength = self.spring_strength * self.port_weight * math.log1p(count)
+            if side == "W":
+                blk.dx += (x1 - blk.x) * strength
+            elif side == "E":
+                blk.dx += (x2 - blk.x) * strength
+            elif side == "S":
+                blk.dy += (y1 - blk.y) * strength
+            else:
+                blk.dy += (y2 - blk.y) * strength
+
+    def place_ports(self):
+        """
+        Put every pin where it costs least, then space the pins out.
+
+        Each pin's ideal spot is the point on its edge closest to the blocks it connects
+        to - for a pin on a vertical edge that is just the mean y of its net. Sorting the
+        pins of a layer by that ideal and sweeping once to enforce pitch keeps them in
+        the order their nets want, which is the minimum-displacement legalisation of a
+        one dimensional row. No iteration and no forces, so nothing here can oscillate.
+        """
+        # Keyed on having pins at all, not on having nets: a pin with nothing to aim at
+        # still has to be spaced off its neighbours. Bailing out when port_nets is empty
+        # left every pin stacked wherever the edge projection put it.
+        if not any(n.edge for n in self.nodes.values()):
+            return
+        if self.group_buses:
+            self.place_ports_as_buses()
+            return
+        x1, y1, x2, y2 = self.die
+
+        # Blocks are opaque: a pin cannot route in through one, so its wanted position
+        # is nudged into the nearest channel between blocks unless it is already facing
+        # a block it connects to
+        blockage = self._edge_blockage() if self.blocks_are_blockage else {}
+
+        ideal: Dict[int, float] = {}
+        for pi, targets in self.port_nets.items():
+            port = self.nodes.get(pi)
+            if port is None or not port.edge or not targets:
+                continue
+            vertical = port.edge in ("W", "E")
+            want = sum((t.y if vertical else t.x) for t in targets) / len(targets)
+            lo, hi = (y1, y2) if vertical else (x1, x2)
+            want = min(max(want, lo), hi)
+            if blockage:
+                want = self._snap_to_channel(want, blockage.get(port.edge, []),
+                                             targets, vertical, lo, hi)
+            ideal[pi] = want
+            # Snap onto the edge itself; the along-edge coordinate is set below
+            self.project_to_edge(port)
+
+        self.legalize_edge_nodes(ideal)
+
+    def _unify_bus_edges(self, ports: List[Node]) -> None:
+        """
+        Put every bit of a bus on one edge.
+
+        Edges are picked per pin, so the bits of one bus follow their own nets and end
+        up spread over three edges on average - which defeats the point, because a bus
+        split four ways cannot be routed as a bundle. The bits vote: the edge most of
+        them already wanted wins, ties going to the one nearest the blocks the bus as a
+        whole reaches.
+        """
+        x1, y1, x2, y2 = self.die
+        buses: Dict[str, List[Node]] = defaultdict(list)
+        for p in ports:
+            if p.bus and p.edge:
+                buses[p.bus].append(p)
+
+        moved = 0
+        for bus, members in buses.items():
+            votes: Dict[str, int] = defaultdict(int)
+            for p in members:
+                votes[p.edge] += 1
+            top = max(votes.values())
+            short_list = sorted(s for s, n in votes.items() if n == top)
+            if len(short_list) == 1:
+                side = short_list[0]
+            else:
+                # Tie: whichever of the tied edges the bus's blocks sit closest to
+                xs, ys = [], []
+                for p in members:
+                    for t in self.port_nets.get(p.index, ()):
+                        xs.append(t.x)
+                        ys.append(t.y)
+                if xs:
+                    cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+                else:
+                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                dist = {"W": cx - x1, "E": x2 - cx, "S": cy - y1, "N": y2 - cy}
+                side = min(short_list, key=lambda s: dist[s])
+            for p in members:
+                if p.edge != side:
+                    p.edge = side
+                    moved += 1
+        if moved:
+            print(f"  {moved} bus bits moved so each bus sits on one edge")
+
+    def place_ports_as_buses(self):
+        """
+        Place the bits of a bus together, in order, instead of one pin at a time.
+
+        Nearly every pin in a real design is a bus bit - 9457 of 9490 here, in 48 buses -
+        and a bus wants to arrive somewhere as a block, in bit order, so it can be routed
+        as a bundle. Placed individually the bits of one bus scatter along the edge in
+        whatever order their own nets happen to want, which is both harder to route and
+        impossible to read.
+
+        So the bus, not the pin, becomes the unit: its wanted position is the average
+        over every block any of its bits reaches, buses are legalised against each other
+        along the edge, and the bits are then laid out inside the span the bus won.
+        Bits fill the layers first, so a 2832-bit bus on 3 layers occupies 944 pitches of
+        edge rather than 2832.
+        """
+        x1, y1, x2, y2 = self.die
+        pitch = max(self.port_footprint, 1e-9)
+        layers = max(1, self.layers_per_edge)
+
+        # Scalars are their own one-bit bus so both kinds go through the same path
+        groups: Dict[Tuple[str, str], List[Node]] = defaultdict(list)
+        for n in self.nodes.values():
+            if n.edge:
+                groups[(n.edge, n.bus if n.bus else f"\x00{n.index}")].append(n)
+
+        by_edge: Dict[str, List[Tuple[float, str, List[Node]]]] = defaultdict(list)
+        for (side, bus), members in groups.items():
+            vertical = side in ("W", "E")
+            wanted = []
+            for p in members:
+                for t in self.port_nets.get(p.index, ()):
+                    wanted.append(t.y if vertical else t.x)
+            if wanted:
+                ideal = sum(wanted) / len(wanted)
+            else:
+                # Nothing to aim at, so leave the bus where it already sits
+                ideal = sum((p.y if vertical else p.x) for p in members) / len(members)
+            by_edge[side].append((ideal, bus, members))
+
+        for side, buses in by_edge.items():
+            vertical = side in ("W", "E")
+            lo, hi = (y1, y2) if vertical else (x1, x2)
+            buses.sort(key=lambda item: item[0])
+
+            # A bus put somewhere by hand keeps that spot and the rest flow around it,
+            # so dragging one is not undone by the next re-place
+            anchored = {b: self.bus_anchor[(side, b)]
+                        for _i, b, _m in buses if (side, b) in self.bus_anchor}
+            if anchored:
+                buses.sort(key=lambda item: anchored.get(item[1], item[0]))
+
+            # A guard band between neighbouring buses. Without it they pack flush, one
+            # pin pitch apart, which is legal but leaves nothing between two bundles
+            # that are supposed to be routed separately.
+            gap = max(0.0, self.bus_gap)
+            needed = sum(math.ceil(len(m) / layers) * pitch for _i, _b, m in buses)
+            needed += gap * max(0, len(buses) - 1)
+            if needed > (hi - lo) and gap > 0.0:
+                # Shrink the guard rather than run off the end, and say so
+                room = max(0.0, (hi - lo) - (needed - gap * max(1, len(buses) - 1)))
+                gap = room / max(1, len(buses) - 1)
+                if not self._gap_warned.get(side):
+                    self._gap_warned[side] = True
+                    print(f"  {side} edge: bus gap reduced to {gap:.4f} um, "
+                          f"{len(buses)} buses do not fit with the requested "
+                          f"{self.bus_gap:g} um")
+
+            # One sweep over the buses, same least-displacement packing used for pins
+            cursor = lo
+            spans: List[Tuple[float, float, List[Node], bool]] = []
+            for ideal, bus, members in buses:
+                rows = math.ceil(len(members) / layers)
+                span = rows * pitch
+                held = (side, bus) in self.bus_anchor
+                if held:
+                    # Held where it was dropped, even if that pushes its neighbours
+                    start = min(max(self.bus_anchor[(side, bus)], lo), hi - span)
+                else:
+                    start = max(ideal - span / 2.0, cursor)
+                spans.append((start, span, members, held))
+                cursor = start + span + gap
+            # Shared out backwards if the edge ran out, rather than piling at the corner
+            if cursor - gap > hi:
+                cursor = hi
+                for i in range(len(spans) - 1, -1, -1):
+                    start, span, members, held = spans[i]
+                    if not held:
+                        start = min(start, cursor - span)
+                        spans[i] = (start, span, members, held)
+                    cursor = start - gap
+
+            # Spread: nudge the packed layout toward an even distribution over the whole
+            # edge. Packed is wirelength-optimal and leaves the far end of the edge
+            # empty; evenly spaced is easier to route into and to look at. A convex
+            # combination of two non-overlapping layouts with the same spans and order
+            # is itself non-overlapping, so any setting in between stays legal.
+            if self.pin_spread > 0.0 and spans:
+                total = sum(sp for _s, sp, _m, _h in spans)
+                slack = (hi - lo) - total
+                if slack > 0.0:
+                    step = slack / (len(spans) + 1)
+                    cursor = lo + step
+                    t = min(1.0, self.pin_spread)
+                    for i, (start, span, members, held) in enumerate(spans):
+                        if not held:
+                            spans[i] = (start + t * (cursor - start), span, members, held)
+                        cursor += span + step
+
+            for start, _span, members, _held in spans:
+                # In bit order, filling the layers at each position before moving along
+                members.sort(key=lambda n: (n.bit, n.index))
+                for i, p in enumerate(members):
+                    p.layer = i % layers
+                    pos = start + (i // layers + 0.5) * pitch
+                    pos = min(max(pos, lo), hi)
+                    if vertical:
+                        p.y = pos
+                    else:
+                        p.x = pos
+                    self.project_to_edge(p)
+
+    def bus_screen_rects(self) -> List[Tuple[int, int, int, int, str, str, int]]:
+        """
+        Each bus as a screen rectangle: (x, y, w, h, edge, bus, bits).
+
+        Shared by the painter and the hover test, so what you can point at is exactly
+        what was drawn - computing the geometry twice is how the two drift apart.
+        """
+        out = []
+        thick = max(3, int(self.port_footprint * self.zoom * self.layers_per_edge) + 3)
+        for side, bus, lo, hi, bits in self.bus_spans():
+            vertical = side in ("W", "E")
+            ax, ay = self.world_to_screen(
+                self.die[0] if side == "W" else (self.die[2] if side == "E" else lo),
+                lo if vertical else (self.die[1] if side == "S" else self.die[3]))
+            bx, by = self.world_to_screen(
+                self.die[0] if side == "W" else (self.die[2] if side == "E" else hi),
+                hi if vertical else (self.die[1] if side == "S" else self.die[3]))
+            if vertical:
+                x = min(ax, bx) - (thick if side == "E" else 0)
+                out.append((x, min(ay, by), thick, max(3, abs(by - ay)), side, bus, bits))
+            else:
+                y = min(ay, by) - (thick if side == "N" else 0)
+                out.append((min(ax, bx), y, max(3, abs(bx - ax)), thick, side, bus, bits))
+        return out
+
+    def visible_flylines(self) -> List[WeightedEdge]:
+        """
+        The fly lines actually on screen, heaviest last so they draw on top.
+
+        Shared with the hover test so you can only point at a line that is drawn -
+        picking the subset twice is how the two end up disagreeing.
+        """
+        drawn = self.edges if self.show_port_edges else self.block_edges
+        if not drawn:
+            return []
+        if self.flyline_fraction < 1.0:
+            keep = max(1, int(len(drawn) * self.flyline_fraction))
+            return sorted(sorted(drawn, key=lambda e: -e.weight)[:keep],
+                          key=lambda e: e.weight)
+        return sorted(drawn, key=lambda e: e.weight)
+
+    def find_flyline_at(self, sx: int, sy: int) -> Optional[WeightedEdge]:
+        """Closest drawn fly line within a few pixels of the cursor."""
+        best, best_d = None, self.flyline_grab_px + 1.0
+        grab = self.flyline_grab_px
+        for e in self.visible_flylines():
+            ax, ay = self.world_to_screen(e.a.x, e.a.y)
+            bx, by = self.world_to_screen(e.b.x, e.b.y)
+            # Reject on the segment's bounding box first: almost every line is nowhere
+            # near the cursor, and this is called on every mouse move
+            if not (min(ax, bx) - grab <= sx <= max(ax, bx) + grab and
+                    min(ay, by) - grab <= sy <= max(ay, by) + grab):
+                continue
+            dx, dy = bx - ax, by - ay
+            if dx == 0 and dy == 0:
+                d = math.hypot(sx - ax, sy - ay)
+            else:
+                t = ((sx - ax) * dx + (sy - ay) * dy) / float(dx * dx + dy * dy)
+                t = max(0.0, min(1.0, t))
+                d = math.hypot(sx - (ax + t * dx), sy - (ay + t * dy))
+            if d < best_d:
+                best, best_d = e, d
+        return best
+
+    def describe_at(self, sx: int, sy: int) -> Optional[str]:
+        """What is under the cursor, as a line of text."""
+        self.hover_edge = None
+        # Buses first: they sit on the die boundary where a block edge also is, and the
+        # bus is the more useful answer there
+        if self.group_buses:
+            grab = 3
+            for x, y, w, h, side, bus, bits in self.bus_screen_rects():
+                if x - grab <= sx <= x + w + grab and y - grab <= sy <= y + h + grab:
+                    members = [n for n in self.nodes.values() if n.bus == bus and n.edge == side]
+                    lo = min((n.bit for n in members), default=0)
+                    hi = max((n.bit for n in members), default=0)
+                    lyr = sorted({n.layer for n in members})
+                    conn = sum(1 for n in members if self.port_nets.get(n.index))
+                    held = "  ANCHORED" if (side, bus) in self.bus_anchor else ""
+                    dirs = sorted({n.direction for n in members})
+                    return (f"{bus}[{hi}:{lo}]{held}   {'/'.join(dirs)}   "
+                            f"{bits} bits on {side}, "
+                            f"layer{'s' if len(lyr) > 1 else ''} "
+                            f"{','.join(str(l) for l in lyr)}   {conn} connected")
+
+        # A fly line before a block, on a near-exact hit only. Blocks cover most of the
+        # die at any real utilisation, so a line checked second is unreachable - every
+        # point along it is over something. The grab radius is a few pixels, so wanting
+        # the block underneath costs a small nudge of the pointer.
+        e = self.find_flyline_at(sx, sy)
+        if e is not None:
+            self.hover_edge = e
+            count = e.weight
+            shown = f"{count:.0f}" if abs(count - round(count)) < 1e-6 else f"{count:.2f}"
+            # Leaf names collide when blocks are named <inst>/<common leaf>, so fall
+            # back to the full paths rather than printing "core <-> core"
+            na, nb = e.a.short_name(), e.b.short_name()
+            if na == nb:
+                na, nb = e.a.name, e.b.name
+            return (f"{na}  <->  {nb}   "
+                    f"{shown} connection{'' if shown == '1' else 's'}   "
+                    f"{math.hypot(e.b.x - e.a.x, e.b.y - e.a.y):.1f} um apart")
+
+        node = self.find_node_at(sx, sy)
+        if node is not None:
+            if node.edge:
+                nets = len(self.port_nets.get(node.index, ()))
+                bus = f"  bus {node.bus}[{node.bit}]" if node.bus else ""
+                return (f"{node.name}   {node.direction} pin on {node.edge}, "
+                        f"layer {node.layer}, "
+                        f"{nets} net{'s' if nets != 1 else ''}{bus}")
+            return (f"{node.name}   {node.ntype} {node.width:.3f} x {node.height:.3f} um "
+                    f"= {node.area:.1f} um2, aspect {node.width / max(node.height, 1e-9):.2f}"
+                    f"{'  FIXED' if node.fixed else ''}")
+
+        # Nothing hit, so at least say where the cursor is
+        wx, wy = self.screen_to_world(sx, sy)
+        return f"({wx:.3f}, {wy:.3f}) um"
+
+    def bus_spans(self) -> List[Tuple[str, str, float, float, int]]:
+        """(edge, bus, lo, hi, bits) along each edge, for drawing a bus as one object."""
+        out = []
+        grouped: Dict[Tuple[str, str], List[Node]] = defaultdict(list)
+        for n in self.nodes.values():
+            if n.edge and n.bus:
+                grouped[(n.edge, n.bus)].append(n)
+        for (side, bus), members in grouped.items():
+            vertical = side in ("W", "E")
+            vals = [(n.y if vertical else n.x) for n in members]
+            out.append((side, bus, min(vals), max(vals), len(members)))
+        return out
+
+    def _edge_blockage(self) -> Dict[str, List[Tuple[float, float, Optional[int]]]]:
+        """
+        What a pin on each edge sees when it looks inward.
+
+        The edge axis is cut at every block boundary, and each resulting segment is
+        labelled with the block nearest the edge whose shadow covers it - the first thing
+        a wire dropped from that segment would hit, or None for a clear channel.
+
+        Merging the shadows instead loses exactly the information that matters: overlap
+        the 28 blocks of this design and the whole edge becomes one interval owned by
+        every block, so every pin looks like it is facing something it connects to and
+        nothing is ever moved.
+        """
+        result: Dict[str, List[Tuple[float, float, Optional[int]]]] = {}
+        blocks = [n for n in self.nodes.values() if not n.edge and n.area > 0.0]
+        if not blocks:
+            return result
+        x1, y1, x2, y2 = self.die
+
+        for side in ("N", "S", "E", "W"):
+            vertical = side in ("W", "E")
+            lo, hi = (y1, y2) if vertical else (x1, x2)
+
+            spans = []
+            for b in blocks:
+                bl, bt, br, bb = b.bounds()
+                across = (bt, bb) if vertical else (bl, br)
+                # How far this block sits from the edge in question
+                if side == "N":
+                    depth = y2 - bb
+                elif side == "S":
+                    depth = bt - y1
+                elif side == "E":
+                    depth = x2 - br
+                else:
+                    depth = bl - x1
+                spans.append((across[0], across[1], depth, b.index))
+
+            cuts = sorted({lo, hi} | {c for s in spans for c in (s[0], s[1])
+                                      if lo <= c <= hi})
+            segments: List[Tuple[float, float, Optional[int]]] = []
+            for a, bnd in zip(cuts, cuts[1:]):
+                mid = (a + bnd) / 2
+                nearest, best = None, float("inf")
+                for s0, s1, depth, idx in spans:
+                    if s0 <= mid <= s1 and depth < best:
+                        best, nearest = depth, idx
+                segments.append((a, bnd, nearest))
+            result[side] = segments
+        return result
+
+    def _snap_to_channel(self, want: float,
+                         segments: List[Tuple[float, float, Optional[int]]],
+                         targets: List[Node], vertical: bool,
+                         lo: float, hi: float) -> float:
+        """
+        Move a wanted position to somewhere a wire could actually get in.
+
+        A position is fine if the first block inward is one this pin connects to, or if
+        nothing is in the way at all. Otherwise the nearest such segment wins, which is
+        how a pin ends up facing the channel between two blocks rather than the middle
+        of one it has no business reaching through.
+        """
+        if not segments:
+            return want
+        own = {t.index for t in targets}
+
+        def usable(owner: Optional[int]) -> bool:
+            return owner is None or owner in own
+
+        here = None
+        for i, (a, b, owner) in enumerate(segments):
+            if a <= want <= b:
+                here = i
+                if usable(owner):
+                    return want
+                break
+        if here is None:
+            return want
+
+        # Walk outward from the blocked segment and take the closer of the two
+        # nearest usable segments
+        best, best_dist = want, float("inf")
+        for i in range(len(segments)):
+            a, b, owner = segments[i]
+            if not usable(owner):
+                continue
+            candidate = min(max(want, a), b)
+            dist = abs(candidate - want)
+            if dist < best_dist:
+                best_dist, best = dist, candidate
+        return min(max(best, lo), hi)
+
+    def legalize_edge_nodes(self, ideal: Optional[Dict[int, float]] = None):
+        """
+        Space the pins out along each die edge.
+
+        A pin is confined to one edge, so keeping pins off each other is a one
+        dimensional problem: sort them along the edge and sweep once, pushing each past
+        the one before it. That is a row legalisation, and it is both exact and far
+        cheaper than asking a two dimensional grid to separate thousands of sub-micron
+        objects sharing a line. It also produces a sensible pin order, which pairwise
+        pushing never does - pins end up in the order their nets want.
+        """
+        x1, y1, x2, y2 = self.die
+        # Keyed on (edge, layer): layers are stacked in Z, so two pins on the same edge
+        # but different layers may sit at the same position. Only same-layer pins are
+        # legalised against each other, which is what makes the layer count buy capacity.
+        by_edge: Dict[Tuple[str, int], List[Node]] = defaultdict(list)
+        for n in self.nodes.values():
+            if n.edge:
+                by_edge[(n.edge, n.layer)].append(n)
+
+        for (side, _layer), group in by_edge.items():
+            vertical = side in ("W", "E")
+            lo, hi = (y1, y2) if vertical else (x1, x2)
+
+            def pos(n: Node) -> float:
+                # Sort and sweep against the wanted position when one was computed, so
+                # the result is the least-displacement packing of the ideal ordering
+                if ideal is not None and n.index in ideal:
+                    return ideal[n.index]
+                return n.y if vertical else n.x
+
+            def move(n: Node, v: float):
+                if vertical:
+                    n.y = v
+                else:
+                    n.x = v
+
+            def pos_now(n: Node) -> float:
+                return n.y if vertical else n.x
+
+            group.sort(key=pos)
+            half = [(n.height if vertical else n.width) / 2 for n in group]
+
+            # Forward sweep: no pin may start before the previous one ends
+            cursor = lo
+            for n, h in zip(group, half):
+                p = max(pos(n), cursor + h)
+                move(n, p)
+                cursor = p + h
+
+            # If that ran past the far end, sweep back so the overflow is shared out
+            # rather than piling every displaced pin into the corner
+            if cursor > hi:
+                cursor = hi
+                for n, h in zip(reversed(group), reversed(half)):
+                    # Against the position the forward sweep produced, not the ideal:
+                    # the forward pass has already pushed these right, and re-reading
+                    # the ideal here would drag them further left than the overflow needs
+                    p = min(n.y if vertical else n.x, cursor - h)
+                    move(n, p)
+                    cursor = p - h
+
+            # Same spread as the bus path, for when bundling is off. Skipped when the
+            # even spacing would be tighter than the pins themselves, since that would
+            # trade the spread for an overlap.
+            if self.pin_spread > 0.0 and len(group) > 1:
+                step = (hi - lo) / (len(group) + 1)
+                if step >= max(half) * 2:
+                    t = min(1.0, self.pin_spread)
+                    for i, n in enumerate(group):
+                        want = lo + (i + 1) * step
+                        move(n, pos_now(n) + t * (want - pos_now(n)))
+
+    def _separate(self, a: Node, b: Node):
+        """Push two overlapping nodes apart along whichever axis needs less correction."""
+        overlap_x = (a.width + b.width) / 2 - abs(a.x - b.x)
+        overlap_y = (a.height + b.height) / 2 - abs(a.y - b.y)
+        if overlap_x <= 0 or overlap_y <= 0:
+            return
+
+        # Resolve on the cheaper axis, which keeps blocks in rows instead of shoving
+        # them diagonally through their neighbours
+        if overlap_x < overlap_y:
+            push = overlap_x * self.overlap_strength
+            sign = 1.0 if a.x <= b.x else -1.0
+            a.dx -= push * sign
+            b.dx += push * sign
+        else:
+            push = overlap_y * self.overlap_strength
+            sign = 1.0 if a.y <= b.y else -1.0
+            a.dy -= push * sign
+            b.dy += push * sign
+
+    def _spread(self, a: Node, b: Node):
+        """Mild push so blocks that are merely close do not crowd into each other."""
+        dx, dy = b.x - a.x, b.y - a.y
+        dist = math.hypot(dx, dy)
+        if dist <= 0.0:
+            return
+        want = (a.half_diagonal + b.half_diagonal) * 1.1
+        if dist < want:
+            push = (want - dist) * self.spread_strength
+            a.dx -= push * dx / dist
+            a.dy -= push * dy / dist
+            b.dx += push * dx / dist
+            b.dy += push * dy / dist
+
+    def _attract(self, e: WeightedEdge):
+        """Pull connected blocks until their edges nearly touch."""
+        dx, dy = e.b.x - e.a.x, e.b.y - e.a.y
+        dist = math.hypot(dx, dy)
+        if dist <= 0.0:
+            return
+        ideal = (e.a.half_diagonal + e.b.half_diagonal) * 1.05
+        pull = (dist - ideal) * self.spring_strength * e.norm
+        if e.a.edge or e.b.edge:
+            # A pin-to-block spring is scaled down because pins outnumber blocks by
+            # orders of magnitude: thousands of individually weak springs otherwise sum
+            # to more than the block-to-block connectivity and the blocks oscillate.
+            pull *= self.port_weight
+        e.a.dx += pull * dx / dist
+        e.a.dy += pull * dy / dist
+        e.b.dx -= pull * dx / dist
+        e.b.dy -= pull * dy / dist
+
+    def _integrate(self, n: Node):
+        if n.movable:
+            n.vx = (n.vx + n.dx) * self.damping
+            n.vy = (n.vy + n.dy) * self.damping
+            n.x += n.vx
+            n.y += n.vy
+            # Keep the block inside the die rather than letting it drift off canvas
+            x1, y1, x2, y2 = self.die
+            n.x = min(max(n.x, x1 + n.width / 2), max(x1 + n.width / 2, x2 - n.width / 2))
+            n.y = min(max(n.y, y1 + n.height / 2), max(y1 + n.height / 2, y2 - n.height / 2))
+            if n.edge:
+                # Applied after the clamp so the edge constraint always wins. The
+                # velocity normal to the edge is dropped, otherwise it accumulates
+                # against the constraint and the port jitters along its edge.
+                self.project_to_edge(n)
+                if n.edge in ("W", "E"):
+                    n.vx = 0.0
+                else:
+                    n.vy = 0.0
+        n.dx = 0.0
+        n.dy = 0.0
+
+    # ------------------------------------------------------------------ metrics
+
+    def total_wirelength(self) -> float:
+        """Weighted centre-to-centre length, the number a placer is trying to reduce."""
+        return sum(e.weight * math.hypot(e.b.x - e.a.x, e.b.y - e.a.y) for e in self.edges)
+
+    def overlap_area(self) -> float:
+        """
+        Overlapping block area. Only the free blocks count: pins are legalised per layer
+        so they cannot overlap each other, and a pin sitting on a block it abuts is not
+        an overlap anyone wants to fix.
+
+        Restricting to blocks is also what makes this affordable. Over every node it is
+        quadratic in the port count - 45 million pairs for this design - and the metrics
+        timer calls it twice a second, which stalls the interface far more than the
+        physics or the painting ever did.
+        """
+        nodes = [n for n in self.nodes.values() if not n.edge]
+        bounds = [n.bounds() for n in nodes]
+        total = 0.0
+        for i in range(len(nodes)):
+            al, at, ar, ab = bounds[i]
+            for j in range(i + 1, len(nodes)):
+                bl, bt, br, bb = bounds[j]
+                ox = min(ar, br) - max(al, bl)
+                if ox <= 0:
+                    continue
+                oy = min(ab, bb) - max(at, bt)
+                if oy > 0:
+                    total += ox * oy
+        return total
+
+    # ------------------------------------------------------------------ view
+
+    # Screen y grows downward, DEF y grows upward. Without the flip a pin constrained to
+    # the north edge draws along the bottom of the window, which reads as the constraint
+    # having failed. Mirroring about the die keeps north up, as every other placement
+    # tool shows it.
+    def _flip(self) -> float:
+        return self.die[1] + self.die[3]
+
+    def world_to_screen(self, x: float, y: float) -> Tuple[int, int]:
+        return (int((x + self.offset_x) * self.zoom),
+                int((self._flip() - y + self.offset_y) * self.zoom))
+
+    def screen_to_world(self, x: int, y: int) -> Tuple[float, float]:
+        return (x / self.zoom - self.offset_x,
+                self._flip() - (y / self.zoom - self.offset_y))
+
+    def resizeEvent(self, event):
+        """
+        Fit the die once the widget knows how big it really is.
+
+        The constructor fits against the minimum size, because at that point the layout
+        has not run and width() is 800 whatever the window is. Refitting on the first
+        real resize is what makes the die fill the canvas; later resizes are left alone
+        so they do not throw away a zoom the user set.
+        """
+        super().resizeEvent(event)
+        if not self._did_initial_fit:
+            self._did_initial_fit = True
+            self.reset_view()
+
+    def reset_view(self):
+        """Fit the die box to the window."""
+        x1, y1, x2, y2 = self.die
+        die_w, die_h = max(x2 - x1, 1e-6), max(y2 - y1, 1e-6)
+        w = max(self.width(), 800)
+        h = max(self.height(), 600)
+        self.zoom = 0.92 * min(w / die_w, h / die_h)
+        self.offset_x = (w / self.zoom - die_w) / 2 - x1
+        self.offset_y = (h / self.zoom - die_h) / 2 - y1
+        self.update()
+
+    def find_handle_at(self, sx: int, sy: int) -> Optional[Tuple[Node, str]]:
+        """A block corner under the cursor, within a few pixels."""
+        if not self.allow_reshape:
+            return None
+        best, best_d = None, self.handle_px + 1
+        for n in self.nodes.values():
+            if n.edge or n.area <= 0.0:
+                continue
+            for name, cx, cy in n.corners():
+                hx, hy = self.world_to_screen(cx, cy)
+                d = max(abs(hx - sx), abs(hy - sy))
+                if d <= self.handle_px and d < best_d:
+                    best, best_d = (n, name), d
+        return best
+
+    def reshape(self, node: Node, corner: str, wx: float, wy: float,
+                preserve_area: bool = True):
+        """
+        Reshape a soft block by dragging a corner, holding the opposite corner still.
+
+        A hierarchical block has an area the synthesis gave it but no fixed shape, so the
+        useful gesture changes the aspect ratio and keeps the area: the block gets
+        taller and narrower, not bigger. Height is snapped to a whole number of rows,
+        because a block that does not sit on the row grid cannot be placed, and the
+        width is then recomputed from the area so the snap does not quietly change it.
+
+        Hold Shift while dragging for a free resize that does change the area.
+        """
+        # The corner diagonally opposite the one being dragged stays put.
+        # Corner names are <ns><ew>: sw, se, nw, ne.
+        west = corner.endswith("w")
+        south = corner.startswith("s")
+        anchor_x = node.x + node.width / 2 if west else node.x - node.width / 2
+        anchor_y = node.y + node.height / 2 if south else node.y - node.height / 2
+
+        area = node.width * node.height
+        row = self.header.get("row_height", 0.0)
+        min_side = max(row if row > 0 else 0.0, 1e-3)
+
+        new_w = max(min_side, abs(wx - anchor_x))
+        new_h = max(min_side, abs(wy - anchor_y))
+
+        if preserve_area and area > 0.0:
+            # Width follows the cursor, height falls out of the area
+            new_h = area / new_w
+            # Keep the shape sane; a 100:1 sliver is not a floorplan
+            limit = self.aspect_limit
+            if limit > 1.0:
+                if new_w / new_h > limit:
+                    new_w = math.sqrt(area * limit)
+                    new_h = area / new_w
+                elif new_h / new_w > limit:
+                    new_h = math.sqrt(area * limit)
+                    new_w = area / new_h
+            if row > 0.0:
+                # Whole rows, then width back-solved so the area is still right
+                rows = max(1, round(new_h / row))
+                new_h = rows * row
+                new_w = area / new_h
+
+        node.width, node.height = new_w, new_h
+        node.x = anchor_x - new_w / 2 if west else anchor_x + new_w / 2
+        node.y = anchor_y - new_h / 2 if south else anchor_y + new_h / 2
+
+    def find_node_at(self, sx: int, sy: int) -> Optional[Node]:
+        wx, wy = self.screen_to_world(sx, sy)
+        # Smallest hit wins, so a small block on top of a big one stays selectable
+        hits = [n for n in self.nodes.values() if n.contains(wx, wy)]
+        return min(hits, key=lambda n: n.area) if hits else None
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.fillRect(self.rect(), QColor(28, 28, 30))
+
+        # Die outline
+        x1, y1 = self.world_to_screen(self.die[0], self.die[1])
+        x2, y2 = self.world_to_screen(self.die[2], self.die[3])
+        p.setPen(QPen(QColor(90, 90, 100), 2, Qt.DashLine))
+        p.setBrush(Qt.NoBrush)
+        # The y flip means die[1] maps below die[3] on screen, so normalise the corners
+        p.drawRect(min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+
+        if self.show_edges:
+            # Block-to-block only unless asked otherwise: the pin lines are thousands of
+            # nearly-identical hairlines that cost more to draw than everything else on
+            # screen and hide the connectivity worth looking at
+            # Only the heaviest fraction. Every pair drawn at once is a web that hides
+            # the layout underneath it, and the light pairs are the ones carrying least.
+            drawn = self.visible_flylines()
+            for e in drawn:
+                ax, ay = self.world_to_screen(e.a.x, e.a.y)
+                bx, by = self.world_to_screen(e.b.x, e.b.y)
+                if e is self.hover_edge:
+                    # Whichever line the readout is describing, so there is no doubt
+                    p.setPen(QPen(QColor(255, 255, 255),
+                                  max(2, int(round(2 + 3.5 * e.norm)))))
+                else:
+                    p.setPen(QPen(QColor(*flyline_rgb(e.norm)),
+                                  max(1, int(round(1 + 3.5 * e.norm)))))
+                p.drawLine(ax, ay, bx, by)
+
+        p.setFont(QFont("Arial", 8))
+
+        # Pins are drawn in one batched pass per layer. A pin is normally well under a
+        # pixel across, so drawing each as a rectangle costs thousands of painter calls
+        # to produce a dot; drawPoints does the same thing in one call per layer.
+        pins = [n for n in self.nodes.values() if n.edge]
+
+        if pins and self.group_buses:
+            # One bar per bus rather than a thousand dots: the bits are contiguous by
+            # construction, so the bar is exactly where the bus is, and it can carry the
+            # bus name, which an individual bit never could
+            p.setFont(QFont("Arial", 7))
+            for x, y, w, h, side, bus, bits in self.bus_screen_rects():
+                vertical = side in ("W", "E")
+                members = [n for n in self.nodes.values()
+                           if n.bus == bus and n.edge == side]
+                dirs = {n.direction for n in members}
+                rgb = DIR_RGB.get(dirs.pop() if len(dirs) == 1 else "bidir",
+                                  DIR_RGB["unknown"])
+                p.setPen(QPen(QColor(*rgb), 1))
+                p.setBrush(QBrush(QColor(rgb[0], rgb[1], rgb[2], 190)))
+                p.drawRect(x, y, w, h)
+                if self.show_labels and max(w, h) > 46:
+                    p.setPen(QPen(QColor(235, 235, 200)))
+                    label = f"{bus.rsplit('/', 1)[-1]}[{bits}]"
+                    if vertical:
+                        p.drawText(x + w + 3, y + h // 2, label)
+                    else:
+                        tw = p.fontMetrics().boundingRect(label).width()
+                        p.drawText(x + w // 2 - tw // 2, y + (-4 if side == "N" else h + 9),
+                                   label)
+            pins = [n for n in pins if not n.bus]   # scalars still drawn as dots below
+
+        if pins:
+            step_px = max(3, int(self.port_footprint * self.zoom) + 2)
+            by_layer: Dict[int, Dict[str, List]] = defaultdict(lambda: defaultdict(list))
+            for n in pins:
+                sx, sy = self.world_to_screen(n.x, n.y)
+                inset = n.layer * step_px
+                # Layers are stacked in Z and share an x/y, so they are stepped inward
+                # on screen only - the stored coordinate stays on the die boundary
+                if n.edge == "W":
+                    sx += inset
+                elif n.edge == "E":
+                    sx -= inset
+                elif n.edge == "S":
+                    sy -= inset
+                else:
+                    sy += inset
+                by_layer[n.layer][n.direction].append(QPoint(sx, sy))
+            for layer, points in sorted(by_layer.items()):
+                for direction, pts in points.items():
+                    rgb = DIR_RGB.get(direction, DIR_RGB["unknown"])
+                    lift = min(60, 20 * layer)
+                    p.setPen(QPen(QColor(min(255, rgb[0] + lift), min(255, rgb[1] + lift),
+                                         min(255, rgb[2] + lift)), max(2, step_px - 2)))
+                    p.drawPoints(*pts)
+
+        for n in self.nodes.values():
+            if n.edge:
+                continue  # pins already drawn above
+            sx, sy = self.world_to_screen(n.x, n.y)
+            w = max(2, int(n.width * self.zoom))
+            h = max(2, int(n.height * self.zoom))
+            colour = QColor(*TYPE_RGB.get(n.ntype, TYPE_RGB["und"]))
+
+            if n.dragging:
+                p.setBrush(QBrush(QColor(255, 110, 110)))
+            elif n.fixed:
+                p.setBrush(QBrush(colour, Qt.BDiagPattern))
+            else:
+                p.setBrush(QBrush(colour))
+
+            p.setPen(QPen(QColor(225, 225, 225), 1))
+            p.drawRect(sx - w // 2, sy - h // 2, w, h)
+
+            if self.allow_reshape and w > 12 and h > 12:
+                # Corner ticks, so it is discoverable that a block can be reshaped
+                p.setPen(QPen(QColor(255, 255, 255, 170), 1))
+                p.setBrush(Qt.NoBrush)
+                k = 4
+                for hx, hy in ((sx - w // 2, sy - h // 2), (sx + w // 2 - k, sy - h // 2),
+                               (sx - w // 2, sy + h // 2 - k), (sx + w // 2 - k, sy + h // 2 - k)):
+                    p.drawRect(hx, hy, k, k)
+
+            if self.show_labels and w > 34:
+                p.setPen(QPen(QColor(20, 20, 20)))
+                label = n.short_name()
+                tr = p.fontMetrics().boundingRect(label)
+                if tr.width() < w - 4:
+                    p.drawText(sx - tr.width() // 2, sy + tr.height() // 4, label)
+
+        # Last, so the readout is never painted over
+        self._paint_hover(p)
+
+    def _paint_hover(self, p):
+        """Readout in its own box, kept inside the widget so long names stay readable."""
+        if not self.hover_text or not self.hover_pos:
+            return
+        p.setFont(QFont("Arial", 9))
+        fm = p.fontMetrics()
+        pad = 6
+        tw = fm.boundingRect(self.hover_text).width()
+        th = fm.height()
+        sx, sy = self.hover_pos
+        x = min(max(4, sx + 12), max(4, self.width() - tw - 2 * pad - 4))
+        y = sy - th - 2 * pad - 6
+        if y < 4:
+            y = sy + 18
+        p.setPen(QPen(QColor(120, 120, 130), 1))
+        p.setBrush(QBrush(QColor(20, 20, 24, 235)))
+        p.drawRect(x, y, tw + 2 * pad, th + pad)
+        p.setPen(QPen(QColor(235, 235, 235)))
+        p.drawText(x + pad, y + th - 1, self.hover_text)
+
+    def leaveEvent(self, event):
+        self.hover_text = None
+        self.hover_pos = None
+        self.update()
+
+    def find_bus_at(self, sx: int, sy: int) -> Optional[Tuple[str, str, float, float]]:
+        """A bus bar under the cursor: (edge, bus, span start, span length) in microns."""
+        if not self.group_buses:
+            return None
+        grab = 3
+        for x, y, w, h, side, bus, _bits in self.bus_screen_rects():
+            if x - grab <= sx <= x + w + grab and y - grab <= sy <= y + h + grab:
+                members = [n for n in self.nodes.values()
+                           if n.bus == bus and n.edge == side]
+                if not members:
+                    continue
+                vertical = side in ("W", "E")
+                vals = [(n.y if vertical else n.x) for n in members]
+                pitch = max(self.port_footprint, 1e-9)
+                start = min(vals) - pitch / 2.0
+                span = math.ceil(len(members) / max(1, self.layers_per_edge)) * pitch
+                return side, bus, start, span
+        return None
+
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.LeftButton:
+            # A bus is grabbed as a whole, before any block underneath it
+            hit = self.find_bus_at(event.x(), event.y())
+            if hit is not None:
+                side, bus, start, span = hit
+                wx, wy = self.screen_to_world(event.x(), event.y())
+                along = wy if side in ("W", "E") else wx
+                # The previous anchor, if any, so a release can tell a click from a
+                # drag: clicking a bus must not anchor it, only moving it should
+                self.dragging_bus = (side, bus, span, along - start)
+                self._bus_drag_origin = (start, (side, bus) in self.bus_anchor)
+                self.last_mouse_pos = event.pos()
+                return
+
+            # A corner takes precedence over the body, so grabbing the edge of a block
+            # reshapes it rather than dragging the whole thing
+            handle = self.find_handle_at(event.x(), event.y())
+            if handle is not None:
+                node, corner = handle
+                self.resizing = handle
+                self.resize_origin = (node.width, node.height, node.x, node.y)
+                node.dragging = True
+                self.last_mouse_pos = event.pos()
+                return
+
+            node = self.find_node_at(event.x(), event.y())
+            if node is not None and not node.fixed:
+                self.dragging_node = node
+                node.dragging = True
+                # Remembered so a release can tell a real drag from a plain click. Qt
+                # sends press and release before it sends the double click, so without
+                # this a double click would fix the block on its first click and the
+                # second click would only be undoing that.
+                self._drag_origin = (node.x, node.y)
+        self.last_mouse_pos = event.pos()
+
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if self.dragging_bus is not None:
+            side, bus, span, grab = self.dragging_bus
+            x1, y1, x2, y2 = self.die
+            lo, hi = (y1, y2) if side in ("W", "E") else (x1, x2)
+            wx, wy = self.screen_to_world(event.x(), event.y())
+            along = wy if side in ("W", "E") else wx
+            self.bus_anchor[(side, bus)] = min(max(along - grab, lo), max(lo, hi - span))
+            self.place_ports()
+            self.last_mouse_pos = event.pos()
+            self.update()
+            return
+
+        if self.resizing is None and self.dragging_node is None and self.last_mouse_pos is None:
+            # Plain hover: say what is under the cursor
+            self.hover_pos = (event.x(), event.y())
+            self.hover_text = self.describe_at(event.x(), event.y())
+            self.update()
+            return
+
+        if self.resizing is not None:
+            node, corner = self.resizing
+            wx, wy = self.screen_to_world(event.x(), event.y())
+            free = bool(event.modifiers() & Qt.ShiftModifier)
+            self.reshape(node, corner, wx, wy, preserve_area=not free)
+            self.last_mouse_pos = event.pos()
+            self.update()
+            return
+
+        if self.dragging_node is not None:
+            wx, wy = self.screen_to_world(event.x(), event.y())
+            self.dragging_node.x = wx
+            self.dragging_node.y = wy
+            if self.dragging_node.edge:
+                # Dragging a port slides it along its edge; it cannot be pulled inboard
+                self.project_to_edge(self.dragging_node)
+        elif self.last_mouse_pos is not None:
+            self.offset_x += (event.x() - self.last_mouse_pos.x()) / self.zoom
+            self.offset_y += (event.y() - self.last_mouse_pos.y()) / self.zoom
+        self.last_mouse_pos = event.pos()
+        self.update()
+
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        # Cleared so the next bare move is treated as a hover rather than a pan
+        self.last_mouse_pos = None
+        if self.dragging_bus is not None:
+            side, bus, _span, _grab = self.dragging_bus
+            self.dragging_bus = None
+            origin, was_anchored = self._bus_drag_origin or (None, False)
+            now = self.bus_anchor.get((side, bus))
+            if now is not None and origin is not None and abs(now - origin) < 1e-9 \
+                    and not was_anchored:
+                # Never moved, so it was a click; leave the bus free
+                del self.bus_anchor[(side, bus)]
+            elif now is not None:
+                print(f"Anchored {bus.rsplit('/', 1)[-1]} on {side} at {now:.3f} um")
+            self._bus_drag_origin = None
+            self.update()
+            return
+        if self.resizing is not None:
+            node, _corner = self.resizing
+            node.dragging = False
+            w0, h0, _x0, _y0 = self.resize_origin
+            self.resizing = None
+            self.resize_origin = None
+            before, after = w0 * h0, node.width * node.height
+            drift = "" if abs(after - before) < 1e-6 else f", area {before:.1f} -> {after:.1f} um2"
+            print(f"Reshaped {node.short_name()} to {node.width:.3f} x {node.height:.3f} um "
+                  f"(aspect {node.width / max(node.height, 1e-9):.2f}){drift}")
+            if self.fix_on_drop:
+                # Reshaping is as deliberate as moving, so it is kept the same way
+                node.fixed = True
+                node.status = "FIXED"
+                node.vx = node.vy = 0.0
+            self.update()
+            return
+
+        if self.dragging_node is not None:
+            node = self.dragging_node
+            node.dragging = False
+            origin = self._drag_origin
+            self._drag_origin = None
+            moved = origin is None or (abs(node.x - origin[0]) + abs(node.y - origin[1])) > 1e-9
+            if self.fix_on_drop and moved and not node.edge:
+                # Putting a block somewhere by hand is a decision, so it is kept: the
+                # node becomes FIXED where it was dropped and the relaxation works
+                # around it. Without this the springs pull it straight back and the
+                # drag accomplishes nothing.
+                node.fixed = True
+                node.status = "FIXED"
+                node.vx = node.vy = 0.0
+                print(f"Fixed {node.name} at ({node.x:.3f}, {node.y:.3f})")
+            self.dragging_node = None
+            self.update()
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        """
+        Toggle whether a block is fixed.
+
+        Double clicking a block you fixed by dropping releases it so it can be dragged
+        and relaxed again; double clicking a free block pins it where it already is,
+        which is handy for holding something still without nudging it first.
+
+        A node the nodefile declared FIXED is left alone: that file says outright that
+        the placer must not move it, and a stray double click is not a good enough reason
+        to overrule the flow that wrote it.
+        """
+        if event.button() != Qt.LeftButton:
+            return
+
+        hit = self.find_bus_at(event.x(), event.y())
+        if hit is not None:
+            side, bus, _s, _sp = hit
+            if (side, bus) in self.bus_anchor:
+                del self.bus_anchor[(side, bus)]
+                print(f"Released {bus.rsplit('/', 1)[-1]} on {side}")
+                self.place_ports()
+                self.update()
+            return
+
+        node = self.find_node_at(event.x(), event.y())
+        if node is None or node.edge:
+            return
+
+        if node.index in self.originally_fixed:
+            print(f"{node.name} is FIXED in the nodefile, so it is left where it is. "
+                  f"Edit the nodefile if it really should move.")
+            return
+
+        if node.fixed:
+            node.fixed = False
+            node.status = "PLACED"
+            node.vx = node.vy = 0.0
+            print(f"Released {node.name} at ({node.x:.3f}, {node.y:.3f})")
+        else:
+            node.fixed = True
+            node.status = "FIXED"
+            node.vx = node.vy = 0.0
+            print(f"Fixed {node.name} at ({node.x:.3f}, {node.y:.3f})")
+        self.update()
+
+    def unfix_all(self):
+        """Release every block fixed by dropping, leaving nodefile FIXED nodes alone."""
+        freed = 0
+        for n in self.nodes.values():
+            if n.fixed and n.index not in self.originally_fixed:
+                n.fixed = False
+                n.status = "PLACED"
+                freed += 1
+        buses = len(self.bus_anchor)
+        self.bus_anchor.clear()
+        if buses:
+            self.place_ports()
+        print(f"Released {freed} hand-placed blocks and {buses} anchored buses"
+              f" ({len(self.originally_fixed)} were FIXED in the nodefile)")
+        self.update()
+
+    def wheelEvent(self, event: QWheelEvent):
+        factor = 1.1 if event.angleDelta().y() > 0 else 1 / 1.1
+        wx, wy = self.screen_to_world(event.x(), event.y())
+        self.zoom = max(0.01, min(200.0, self.zoom * factor))
+        self.offset_x = event.x() / self.zoom - wx
+        self.offset_y = event.y() / self.zoom - wy
+        self.update()
+
+    # ------------------------------------------------------------------ output
+
+    def save_nodefile(self, path: str):
+        """Rewrite the nodefile with current coordinates and a PLACED status."""
+        with open(path, "w") as fh:
+            fh.write(f"# hierarchical placement written by hier_place.py\n")
+            fh.write(f"# source: {self.nodefile_path}\n")
+            fh.write("# all coordinates and dimensions are in microns\n")
+            fh.write("# <x> <y> is the lower left corner of the node, as read in\n")
+            fh.write("# <node> <name> INST|PORT <width> <height> <status> <x> <y> TYPE=<node type>\n")
+            if "dbu" in self.header:
+                fh.write(f"DBU {int(self.header['dbu'])}\n")
+            fh.write(f"DIEAREA {self.die[0]:g} {self.die[1]:g} {self.die[2]:g} {self.die[3]:g}\n")
+            if "row_height" in self.header:
+                fh.write(f"ROWHEIGHT {self.header['row_height']:g}\n")
+            fh.write(f"NODES {len(self.all_nodes)}\n")
+            for i in sorted(self.all_nodes):
+                n = self.all_nodes[i]
+                placed = i in self.nodes
+                status = n.status if n.fixed else ("PLACED" if placed else n.status)
+                # Back to the lower left, against the declared size: a reshaped block
+                # writes its new size, and a pin declared with none writes the point it
+                # actually sits at rather than the corner of its display box
+                w = n.decl_width if n.decl_width > 0.0 else 0.0
+                h = n.decl_height if n.decl_height > 0.0 else 0.0
+                if n.kind.upper() != "PORT":
+                    # A block's size is real and may have been reshaped
+                    w, h = n.width, n.height
+                fh.write(f"{n.index} {n.name} {n.kind} {w:g} {h:g} "
+                         f"{status} {n.x - w / 2.0:.4f} {n.y - h / 2.0:.4f} "
+                         f"TYPE={n.ntype}\n")
+        print(f"Wrote {path}")
+
+
+class MainWindow(QMainWindow):
+
+    def __init__(self, nodefile: str, edgefile: str, kinds: List[str],
+                 port_fanout_limit: int, seed: int,
+                 port_edge_rules=None, port_size: float = 0.0,
+                 port_weight: float = 0.1, layers: int = 6,
+                 port_update: int = 8, bus_gap: float = 1.0):
+        super().__init__()
+        self.setWindowTitle(f"Hierarchical Placer - {os.path.basename(nodefile)}")
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        # Canvas on the left, everything you can change on the right. A control strip
+        # across the top steals height from a layout that is already taller than wide,
+        # and it cannot group anything: a single row of mixed checkboxes, buttons and
+        # sliders gives no clue which control affects what.
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        self.view = PlaceWidget(nodefile, edgefile, kinds, port_fanout_limit, seed,
+                                port_edge_rules, port_size, port_weight, layers,
+                                port_update, bus_gap)
+        root.addWidget(self.view, 1)
+
+        panel = QWidget()
+        # Two columns.
+        #
+        # As one column this needed 1199px of height and could not compress -- its
+        # minimumSizeHint equalled its sizeHint -- so on any screen shorter than that
+        # the Forces sliders and everything under them were cut off the bottom, with
+        # no scroll area to reach them and no keyboard route to the same settings.
+        # Two columns, one row per slider instead of two, and labels trimmed to the
+        # one word that identifies them brings it back inside a normal window.
+        #<!-- wide enough for the two columns' own minimum: the combo boxes set it,
+        #     and squeezing below it clips them rather than eliding -->
+        panel.setFixedWidth(530)
+        cols = QHBoxLayout(panel)
+        cols.setContentsMargins(8, 8, 8, 8)
+        cols.setSpacing(8)
+        colA = QVBoxLayout()
+        colA.setSpacing(8)
+        colB = QVBoxLayout()
+        colB.setSpacing(8)
+        cols.addLayout(colA, 1)
+        cols.addLayout(colB, 1)
+        root.addWidget(panel, 0)
+
+        v = self.view
+
+        #<!-- name, slider and value on ONE row.  The label used to sit on a row of
+        #     its own above the slider, which doubled the height of every one of the
+        #     seven sliders for no extra information. -->
+        def slider_row(box, text, lo, hi, value, setter, note):
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            name = QLabel(text)
+            name.setFixedWidth(50)
+            s = QSlider(Qt.Horizontal)
+            s.setRange(lo, hi)
+            s.setValue(value)
+            note.setFixedWidth(58)
+            note.setAlignment(Qt.AlignRight)
+            note.setStyleSheet("color: #9fd0ff;")
+            s.valueChanged.connect(setter)
+            row.addWidget(name)
+            row.addWidget(s, 1)
+            row.addWidget(note)
+            box.addLayout(row)
+            return s
+
+        # ---- toggles, two per row ----
+        toggles = QGroupBox("Show")
+        tgrid = QGridLayout(toggles)
+        tgrid.setSpacing(2)
+        tgrid.setContentsMargins(6, 4, 6, 4)
+        self._toggle_cell = 0
+
+        def toggle(text, initial, setter):
+            cb = QCheckBox(text)
+            cb.setChecked(initial)
+            cb.stateChanged.connect(lambda _s, c=cb: setter(c.isChecked()))
+            r, c = divmod(self._toggle_cell, 2)
+            tgrid.addWidget(cb, r, c, Qt.AlignLeft)
+            self._toggle_cell += 1
+            return cb
+
+        self.relax_cb = toggle("Relax", True, self.set_relax)
+        self.edges_cb = toggle("Block nets", True,
+                               lambda on: setattr(v, "show_edges", on))
+        self.pinedge_cb = toggle("Pin nets", v.show_port_edges,
+                                 lambda on: setattr(v, "show_port_edges", on))
+        self.labels_cb = toggle("Names", True,
+                                lambda on: setattr(v, "show_labels", on))
+        self.fix_cb = toggle("Fix on drop", v.fix_on_drop,
+                             lambda on: setattr(v, "fix_on_drop", on))
+        self.reshape_cb = toggle("Reshape", v.allow_reshape,
+                                 lambda on: setattr(v, "allow_reshape", on))
+        self.blockage_cb = toggle("Blockage", v.blocks_are_blockage,
+                                  lambda on: setattr(v, "blocks_are_blockage", on))
+        self.bus_cb = toggle("Bus bars", v.group_buses, self.on_group_buses)
+
+        self.fly_note = QLabel(f"top {int(round(v.flyline_fraction * 100))}%")
+        r = (self._toggle_cell + 1) // 2
+        flyrow = QHBoxLayout()
+        slider_row(flyrow, "Fly lines", 0, 100,
+                   int(round(v.flyline_fraction * 100)), self.on_flylines,
+                   self.fly_note)
+        holder = QWidget()
+        holder.setLayout(flyrow)
+        tgrid.addWidget(holder, r, 0, 1, 2)
+        colA.addWidget(toggles)
+
+        # ---- how pins pick an edge and a layer ----
+        pins = QGroupBox("Pins")
+        pbox = QVBoxLayout(pins)
+        pbox.setSpacing(3)
+        pbox.setContentsMargins(6, 4, 6, 4)
+
+        erow = QHBoxLayout()
+        erow.setSpacing(4)
+        elabel = QLabel("Edge")
+        elabel.setFixedWidth(50)
+        erow.addWidget(elabel)
+        self.edge_combo = QComboBox()
+        # (label, method) - the method strings are the ones assign_port_edges knows
+        self.edge_methods = [
+            ("Nearest blocks", "nearest"),
+            ("From rules", "rules"),
+            ("Spread evenly", "roundrobin"),
+            ("In W/N, out E/S", "bydir"),
+            ("All north", "N"),
+            ("All south", "S"),
+            ("All east", "E"),
+            ("All west", "W"),
+        ]
+        for label, _m in self.edge_methods:
+            self.edge_combo.addItem(label)
+        current = [m for _l, m in self.edge_methods].index(v.port_edge_method) \
+            if v.port_edge_method in [m for _l, m in self.edge_methods] else 0
+        self.edge_combo.setCurrentIndex(current)
+        self.edge_combo.currentIndexChanged.connect(
+            lambda i: v.set_port_edge_method(self.edge_methods[i][1]))
+        erow.addWidget(self.edge_combo, 1)
+        pbox.addLayout(erow)
+
+        orow = QHBoxLayout()
+        orow.setSpacing(4)
+        olabel = QLabel("Order")
+        olabel.setFixedWidth(50)
+        orow.addWidget(olabel)
+        self.order_combo = QComboBox()
+        self.order_orders = [("Interleave", "interleave"), ("Group", "group")]
+        for label, _o in self.order_orders:
+            self.order_combo.addItem(label)
+        self.order_combo.setCurrentIndex(
+            0 if v.layer_order == "interleave" else 1)
+        self.order_combo.currentIndexChanged.connect(
+            lambda i: v.set_layer_order(self.order_orders[i][1]))
+        orow.addWidget(self.order_combo, 1)
+        pbox.addLayout(orow)
+
+        lrow = QHBoxLayout()
+        lrow.setSpacing(4)
+        llabel = QLabel("Layers")
+        llabel.setFixedWidth(50)
+        lrow.addWidget(llabel)
+        self.layer_spin = QSpinBox()
+        self.layer_spin.setRange(1, 32)
+        self.layer_spin.setValue(max(1, v.layers_per_edge * 2))
+        self.layer_spin.valueChanged.connect(self.on_layers_changed)
+        lrow.addWidget(self.layer_spin, 1)
+        self.layer_note = QLabel(f"{v.layers_per_edge}/edge")
+        self.layer_note.setFixedWidth(58)
+        self.layer_note.setAlignment(Qt.AlignRight)
+        self.layer_note.setStyleSheet("color: #9fd0ff;")
+        lrow.addWidget(self.layer_note)
+        pbox.addLayout(lrow)
+
+        self.gap_note = QLabel(f"{v.bus_gap:.2f}um")
+        slider_row(pbox, "Bus gap", 0, 200, int(round(v.bus_gap * 10)),
+                   self.on_bus_gap, self.gap_note)
+        self.spread_note = QLabel(f"{int(round(v.pin_spread * 100))}%")
+        slider_row(pbox, "Spread", 0, 100, int(round(v.pin_spread * 100)),
+                   self.on_pin_spread, self.spread_note)
+        colA.addWidget(pins)
+        colA.addStretch()
+
+        # ---- sliders, each showing the value it is actually set to ----
+        forces = QGroupBox("Forces")
+        fbox = QVBoxLayout(forces)
+        fbox.setSpacing(2)
+        fbox.setContentsMargins(6, 4, 6, 4)
+
+        def force(text, lo, hi, value, scale, setter, fmt="{:.2f}"):
+            shown = QLabel(fmt.format(value / scale))
+            return slider_row(
+                fbox, text, lo, hi, value,
+                lambda x: (setter(x / scale), shown.setText(fmt.format(x / scale))),
+                shown)
+
+        force("Attract", 0, 40, int(round(v.spring_strength * 100)), 100.0,
+              lambda x: setattr(v, "spring_strength", x))
+        force("Separate", 0, 100, int(round(v.overlap_strength * 100)), 100.0,
+              lambda x: setattr(v, "overlap_strength", x))
+        force("Spread", 0, 30, int(round(v.spread_strength * 100)), 100.0,
+              lambda x: setattr(v, "spread_strength", x))
+        force("Pin pull", 0, 100, int(round(v.port_weight * 100)), 100.0,
+              lambda x: setattr(v, "port_weight", x))
+        colB.addWidget(forces)
+
+        # ---- actions, two per row ----
+        actions = QGroupBox("Actions")
+        agrid = QGridLayout(actions)
+        agrid.setSpacing(3)
+        agrid.setContentsMargins(6, 4, 6, 4)
+
+        # Stopping the relaxation is the first thing you want when arranging blocks by
+        # hand, so it gets a button of its own rather than only a checkbox in a list
+        self.run_button = QPushButton()
+        self.run_button.clicked.connect(self.toggle_relax)
+        agrid.addWidget(self.run_button, 0, 0)
+        rerun = QPushButton("Re-run")
+        rerun.clicked.connect(self.restart_relax)
+        agrid.addWidget(rerun, 0, 1)
+
+        for i, (text, slot) in enumerate((("Fit view", self.view.reset_view),
+                                          ("Re-edge pins", self.view.reassign_port_edges),
+                                          ("Unfix all", self.view.unfix_all),
+                                          ("Save", self.on_save))):
+            b = QPushButton(text)
+            b.clicked.connect(slot)
+            agrid.addWidget(b, 1 + i // 2, i % 2)
+        colB.addWidget(actions)
+
+        # ---- what the layout currently costs ----
+        status = QGroupBox("Placement")
+        sbox = QVBoxLayout(status)
+        sbox.setContentsMargins(6, 4, 6, 4)
+        self.metrics = QLabel("")
+        self.metrics.setWordWrap(True)
+        self.metrics.setStyleSheet("color: #ffaa00;")
+        sbox.addWidget(self.metrics)
+        colB.addWidget(status)
+
+        hint = QLabel("Drag a block to place and fix it.  Drag a corner to "
+                      "reshape, Shift to resize freely.  Double-click releases.  "
+                      "Wheel zooms, right-drag pans.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #888; font-size: 10px;")
+        colB.addWidget(hint)
+        colB.addStretch()
+
+        self.setStyleSheet("""
+            QMainWindow { background-color: #2b2b2b; }
+            QGroupBox {
+                color: #dddddd; border: 1px solid #4a4a4a; border-radius: 4px;
+                margin-top: 8px; padding-top: 8px; font-weight: bold;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 3px; }
+            /* Left aligned and indented to the same place as the checkbox labels, so
+               the panel reads as one column of text rather than centred captions
+               floating between left aligned ones */
+            QPushButton { background-color: #3c3c3c; color: white;
+                          border: 1px solid #555; border-radius: 3px;
+                          padding: 5px 5px 5px 22px; text-align: left; }
+            QPushButton:hover { background-color: #4c4c4c; }
+            QCheckBox { color: white; spacing: 6px; }
+            QLabel { color: white; }
+            QSlider::groove:horizontal { background: #3c3c3c; height: 6px; border-radius: 3px; }
+            QSlider::handle:horizontal { background: #5c5c5c; width: 12px;
+                                         margin: -3px 0; border-radius: 6px; }
+        """)
+
+        self.set_relax(self.view.animation_running)
+
+        self.metrics_timer = QTimer()
+        self.metrics_timer.timeout.connect(self.update_metrics)
+        self.metrics_timer.start(500)
+        self.update_metrics()
+
+    def set_relax(self, running: bool):
+        """One place to start or stop, so the checkbox and the button agree."""
+        self.view.animation_running = running
+        self.run_button.setText("Pause" if running else "Run")
+        if self.relax_cb.isChecked() != running:
+            self.relax_cb.blockSignals(True)
+            self.relax_cb.setChecked(running)
+            self.relax_cb.blockSignals(False)
+
+    def toggle_relax(self):
+        self.set_relax(not self.view.animation_running)
+
+    def restart_relax(self):
+        """
+        Pick the relaxation back up after moving things by hand.
+
+        Velocities are cleared first: a block carries whatever speed it had when the
+        simulation stopped, and letting that loose again throws it away from where it
+        was just put. Pins are re-placed too, since they only follow the blocks while
+        the simulation is running and will be stale after an edit.
+        """
+        for n in self.view.nodes.values():
+            n.vx = n.vy = 0.0
+            n.dx = n.dy = 0.0
+        self.view.place_ports()
+        self.set_relax(True)
+        self.view.update()
+        print("Relaxation restarted")
+
+    def on_flylines(self, pct: int):
+        self.fly_note.setText(f"top {pct}%")
+        self.view.flyline_fraction = pct / 100.0
+        self.view.update()
+
+    def on_pin_spread(self, pct: int):
+        self.spread_note.setText(f"{pct}%")
+        self.view.set_pin_spread(pct / 100.0)
+
+    def on_bus_gap(self, tenths: int):
+        gap = tenths / 10.0
+        self.gap_note.setText(f"{gap:.2f}um")
+        self.view.set_bus_gap(gap)
+
+    def on_group_buses(self, on: bool):
+        """Re-place the pins straight away so the change is visible."""
+        self.view.group_buses = on
+        self.view.place_ports()
+        self.view.update()
+
+    def on_layers_changed(self, total: int):
+        """Total layers in, per-edge count shown, pins re-dealt."""
+        self.view.set_layers(total)
+        self.layer_note.setText(f"{self.view.layers_per_edge}/edge")
+
+    def update_metrics(self):
+        wl = self.view.total_wirelength()
+        ov = self.view.overlap_area()
+        blocks = [n for n in self.view.nodes.values() if not n.edge]
+        area = sum(n.area for n in blocks) or 1.0
+        fixed = sum(1 for n in blocks if n.fixed)
+        self.metrics.setText(
+            f"weighted WL\n  {wl / 1000.0:.1f}k um\n"
+            f"block overlap\n  {ov:.0f} um2 ({100.0 * ov / area:.1f}%)\n"
+            f"blocks {len(blocks)}, fixed {fixed}")
+
+
+    def on_save(self):
+        default = self.view.nodefile_path.replace(".nodefile", ".placed.nodefile")
+        path, _ = QFileDialog.getSaveFileName(self, "Save placed nodefile", default)
+        if path:
+            self.view.save_nodefile(path)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Interactive hierarchical block placer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  hier_place.py tt_fpu_gtile.pseudo.nodefile tt_fpu_gtile.pseudo.txt
+  hier_place.py design.nodefile design.txt --kinds INST PORT
+  hier_place.py design.nodefile design.txt --kinds INST PORT \\
+      --port-edge 'i_cg_*:W' --port-edge '*_col_id*:N'
+  hier_place.py design.nodefile design.txt --kinds INST PORT --port-edges ports.edges
+  hier_place.py design.nodefile design.txt --report-only
+
+Port edge constraint file, first match wins:
+  # <name glob>            <edge>
+  fpu_gtile_tran_i_cg_*    W
+  *_col_id[*]              N
+  *                        ANY      # ANY means choose the nearest edge
+
+Controls:
+  Left-click drag a block, mouse wheel to zoom, right-click drag to pan.
+  Drag a block's corner to reshape it: the area is kept and the aspect ratio changes,
+  with the height snapped to whole rows. Hold Shift to resize freely instead.
+  A dropped block is FIXED where you put it and drawn hatched. Double-click a block to
+  release it and move it again, or to pin a free one in place; 'Unfix all' releases
+  everything fixed by hand. A port slides along its edge only.
+  'Re-edge ports' re-picks free ports' edges once the blocks have settled.
+  Save writes a placed nodefile.
+        """)
+    parser.add_argument("nodefile", help="nodefile describing the blocks and ports")
+    parser.add_argument("edgefile", help="edge file of node index pairs")
+    parser.add_argument("--kinds", nargs="+", default=["INST"],
+                        help="node kinds to place (default: INST). Ports are reduced to "
+                             "block-to-block weights unless placed explicitly.")
+    parser.add_argument("--port-fanout-limit", type=int, default=32,
+                        help="ignore a port touching more than this many blocks, since a "
+                             "near-global net pulls everything together (default: 32)")
+    parser.add_argument("--port-edges", metavar="FILE",
+                        help="constraint file of '<name glob> <N|S|E|W|ANY>' lines, first "
+                             "match wins. Ports are always confined to an edge; this says "
+                             "which one. Unmatched ports go to the edge nearest the blocks "
+                             "they connect to.")
+    parser.add_argument("--port-edge", action="append", default=[], metavar="GLOB:EDGE",
+                        help="single edge rule, repeatable, e.g. --port-edge 'i_cg_*:W'. "
+                             "Applied after --port-edges. N/S/E/W or NORTH/TOP/LEFT/... "
+                             "are all accepted.")
+    parser.add_argument("--layers", type=int, default=6, metavar="N",
+                        help="routing layers available for pins (default: 6). Half serve "
+                             "the horizontal edges and half the vertical, so each edge "
+                             "gets N/2 tracks; pins are dealt across them so the usable "
+                             "pitch is N/2 times the pin pitch.")
+    parser.add_argument("--no-fix-on-drop", action="store_true",
+                        help="do not fix a block where it is dropped. By default a block "
+                             "moved by hand becomes FIXED there, because otherwise the "
+                             "springs pull it straight back and the drag does nothing.")
+    parser.add_argument("--flylines", type=float, default=0.25, metavar="F",
+                        help="fraction of the heaviest block-to-block pairs drawn as fly "
+                             "lines (default: 0.25). All of them at once is a web that "
+                             "hides the layout, and the light pairs carry least.")
+    parser.add_argument("--spread", type=float, default=0.0, metavar="F",
+                        help="0 keeps pins and buses where wirelength wants them, 1 "
+                             "spreads them evenly along the whole edge (default: 0)")
+    parser.add_argument("--no-bundle", action="store_true",
+                        help="place pins one at a time instead of bundling the bits of "
+                             "a bus together and in order (bundling is the default)")
+    parser.add_argument("--bus-gap", type=float, default=1.0, metavar="UM",
+                        help="guard band in microns between neighbouring buses on an "
+                             "edge (default: 1.0). Without one they pack flush, a single "
+                             "pin pitch apart, which is legal but leaves nothing between "
+                             "two bundles meant to route separately.")
+    parser.add_argument("--no-reshape", action="store_true",
+                        help="disable reshaping blocks by dragging a corner")
+    parser.add_argument("--aspect-limit", type=float, default=4.0, metavar="R",
+                        help="widest width:height a reshaped block may reach, and its "
+                             "inverse (default: 4.0)")
+    parser.add_argument("--blockage", action="store_true",
+                        help="treat blocks as opaque when placing pins: a pin facing a "
+                             "block it does not connect to is moved to the nearest "
+                             "channel between blocks. Only helps when the floorplan "
+                             "leaves channels - a tiled one shadows the whole edge.")
+    parser.add_argument("--port-update", type=int, default=8, metavar="N",
+                        help="re-place the pins every N relaxation steps (default: 8). "
+                             "Pin placement is the bulk of a step and the blocks it "
+                             "follows move by a fraction of a pin pitch each step, so "
+                             "running it every step costs a lot and shows nothing. Use 1 "
+                             "to update every step.")
+    parser.add_argument("--port-weight", type=float, default=0.1, metavar="F",
+                        help="scale on pin-to-block springs (default: 0.1). Pins "
+                             "outnumber blocks by orders of magnitude, so unscaled they "
+                             "sum to more than the block-to-block connectivity and the "
+                             "blocks oscillate. Only matters when ports are placed.")
+    parser.add_argument("--port-size", type=float, default=0.0, metavar="UM",
+                        help="pin footprint in microns for ports declared with zero "
+                             "size. The default of 0 means ROWHEIGHT/4 from the nodefile, "
+                             "falling back to the pitch the perimeter and layer count "
+                             "allow when the file has no row height.")
+    parser.add_argument("--seed", type=int, default=1, help="initial scatter seed")
+    parser.add_argument("--width", type=int, default=1400, help="window width")
+    parser.add_argument("--height", type=int, default=900, help="window height")
+    parser.add_argument("--report-only", action="store_true",
+                        help="parse, print the summary and exit without opening a window")
+    args = parser.parse_args()
+
+    for path in (args.nodefile, args.edgefile):
+        if not os.path.exists(path):
+            sys.exit(f"Error: file not found: {path}")
+    if args.port_edges and not os.path.exists(args.port_edges):
+        sys.exit(f"Error: port edge file not found: {args.port_edges}")
+
+    port_edge_rules = parse_port_edge_rules(args.port_edges, args.port_edge)
+    if port_edge_rules:
+        print(f"Port edge rules: {len(port_edge_rules)}")
+        for pattern, _, side, layer in port_edge_rules[:10]:
+            print(f"  {pattern} -> {side}" + (f" layer {layer}" if layer is not None else ""))
+        if len(port_edge_rules) > 10:
+            print(f"  ... {len(port_edge_rules) - 10} more")
+
+    if args.report_only:
+        # Headless path: useful for checking a design over ssh with no display
+        nodes, header = parse_nodefile(args.nodefile)
+        wanted = {k.upper() for k in args.kinds}
+        placeable = {i: n for i, n in nodes.items() if n.kind.upper() in wanted}
+        raw = parse_edges(args.edgefile)
+        edges, stats = build_weighted_edges(raw, nodes, placeable, args.port_fanout_limit)
+        by_kind = defaultdict(int)
+        by_type = defaultdict(int)
+        for n in nodes.values():
+            by_kind[n.kind] += 1
+            by_type[n.ntype] += 1
+        print(f"nodes      : {len(nodes)}")
+        print("  by kind  : " + ", ".join(f"{k}={v}" for k, v in sorted(by_kind.items())))
+        print("  by type  : " + ", ".join(f"{k}={v}" for k, v in sorted(by_type.items())))
+        print(f"placing    : {len(placeable)} of kind {'/'.join(sorted(wanted))}")
+        print(f"connections: {len(raw)} -> {len(edges)} weighted pairs")
+        print(f"  direct={stats['direct']} via-port={stats['via']} "
+              f"ignored={stats['dangling']} self={stats['self']} unknown={stats['unknown']}")
+        if edges:
+            ws = sorted(e.weight for e in edges)
+            print(f"  weight min {ws[0]:.2f}  median {ws[len(ws)//2]:.2f}  max {ws[-1]:.2f}")
+        die_w = header.get("die_x2", 0) - header.get("die_x1", 0)
+        die_h = header.get("die_y2", 0) - header.get("die_y1", 0)
+        area = sum(n.area for n in placeable.values())
+        if die_w * die_h > 0:
+            print(f"die        : {die_w:.3f} x {die_h:.3f} um, block area {area:.0f} um2, "
+                  f"utilisation {100.0 * area / (die_w * die_h):.1f}%")
+
+        # Show how the edge constraint would resolve, even when ports are not placed,
+        # so a constraint file can be checked without opening a window
+        ports = [n for n in nodes.values() if n.kind.upper() == "PORT"]
+        if ports:
+            die = (header.get("die_x1", 0.0), header.get("die_y1", 0.0),
+                   header.get("die_x2", 1000.0), header.get("die_y2", 1000.0))
+            acc = defaultdict(lambda: [0.0, 0.0, 0])
+            for e in edges:
+                for src, dst in ((e.a, e.b), (e.b, e.a)):
+                    if src.kind.upper() == "PORT" and dst.kind.upper() != "PORT":
+                        slot = acc[src.index]
+                        slot[0] += dst.x
+                        slot[1] += dst.y
+                        slot[2] += 1
+            centroid = {i: (v[0] / v[2], v[1] / v[2]) for i, v in acc.items() if v[2] > 0}
+            counts = assign_port_edges(ports, port_edge_rules, die, centroid)
+            matched = sum(1 for p in ports
+                          if any(rx.match(p.name) for _, rx, _, _ in port_edge_rules))
+            print(f"ports      : {len(ports)} confined to edges - " +
+                  ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+            print(f"  {matched} matched an explicit rule, "
+                  f"{len(ports) - matched} assigned automatically")
+
+            layers_per_edge = max(1, args.layers // 2)
+            row = header.get("row_height", 0.0)
+            footprint = (args.port_size if args.port_size > 0.0
+                         else (row / 4.0 if row > 0.0 else 0.1))
+            for p in ports:
+                p.width = p.height = footprint
+            explicit = {}
+            for p in ports:
+                for _pat, rx, _side, lyr in port_edge_rules:
+                    if rx.match(p.name):
+                        if lyr is not None:
+                            explicit[p.index] = lyr
+                        break
+            assign_port_layers(ports, layers_per_edge, explicit)
+            print(f"  {args.layers} layers -> {layers_per_edge} per edge, "
+                  f"pin footprint {footprint:g} um"
+                  + (f" (ROWHEIGHT {row:g} / 4)" if args.port_size <= 0 and row else ""))
+            groups = defaultdict(list)
+            for p in ports:
+                groups[(p.edge, p.layer)].append(p)
+            print(f"  {'edge':<6}{'layer':>6}{'pins':>7}{'used um':>10}"
+                  f"{'avail um':>10}{'fill':>8}")
+            for key in sorted(groups):
+                side, layer = key
+                vertical = side in ("W", "E")
+                avail = (die[3] - die[1]) if vertical else (die[2] - die[0])
+                used = footprint * len(groups[key])
+                fill = 100.0 * used / avail if avail > 0 else 0.0
+                print(f"  {side:<6}{layer:>6}{len(groups[key]):>7}{used:>10.1f}"
+                      f"{avail:>10.1f}{fill:>7.1f}%" + ("  OVER" if fill > 100 else ""))
+        return
+
+    if not HAVE_QT:
+        sys.exit("Error: PyQt5 is not available in this interpreter, so the GUI cannot "
+                 "start.\n       Run with --report-only for the headless summary, or use "
+                 "a python with PyQt5 installed.")
+
+    app = QApplication(sys.argv)
+    window = MainWindow(args.nodefile, args.edgefile, args.kinds,
+                        args.port_fanout_limit, args.seed,
+                        port_edge_rules, args.port_size, args.port_weight,
+                        args.layers, args.port_update, args.bus_gap)
+    window.view.fix_on_drop = not args.no_fix_on_drop
+    window.view.blocks_are_blockage = args.blockage
+    window.view.allow_reshape = not args.no_reshape
+    window.view.group_buses = not args.no_bundle
+    window.bus_cb.setChecked(window.view.group_buses)
+    window.view.pin_spread = max(0.0, min(1.0, args.spread))
+    window.view.flyline_fraction = max(0.0, min(1.0, args.flylines))
+    window.fly_note.setText(f"top {int(round(window.view.flyline_fraction * 100))}%")
+    window.spread_note.setText(f"{int(round(window.view.pin_spread * 100))}%")
+    window.view.aspect_limit = args.aspect_limit
+    window.setGeometry(100, 100, args.width, args.height)
+    window.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
