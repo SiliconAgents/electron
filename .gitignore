@@ -17,3 +17,7 @@ electron.cmd*
 # GB: podman save writes oci-*.tar, apptainer build turns it into a .sif.
 *.sif
 INSTALL/podman/oci-*.tar
+
+# Python bytecode cache, e.g. from the 3RDBIN placers being imported.
+__pycache__/
+*.pyc
