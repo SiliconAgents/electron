@@ -1180,7 +1180,7 @@ my $ruler_baloon = $rightFrame->Balloon();
 
 #---------------------------------------------------------------------#
 #<!-- no icon for this one yet, a text button keeps its meaning obvious -->
-my $physonlyButton = $rightFrame->Button(-text=> "Phys\nOnly", -font=>"Times 7 bold", -padx=>0, -pady=>0,
+my $physonlyButton = $rightFrame->Button(-text=> "Commit", -font=>"Times 7 bold", -padx=>0, -pady=>0,
                                          -command=>sub{&call_popup_physical_only_module();})->pack(-side=>'top', -fill=>'x');
 my $physonly_baloon = $rightFrame->Balloon();
    $physonly_baloon->attach($physonlyButton, -balloonmsg => 'Edit/Commit module, physical data only (no nets, connectivity or routing)');
