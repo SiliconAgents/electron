@@ -20,6 +20,9 @@ if( $_[0] eq '-h') { print "\nUsage : hier_place_pins \n";
                      print "        -bottomLayer <bottomLayerName>\n";
                      print "              default taken as $bottomLayer\n";
                      print "        -spaceTracks <integer value>\n";
+                     print "              with -layers, the tracks to keep between pins that\n";
+                     print "              share a layer on the same edge.  Omit it and nothing\n";
+                     print "              moves: only the layer is assigned.\n";
                      print "        -layers <lo:hi>\n";
                      print "              assign layers to pins that are ALREADY placed, from\n";
                      print "              where they sit rather than from a pin guide.  East and\n";
@@ -61,7 +64,7 @@ if ( $layerRange ne "" ) {
   unless ( defined $lo && defined $hi ) {
     return;
   }
-  &dbfTstgenAssignPinLayersFromLoc($layerModule, $lo, $hi, $debug);
+  &dbfTstgenAssignPinLayersFromLoc($layerModule, $lo, $hi, $spaceTracks, $debug);
   return;
 }
 
@@ -516,7 +519,7 @@ return ( $pos[0] <= $pos[1] ) ? ($pos[0], $pos[1]) : ($pos[1], $pos[0]);
 #****
 sub dbfTstgenAssignPinLayersFromLoc {
 
-my ($module, $loNum, $hiNum, $debug) = @_;
+my ($module, $loNum, $hiNum, $spaceTracks, $debug) = @_;
 
 unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$module} ) {
   print "ERR-TST-PN_LYR : 001 : module $module is not being edited, run edit_module first\n";
@@ -618,25 +621,86 @@ foreach my $pin ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPins ) {
   push(@{$bySide{$side}}, [$pin, $along, $llx, $lly, $urx, $ury]);
 }
 
-#<!-- Deal the layers out. -->
+#<!-- Deal the layers out, then space the pins that share one.
+#
+#     Dealing round robin along the edge is itself the first half of spacing:
+#     neighbours land on different layers, and two pins on different layers may
+#     sit at the same coordinate without shorting.  What is left is the pins that
+#     came round to the same layer again, and -spaceTracks says how far apart
+#     they have to be: that many tracks of the layer's own pitch, on top of the
+#     length of the pin itself.
+#
+#     Without -spaceTracks nothing moves and this is a pure layer assignment,
+#     which is what it was before and what you want when the placer's positions
+#     are the point. -->
 my %sideCnt = ();
 my $assigned = 0;
+my $moved = 0;
+my $overflowed = 0;
 foreach my $side ( "W", "E", "S", "N" ) {
   my $layers = ( $side eq "E" || $side eq "W" ) ? \@hLayers : \@vLayers;
   my $n = @$layers;
   $sideCnt{$side} = scalar @{$bySide{$side}};
   next unless ( $n > 0 && $sideCnt{$side} > 0 );
   my @ordered = sort { $a->[1] <=> $b->[1] || $a->[0] cmp $b->[0] } @{$bySide{$side}};
+
+  #<!-- deal, keeping each layer's pins in edge order -->
+  my %onLayer = ();
   my $k = 0;
   foreach my $rec ( @ordered ) {
-    my ($pin, $along, $llx, $lly, $urx, $ury) = @$rec;
     my $layerName = $layers->[$k % $n]->[1];
     $k++;
-    $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenWipePinRect($pin);
-    $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenAddPinRect($pin,
-                                   "$layerName $llx $lly $urx $ury");
-    print "DBG-TST-PN_LYR : 011 : $pin side $side -> $layerName ($llx $lly $urx $ury)\n" if ($debug);
-    $assigned++;
+    push(@{$onLayer{$layerName}}, $rec);
+  }
+
+  #<!-- the extent of the edge the pins run along -->
+  my ($edgeLo, $edgeHi) = ( $side eq "E" || $side eq "W" )
+                          ? ($die[1], $die[3]) : ($die[0], $die[2]);
+
+  foreach my $layerName ( sort keys %onLayer ) {
+    my $gap = 0;
+    if ( defined $spaceTracks && $spaceTracks > 0 ) {
+      #<!-- PITCH is in microns as the LEF gives it, and so is everything here,
+      #     so no dbu conversion belongs in this sub.  remove_hier_pins_overlap
+      #     multiplies by the dbu because it works on the flat floorplan, which
+      #     is scaled; this does not. -->
+      my $pitch = ( exists $PTDB{$layerName} )
+                  ? $PTDB{$layerName}->dbTechGetLayerPitch : 0;
+      $pitch = 0 unless ( defined $pitch && $pitch > 0 );
+      $gap = $spaceTracks * $pitch;
+    }
+
+    my $prevEnd;
+    foreach my $rec ( @{$onLayer{$layerName}} ) {
+      my ($pin, $along, $llx, $lly, $urx, $ury) = @$rec;
+      my $len = ( $side eq "E" || $side eq "W" ) ? ($ury - $lly) : ($urx - $llx);
+      $len = 0 if ( $len < 0 );
+
+      my $lo = ( $side eq "E" || $side eq "W" ) ? $lly : $llx;
+      if ( $gap > 0 ) {
+        if ( defined $prevEnd && $lo < $prevEnd + $gap ) {
+          $lo = $prevEnd + $gap;
+          $moved++;
+        }
+        if ( $lo + $len > $edgeHi ) {
+          #<!-- past the end of the edge: leave it at the boundary and say so
+          #     rather than pushing pins off the block -->
+          $lo = $edgeHi - $len;
+          $lo = $edgeLo if ( $lo < $edgeLo );
+          $overflowed++;
+        }
+        $prevEnd = $lo + $len;
+      }
+
+      if ( $side eq "E" || $side eq "W" ) { ($lly, $ury) = ($lo, $lo + $len); }
+      else                                { ($llx, $urx) = ($lo, $lo + $len); }
+
+      $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenWipePinRect($pin);
+      $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenAddPinRect($pin,
+                                     "$layerName $llx $lly $urx $ury");
+      print "DBG-TST-PN_LYR : 011 : $pin side $side -> $layerName ($llx $lly $urx $ury)\n" if ($debug);
+      $assigned++;
+    }
   }
 }
 
@@ -648,6 +712,15 @@ if ( $noLoc > 0 ) {
 }
 if ( $noShape > 0 ) {
   print "WARN-TST-PN_LYR : 015 : $noShape pin(s) are placed but carry no usable shape\n";
+}
+if ( defined $spaceTracks && $spaceTracks > 0 ) {
+  print "INFO-TST-PN_LYR : 022 : -spaceTracks $spaceTracks moved $moved pin(s) to keep",
+        " $spaceTracks track(s) between pins sharing a layer\n";
+  if ( $overflowed > 0 ) {
+    print "WARN-TST-PN_LYR : 023 : $overflowed pin(s) ran past the end of their edge and were\n";
+    print "WARN-TST-PN_LYR : 024 : left at the boundary.  Use fewer tracks, more layers, or a\n";
+    print "WARN-TST-PN_LYR : 025 : bigger block: the edge cannot hold them at this spacing.\n";
+  }
 }
 return ($assigned);
 
