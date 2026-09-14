@@ -605,7 +605,10 @@ unless ( defined $moduleName && $moduleName ne "" ) {
   $moduleName = $TOP_MODULE;
 }
 my $popupWindow = MainWindow->new();
-$popupWindow->title("Physical Only");
+#<!-- matches the toolbar button that opens it.  What "Physical Only" used to
+#     say is now said by the note below the fields, where it is read at the
+#     moment it matters rather than in the title bar. -->
+$popupWindow->title("Commit");
 
 my $Frame1 = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'x');
 my $Frame2 = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'x');

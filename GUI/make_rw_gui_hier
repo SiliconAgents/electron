@@ -1175,7 +1175,7 @@ my $ruler_baloon = $rightFrame->Balloon();
 #     arguments, which writes connectivity back as well as geometry, and that
 #     is not what anyone wants from the Hier-View: the pseudo net tables are
 #     built for editing geometry, and committing them over VNOM is how a
-#     netlist gets quietly rewritten.  Phys Only, below, is the commit to
+#     netlist gets quietly rewritten.  The Commit button below is the one to
 #     use -- it drives commit_module --physical_only. -->
 
 #---------------------------------------------------------------------#
