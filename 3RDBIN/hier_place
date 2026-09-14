@@ -2484,7 +2484,7 @@ class MainWindow(QMainWindow):
         for i, (text, slot) in enumerate((("Fit view", self.view.reset_view),
                                           ("Re-edge pins", self.view.reassign_port_edges),
                                           ("Unfix all", self.view.unfix_all),
-                                          ("Save", self.on_save))):
+                                          ("Save & Close", self.on_save))):
             b = QPushButton(text)
             b.clicked.connect(slot)
             agrid.addWidget(b, 1 + i // 2, i % 2)
@@ -2603,10 +2603,22 @@ class MainWindow(QMainWindow):
 
 
     def on_save(self):
+        """
+        Write the placement and close.
+
+        electron's hier_place runs this with system() and waits for it to exit
+        before reading the file back, so leaving the window open after a save is
+        just a step the user has to remember: nothing happens on their side until
+        the process is gone. Saving and closing makes the round trip one click.
+
+        Cancelling the file dialog leaves the window alone, so a mis-click on
+        Save is not a way to lose the arrangement.
+        """
         default = self.view.nodefile_path.replace(".nodefile", ".placed.nodefile")
         path, _ = QFileDialog.getSaveFileName(self, "Save placed nodefile", default)
         if path:
             self.view.save_nodefile(path)
+            self.close()
 
 
 def main():
