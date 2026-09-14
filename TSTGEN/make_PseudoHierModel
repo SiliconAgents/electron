@@ -1151,11 +1151,18 @@ sub commitModule {
      print "Usage : commit_module  -module <module name>\n";
      print "                       -floorplan <floorplan name>\n";
      print "                       --physical_only\n";
+     print "                             geometry only, no connectivity.\n";
+     print "                             --physical and --no_nets mean the same.\n";
   }else{
      for(my $i = 0; $i < $noOfArguments; $i++){
          if($_[$i] eq "-module")    { $moduleName = $_[$i+1]; }
          if($_[$i] eq "-floorplan") { $flplanName = $_[$i+1]; }
-         if($_[$i] eq "--physical_only" || $_[$i] eq "--no_nets") { $physOnly = 1; }
+#<!-- --physical is what hier2flat calls the same idea.  Typing it here and
+#     having it silently ignored -- committing connectivity after all, which is
+#     how a netlist gets quietly rewritten -- is a far worse outcome than any
+#     amount of spelling pedantry is worth. -->
+         if($_[$i] eq "--physical_only" || $_[$i] eq "--no_nets" ||
+            $_[$i] eq "--physical") { $physOnly = 1; }
      }#for
 
      unless(defined $moduleName){

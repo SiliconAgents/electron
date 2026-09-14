@@ -1103,10 +1103,12 @@ my $ruler_baloon = $rightFrame->Balloon();
    $ruler_baloon->attach($rulerButton, -balloonmsg => 'Ruler');
 
 #---------------------------------------------------------------------#
-my $commitmodule_image = $rightFrame->Photo(-file       => "$path2eq/PNG/commitModule_32.png");               
-my $commitmoduleButton = $rightFrame->Button(-image=> $commitmodule_image,-command=>sub{&commitModule();})->pack(-side=>'top');
-my $commitmodule_baloon = $rightFrame->Balloon();
-   $commitmodule_baloon->attach($commitmoduleButton, -balloonmsg => 'Commit Module');
+#<!-- The plain Commit button is gone.  It called commitModule with no
+#     arguments, which writes connectivity back as well as geometry, and that
+#     is not what anyone wants from the Hier-View: the pseudo net tables are
+#     built for editing geometry, and committing them over VNOM is how a
+#     netlist gets quietly rewritten.  Phys Only, below, is the commit to
+#     use -- it drives commit_module --physical_only. -->
 
 #---------------------------------------------------------------------#
 #<!-- no icon for this one yet, a text button keeps its meaning obvious -->
@@ -1114,6 +1116,18 @@ my $physonlyButton = $rightFrame->Button(-text=> "Phys\nOnly", -font=>"Times 7 b
                                          -command=>sub{&call_popup_physical_only_module();})->pack(-side=>'top', -fill=>'x');
 my $physonly_baloon = $rightFrame->Balloon();
    $physonly_baloon->attach($physonlyButton, -balloonmsg => 'Edit/Commit module, physical data only (no nets, connectivity or routing)');
+
+#---------------------------------------------------------------------#
+#<!-- The step after a physical commit.  commit_module writes the pseudo
+#     geometry into FLOORPLAN_ALREADY; nothing the flat view or write_def reads
+#     changes until hier2flat carries it on into PORTS_ALREADY and the
+#     component table.  Having committed and then seen the flat view unchanged
+#     is confusing enough that the button belongs next to the one that commits. -->
+my $hier2flatButton = $rightFrame->Button(-text=> "Hier2\nFlat", -font=>"Times 7 bold", -padx=>0, -pady=>0,
+                                          -command=>sub{ print "#<CMD> hier2flat --physical\n";
+                                                         &hier2flat("--physical"); })->pack(-side=>'top', -fill=>'x');
+my $hier2flat_baloon = $rightFrame->Balloon();
+   $hier2flat_baloon->attach($hier2flatButton, -balloonmsg => 'hier2flat --physical: push the committed hierarchical geometry into the flat database');
 
 #---------------------------------------------------------------------#
 #my $refresh_image = $rightFrame->Photo(-file => "$path2eq/ETC/redraw.gif");               
