@@ -20,20 +20,50 @@ if( $_[0] eq '-h') { print "\nUsage : pin_place_hier \n";
                      print "        -bottomLayer <bottomLayerName>\n";
                      print "              default taken as $bottomLayer\n";
                      print "        -spaceTracks <integer value>\n";
+                     print "        -layers <lo:hi>\n";
+                     print "              assign layers to pins that are ALREADY placed, from\n";
+                     print "              where they sit rather than from a pin guide.  East and\n";
+                     print "              west pins take the horizontal layers of the range,\n";
+                     print "              north and south the vertical ones, dealt round robin\n";
+                     print "              along each edge.  Use this after hier_place, which\n";
+                     print "              places pins but assigns no layer.  lo and hi may be\n";
+                     print "              layer numbers or layer names.\n";
+                     print "        -module <module name>\n";
+                     print "              with -layers, the module being edited; default TOP_MODULE\n";
                      print "        --honorBus\n";
                      print "        --honorPinGuide\n";
                      print "        -debug\n";
                          }
 else { # if correct no. of inputs
 
+my $layerRange = "";
+my $layerModule = $TOP_MODULE;
 for(my $i = 0; $i < $noOfArguments; $i++){
 if($_[$i] eq "-topLayer"){$topLayer =  $_[$i+1]; }
 if($_[$i] eq "-bottomLayer"){$bottomLayer = $_[$i+1];}
 if($_[$i] eq "-spaceTracks"){$spaceTracks = $_[$i+1];}
+if($_[$i] eq "-layers"){$layerRange = $_[$i+1];}
+if($_[$i] eq "-module"){$layerModule = $_[$i+1];}
 if($_[$i] eq "--honorBus"){$BUS_BITS_TOGETHER = 1;}
 if($_[$i] eq "--honorPinGuide"){$HONOR_PIN_GUIDE = 1;}
 if($_[$i] eq "-debug"){$debug = 1;}
 } # for
+
+#<!-- -layers is its own mode and returns here.
+#
+#     The rest of this sub assigns pins FROM pin guides, and needs a guide per
+#     pin to do it.  -layers is the other direction: the pins are already where
+#     the placer put them, and only the layer is missing.  Mixing the two would
+#     mean the guide path silently moving pins that were just placed. -->
+if ( $layerRange ne "" ) {
+  my @stack = &dbfTstgenRoutingLayerStack();
+  my ($lo, $hi) = &dbfTstgenLayerRange($layerRange, @stack);
+  unless ( defined $lo && defined $hi ) {
+    return;
+  }
+  &dbfTstgenAssignPinLayersFromLoc($layerModule, $lo, $hi, $debug);
+  return;
+}
 
 $topLayerNum = $PTDB{$topLayer}->dbTechGetLayerNum;
 $bottomLayerNum = $PTDB{$bottomLayer}->dbTechGetLayerNum;
@@ -377,6 +407,252 @@ foreach my $pin ( @pins ) {
 
 print "DBG-TST : 009 : End hier_pins_legalize\n";
 }# sub hier_pins_legalize
+
+#<!-- The routing layers, bottom first.
+#
+#     Not to be confused with dbTechGetLayerNum, which is only the order the
+#     layer was read in -- "my $layerNum = keys %PTDB" in read_lef -- and counts
+#     cut and masterslice layers along with routing ones.  Nobody asking for
+#     "layers 2 to 6" means the 2nd through 6th line of the LEF; they mean the
+#     metal stack.  read_lef inserts in file order and a tech LEF is written
+#     bottom up, so sorting on that index recovers the stack. -->
+sub dbfTstgenRoutingLayerStack {
+
+my @stack = ();
+foreach my $layerName ( keys %PTDB ) {
+  my $type = $PTDB{$layerName}->dbTechGetLayerType;
+  next unless ( defined $type && $type =~ m/^ROUTING$/i );
+  my $num = $PTDB{$layerName}->dbTechGetLayerNum;
+  push(@stack, [ ( defined $num ? $num : 0 ), $layerName ]);
+}
+return ( sort { $a->[0] <=> $b->[0] } @stack );
+
+}# sub dbfTstgenRoutingLayerStack
+
+
+#<!-- "2:6", "M2:D6", or a single layer, to a pair of 1-based positions in the
+#     routing stack.  A bare number is that position -- 2 is the second routing
+#     layer up, which in this tech is M2 -- and a name is looked up in the
+#     stack, so both ways of saying it land in the same place. -->
+sub dbfTstgenLayerRange {
+
+my ($spec, @stack) = @_;
+$spec = "" unless ( defined $spec );
+$spec =~ s/\s+//g;
+
+my $depth = @stack;
+unless ( $depth > 0 ) {
+  print "ERR-TST-PN_LYR : 016 : the tech has no ROUTING layers, so -layers has nothing to pick from\n";
+  return (undef, undef);
+}
+
+my @ends = ();
+if ( $spec =~ m/^(.+?)[:\-](.+)$/ ) { @ends = ($1, $2); }
+elsif ( $spec ne "" )               { @ends = ($spec, $spec); }
+else {
+  print "ERR-TST-PN_LYR : 017 : -layers needs a range like 2:6 or M2:D6\n";
+  return (undef, undef);
+}
+
+my @pos = ();
+foreach my $end ( @ends ) {
+  if ( $end =~ m/^\d+$/ ) {
+    if ( $end < 1 || $end > $depth ) {
+      print "ERR-TST-PN_LYR : 018 : $end is outside the routing stack, which is 1..$depth\n";
+      print "ERR-TST-PN_LYR : 019 : bottom to top: ", join(" ", map { $_->[1] } @stack), "\n";
+      return (undef, undef);
+    }
+    push(@pos, $end + 0);
+    next;
+  }
+  my $found = 0;
+  for ( my $i = 0 ; $i < $depth ; $i++ ) {
+    if ( $stack[$i]->[1] eq $end ) { push(@pos, $i + 1); $found = 1; last; }
+  }
+  next if ( $found );
+  print "ERR-TST-PN_LYR : 020 : \"$end\" is neither a position in the routing stack nor a routing layer\n";
+  print "ERR-TST-PN_LYR : 021 : bottom to top: ", join(" ", map { $_->[1] } @stack), "\n";
+  return (undef, undef);
+}
+
+return ( $pos[0] <= $pos[1] ) ? ($pos[0], $pos[1]) : ($pos[1], $pos[0]);
+
+}# sub dbfTstgenLayerRange
+
+
+#****f* /dbfTstgenAssignPinLayersFromLoc
+#  dbfTstgenAssignPinLayersFromLoc
+# FUNCTION
+#  Give every already-placed pin of a module a routing layer chosen from its
+#  position, rather than from a pin guide.
+#
+#  This is the return path from hier_place: read_pseudo_nodefile writes the x
+#  and y the placer chose but has no opinion about layers, so it leaves each pin
+#  on whatever layer it already had -- in practice the bottom routing layer for
+#  all of them, or NONE when no tech was read.  Every pin of the block on one
+#  layer is not a pin assignment anyone can route to.
+#
+#  A pin is reached by a wire running perpendicular to the edge it sits on, so
+#  the edge decides the direction and the direction decides the layer: pins on
+#  the east and west edges need HORIZONTAL layers, pins on the north and south
+#  edges need VERTICAL ones.  With -layers 2:6 on a tech where the odd layers
+#  run vertically, east and west get 2, 4 and 6 while north and south get 3 and
+#  5.  The direction is read from the tech, not assumed from the number; the
+#  odd-is-vertical convention is only the fallback for a layer the tech does not
+#  describe.
+#
+#  Pins on a side are sorted along that edge and dealt the layers of their
+#  direction round robin, so neighbours land on different layers instead of the
+#  whole side sharing one.
+#
+# INPUTS
+#  $module   the module being edited
+#  $loNum    lowest routing layer number to use
+#  $hiNum    highest routing layer number to use
+#  $debug
+#
+# OUTPUTS
+#  the pin rects of $module, rewritten with a new layer and the same coordinates
+#****
+sub dbfTstgenAssignPinLayersFromLoc {
+
+my ($module, $loNum, $hiNum, $debug) = @_;
+
+unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$module} ) {
+  print "ERR-TST-PN_LYR : 001 : module $module is not being edited, run edit_module first\n";
+  return (0);
+}
+
+#<!-- The edges to assign against.  dbaTstgenGetSize is in microns, and so is
+#     dbaTstgenGetPinRect, so no dbu conversion belongs anywhere here. -->
+my @die = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetSize;
+unless ( @die >= 4 && defined $die[3] && $die[2] > $die[0] && $die[3] > $die[1] ) {
+  print "ERR-TST-PN_LYR : 002 : module $module has no floorplan size, so it has no edges to assign against\n";
+  return (0);
+}
+
+#<!-- The slice of the routing stack asked for, split by preferred direction.
+#
+#     The direction comes from the tech and is not inferred from the position:
+#     the odd-is-vertical convention does not hold everywhere -- in this samsung
+#     stack M1 is HORIZONTAL and M2 VERTICAL, the other way round -- and the
+#     names are not all Mn either (M1 M2 M3 F4 F5 D6 ...).  Parity is only the
+#     fallback for a layer the tech does not describe. -->
+my @stack = &dbfTstgenRoutingLayerStack();
+my @hLayers = ();
+my @vLayers = ();
+my $guessed = 0;
+for ( my $i = $loNum - 1 ; $i <= $hiNum - 1 && $i < @stack ; $i++ ) {
+  my $pos = $i + 1;
+  my $layerName = $stack[$i]->[1];
+  my $dir = $PTDB{$layerName}->dbTechGetLayerDir;
+  if    ( defined $dir && $dir =~ m/^HORIZONTAL$/i ) { push(@hLayers, [$pos, $layerName]); }
+  elsif ( defined $dir && $dir =~ m/^VERTICAL$/i )   { push(@vLayers, [$pos, $layerName]); }
+  else {
+    $guessed++;
+    if ( $pos % 2 ) { push(@vLayers, [$pos, $layerName]); }
+    else            { push(@hLayers, [$pos, $layerName]); }
+  }
+}
+
+if ( @hLayers == 0 && @vLayers == 0 ) {
+  print "ERR-TST-PN_LYR : 003 : the routing stack has no layer at positions $loNum:$hiNum\n";
+  print "ERR-TST-PN_LYR : 004 : read a tech LEF, or widen the range\n";
+  return (0);
+}
+print "INFO-TST-PN_LYR : 005 : horizontal layers for east and west pins: ",
+      join(" ", map { $_->[1] } @hLayers), "\n";
+print "INFO-TST-PN_LYR : 006 : vertical layers for north and south pins: ",
+      join(" ", map { $_->[1] } @vLayers), "\n";
+if ( $guessed > 0 ) {
+  print "WARN-TST-PN_LYR : 007 : $guessed layer(s) have no DIRECTION in the tech; the odd\n";
+  print "WARN-TST-PN_LYR : 008 : layers were taken as vertical and the even ones horizontal\n";
+}
+if ( @hLayers == 0 ) {
+  print "WARN-TST-PN_LYR : 009 : no horizontal layer in range, so east and west pins keep their layer\n";
+}
+if ( @vLayers == 0 ) {
+  print "WARN-TST-PN_LYR : 010 : no vertical layer in range, so north and south pins keep their layer\n";
+}
+
+#<!-- Which side each placed pin is on, and where along that side it sits. -->
+my %bySide = ( "E" => [], "W" => [], "N" => [], "S" => [] );
+my ($noLoc, $noShape) = (0, 0);
+foreach my $pin ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPins ) {
+  next if ( ! defined $pin || $pin eq "" );
+  my $status = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinStatus($pin);
+  unless ( defined $status && $status >= 2 ) {
+    $noLoc++;
+    next;
+  }
+  my @shapes = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinRect($pin);
+  if ( @shapes == 0 ) {
+    $noShape++;
+    next;
+  }
+  #<!-- coordinates from the END of the record: a shape written without a layer
+  #     is four numbers, and reading the first as a layer shifts them all -->
+  my @v = split(/\s+/, $shapes[0]);
+  if ( @v < 4 ) {
+    $noShape++;
+    next;
+  }
+  my ($llx, $lly, $urx, $ury) = @v[($#v - 3) .. $#v];
+  my $cx = ($llx + $urx) / 2;
+  my $cy = ($lly + $ury) / 2;
+
+  #<!-- nearest edge wins.  A pin is normally on the boundary already, so this
+  #     only has to break the tie at a corner, and it does so consistently. -->
+  my $dW = $cx - $die[0];
+  my $dE = $die[2] - $cx;
+  my $dS = $cy - $die[1];
+  my $dN = $die[3] - $cy;
+  my $side = "W";
+  my $best = $dW;
+  if ( $dE < $best ) { $side = "E"; $best = $dE; }
+  if ( $dS < $best ) { $side = "S"; $best = $dS; }
+  if ( $dN < $best ) { $side = "N"; $best = $dN; }
+
+  #<!-- the coordinate that orders pins along their own edge -->
+  my $along = ( $side eq "E" || $side eq "W" ) ? $cy : $cx;
+  push(@{$bySide{$side}}, [$pin, $along, $llx, $lly, $urx, $ury]);
+}
+
+#<!-- Deal the layers out. -->
+my %sideCnt = ();
+my $assigned = 0;
+foreach my $side ( "W", "E", "S", "N" ) {
+  my $layers = ( $side eq "E" || $side eq "W" ) ? \@hLayers : \@vLayers;
+  my $n = @$layers;
+  $sideCnt{$side} = scalar @{$bySide{$side}};
+  next unless ( $n > 0 && $sideCnt{$side} > 0 );
+  my @ordered = sort { $a->[1] <=> $b->[1] || $a->[0] cmp $b->[0] } @{$bySide{$side}};
+  my $k = 0;
+  foreach my $rec ( @ordered ) {
+    my ($pin, $along, $llx, $lly, $urx, $ury) = @$rec;
+    my $layerName = $layers->[$k % $n]->[1];
+    $k++;
+    $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenWipePinRect($pin);
+    $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenAddPinRect($pin,
+                                   "$layerName $llx $lly $urx $ury");
+    print "DBG-TST-PN_LYR : 011 : $pin side $side -> $layerName ($llx $lly $urx $ury)\n" if ($debug);
+    $assigned++;
+  }
+}
+
+print "INFO-TST-PN_LYR : 012 : assigned layers to $assigned pin(s) of $module",
+      " -- W $sideCnt{W}, E $sideCnt{E}, S $sideCnt{S}, N $sideCnt{N}\n";
+if ( $noLoc > 0 ) {
+  print "WARN-TST-PN_LYR : 013 : $noLoc pin(s) have no location and were left alone\n";
+  print "WARN-TST-PN_LYR : 014 : place them with hier_place first\n";
+}
+if ( $noShape > 0 ) {
+  print "WARN-TST-PN_LYR : 015 : $noShape pin(s) are placed but carry no usable shape\n";
+}
+return ($assigned);
+
+}# sub dbfTstgenAssignPinLayersFromLoc
+
 
 sub pldb_layer_info {
 my %bd;
