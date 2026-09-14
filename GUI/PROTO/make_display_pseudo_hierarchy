@@ -1537,6 +1537,19 @@ $CONN_SMATRIX->dbgPlaceGetTpath;
 
 sub display_hier_inst_pin {
 
+#<!-- Nothing to draw on without a Hier-View.  Every createRectangle below is
+#     on $hier_canvas, so under --nogui this used to die with
+#     "Can't call method createRectangle on an undefined value" part way
+#     through, having already drawn nothing.  Say so and return. -->
+unless ( defined $hier_canvas ) {
+  print "WARN-TST-DIS_HR_INST_PN : 009 : there is no Hier-View open, so there is nothing to draw pins on\n";
+  return;
+}
+unless ( exists $PSEUDO_MODULE_ALREADY{$TOP_MODULE} ) {
+  print "WARN-TST-DIS_HR_INST_PN : 010 : $TOP_MODULE is not being edited, run edit_module first\n";
+  return;
+}
+
 my $dbfact = $DEF_DATABASE_UNIT;
 my %PORT_HASH = ();
 my @output_pins = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetOutput;
@@ -1584,13 +1597,36 @@ foreach my $bidi (@bidi_pins){
 # commented by rajeev
 #my $curr_floor_plan = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetFloorplan;
 #&setPseudoFloorplan("-module",$TOP_MODULE,"-floorplan", $TOP_MODULE);
+my $ioTotal = keys %PORT_HASH;
+my ($ioDrawn, $ioNoLoc, $ioNoShape, $ioNoLayer) = (0, 0, 0, 0);
 foreach my $pin ( keys %PORT_HASH) {
    my $status = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetPinStatus($pin);
-   if (( $status == 3) || ($status == 4) || ($status ==2)) {
-     my @shapes = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetPinRect($pin);
-     if ( @shapes == 0 ) {
-     } else {
-      my ($layer, $pinllx, $pinlly,$pinurx,$pinury) = (split(/\s+/,$shapes[0])) [0,1,2,3,4];
+   unless (( $status == 3) || ($status == 4) || ($status ==2)) {
+     $ioNoLoc++;
+     next;
+   }
+   my @shapes = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetPinRect($pin);
+   if ( @shapes == 0 ) {
+     $ioNoShape++;
+     next;
+   }
+#<!-- A shape reads "<layer> x1 y1 x2 y2".  A shape written without a layer
+#     leaves four numbers, and reading those as though the first were a layer
+#     shifts every coordinate along by one, which draws the pin somewhere else
+#     entirely instead of saying anything.  Take the coordinates from the END,
+#     where they are in both forms, and treat a missing layer as something to
+#     report rather than something to fail on: the location is still good
+#     without it, and a pin on screen beats a pin the view refused to draw. -->
+   my @v = split(/\s+/, $shapes[0]);
+   if ( @v < 4 ) {
+     $ioNoShape++;
+     next;
+   }
+   my ($pinllx, $pinlly, $pinurx, $pinury) = @v[($#v - 3) .. $#v];
+   my $layer = ( @v >= 5 ) ? $v[0] : "";
+   if ( $layer eq "" || $layer =~ m/^NONE$/i ) {
+     $ioNoLayer++;
+   }
       my $llx = 20+($pinllx)*$MICRONFACTOR;
       my $lly = 20+($pinlly)*$MICRONFACTOR;
       my $urx = 20+($pinurx)*$MICRONFACTOR;
@@ -1601,8 +1637,21 @@ foreach my $pin ( keys %PORT_HASH) {
         $hier_canvas->createRectangle($llx,$lly,$urx,$ury,-outline=>'yellow', -tags=>"HIERPINS");
       }
       $hier_canvas->createText($llx,$lly,-fill=>'yellow',-text=>$pin, -tags=>"HIERPINS", -anchor=>"nw");
-     }
-   }
+   $ioDrawn++;
+}
+
+print "INFO-TST-DIS_HR_INST_PN : 002 : drew $ioDrawn of $ioTotal IO port(s) of $TOP_MODULE\n";
+if ( $ioNoLoc > 0 ) {
+  print "WARN-TST-DIS_HR_INST_PN : 003 : $ioNoLoc port(s) have no location and are not drawn\n";
+  print "WARN-TST-DIS_HR_INST_PN : 004 : place them with hier_place or place_io_ports first\n";
+}
+if ( $ioNoShape > 0 ) {
+  print "WARN-TST-DIS_HR_INST_PN : 005 : $ioNoShape port(s) are placed but carry no usable shape\n";
+}
+if ( $ioNoLayer > 0 ) {
+  print "WARN-TST-DIS_HR_INST_PN : 006 : $ioNoLayer port shape(s) name no layer; drawn at their\n";
+  print "WARN-TST-DIS_HR_INST_PN : 007 : location anyway.  Read a tech LEF, or pass -layer to\n";
+  print "WARN-TST-DIS_HR_INST_PN : 008 : read_pseudo_nodefile, to put them on a real layer.\n";
 }
 
 foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$TOP_MODULE}} ) {

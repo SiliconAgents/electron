@@ -686,6 +686,30 @@ push(@readArgs, "--no_size") if ( $noSize );
 push(@readArgs, "--no_ports") if ( $noPorts );
 &read_pseudo_nodefile(@readArgs);
 
+#<!-- Show the pins that were just placed.
+#
+#     read_pseudo_nodefile writes the locations into the pseudo database, but the
+#     Hier-View only draws pins when its "Pins" button is pressed, so straight
+#     after a placement the ports were in the database and nowhere on screen --
+#     the one moment you most want to look at them.  Redraw them here.
+#
+#     Guarded twice: there is no canvas at all under --nogui, and the module
+#     being edited need not be the one the view is showing, which is always
+#     TOP_MODULE.  display_hier_inst_pin reports what it could not draw and
+#     carries on, so a port with no layer is a warning and not a dead end. -->
+unless ( $noPorts ) {
+  if ( $GLOBAL->dbGlobalGetGuiStatus == 1 && defined $hier_canvas ) {
+    if ( $module eq $TOP_MODULE ) {
+      $hier_canvas->delete("HIERPINS");
+      &display_hier_inst_pin;
+    }
+    else {
+      print "INFO-TST-HIER_PL : 016 : $module is not the module on display ($TOP_MODULE),\n";
+      print "INFO-TST-HIER_PL : 017 : so the Hier-View pins were left alone\n";
+    }
+  }
+}
+
 unless ( $keepFiles ) {
   unlink($nodeFile);
   unlink($graphFile);
