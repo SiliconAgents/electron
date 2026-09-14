@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# =============================================================================
+#
+#   Copyright © 2025-2026 Tenstorrent AI ULC
+#   All rights reserved.
+#
+#   Author: Rajeev Srivastava
+#
+# =============================================================================
 """
 Interactive hierarchical block placer.
 
@@ -7,14 +16,14 @@ describing blocks and ports, and an edge file listing connections between them.
 
     hier_place.py <design>.pseudo.nodefile <design>.pseudo.txt
 
-Nodefile format (written by proton):
+Nodefile format (written by electron):
     DBU 4000
     DIEAREA 0 0 503.845 503.845
     ROWHEIGHT 0.2
     NODES 9518
     <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<type>
 
-<x> <y> is the LOWER LEFT corner, as proton and DEF give it. It is read and written
+<x> <y> is the LOWER LEFT corner, as electron and DEF give it. It is read and written
 that way so a placed nodefile goes straight back into the flow; the conversion to and
 from the centre the physics works in happens only in the reader and the writer.
 
@@ -46,6 +55,10 @@ Controls:
   Left-click drag a block to move it, mouse wheel to zoom, right-click drag to pan.
   FIXED nodes are drawn hatched and never move. 'Save' writes a placed nodefile.
 """
+
+__author__ = "Rajeev Srivastava"
+__copyright__ = "Copyright © 2025-2026 Tenstorrent AI ULC"
+__banner__ = f"hier_place - {__copyright__} - Author: {__author__}"
 
 import argparse
 import math
@@ -248,7 +261,7 @@ def parse_nodefile(path: str) -> Tuple[Dict[int, Node], Dict[str, float]]:
             width, height = float(fields[3]), float(fields[4])
             status = fields[5]
             # Coordinates are optional; present only for already-placed nodes.
-            # The file gives the lower left corner, which is what proton and DEF use;
+            # The file gives the lower left corner, which is what electron and DEF use;
             # everything inside works from the centre, so the two are converted here and
             # in the writer and nowhere else.
             if len(fields) >= 8:
@@ -2250,7 +2263,8 @@ class MainWindow(QMainWindow):
                  port_weight: float = 0.1, layers: int = 6,
                  port_update: int = 8, bus_gap: float = 1.0):
         super().__init__()
-        self.setWindowTitle(f"Hierarchical Placer - {os.path.basename(nodefile)}")
+        self.setWindowTitle(f"Hierarchical Placer - {os.path.basename(nodefile)}"
+                            f"   |   {__copyright__}")
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -2697,6 +2711,8 @@ Controls:
     parser.add_argument("--report-only", action="store_true",
                         help="parse, print the summary and exit without opening a window")
     args = parser.parse_args()
+
+    print(__banner__)
 
     for path in (args.nodefile, args.edgefile):
         if not os.path.exists(path):
