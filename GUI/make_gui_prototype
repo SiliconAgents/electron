@@ -601,6 +601,15 @@ $buttonFrame->Button(-text => 'Cancel', -padx=>0, -pady=>0, -command=>sub {$popu
 sub call_popup_physical_only_module {
 my $moduleName = $_[0];
 my $fplan = $_[1];
+#<!-- Which action to offer: "edit", "commit", or nothing for both.
+#
+#     The toolbar has a button per action now, so each opens the popup showing
+#     only its own -- pressing Edit and being given a Commit button to choose
+#     again is a step that asks the same question twice.  The hier canvas's
+#     right-click still passes no action and gets both, which is what it wants:
+#     there the choice is made after picking a module, not before. -->
+my $action = $_[2];
+$action = "" unless ( defined $action );
 unless ( defined $moduleName && $moduleName ne "" ) {
   $moduleName = $TOP_MODULE;
 }
@@ -608,7 +617,7 @@ my $popupWindow = MainWindow->new();
 #<!-- matches the toolbar button that opens it.  What "Physical Only" used to
 #     say is now said by the note below the fields, where it is read at the
 #     moment it matters rather than in the title bar. -->
-$popupWindow->title("Commit");
+$popupWindow->title( ( $action eq "edit" ) ? "Edit" : "Commit" );
 
 my $Frame1 = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'x');
 my $Frame2 = $popupWindow->Frame()->pack(-side => 'top',-expand=>1, -fill=>'x');
@@ -623,16 +632,20 @@ $Frame2->Entry(-textvariable => \$fplan, -width =>12 )->pack(-side=>'right');
 $noteFrame->Label(-text => "nets, connectivity and routing are not transferred",
                   -font => "Times 8")->pack(-side=>'left');
 
-$buttonFrame->Button(-text => 'Edit', -padx=>0, -pady=>0,
-                     -command=>sub {&editModule(&physical_only_args($moduleName, $fplan));
-                                    $popupWindow->destroy;
-                                    &refresh_hierView_after_physical_only;
-                                    })->pack( -side=>"left");
-$buttonFrame->Button(-text => 'Commit', -padx=>0, -pady=>0,
-                     -command=>sub {&commitModule(&physical_only_args($moduleName, $fplan));
-                                    $popupWindow->destroy;
-                                    &refresh_hierView_after_physical_only;
-                                    })->pack( -side=>"left");
+unless ( $action eq "commit" ) {
+  $buttonFrame->Button(-text => 'Edit', -padx=>0, -pady=>0,
+                       -command=>sub {&editModule(&physical_only_args($moduleName, $fplan));
+                                      $popupWindow->destroy;
+                                      &refresh_hierView_after_physical_only;
+                                      })->pack( -side=>"left");
+}
+unless ( $action eq "edit" ) {
+  $buttonFrame->Button(-text => 'Commit', -padx=>0, -pady=>0,
+                       -command=>sub {&commitModule(&physical_only_args($moduleName, $fplan));
+                                      $popupWindow->destroy;
+                                      &refresh_hierView_after_physical_only;
+                                      })->pack( -side=>"left");
+}
 $buttonFrame->Button(-text => 'Cancel', -padx=>0, -pady=>0, -command=>sub {$popupWindow->destroy;})->pack( -side=>"left");
 
 }#sub call_popup_physical_only_module

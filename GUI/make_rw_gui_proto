@@ -1112,10 +1112,19 @@ my $ruler_baloon = $rightFrame->Balloon();
 
 #---------------------------------------------------------------------#
 #<!-- no icon for this one yet, a text button keeps its meaning obvious -->
+#<!-- One button per direction.  They were a single button opening a popup that
+#     offered both, which meant choosing the action twice: once to open it and
+#     again inside.  Edit loads a module into the pseudo database, Commit writes
+#     it back; they are opposite directions and the toolbar can say so. -->
+my $editmodButton = $rightFrame->Button(-text=> "Edit", -font=>"Times 7 bold", -padx=>0, -pady=>0,
+                                        -command=>sub{&call_popup_physical_only_module("", "", "edit");})->pack(-side=>'top', -fill=>'x');
+my $editmod_baloon = $rightFrame->Balloon();
+   $editmod_baloon->attach($editmodButton, -balloonmsg => 'Edit module into the Hier-View, physical data only (no nets, connectivity or routing)');
+
 my $physonlyButton = $rightFrame->Button(-text=> "Commit", -font=>"Times 7 bold", -padx=>0, -pady=>0,
-                                         -command=>sub{&call_popup_physical_only_module();})->pack(-side=>'top', -fill=>'x');
+                                         -command=>sub{&call_popup_physical_only_module("", "", "commit");})->pack(-side=>'top', -fill=>'x');
 my $physonly_baloon = $rightFrame->Balloon();
-   $physonly_baloon->attach($physonlyButton, -balloonmsg => 'Edit/Commit module, physical data only (no nets, connectivity or routing)');
+   $physonly_baloon->attach($physonlyButton, -balloonmsg => 'Commit module from the Hier-View, physical data only (no nets, connectivity or routing)');
 
 #---------------------------------------------------------------------#
 #<!-- The step after a physical commit.  commit_module writes the pseudo
