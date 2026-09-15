@@ -11,6 +11,7 @@ Everything is drawn 8x oversized and downscaled with Lanczos; drawing straight
 at 32px gives stair-stepped diagonals on the arrowheads.
 """
 
+import math
 import os
 import sys
 
@@ -48,10 +49,42 @@ def arrow(d, cx, y0, y1, colour, half=6, shaft=4):
     a, b = sorted((y0, base))
     d.rectangle([(cx-shaft)*SS, a*SS, (cx+shaft)*SS, b*SS], fill=colour)
 
-# --- Edit: arrow down INTO a module box ---
+PAGE = (246,246,246,255)       # the greyscale page and pencil
+EDGE = ( 85, 85, 85,255)
+FOLD = (205,205,205,255)
+TEXT = (150,150,150,255)
+BODY = (115,115,115,255)
+TIP  = ( 45, 45, 45,255)
+FERR = (180,180,180,255)
+
+# --- Edit: a page being written on ---
+#<!-- The arrow-into-a-box this replaced said "load a module" accurately and
+#     looked like nothing in particular.  A page with a pencil on it is the
+#     edit metaphor everything else uses, and reads at 32px without colour
+#     doing the work: the lowest ruled line is short, as if part written. -->
 im, d = new()
-box(d, 4, 18, 28, 29, BLOCK)
-arrow(d, 16, 3, 16, DOWN)
+P = lambda *p: [(x*SS, y*SS) for x, y in p]
+d.polygon(P((4,3),(16,3),(21,8),(21,28),(4,28)), fill=PAGE, outline=EDGE)
+d.line(P((4,3),(16,3),(21,8),(21,28),(4,28),(4,3)), fill=EDGE, width=2*SS, joint="curve")
+d.polygon(P((16,3),(21,8),(16,8)), fill=FOLD, outline=EDGE)
+d.line(P((16,3),(16,8),(21,8)), fill=EDGE, width=2*SS)
+for _y, _x1 in ((13,18),(17,18),(21,13)):
+    d.line(P((7,_y),(_x1,_y)), fill=TEXT, width=2*SS)
+
+#<!-- pencil along a unit vector, tip first, so the angle is one number to
+#     change rather than eight coordinates to recompute -->
+_ax, _ay, _bx, _by = 14.0, 27.0, 28.0, 11.0
+_ux, _uy = _bx-_ax, _by-_ay
+_L = math.hypot(_ux, _uy); _ux, _uy = _ux/_L, _uy/_L
+_px, _py = -_uy, _ux
+_w = 2.6
+_at = lambda t, off: (_ax+_ux*t+_px*off, _ay+_uy*t+_py*off)
+def _seg(t0, t1, col):
+    d.polygon(P(_at(t0,-_w), _at(t1,-_w), _at(t1,_w), _at(t0,_w)), fill=col)
+d.polygon(P(_at(0,0), _at(3.6,-_w), _at(3.6,_w)), fill=TIP)     # sharpened point
+_seg(3.6, _L-4.0, BODY)
+_seg(_L-4.0, _L, FERR)
+d.line(P(_at(0,0), _at(_L,0)), fill=(70,70,70,255), width=1*SS)
 done(im, "editMod_32.png")
 
 # --- Commit: arrow up OUT of a module box ---
