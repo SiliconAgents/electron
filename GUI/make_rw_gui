@@ -573,8 +573,8 @@ $placemenu->separator;
 #    -underline => 0); # D in Display
 $placemenu->separator;
      $placemenu->command(
-    -command => \&legalizeFlatPlace,
-    -label => "legalizePlace",
+    -command => \&legalize_flat_popup,
+    -label => "Legalize",
     -underline => 0); # D in Display
 #$placemenu->separator;
 #     $placemenu->command(

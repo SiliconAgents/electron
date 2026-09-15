@@ -616,5 +616,74 @@ sub create_hier_fractal_placer_popup {
 
 ##########################################################################################################
 
+##########################################################################################################
+############################ Creating popup Gui to run the legalizer #####################################
+##########################################################################################################
+#<!-- Drives legalize_flat: spread the density on a bin grid, then put every
+#     movable CORE cell on a row and a site by Abacus, moving each as little as
+#     it can.  Takes the placement that is there and makes it legal; it is not a
+#     placer, so it has no connectivity term and nothing to do with wirelength.
+#
+#     This replaced "legalizePlace", which ran snapPlace and remove_overlap --
+#     snapping each cell to the nearest row independently of every other cell,
+#     which cannot remove an overlap and can introduce one. -->
+sub legalize_flat_popup {
+  my $subWin = MainWindow->new();
+  $subWin->title ("Legalize");
+  $subWin->geometry("330x210+0+0");
+
+  my ($grid, $rows, $maxDisp, $iters) = ("", "", "", "");
+  my ($noSpread, $noSnapX, $reportOnly) = ("", "", "");
+
+  my $gridFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $rowFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $dispFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $iterFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $optFrame    = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $opt2Frame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $noteFrame   = $subWin->Frame()->pack(-side => 'top', -anchor=>'n', -fill=>'x');
+  my $buttonFrame = $subWin->Frame()->pack(-side => 'bottom');
+
+  $gridFrame->Label(-text => "Bin size    (um) ")->pack(-side=>'left');
+  $gridFrame->Entry(-textvariable => \$grid, -width=>8)->pack(-side=>'left');
+  $gridFrame->Label(-text => " default 10", -font=>"Times 8")->pack(-side=>'left');
+  $rowFrame->Label(-text  => "Rows to try      ")->pack(-side=>'left');
+  $rowFrame->Entry(-textvariable => \$rows, -width=>8)->pack(-side=>'left');
+  $rowFrame->Label(-text => " either side, default 6", -font=>"Times 8")->pack(-side=>'left');
+  $dispFrame->Label(-text => "Warn over   (um) ")->pack(-side=>'left');
+  $dispFrame->Entry(-textvariable => \$maxDisp, -width=>8)->pack(-side=>'left');
+  $iterFrame->Label(-text => "Spread passes    ")->pack(-side=>'left');
+  $iterFrame->Entry(-textvariable => \$iters, -width=>8)->pack(-side=>'left');
+
+  $optFrame->Checkbutton(-text => "no spread", -variable => \$noSpread,
+                         -onvalue => "--no_spread", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $optFrame->Checkbutton(-text => "x off grid", -variable => \$noSnapX,
+                         -onvalue => "--no_snap_x", -offvalue => "",
+                         -font=>"Times 10 bold")->pack(-side=>"left");
+  $opt2Frame->Checkbutton(-text => "report only", -variable => \$reportOnly,
+                          -onvalue => "--report_only", -offvalue => "",
+                          -font=>"Times 10 bold")->pack(-side=>"left");
+
+  $noteFrame->Label(-text => "removes overlaps, moving each cell as little as it can",
+                    -font=>"Times 8")->pack(-side=>'left');
+
+  $buttonFrame->Button(-text=>'Run', -command => sub {
+                         my @args = ();
+                         if ( $grid    =~ m/^\d+(\.\d+)?$/ ) { push(@args, "-grid", $grid); }
+                         if ( $rows    =~ m/^\d+$/ )          { push(@args, "-rows", $rows); }
+                         if ( $maxDisp =~ m/^\d+(\.\d+)?$/ ) { push(@args, "-max_disp", $maxDisp); }
+                         if ( $iters   =~ m/^\d+$/ )          { push(@args, "-iters", $iters); }
+                         if ( $noSpread   ne "" ) { push(@args, $noSpread); }
+                         if ( $noSnapX    ne "" ) { push(@args, $noSnapX); }
+                         if ( $reportOnly ne "" ) { push(@args, $reportOnly); }
+                         print "#<CMD> legalize_flat @args\n";
+                         &legalize_flat(@args);
+                         $subWin->destroy;
+                       })->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Cancel', -command => sub {$subWin->destroy;})->pack(-side=>"left");
+
+}#sub legalize_flat_popup
+
 
 1;
