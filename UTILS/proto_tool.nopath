@@ -408,6 +408,7 @@ require "$BEEHOME/ALGO/BLOCKPLACE/make_blockPlacer_Shift";
 require "$BEEHOME/ALGO/POSTPLACE/make_postPlace_func";
 require "$BEEHOME/ALGO/PLACE_NEW/make_leastpath_resistance";
 require "$BEEHOME/ALGO/PLACE_NEW/make_place_out_fine_tuned";
+require "$BEEHOME/ALGO/PLACE_NEW/make_legalize_flat";
 require "$BEEHOME/ALGO/SEEDPLACE/make_ankur_identify_seed";
 ##### database programs #####
 require "$BEEHOME/DB/make_CdlDB_package";
