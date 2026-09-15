@@ -202,8 +202,12 @@ sub eplacer_popup {
   $fanFrame->Entry(-textvariable => \$fanout, -width=>8)->pack(-side=>'left');
 
   $fixFrame->Label(-text => "Hold ")->pack(-side=>'left');
+#<!-- placed holds every node that already has a location, ports and std cells
+#     alike, and places only the UNPLACED ones.  status, the default, holds a
+#     FIXED node only, so a design that is placed bar a few gaps gets
+#     rearranged wholesale. -->
   $fixFrame->Optionmenu(-variable => \$fix,
-                        -options => [qw/status none ports macros ports+macros/],
+                        -options => [qw/status placed none ports macros ports+macros/],
                         )->pack(-side=>'left');
 
   $optFrame->Checkbutton(-text => "keep files", -variable => \$keepFiles,
@@ -213,7 +217,7 @@ sub eplacer_popup {
                          -onvalue => "--write_only", -offvalue => "",
                          -font=>"Times 10 bold")->pack(-side=>"left");
 
-  $noteFrame->Label(-text => "starts from the current placement, FIXED nodes stay",
+  $noteFrame->Label(-text => "Hold=placed keeps the placement and fills only the gaps",
                     -font=>"Times 8")->pack(-side=>'left');
 
   $buttonFrame->Button(-text=>'Run', -command => sub {
@@ -273,8 +277,12 @@ sub mincut_placer_popup {
   $fanFrame->Entry(-textvariable => \$fanout, -width=>8)->pack(-side=>'left');
 
   $fixFrame->Label(-text => "Hold ")->pack(-side=>'left');
+#<!-- placed holds every node that already has a location, ports and std cells
+#     alike, and places only the UNPLACED ones.  status, the default, holds a
+#     FIXED node only, so a design that is placed bar a few gaps gets
+#     rearranged wholesale. -->
   $fixFrame->Optionmenu(-variable => \$fix,
-                        -options => [qw/status none ports macros ports+macros/],
+                        -options => [qw/status placed none ports macros ports+macros/],
                         )->pack(-side=>'left');
 
   $optFrame->Checkbutton(-text => "keep files", -variable => \$keepFiles,
@@ -284,7 +292,7 @@ sub mincut_placer_popup {
                          -onvalue => "--write_only", -offvalue => "",
                          -font=>"Times 10 bold")->pack(-side=>"left");
 
-  $noteFrame->Label(-text => "uniform density by construction, FIXED nodes stay",
+  $noteFrame->Label(-text => "uniform density.  Hold=placed fills only the gaps",
                     -font=>"Times 8")->pack(-side=>'left');
 
   $buttonFrame->Button(-text=>'Run', -command => sub {
