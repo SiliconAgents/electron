@@ -1463,13 +1463,40 @@ sub hier2flat{
 
         ############################## Adding COMPONENTS ##################################
         %hier_inst_abs_location = ();
+#<!-- Only the instances that actually have a location come out PLACED.
+#
+#     This used to set PLACED on every key of %CADB unconditionally, and
+#     get_location_of_flat_inst_from_pseudo_db returns (0,0,"UND") for an
+#     instance no floorplan knows about.  So a design where hier_place had
+#     positioned the ports and the flops and nothing else came out of here with
+#     every one of its std cells "placed" at the origin: a placer told to hold
+#     what is placed would hold the whole design and place nothing, and
+#     write_def would emit thousands of components stacked on (0,0).
+#
+#     "UND" is the sentinel for all three of the helper's fallbacks, and it is
+#     not a DEF orientation either -- the legal set is N FN S FS W FW E FE -- so
+#     an instance carrying it has no placement to record whichever way it got
+#     one.  Those are marked UNPLACED and left for the placer.
+#
+#     A FIXED instance keeps that status rather than being demoted to PLACED,
+#     which the old code did to every fixed cell in the design. -->
+        my ($h2fPlaced, $h2fFixed, $h2fUnplaced) = (0, 0, 0);
         foreach my $inst (keys %CADB){
             #my $orient = &get_orien_of_flat_inst_from_pseudo_db($inst);
             my ($x1, $y1, $orient) = &get_location_of_flat_inst_from_pseudo_db($inst);
-            $CADB{$inst}->dbCadbSetLoc($x1, $y1);
-            $CADB{$inst}->dbCadbSetStatus(PLACED);
-            $CADB{$inst}->dbCadbSetOrient($orient);
+            if ( defined $orient && $orient ne "UND" && $orient ne "" ) {
+              $CADB{$inst}->dbCadbSetLoc($x1, $y1);
+              $CADB{$inst}->dbCadbSetOrient($orient);
+              if ( $CADB{$inst}->dbCadbGetStatus eq "FIXED" ) { $h2fFixed++; }
+              else { $CADB{$inst}->dbCadbSetStatus(PLACED); $h2fPlaced++; }
+            }
+            else {
+              $CADB{$inst}->dbCadbSetStatus("UNPLACED");
+              $h2fUnplaced++;
+            }
         }
+        print "INFO-UTS-HIER2FLAT : 001 : $h2fPlaced instance(s) placed, $h2fFixed kept FIXED,\n";
+        print "INFO-UTS-HIER2FLAT : 002 : $h2fUnplaced left UNPLACED with no location in the hierarchy\n";
         %hier_inst_abs_location = ();
         &set_inst_box;
 
@@ -1655,7 +1682,7 @@ sub get_floorplanID_of_module
       }
     }
   }
-  print("\nCould not find floorplan ID for module $curr_module");
+  print("WARN-UTS-HIER2FLAT : 003 : could not find a floorplan ID for module $curr_module\n");
   return $curr_floorplanID;
 }#sub get_floorplanID_of_module
 #----------------------------------------------------------------------------------------------------------------------------------------#
