@@ -116,11 +116,21 @@ my $nodeFile = "nodefile";
 my $graphFile;
 my $fanoutLimit = 0;
 my $nodeFileOnly = 0;
+#<!-- Every placer here distinguishes FIXED from PLACED: FIXED means hold it,
+#     PLACED only means "it already has somewhere to start from".  eplace's
+#     --fix status honours only FIXED, so with a design that is fully placed
+#     bar a handful of cells, the placer will happily rearrange all of it.
+#     --placed_as_fixed says the current placement IS the constraint. -->
+my $placedAsFixed = 0;
+my $heldCnt = 0;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : write_flat_graph -nodefile <file name>\n";
   print "                         -graph <file name>\n";
   print "                         -fanout_limit <high fan out threshold>\n";
+  print "                         --placed_as_fixed\n";
+  print "                               write an already PLACED node as FIXED, so a\n";
+  print "                               placer asked to honour status holds it too\n";
   print "                         --nodefile_only\n";
   return;
 }
@@ -129,6 +139,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-graph")         { $graphFile = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "--nodefile_only"){ $nodeFileOnly = 1; }
+  elsif ($_[$i] eq "--placed_as_fixed"){ $placedAsFixed = 1; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-PL_FLAT_GRPH : 001 : invalid option $_[$i]\n"; }
 }
 unless ( defined $graphFile && $graphFile ne "" ) {
@@ -200,7 +211,8 @@ foreach my $port ( sort keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
     my @loc = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetLoc;
     my $px = (defined $loc[0]) ? $loc[0] / $dbu : 0;
     my $py = (defined $loc[1]) ? $loc[1] / $dbu : 0;
-    $line .= "PLACED $px $py";
+    $line .= ( $placedAsFixed ? "FIXED" : "PLACED" ) . " $px $py";
+    $heldCnt++ if ( $placedAsFixed );
   }
   else {
     $line .= "UNPLACED";
@@ -242,7 +254,9 @@ foreach my $inst ( sort keys %COMP_ALREADY ) {
     my @loc = $CADB{$inst}->dbCadbGetLoc;
     my $ix = (defined $loc[0]) ? $loc[0] / $dbu : 0;
     my $iy = (defined $loc[1]) ? $loc[1] / $dbu : 0;
-    $line .= "$status $ix $iy";
+    my $written = ( $placedAsFixed && $status eq "PLACED" ) ? "FIXED" : $status;
+    $heldCnt++ if ( $placedAsFixed && $status eq "PLACED" );
+    $line .= "$written $ix $iy";
   }
   else {
     $line .= "UNPLACED";
@@ -283,6 +297,11 @@ foreach my $t ( sort keys %typeCnt ) {
   push(@typeSummary, "$t $typeCnt{$t}");
 }
 print "INFO-PL_FLAT_GRPH : 014 : node types: ", join(", ", @typeSummary), "\n";
+if ( $placedAsFixed ) {
+  my $free = $nodeCnt - $heldCnt;
+  print "INFO-PL_FLAT_GRPH : 020 : --placed_as_fixed: $heldCnt already-placed node(s) written FIXED,\n";
+  print "INFO-PL_FLAT_GRPH : 021 : so a placer honouring status will move only the remaining $free\n";
+}
 if ( exists $typeCnt{und} && $typeCnt{und} > 0 ) {
   print "WARN-PL_FLAT_GRPH : 015 : $typeCnt{und} node(s) have no known function, so no placer\n";
   print "WARN-PL_FLAT_GRPH : 016 : can tell them apart -- read_lib or read_cell_func_map fills this in\n";
@@ -1098,8 +1117,11 @@ print "Command arrange_macros took:",timestr($td),"\n";
 #               -target_density <fraction> : density the placer aims for
 #               -max_displacement <um> : cap on how far a node may move
 #               -fanout_limit <n> : passed to write_flat_graph
-#               -fix <none|ports|macros|ports+macros|status> : which nodes to
-#                       hold, defaults to status so the nodefile decides
+#               -fix <none|ports|macros|ports+macros|status|placed> : which nodes
+#                       to hold.  The eplacer wrapper supplies --fix status when
+#                       none is given, so the nodefile decides by default, and
+#                       that honours FIXED only.  Use placed to hold everything
+#                       that already has a location and place only the rest.
 #
 #       switches :
 #               --write_only : write the nodefile and graph and stop
@@ -1127,7 +1149,10 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                -iters <number of eplace iterations>\n";
   print "                -target_density <fraction>\n";
   print "                -max_displacement <microns>\n";
-  print "                -fix <none|ports|macros|ports+macros|status>\n";
+  print "                -fix <none|ports|macros|ports+macros|status|placed>\n";
+    print "                      placed: hold every node that already has a\n";
+    print "                      location -- ports and std cells alike -- and place\n";
+    print "                      only the UNPLACED ones\n";
   print "                -fanout_limit <high fan out threshold>\n";
   print "                --write_only\n";
   print "                --keep\n";
@@ -1163,6 +1188,16 @@ my @writeArgs = ("-nodefile", $nodeFile, "-graph", $graphFile);
 if ( $fanoutLimit > 0 ) {
   push(@writeArgs, "-fanout_limit", $fanoutLimit);
 }
+#<!-- "-fix placed" is handled here and never reaches the placer, which has no
+#     such choice.  The placers distinguish FIXED from PLACED -- FIXED means
+#     hold, PLACED only means there is somewhere to start from -- so honouring
+#     an existing placement is done by writing those nodes FIXED and then
+#     asking for the status the nodefile now carries. -->
+my $placerFix = $fix;
+if ( defined $fix && $fix eq "placed" ) {
+  push(@writeArgs, "--placed_as_fixed");
+  $placerFix = "status";
+}
 &write_flat_graph(@writeArgs);
 
 unless ( -e $nodeFile && -e $graphFile ) {
@@ -1186,7 +1221,7 @@ my $cmd = "$placer $graphFile $nodeFile $xyFile";
 if ( defined $iters && $iters ne "" )                 { $cmd .= " --iters $iters"; }
 if ( defined $targetDensity && $targetDensity ne "" ) { $cmd .= " --target-density $targetDensity"; }
 if ( defined $maxDisp && $maxDisp ne "" )             { $cmd .= " --max-displacement $maxDisp"; }
-if ( defined $fix && $fix ne "" )                     { $cmd .= " --fix $fix"; }
+if ( defined $placerFix && $placerFix ne "" )         { $cmd .= " --fix $placerFix"; }
 
 print "INFO-PL_EPLACE : 007 : placing $TOP_MODULE with $placer\n";
 my $rc = system($cmd);
@@ -1247,7 +1282,10 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                      -tolerance <how far a side may stray from its area target, as a fraction>\n";
   print "                      -target_density <fraction, reporting only>\n";
   print "                      -macro_area <um2 above which a node counts as a macro>\n";
-  print "                      -fix <none|ports|macros|ports+macros|status>\n";
+  print "                      -fix <none|ports|macros|ports+macros|status|placed>\n";
+  print "                            placed: hold every node that already has a\n";
+  print "                            location -- ports and std cells alike -- and\n";
+  print "                            place only the UNPLACED ones\n";
   print "                      -fanout_limit <high fan out threshold>\n";
   print "                      --write_only\n";
   print "                      --keep\n";
@@ -1285,6 +1323,16 @@ my @writeArgs = ("-nodefile", $nodeFile, "-graph", $graphFile);
 if ( $fanoutLimit > 0 ) {
   push(@writeArgs, "-fanout_limit", $fanoutLimit);
 }
+#<!-- "-fix placed" is handled here and never reaches the placer, which has no
+#     such choice.  The placers distinguish FIXED from PLACED -- FIXED means
+#     hold, PLACED only means there is somewhere to start from -- so honouring
+#     an existing placement is done by writing those nodes FIXED and then
+#     asking for the status the nodefile now carries. -->
+my $placerFix = $fix;
+if ( defined $fix && $fix eq "placed" ) {
+  push(@writeArgs, "--placed_as_fixed");
+  $placerFix = "status";
+}
 &write_flat_graph(@writeArgs);
 
 unless ( -e $nodeFile && -e $graphFile ) {
@@ -1310,7 +1358,7 @@ if ( defined $passes && $passes ne "" )               { $cmd .= " --passes $pass
 if ( defined $tolerance && $tolerance ne "" )         { $cmd .= " --tolerance $tolerance"; }
 if ( defined $targetDensity && $targetDensity ne "" ) { $cmd .= " --target-density $targetDensity"; }
 if ( defined $macroArea && $macroArea ne "" )         { $cmd .= " --macro-area $macroArea"; }
-if ( defined $fix && $fix ne "" )                     { $cmd .= " --fix $fix"; }
+if ( defined $placerFix && $placerFix ne "" )         { $cmd .= " --fix $placerFix"; }
 
 print "INFO-PL_MINCUT : 007 : placing $TOP_MODULE with $placer\n";
 my $rc = system($cmd);
