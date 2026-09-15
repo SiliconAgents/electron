@@ -1184,13 +1184,15 @@ my $ruler_baloon = $rightFrame->Balloon();
 #     offered both, which meant choosing the action twice: once to open it and
 #     again inside.  Edit loads a module into the pseudo database, Commit writes
 #     it back; they are opposite directions and the toolbar can say so. -->
-my $editmodButton = $rightFrame->Button(-text=> "Edit", -font=>"Times 7 bold", -padx=>0, -pady=>0,
-                                        -command=>sub{&call_popup_physical_only_module("", "", "edit");})->pack(-side=>'top', -fill=>'x');
+my $editmod_image = $rightFrame->Photo(-file => "$path2eq/PNG/editMod_32.png");
+my $editmodButton = $rightFrame->Button(-image=> $editmod_image,
+                                        -command=>sub{&call_popup_physical_only_module("", "", "edit");})->pack(-side=>'top');
 my $editmod_baloon = $rightFrame->Balloon();
    $editmod_baloon->attach($editmodButton, -balloonmsg => 'Edit module into the Hier-View, physical data only (no nets, connectivity or routing)');
 
-my $physonlyButton = $rightFrame->Button(-text=> "Commit", -font=>"Times 7 bold", -padx=>0, -pady=>0,
-                                         -command=>sub{&call_popup_physical_only_module("", "", "commit");})->pack(-side=>'top', -fill=>'x');
+my $physonly_image = $rightFrame->Photo(-file => "$path2eq/PNG/commitMod_32.png");
+my $physonlyButton = $rightFrame->Button(-image=> $physonly_image,
+                                         -command=>sub{&call_popup_physical_only_module("", "", "commit");})->pack(-side=>'top');
 my $physonly_baloon = $rightFrame->Balloon();
    $physonly_baloon->attach($physonlyButton, -balloonmsg => 'Commit module from the Hier-View, physical data only (no nets, connectivity or routing)');
 
@@ -1200,9 +1202,10 @@ my $physonly_baloon = $rightFrame->Balloon();
 #     changes until hier2flat carries it on into PORTS_ALREADY and the
 #     component table.  Having committed and then seen the flat view unchanged
 #     is confusing enough that the button belongs next to the one that commits. -->
-my $hier2flatButton = $rightFrame->Button(-text=> "Hier2\nFlat", -font=>"Times 7 bold", -padx=>0, -pady=>0,
+my $hier2flat_image = $rightFrame->Photo(-file => "$path2eq/PNG/hier2flat_32.png");
+my $hier2flatButton = $rightFrame->Button(-image=> $hier2flat_image,
                                           -command=>sub{ print "#<CMD> hier2flat --physical\n";
-                                                         &hier2flat("--physical"); })->pack(-side=>'top', -fill=>'x');
+                                                         &hier2flat("--physical"); })->pack(-side=>'top');
 my $hier2flat_baloon = $rightFrame->Balloon();
    $hier2flat_baloon->attach($hier2flatButton, -balloonmsg => 'hier2flat --physical: push the committed hierarchical geometry into the flat database');
 
