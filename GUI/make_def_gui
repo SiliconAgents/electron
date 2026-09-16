@@ -738,8 +738,32 @@ my $dbY = $_[1];
 my $xShift = ( $dieIsCentre == 1 ) ? 270 : 20;
 my $yFlip  = ( $dieIsCentre == 1 ) ? 270 : 520;
 
-$guiX = $xShift + ($dbX/$DEF_DATABASE_UNIT)*$MICRONFACTOR;
-$guiY = $yFlip  - ($dbY/$DEF_DATABASE_UNIT)*$MICRONFACTOR;
+#<!-- Scale off $DBSCALEFACTOR, which is what the instance rectangles use:
+#     $mulFact = $MICRONFACTOR/$DBSCALEFACTOR.  This used $DEF_DATABASE_UNIT,
+#     and the two are only equal until something reassigns one of them.
+#     $DBSCALEFACTOR is captured once when the view is built, while
+#     $DEF_DATABASE_UNIT is a global that set_inst_box overwrites from the
+#     GLOBAL dbu every time it runs -- and legalize_flat, place_output_fine_tune
+#     and hier2flat all call set_inst_box.  reset_electron sets the GLOBAL dbu
+#     to 2000 while tool.nopath has $DEF_DATABASE_UNIT at 4000, so the two
+#     really can differ, and then everything drawn through here sat at the wrong
+#     distance from the origin -- an error that grows with distance rather than
+#     a constant shift, so the far side of the die is worst.
+#
+#     Reading the same variable the instances read makes disagreeing impossible
+#     rather than unlikely. -->
+my $scale = $DBSCALEFACTOR;
+$scale = $DEF_DATABASE_UNIT unless ( defined $scale && $scale > 0 );
+$scale = $GLOBAL->dbfGlobalGetDBU unless ( defined $scale && $scale > 0 );
+
+$guiX = $xShift + ($dbX/$scale)*$MICRONFACTOR;
+$guiY = $yFlip  - ($dbY/$scale)*$MICRONFACTOR;
+
+if ( $DEBUG > 10 ) {
+  print "DBG-GUI-XFORM : 001 : dbu($dbX,$dbY) -> gui($guiX,$guiY)",
+        " [scale $scale, DEF_DATABASE_UNIT $DEF_DATABASE_UNIT,",
+        " MICRONFACTOR $MICRONFACTOR, dieIsCentre $dieIsCentre]\n";
+}
 
 return($guiX,$guiY);
 
