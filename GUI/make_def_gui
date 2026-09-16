@@ -724,8 +724,22 @@ sub dbGuidatabase2Gui {
 my $dbX = $_[0];
 my $dbY = $_[1];
 
-$guiX = 20 + ($dbX/$DEF_DATABASE_UNIT)*$MICRONFACTOR;
-$guiY = 520 - ($dbY/$DEF_DATABASE_UNIT)*$MICRONFACTOR;
+#<!-- The canvas origin depends on where the die is.
+#
+#     Everything else in this view picks its origin from $dieIsCentre -- the
+#     instance rectangles do it a few hundred lines up, and make_worldCan_def_gui
+#     keeps the same choice in a $dieShift -- but this transform had (20,520)
+#     written into it, which is only the case for a die whose lower left is the
+#     origin.  read_def sets $dieIsCentre to 1 for a DIEAREA symmetric about
+#     zero, and on one of those every caller of this came out 250 canvas units
+#     right and 250 up of the instance it was supposed to be touching.  The
+#     flylines are drawn through here; the instances are not, which is why they
+#     were the thing that looked wrong. -->
+my $xShift = ( $dieIsCentre == 1 ) ? 270 : 20;
+my $yFlip  = ( $dieIsCentre == 1 ) ? 270 : 520;
+
+$guiX = $xShift + ($dbX/$DEF_DATABASE_UNIT)*$MICRONFACTOR;
+$guiY = $yFlip  - ($dbY/$DEF_DATABASE_UNIT)*$MICRONFACTOR;
 
 return($guiX,$guiY);
 
@@ -1461,17 +1475,23 @@ sub call_display_pin2pin_flyLines {
 
 my ($x1, $y1, $x2, $y2) = @_;
 
-my $Sel_llx = $x1 * 2000;
-my $Sel_lly = $y1 * 2000;
-my $Sel_urx = $x2 * 2000;
-my $Sel_ury = $y2 * 2000;
+#<!-- The caller hands microns; the instance locations are in dbu.  This had
+#     2000 written into it four times over, so on a 4000 dbu design the
+#     selection rectangle covered a quarter of the area the rubber band showed
+#     and picked the wrong instances. -->
+my $selDbu = $GLOBAL->dbfGlobalGetDBU;
+$selDbu = $DEF_DATABASE_UNIT unless ( defined $selDbu && $selDbu > 0 );
+my $Sel_llx = $x1 * $selDbu;
+my $Sel_lly = $y1 * $selDbu;
+my $Sel_urx = $x2 * $selDbu;
+my $Sel_ury = $y2 * $selDbu;
 
 my (@loc,@loc_mod, $instName,$size);
 my ($xorigin, $yorigin, $llx, $lly, $urx,$ury);
    foreach $instName ( keys %COMP_ALREADY ) {
         #my $status = $CADB{$instName}->dbCadbGetStatus;
         my $cellref =  $CADB{$instName}->dbCadbGetCellref;
-        my $orient = $CADB{$instance}->dbCadbGetOrient;
+        my $orient = $CADB{$instName}->dbCadbGetOrient;
         (@loc) =  $CADB{$instName}->dbCadbGetLoc;
         $xorigin = $loc[0];
         $yorigin = $loc[1];
@@ -1479,8 +1499,8 @@ my ($xorigin, $yorigin, $llx, $lly, $urx,$ury);
     $size = $MACROS_ATTRIBUTE_ALREADY{$cellref}{size};
     ($width,$height)=(split(/\s+/,$size))[0,1];
 
-    $width = $width*2000;
-    $height = $height*2000;  
+    $width = $width*$selDbu;
+    $height = $height*$selDbu;  
         } 
   else { 
    print "WARNING : $InstanceName : $cellref at $location size not found\n"; 
@@ -1546,7 +1566,10 @@ my ($xorigin, $yorigin, $llx, $lly, $urx,$ury);
 sub display_connections {
 my $inst = $_[0];
 foreach my $pin (keys %{$COMP_ALREADY{$inst}} ){
-        my $cellRef = $CADB{$instance}->dbCadbGetCellref;
+#<!-- $inst, not $instance: the loop that declares $instance is below this, so
+#     this read picked up whatever the global happened to hold and took the pin
+#     direction off an unrelated cell, which is what decided the arrow end. -->
+        my $cellRef = $CADB{$inst}->dbCadbGetCellref;
         my $pinDirection = $PLDB{$cellRef}->dbMdbGetPinDir($pin);
         my @sourceInst = ();
         my @destinationInst = ();
@@ -1573,7 +1596,10 @@ foreach my $pin (keys %{$COMP_ALREADY{$inst}} ){
         my @FirstRect = &xformCellPinToInstPin($instLoc[0],$instLoc[1],$cellOrigin[0], $cellOrigin[1],$orient,$cellSize[0],$cellSize[1],$llx2,$lly2,$urx2,$ury2);
         my ($llx2,$lly2) = dbGuidatabase2Gui($FirstRect[0],$FirstRect[1]);  # Multiplying with database#  
         my ($urx2,$ury2) = dbGuidatabase2Gui($FirstRect[2],$FirstRect[3]);            
-                                  my $midx = $llx2 + ($urx2 - $llx2)/4;
+                                  #<!-- the centre of the pin: x was /4 while
+                                  #     y was /2, so every endpoint sat a
+                                  #     quarter of the pin width to the left -->
+                                  my $midx = $llx2 + ($urx2 - $llx2)/2;
                                   my $midy = $lly2 + ($ury2 - $lly2)/2;
                               if($inst eq $instance) {push(@sourceInst, $midx, $midy);}
                             else {push(@destinationInst, $midx, $midy);}
