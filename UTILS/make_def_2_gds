@@ -111,18 +111,38 @@ sub def2gds {
         ########################## Writing PINS in gds as POLYGON #######################
         if($write_pins == 1){
            my $portTextLayer = $total_layers + 10;
+#<!-- A port with no location or no layer has no shape to write.  This used to
+#     go straight into $PTDB{$layer}->dbTechGetLayerNum, and on a design where
+#     nothing has placed the I/O -- which is every design until place_io_ports
+#     or hier_place_pins has run -- $layer is empty, $PTDB{""} does not exist,
+#     and def2gds died on an undefined value partway through the GDS.  Skip
+#     those ports, finish the file, and say how many were left out. -->
+           my ($portNoLoc, $portNoLayer) = (0, 0);
+           my @portSkipped = ();
            foreach my $port (keys %{$PORTS_ALREADY{$moduleName}}){
-              my @loc = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetLoc; 
+              my @loc = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetLoc;
               my $layer = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetLayer;
               my $side = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetSide;
-              my ($W, $H) = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetSize;  
+              my ($W, $H) = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetSize;
+              #<!-- 3 FIXED, 2 PLACED; anything less has no location -->
+              my $portStatus = $PORTS_ALREADY{$moduleName}{$port}->dbPortGetStatus;
+              unless ( defined $portStatus && $portStatus >= 2 ) {
+                $portNoLoc++;
+                push(@portSkipped, $port) if ( @portSkipped < 5 );
+                next;
+              }
+              unless ( defined $layer && $layer ne "" && exists $PTDB{$layer} ) {
+                $portNoLayer++;
+                push(@portSkipped, $port) if ( @portSkipped < 5 );
+                next;
+              }
               my $layerNum = $PTDB{$layer}->dbTechGetLayerNum;
               if(exists $temp_layer_map{$layer}){
                 $layerNum = $temp_layer_map{$layer};
               }else{
                  print "layernum not found for $layer\n";
               }
-              print "W=$W H=$H\n";
+              print "DBG-UTS-DEF2GDS : 006 : $port W=$W H=$H\n" if ($DEBUG);
               my $port_llx ;
               my $port_lly ;
               my $port_urx ;
@@ -160,6 +180,15 @@ sub def2gds {
                           );
               }
            }
+             if ( $portNoLoc > 0 || $portNoLayer > 0 ) {
+               my $skipped = $portNoLoc + $portNoLayer;
+               my $total = keys %{$PORTS_ALREADY{$moduleName}};
+               print "WARN-UTS-DEF2GDS : 001 : $skipped of $total port(s) were left out of the GDS\n";
+               print "WARN-UTS-DEF2GDS : 002 : $portNoLoc have no location\n" if ( $portNoLoc > 0 );
+               print "WARN-UTS-DEF2GDS : 003 : $portNoLayer have no layer this tech knows\n" if ( $portNoLayer > 0 );
+               print "WARN-UTS-DEF2GDS : 004 : for example: ", join(" ", @portSkipped), "\n" if ( @portSkipped );
+               print "WARN-UTS-DEF2GDS : 005 : place the I/O first -- place_io_ports, or hier_place_pins -layers\n";
+             }
         }
 
         ########################## Writing Instances in gds as SREF #######################
