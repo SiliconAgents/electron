@@ -614,7 +614,6 @@ require "$BEEHOME/SPARK/make_rw_sgraph";
 ######## PADFRAME #########
 require "$BEEHOME/PADFRAME/make_padframe";
 
-require "$BEEHOME/TESTS/demo1.pl";
 
 ################################################################################################
 # Check the existence of the environment variable

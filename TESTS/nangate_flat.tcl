@@ -5,9 +5,10 @@
 # Everything this needs is in the repository: the netlist is
 # rtls/vedic/vedic.vg, already mapped to Nangate cells, and the LEF is
 # library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef.  No PDK, no synthesis,
-# no network.  That is the point -- the other scripts in here
-# (awgn.tcl, vedic.tcl, demo1.pl) all reach for an XFAB tree under /ef or
-# /home/ubuntu that has not existed for years, so none of them run.
+# no network.  That is the point -- the scripts that used to sit beside this
+# one (awgn.tcl, vedic.tcl, demo1.pl) all reached for an XFAB tree under /ef
+# or /home/ubuntu that has not existed for years, so none of them ran; they
+# have been removed.
 #
 # Runs from TESTS/workarea, which the Makefile creates.  It also does the
 # egrep that produces vedic_filter.vg: vedic.vg is raw yosys output and

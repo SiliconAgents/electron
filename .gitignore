@@ -17,6 +17,10 @@ electron.cmd*
 # router logs.  All reproducible from what is checked in.
 TESTS/workarea/
 
+# What rtls/vedic/synthesis.tcl writes.  vedic.vg beside it is the checked-in
+# netlist that nangate_flat.tcl reads; this is a fresh one from yosys.
+TESTS/rtls/vedic/vedic.v
+
 # Container images built by INSTALL/podman/Makefile.  Each pair is a couple of
 # GB: podman save writes oci-*.tar, apptainer build turns it into a .sif.
 *.sif

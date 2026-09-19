@@ -18,12 +18,14 @@ proc; opt; fsm; opt; memory; opt
 # mapping to internal cell library
 techmap; opt
 
-# mapping flip-flops to mycells.lib
-dfflibmap -liberty /ef/tech/ef-xfab-xh035/EFXH035A/libs.ref/liberty-yosys-abc/D_CELLS/PVT_3_30V_range/D_CELLS_MOS_fast_3_60V_25C_abc.lib
+# mapping flip-flops to the Nangate liberty in TESTS/library.  Paths are
+# relative to TESTS/rtls/vedic, which is where this script is run from --
+# the read_verilog lines above are relative to the same place.
+dfflibmap -liberty ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib
 
 
-# mapping logic to mycells.lib
-abc -liberty /ef/tech/ef-xfab-xh035/EFXH035A/libs.ref/liberty-yosys-abc/D_CELLS/PVT_3_30V_range/D_CELLS_MOS_fast_3_60V_25C_abc.lib
+# mapping logic to the same liberty
+abc -liberty ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib
 
 
 # cleanup
