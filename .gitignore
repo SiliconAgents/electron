@@ -13,6 +13,10 @@
 electron.log*
 electron.cmd*
 
+# Scratch directory the TESTS Makefile builds in: filtered netlist, DEFs,
+# router logs.  All reproducible from what is checked in.
+TESTS/workarea/
+
 # Container images built by INSTALL/podman/Makefile.  Each pair is a couple of
 # GB: podman save writes oci-*.tar, apptainer build turns it into a .sif.
 *.sif
