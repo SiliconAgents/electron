@@ -1680,10 +1680,17 @@ if ($_[0] eq "-h") {print "first you should select an area by scrolling LMB then
                     print "usage: get_selected_instance -force\n";
                     return;}    
 
-my $Sel_llx = $x1 * 2000;
-my $Sel_lly = $y1 * 2000;
-my $Sel_urx = $x2 * 2000;
-my $Sel_ury = $y2 * 2000;
+#<!-- @bounding_box is microns, from dbfGuiGui2Micron; %CADB is dbu.  This had
+#     2000 written into it, the same as call_display_pin2pin_flyLines did, so on
+#     a 4000 dbu design the compare box covered a quarter of the area the rubber
+#     band showed -- and the "10% of the die" and instance-count guards below
+#     were measured against that wrong box too. -->
+my $selDbu = $GLOBAL->dbfGlobalGetDBU;
+$selDbu = $DEF_DATABASE_UNIT unless ( defined $selDbu && $selDbu > 0 );
+my $Sel_llx = $x1 * $selDbu;
+my $Sel_lly = $y1 * $selDbu;
+my $Sel_urx = $x2 * $selDbu;
+my $Sel_ury = $y2 * $selDbu;
 if ( exists $DIE_ALREADY{dieArea} ) {
 $guiDiellx = $DIE_ALREADY{dieArea}[0];
 $guiDielly = $DIE_ALREADY{dieArea}[1];
@@ -1707,7 +1714,10 @@ my (@loc, $instName,$size);
 my ($xorigin, $yorigin, $llx, $lly, $urx,$ury);
    foreach $instName ( keys %COMP_ALREADY ) {
         my $cellref =  $CADB{$instName}->dbCadbGetCellref;
-        my $orient = $CADB{$instance}->dbCadbGetOrient;
+#<!-- $instName.  There is no $instance in this sub at all, so this read picked
+#     up whatever the global last held and every instance was shaped with one
+#     unrelated cell's orientation. -->
+        my $orient = $CADB{$instName}->dbCadbGetOrient;
         (@loc) =  $CADB{$instName}->dbCadbGetLoc;
         $xorigin = $loc[0];
         $yorigin = $loc[1];
@@ -1715,8 +1725,8 @@ my ($xorigin, $yorigin, $llx, $lly, $urx,$ury);
     $size = $MACROS_ATTRIBUTE_ALREADY{$cellref}{size};
     ($width,$height)=(split(/\s+/,$size))[0,1];
 
-    $width = $width*2000;
-    $height = $height*2000;  
+    $width = $width*$selDbu;
+    $height = $height*$selDbu;  
         } 
   else { 
    print "WARNING : $InstanceName : $cellref at $location size not found\n"; 

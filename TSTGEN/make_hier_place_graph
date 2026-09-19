@@ -2378,11 +2378,17 @@ my $Dieury = $DIE_ALREADY{dieArea}[3];
 my $guiDiellx = $Diellx/$DBSCALEFACTOR;
 my $guiDielly = $Dielly/$DBSCALEFACTOR;
 my $guiDieurx = $Dieurx/$DBSCALEFACTOR;
-my $guiDieury = $Dirury/$DBSCALEFACTOR;
+#<!-- $Dieury.  This read $Dirury, which is declared nowhere, so the die height
+#     came out 0 and so did the row count below it.  The sibling sub a hundred
+#     lines up has the same four lines spelled correctly. -->
+my $guiDieury = $Dieury/$DBSCALEFACTOR;
 
 my $height = $GLOBAL->dbGlobalGetRowHeight;
 my $numberOfRows = int(($guiDieury - $guiDielly)/$height);
-print WRITE_NODE"$numberOfRow\n";
+#<!-- $numberOfRows.  The singular is declared nowhere, so this line wrote an
+#     empty row count into the nodefile.  Same sub, two lines below the $Dirury
+#     typo, and the sibling sub at the top of the file has both spelled right. -->
+print WRITE_NODE"$numberOfRows\n";
 
 print WRITE_NODE "$guiDiellx $guiDielly\n";
 print WRITE_NODE "$guiDieurx $guiDieury\n";
