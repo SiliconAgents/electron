@@ -681,8 +681,21 @@ if ( $_[0] eq '-h') { print "Usage : run_yosys_binary\n";
     if($_[$i] eq "-rtl"){$rtl_file = $_[$i+1];}
     if($_[$i] eq "-top_module"){$top_module = $_[$i+1];}
   }#for
-  my $Projectid ="unitTestCases/RTL2GDS";
-  my $Projectdir = "/ef/home/mas";
+#<!-- These were hardcoded to an efabless developer's home directory and a test
+#     case path under it, on a machine that has not existed for years.
+#     Environment first, then the working directory, so the generated Makefile
+#     refers to somewhere that exists.
+#
+#     Be aware the sub does not work regardless: the Makefile it writes does
+#     "cat ../script/synth.ys", and no such file is in this repository.  The
+#     working path to yosys is the synth agent under .claude/agents, which
+#     builds the script itself. -->
+  my $Projectid = $ENV{ELECTRON_PROJECT_ID};
+  $Projectid = "" unless ( defined $Projectid );
+  my $Projectdir = $ENV{ELECTRON_PROJECT_DIR};
+  unless ( defined $Projectdir && $Projectdir ne "" ) {
+    chomp($Projectdir = `pwd`);
+  }
   my $synethesisdir ="workarea/synthesis";
   system ("rm -rf synthesis");
   open(WRITE_MAKE,">Makefile");
@@ -717,7 +730,8 @@ if ( $_[0] eq '-h') { print "Usage : run_yosys_binary\n";
   print WRITE_MAKE  "\tsed -i 's\@TECHLIBPATH\@\${TECHLIBPATH}\@g' synth.ys\n";
   print WRITE_MAKE  "\tsed -i 's\@LIBERTYFILE\@\${LIBERTYFILE}\@g' synth.ys\n";
   print WRITE_MAKE  "\tsed -i 's\@TOPMODULE\@\${TOPMODULE}\@g' synth.ys\n";
-  print WRITE_MAKE  "\t/ef/apps/bin/yosys synth.ys\n";
+#<!-- was /ef/apps/bin/yosys; the container has yosys at /usr/bin and on PATH -->
+  print WRITE_MAKE  "\tyosys synth.ys\n";
   print WRITE_MAKE  "\texit\n";
   close (WRITE_MAKE);
 }#else
