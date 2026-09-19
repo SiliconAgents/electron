@@ -38,6 +38,9 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
     open(my $fh, '>', $output_file) or die "Cannot open $output_file: $!\n";
 
     my $found_lefs = 0;
+    #<!-- liberty paths collected, not opened; see the std-cell-libs block -->
+    my $found_libs = 0;
+    %STDCELL_LIB_ALREADY = ();
     #<!-- read after every LEF, since it stamps cells that only exist in PLDB
     #     once a LEF has been read -->
     my @func_maps = ();
@@ -113,6 +116,21 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
                     }
                 }
 
+#<!-- Liberty paths, remembered but NOT read.
+#
+#     "std-cell-libs" lists every corner of every VT flavour -- 3336 files for
+#     slvt on this samsung config, 2937 for elvt on the tsmc one, and the
+#     uncompressed ones run to 2GB each.  Reading them here would be absurd and
+#     nothing in this tool wants all of them at once.  What the list is for is
+#     picking one: synthesis takes a single liberty for dfflibmap and abc.
+#
+#     So the paths go into %STDCELL_LIB_ALREADY keyed by VT flavour, and
+#     get_std_cell_libs searches them by corner.  Nothing is opened until
+#     something asks for a specific file. -->
+                if (exists $file_group->{'std-cell-libs'}) {
+                    $found_libs += &dbfConfigAddStdCellLibs($file_group->{'std-cell-libs'});
+                }
+
                 # Cell function map: says which cells are combinational,
                 # sequential or memory when no liberty is read
                 if (exists $file_group->{'cell-func-map'}) {
@@ -173,6 +191,13 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
     if (@func_maps) {
         print "Read " . scalar(@func_maps) . " cell function map(s) from the config\n";
     }
+    if ($found_libs > 0) {
+        my @vts = sort keys %STDCELL_LIB_ALREADY;
+        my @summary = map { "$_ " . scalar(@{$STDCELL_LIB_ALREADY{$_}}) } @vts;
+        print "INFO-PAR-CONFIG : 003 : $found_libs liberty path(s) noted, not read: ",
+              join(", ", @summary), "\n";
+        print "INFO-PAR-CONFIG : 004 : pick one with get_std_cell_libs -vt <flavour> -corner <pattern>\n";
+    }
 
     #<!-- The library is loaded now, so choose the assign buffer.  Without one,
     #     read_verilog drops every assign statement and only says so at
@@ -201,6 +226,197 @@ print "Command read_config took:",timestr($td),"\n";
 
 }# sub read_config
 
+#------------------------------------------------------------------------------------------#
+#<!-- Files a "std-cell-libs" entry into %STDCELL_LIB_ALREADY and says how many
+#     it filed.  The entry is either a hash keyed by VT flavour or a bare list,
+#     and both shapes appear in the configs in use.  Nothing is opened here. -->
+sub dbfConfigAddStdCellLibs {
+    my ($lib_group) = @_;
+    return 0 unless ( defined $lib_group );
+
+    my $count = 0;
+    if (ref($lib_group) eq 'HASH') {
+        foreach my $vt_type (keys %$lib_group) {
+            my $lib_files = ref($lib_group->{$vt_type}) eq 'ARRAY' ?
+                            $lib_group->{$vt_type} : [$lib_group->{$vt_type}];
+            push(@{$STDCELL_LIB_ALREADY{$vt_type}}, @$lib_files);
+            $count += scalar(@$lib_files);
+        }
+    } else {
+        my $lib_files = ref($lib_group) eq 'ARRAY' ? $lib_group : [$lib_group];
+        push(@{$STDCELL_LIB_ALREADY{'default'}}, @$lib_files);
+        $count += scalar(@$lib_files);
+    }
+    return $count;
+}
+#------------------------------------------------------------------------------------------#
+#<!-- read_library_config: the liberty half of read_config_file, on its own.
+#
+#     read_config_file reads every tech and std-cell LEF it finds, which takes
+#     minutes and is beside the point when all you want is a liberty to hand to
+#     yosys.  This walks the same library.config and fills only
+#     %STDCELL_LIB_ALREADY, so synthesize has something to choose from before a
+#     single LEF has been read.  get_std_cell_libs does the choosing. -->
+sub read_library_config {
+
+my $config_file;
+my $tech_node;
+my $foundry;
+my $layer;
+my $append = 0;
+
+my $noOfArguments = @_;
+if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
+  print "Usage : read_library_config -config <library.config> -foundary <fab> -technode <node> [-layer <n>] [--append]\n";
+  print "        Records the std-cell liberty paths only; reads no LEF and opens no liberty.\n";
+  print "        Use get_std_cell_libs to pick one out of what this records.\n";
+  return;
+}
+
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-config"){$config_file = $_[$i+1];}
+  if($_[$i] eq "-technode"){$tech_node = $_[$i+1];}
+  if($_[$i] eq "-foundary"){$foundry = $_[$i+1];}
+  if($_[$i] eq "-foundry"){$foundry = $_[$i+1];}
+  if($_[$i] eq "-layer"){$layer = $_[$i+1];}
+  if($_[$i] eq "--append"){$append = 1;}
+}#for
+
+unless ( defined $config_file && $config_file ne "" ) {
+  print "ERROR-PAR-LIBCFG : 001 : no -config given\n";
+  return;
+}
+unless ( -f $config_file ) {
+  print "ERROR-PAR-LIBCFG : 002 : config file $config_file does not exist\n";
+  return;
+}
+unless ( defined $foundry && $foundry ne "" ) {
+  print "ERROR-PAR-LIBCFG : 003 : no -foundary given\n";
+  return;
+}
+
+my $config = parse_config($config_file);
+
+unless ( exists $config->{$foundry} && exists $config->{$foundry}{node} ) {
+  print "ERROR-PAR-LIBCFG : 004 : foundry $foundry has no nodes in $config_file\n";
+  print "ERROR-PAR-LIBCFG : 005 : the file has: " . join(", ", sort keys %$config) . "\n";
+  return;
+}
+
+%STDCELL_LIB_ALREADY = () unless ( $append == 1 );
+
+my $found_libs = 0;
+foreach my $node (@{$config->{$foundry}{node}}) {
+  next if ( defined $tech_node && $tech_node ne "" && $node->{type} !~ /$tech_node/i );
+
+  foreach my $file_group (@{$node->{files}}) {
+    next if ( defined $layer && $layer ne "" && $layer ne $file_group->{layer} );
+    next unless ( exists $file_group->{'std-cell-libs'} );
+    $found_libs += &dbfConfigAddStdCellLibs($file_group->{'std-cell-libs'});
+  }
+}
+
+if ( $found_libs == 0 ) {
+  print "WARN-PAR-LIBCFG : 006 : no std-cell-libs found for foundry $foundry" .
+        ( defined $tech_node ? ", node $tech_node" : "" ) .
+        ( defined $layer     ? ", layer $layer"    : "" ) . "\n";
+  return;
+}
+
+my @vts = sort keys %STDCELL_LIB_ALREADY;
+print "INFO-PAR-LIBCFG : 007 : recorded $found_libs liberty path(s) in " . scalar(@vts) . " flavour(s)\n";
+foreach my $vt ( @vts ) {
+  print "INFO-PAR-LIBCFG : 008 :   $vt : " . scalar(@{$STDCELL_LIB_ALREADY{$vt}}) . "\n";
+}
+return;
+
+}# sub read_library_config
+#------------------------------------------------------------------------------------------#
+#<!-- get_std_cell_libs: pick liberty paths out of what the config recorded.
+#
+#     There are thousands per flavour -- every corner of every voltage and
+#     temperature -- so this is a filter, not a dump.  -vt narrows to a flavour,
+#     -corner is a substring or regex matched against the file name, and the
+#     surviving paths are printed and returned.  --set also parks them in
+#     @SYNTH_LIBERTY_LIST, which is where synthesize looks when it is given no
+#     -liberty of its own. -->
+sub get_std_cell_libs {
+
+my $vt;
+my $corner;
+my $maxPrint = 20;
+my $doSet = 0;
+my $wantFirst = 0;
+
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
+  print "Usage : get_std_cell_libs [-vt <flavour>] [-corner <pattern>] [-max <n>] [--first] [--set]\n";
+  print "        --first keeps only the first match, --set parks the result for synthesize\n";
+  return;
+}
+
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-vt"){$vt = $_[$i+1];}
+  if($_[$i] eq "-corner"){$corner = $_[$i+1];}
+  if($_[$i] eq "-max"){$maxPrint = $_[$i+1];}
+  if($_[$i] eq "--first"){$wantFirst = 1;}
+  if($_[$i] eq "--set"){$doSet = 1;}
+}#for
+
+unless ( keys %STDCELL_LIB_ALREADY ) {
+  print "ERROR-PAR-LIBSEL : 001 : no liberty paths are recorded\n";
+  print "ERROR-PAR-LIBSEL : 002 : run read_library_config -config <library.config> -foundary <fab> -technode <node> first\n";
+  return ();
+}
+
+my @flavours = sort keys %STDCELL_LIB_ALREADY;
+if ( defined $vt && $vt ne "" ) {
+  my @hit = grep { /^$vt$/i } @flavours;
+  unless ( @hit ) {
+    print "ERROR-PAR-LIBSEL : 003 : no flavour named $vt; the config has " . join(", ", @flavours) . "\n";
+    return ();
+  }
+  @flavours = @hit;
+}
+
+my @picked = ();
+foreach my $flavour ( @flavours ) {
+  foreach my $lib ( @{$STDCELL_LIB_ALREADY{$flavour}} ) {
+    next if ( defined $corner && $corner ne "" && $lib !~ /$corner/ );
+    push(@picked, $lib);
+  }
+}
+
+unless ( @picked ) {
+  print "WARN-PAR-LIBSEL : 004 : nothing matched" .
+        ( defined $vt     ? " -vt $vt"         : "" ) .
+        ( defined $corner ? " -corner $corner" : "" ) . "\n";
+  return ();
+}
+
+@picked = ( $picked[0] ) if ( $wantFirst == 1 );
+
+print "INFO-PAR-LIBSEL : 005 : " . scalar(@picked) . " liberty file(s) matched\n";
+my $shown = 0;
+foreach my $lib ( @picked ) {
+  last if ( $shown >= $maxPrint );
+  print "INFO-PAR-LIBSEL : 006 :   $lib\n";
+  $shown++;
+}
+if ( scalar(@picked) > $shown ) {
+  print "INFO-PAR-LIBSEL : 007 :   ... and " . ( scalar(@picked) - $shown ) .
+        " more; narrow it with -corner or raise -max\n";
+}
+
+if ( $doSet == 1 ) {
+  @SYNTH_LIBERTY_LIST = @picked;
+  print "INFO-PAR-LIBSEL : 008 : synthesize will use these unless it is given -liberty\n";
+}
+
+return @picked;
+
+}# sub get_std_cell_libs
+#------------------------------------------------------------------------------------------#
 sub parse_config {
     my ($config_file) = @_;
 

@@ -1,0 +1,417 @@
+#<!-- synthesize: RTL to gate-level netlist through yosys.
+#
+#     The old path here was run_yosys_binary, which writes a Makefile that cats
+#     a script out of ../script/synth.ys -- a file that is not in this
+#     repository, so it has never run as shipped.  This does the same job
+#     directly: expand the filelist, write the yosys script, run it, filter the
+#     netlist into something read_verilog can parse, and report what came out.
+#
+#     The liberty is the interesting part.  A modern config lists thousands of
+#     them per VT flavour, one per corner, and most are gzipped; yosys 0.9
+#     cannot read a .gz.  So read_library_config records the paths,
+#     get_std_cell_libs picks the one you want, and this decompresses it into
+#     the work directory before yosys sees it. -->
+
+#------------------------------------------------------------------------------------------#
+sub synthesize {
+
+my $noOfArguments = @_;
+if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
+  print "Usage : synthesize -rtl <filelist> [-top <module>] [-liberty <lib>[,<lib>...]]\n";
+  print "                   [-out <dir>] [-script <file>] [--no_run] [--keep_attributes] [--read]\n";
+  print "\n";
+  print "        -rtl      a filelist: one RTL path per line, # comments and blanks ignored.\n";
+  print "                  A .v or .sv given directly is taken as a one-file list.\n";
+  print "        -liberty  liberty files for dfflibmap and abc; repeat the switch or comma\n";
+  print "                  separate.  Gzipped files are decompressed into -out first.\n";
+  print "                  Omitted, the list left by get_std_cell_libs --set is used.\n";
+  print "        -out      work directory, default synthesis\n";
+  print "        --no_run  write the script and stop\n";
+  print "        --read    read the filtered netlist back with read_verilog and elaborate\n";
+  return;
+}
+
+my $rtlList;
+my $topModule;
+my $outDir = "synthesis";
+my $scriptName;
+my $noRun = 0;
+my $keepAttr = 0;
+my $readBack = 0;
+my @libFiles = ();
+
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-rtl"){$rtlList = $_[$i+1];}
+  if($_[$i] eq "-top"){$topModule = $_[$i+1];}
+  if($_[$i] eq "-top_module"){$topModule = $_[$i+1];}
+  if($_[$i] eq "-out"){$outDir = $_[$i+1];}
+  if($_[$i] eq "-script"){$scriptName = $_[$i+1];}
+  if($_[$i] eq "-liberty"){ push(@libFiles, split(/\s*\,\s*/, $_[$i+1])); }
+  if($_[$i] eq "--no_run"){$noRun = 1;}
+  if($_[$i] eq "--keep_attributes"){$keepAttr = 1;}
+  if($_[$i] eq "--read"){$readBack = 1;}
+}#for
+
+unless ( defined $rtlList && $rtlList ne "" ) {
+  print "ERROR-PAR-SYNTH : 001 : no -rtl given\n";
+  return;
+}
+unless ( -f $rtlList ) {
+  print "ERROR-PAR-SYNTH : 002 : $rtlList does not exist\n";
+  return;
+}
+
+$topModule = $TOP_MODULE unless ( defined $topModule && $topModule ne "" );
+unless ( defined $topModule && $topModule ne "" ) {
+  print "ERROR-PAR-SYNTH : 003 : no -top given and TOP_MODULE is not set\n";
+  return;
+}
+
+#<!-- the RTL -->
+my @rtlFiles = &dbfSynthExpandFileList($rtlList);
+unless ( @rtlFiles ) {
+  print "ERROR-PAR-SYNTH : 004 : $rtlList named no readable RTL file\n";
+  return;
+}
+print "INFO-PAR-SYNTH : 005 : " . scalar(@rtlFiles) . " RTL file(s) from $rtlList, top $topModule\n";
+
+#<!-- the liberty.  No -liberty means use whatever get_std_cell_libs parked. -->
+unless ( @libFiles ) {
+  @libFiles = @SYNTH_LIBERTY_LIST if ( @SYNTH_LIBERTY_LIST );
+}
+unless ( @libFiles ) {
+  print "ERROR-PAR-SYNTH : 006 : no liberty given and none set by get_std_cell_libs --set\n";
+  print "ERROR-PAR-SYNTH : 007 : either pass -liberty <file>, or\n";
+  print "ERROR-PAR-SYNTH : 008 :   read_library_config -config <library.config> -foundary <fab> -technode <node>\n";
+  print "ERROR-PAR-SYNTH : 009 :   get_std_cell_libs -vt <flavour> -corner <pattern> --first --set\n";
+  return;
+}
+
+unless ( -d $outDir ) {
+  system("mkdir -p $outDir");
+  unless ( -d $outDir ) {
+    print "ERROR-PAR-SYNTH : 010 : cannot create the work directory $outDir\n";
+    return;
+  }
+}
+
+my @usableLibs = ();
+foreach my $lib ( @libFiles ) {
+  my $ready = &dbfSynthPrepareLiberty($lib, $outDir);
+  push(@usableLibs, $ready) if ( defined $ready );
+}
+unless ( @usableLibs ) {
+  print "ERROR-PAR-SYNTH : 011 : none of the " . scalar(@libFiles) . " liberty file(s) could be used\n";
+  return;
+}
+print "INFO-PAR-SYNTH : 012 : liberty: " . join(" ", @usableLibs) . "\n";
+
+#<!-- the script.  This shape is the one proven on this flow; hierarchy -check
+#     is what catches a module referenced but never read, and stat -liberty is
+#     the only way to get a cell count and an area out of yosys. -->
+$scriptName = "$outDir/${topModule}_synth.ys" unless ( defined $scriptName && $scriptName ne "" );
+my $netlist    = "$outDir/${topModule}.vg";
+my $filtered   = "$outDir/${topModule}_filter.vg";
+my $logFile    = "$outDir/${topModule}_synth.log";
+
+unless ( open(SYNTH_YS, ">$scriptName") ) {
+  print "ERROR-PAR-SYNTH : 013 : cannot write $scriptName : $!\n";
+  return;
+}
+foreach my $rtl ( @rtlFiles ) { print SYNTH_YS "read_verilog $rtl\n"; }
+print SYNTH_YS "\n";
+print SYNTH_YS "hierarchy -check -top $topModule\n";
+print SYNTH_YS "\n";
+print SYNTH_YS "proc; opt; fsm; opt; memory; opt\n";
+print SYNTH_YS "\n";
+print SYNTH_YS "techmap; opt\n";
+print SYNTH_YS "\n";
+foreach my $lib ( @usableLibs ) { print SYNTH_YS "dfflibmap -liberty $lib\n"; }
+foreach my $lib ( @usableLibs ) { print SYNTH_YS "abc -liberty $lib\n"; }
+print SYNTH_YS "\n";
+print SYNTH_YS "clean\n";
+print SYNTH_YS "\n";
+foreach my $lib ( @usableLibs ) { print SYNTH_YS "stat -liberty $lib\n"; }
+print SYNTH_YS "write_verilog $netlist\n";
+close(SYNTH_YS);
+print "INFO-PAR-SYNTH : 014 : wrote $scriptName\n";
+
+if ( $noRun == 1 ) {
+  print "INFO-PAR-SYNTH : 015 : --no_run, so yosys was not started\n";
+  return;
+}
+
+my $cmd = &dbfSynthYosysCommand($scriptName, $logFile);
+unless ( defined $cmd ) {
+  print "ERROR-PAR-SYNTH : 016 : no yosys on PATH and no container image to run it in\n";
+  print "ERROR-PAR-SYNTH : 017 : set ELECTRON_CONTAINER to a .sif that has yosys, or run inside one\n";
+  return;
+}
+print "INFO-PAR-SYNTH : 018 : running yosys, log in $logFile\n";
+system($cmd);
+
+unless ( -f $netlist ) {
+  print "ERROR-PAR-SYNTH : 019 : yosys wrote no netlist; see $logFile\n";
+  &dbfSynthReportLog($logFile);
+  return;
+}
+
+#<!-- The filter is not optional.  read_verilog cannot parse the (* ... *)
+#     attributes yosys emits, and handing back the unfiltered netlist is a
+#     failure that only shows up several commands later. -->
+if ( $keepAttr == 1 ) {
+  $filtered = $netlist;
+  print "INFO-PAR-SYNTH : 020 : --keep_attributes, so the netlist still has (* *) and read_verilog will choke on it\n";
+}
+else {
+  system("cat $netlist | egrep -v \"\\(\\*\" > $filtered");
+  print "INFO-PAR-SYNTH : 021 : attributes filtered into $filtered\n";
+}
+
+&dbfSynthReportLog($logFile);
+
+if ( $readBack == 1 ) {
+  print "INFO-PAR-SYNTH : 022 : reading $filtered back in\n";
+  &read_verilog("-v", $filtered);
+  $TOP_MODULE = $topModule;
+  &elaborate();
+}
+else {
+  print "INFO-PAR-SYNTH : 023 : to use it: read_verilog -v $filtered ; set TOP_MODULE $topModule ; elaborate\n";
+}
+
+return;
+
+}# sub synthesize
+#------------------------------------------------------------------------------------------#
+#<!-- One RTL path per line.  A bare .v or .sv is treated as a one-line list so
+#     that a single-file design does not need a filelist of its own.  Paths are
+#     resolved against the filelist's own directory when they are not found as
+#     given, which is how most filelists in the wild are written. -->
+sub dbfSynthExpandFileList {
+my ($listFile) = @_;
+
+if ( $listFile =~ /\.s?v$/ && $listFile !~ /\.f$/ ) {
+  #<!-- could still be a filelist named .v, so look at the first line -->
+  my $looksLikeRtl = 0;
+  if ( open(PEEK, "<$listFile") ) {
+    while ( my $line = <PEEK> ) {
+      next if ( $line =~ /^\s*$/ || $line =~ /^\s*(#|\/\/)/ );
+      $looksLikeRtl = 1 unless ( $line =~ /^\s*\S+\.s?v\s*$/ );
+      last;
+    }
+    close(PEEK);
+  }
+  return ( $listFile ) if ( $looksLikeRtl == 1 );
+}
+
+my $listDir = ".";
+$listDir = $1 if ( $listFile =~ /^(.*)\/[^\/]+$/ );
+
+my @files = ();
+unless ( open(FLIST, "<$listFile") ) {
+  print "ERROR-PAR-SYNTH : 024 : cannot read $listFile : $!\n";
+  return ();
+}
+while ( my $line = <FLIST> ) {
+  chomp($line);
+  $line =~ s/^\s+//;
+  $line =~ s/\s+$//;
+  next if ( $line eq "" );
+  next if ( $line =~ /^(#|\/\/)/ );
+  #<!-- filelists carry switches too; the ones yosys does not take are dropped
+  #     with a word rather than silently -->
+  if ( $line =~ /^[+-]/ ) {
+    if ( $line =~ /^-v\s+(\S+)/ ) { $line = $1; }
+    else {
+      print "WARN-PAR-SYNTH : 025 : ignoring filelist switch \"$line\"\n";
+      next;
+    }
+  }
+
+  my $path = $line;
+  unless ( -f $path ) { $path = "$listDir/$line" if ( -f "$listDir/$line" ); }
+  unless ( -f $path ) {
+    print "WARN-PAR-SYNTH : 026 : $line is in the filelist but not on disk, skipped\n";
+    next;
+  }
+  push(@files, $path);
+}
+close(FLIST);
+
+return @files;
+
+}# sub dbfSynthExpandFileList
+#------------------------------------------------------------------------------------------#
+#<!-- yosys 0.9 cannot read a gzipped liberty, and the ones in the configs here
+#     are all .gz.  Decompress into the work directory, once: uncompressed they
+#     run to a couple of gigabytes each, so an existing copy is reused rather
+#     than written again. -->
+sub dbfSynthPrepareLiberty {
+my ($lib, $outDir) = @_;
+
+unless ( -f $lib ) {
+  print "WARN-PAR-SYNTH : 027 : liberty $lib does not exist, skipped\n";
+  return undef;
+}
+
+return $lib unless ( $lib =~ /\.gz$/ );
+
+my $base = $lib;
+$base =~ s/^.*\///;
+$base =~ s/\.gz$//;
+my $plain = "$outDir/$base";
+
+if ( -f $plain && -s $plain ) {
+  print "INFO-PAR-SYNTH : 028 : reusing the already decompressed $plain\n";
+  return $plain;
+}
+
+print "INFO-PAR-SYNTH : 029 : decompressing $lib into $outDir, which may take a while and a few GB\n";
+my $rc = system("gunzip -c $lib > $plain");
+if ( $rc != 0 || ! -s $plain ) {
+  print "ERROR-PAR-SYNTH : 030 : could not decompress $lib\n";
+  unlink($plain) if ( -f $plain );
+  return undef;
+}
+return $plain;
+
+}# sub dbfSynthPrepareLiberty
+#------------------------------------------------------------------------------------------#
+#<!-- yosys lives in the container on this setup and is not on the host PATH.
+#     Run it directly when it is there, otherwise through apptainer.  The binds
+#     are the ones the tech and project trees need to be visible. -->
+sub dbfSynthYosysCommand {
+my ($scriptName, $logFile) = @_;
+
+my $onPath = `which yosys 2>/dev/null`;
+chomp($onPath);
+if ( $onPath ne "" && -x $onPath ) {
+  return "yosys -s $scriptName 2>&1 | tee $logFile";
+}
+
+my $sif = $ENV{ELECTRON_CONTAINER};
+unless ( defined $sif && -f $sif ) {
+  my $home = $GLOBAL->dbfGlobalGetElectronHome;
+  $sif = "$home/INSTALL/podman/pysparkplusbuild.sif" if ( defined $home && $home ne "" );
+}
+return undef unless ( defined $sif && -f $sif );
+
+my $user = $ENV{USER};
+$user = "" unless ( defined $user );
+my $binds = "";
+foreach my $dir ( "/tech", "/proj_pd", "/home/$user" ) {
+  $binds .= "--bind $dir:$dir " if ( -d $dir );
+}
+my $cwd = `pwd`;
+chomp($cwd);
+
+print "INFO-PAR-SYNTH : 031 : yosys is not on PATH, running it in $sif\n";
+return "apptainer exec $binds$sif bash -lc 'cd $cwd && yosys -s $scriptName' 2>&1 | tee $logFile";
+
+}# sub dbfSynthYosysCommand
+#------------------------------------------------------------------------------------------#
+#<!-- What came out: whether it finished, the cell count and area from stat,
+#     and the warnings that change the netlist rather than all of them.  An
+#     inferred latch is nearly always an incomplete if or case in the RTL and
+#     worth saying out loud. -->
+sub dbfSynthReportLog {
+my ($logFile) = @_;
+
+unless ( -f $logFile ) {
+  print "WARN-PAR-SYNTH : 032 : no log at $logFile to report on\n";
+  return;
+}
+unless ( open(SYNTH_LOG, "<$logFile") ) {
+  print "WARN-PAR-SYNTH : 033 : cannot read $logFile : $!\n";
+  return;
+}
+
+my @errors = ();
+my $numCells = 0;
+my $area = "";
+my $latches = 0;
+my $blackboxes = 0;
+my %cellCount = ();
+my $inStat = 0;
+
+#<!-- stat prints a section per module and then, for a hierarchical design, a
+#     "design hierarchy" section holding the totals.  Only the last section is
+#     wanted; taking every section double counts, and the module list at the
+#     head of the hierarchy section looks exactly like a cell tally, so the
+#     counting starts at "Number of cells" and stops at the blank line after
+#     it. -->
+my $inCellList = 0;
+while ( my $line = <SYNTH_LOG> ) {
+  chomp($line);
+  push(@errors, $line) if ( $line =~ /^ERROR:/ );
+  $latches++    if ( $line =~ /inferring latch|Latch inferred/i );
+  $blackboxes++ if ( $line =~ /blackbox/i && $line =~ /Warning/i );
+
+  $inStat = 1 if ( $line =~ /Printing statistics/ );
+  next unless ( $inStat == 1 );
+
+  #<!-- the header is "=== top ===" per module and "=== design hierarchy ==="
+  #     for the totals, so the name is not one word -->
+  if ( $line =~ /^\s*===\s+.+\s+===\s*$/ ) {
+    %cellCount = ();
+    $numCells = 0;
+    $area = "";
+    $inCellList = 0;
+    next;
+  }
+  if ( $line =~ /Number of cells:\s+(\d+)/ ) {
+    $numCells = $1;
+    $inCellList = 1;
+    next;
+  }
+  if ( $line =~ /Chip area for(?: top)? module.*:\s+(\S+)/ ) { $area = $1; }
+  if ( $inCellList == 1 ) {
+    if ( $line =~ /^\s+(\S+)\s+(\d+)\s*$/ ) { $cellCount{$1} = $2; }
+    else { $inCellList = 0; }
+  }
+}
+close(SYNTH_LOG);
+
+if ( @errors ) {
+  print "ERROR-PAR-SYNTH : 034 : yosys reported " . scalar(@errors) . " error(s)\n";
+  foreach my $e ( @errors ) { print "ERROR-PAR-SYNTH : 035 :   $e\n"; }
+  return;
+}
+
+print "INFO-PAR-SYNTH : 036 : $numCells cell(s) after mapping" .
+      ( $area ne "" ? ", chip area $area" : "" ) . "\n";
+
+my @types = sort { $cellCount{$b} <=> $cellCount{$a} } keys %cellCount;
+my $shown = 0;
+foreach my $type ( @types ) {
+  last if ( $shown >= 15 );
+  print "INFO-PAR-SYNTH : 037 :   $type : $cellCount{$type}\n";
+  $shown++;
+}
+if ( scalar(@types) > $shown ) {
+  print "INFO-PAR-SYNTH : 038 :   ... and " . ( scalar(@types) - $shown ) . " more cell type(s)\n";
+}
+
+if ( $latches > 0 ) {
+  print "WARN-PAR-SYNTH : 039 : $latches inferred latch(es); look for an incomplete if or case in the RTL\n";
+}
+if ( $blackboxes > 0 ) {
+  print "WARN-PAR-SYNTH : 040 : $blackboxes blackbox warning(s); a module did not synthesise\n";
+}
+
+#<!-- A cell type still named $something is a yosys internal that never got
+#     mapped, which means the netlist has no library cell behind it and place
+#     and route has nothing to place. -->
+my @unmapped = grep { /^\$/ } @types;
+if ( @unmapped ) {
+  print "WARN-PAR-SYNTH : 041 : " . scalar(@unmapped) . " unmapped cell type(s) survived abc: " .
+        join(", ", @unmapped) . "\n";
+}
+
+return;
+
+}# sub dbfSynthReportLog
+#------------------------------------------------------------------------------------------#
+
+1;
