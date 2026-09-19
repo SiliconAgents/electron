@@ -21,3 +21,14 @@ INSTALL/podman/oci-*.tar
 # Python bytecode cache, e.g. from the 3RDBIN placers being imported.
 __pycache__/
 *.pyc
+
+# Editor leftovers.  Three vim swap files were committed with the original
+# import and sat in the tree for years; they carry the buffer contents plus the
+# username, hostname and home directory of whoever had the file open.
+*.swp
+*.swo
+*.swn
+*~
+*.orig
+*.rej
+.DS_Store
