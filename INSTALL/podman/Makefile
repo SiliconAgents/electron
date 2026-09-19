@@ -32,3 +32,15 @@ artemis:
 	    podman build --net=host -v /proj_pd/user_dev/rsrivastava:/proj_pd/user_dev/rsrivastava -t pysparkplusbuild -f ../pysparkplusContainerFile
 		podman save -o oci-pysparkplusbuild.tar --format oci-archive localhost/pysparkplusbuild
 		apptainer build --force pysparkplusbuild.sif docker-archive://oci-pysparkplusbuild.tar
+
+# pysparkpp = pysparkplus plus qrouter.  Layered the same way artemis is, so
+# the perl, CPAN, yosys and python stack is inherited rather than rebuilt.
+# The parent is built only when missing.
+#
+# Point ELECTRON_CONTAINER at the .sif this produces and qroute finds qrouter
+# without being told where it is.
+qrouter:
+	    podman image exists localhost/pysparkplusbuild || $(MAKE) artemis
+	    podman build --net=host -v /proj_pd/user_dev/rsrivastava:/proj_pd/user_dev/rsrivastava -t pysparkpp -f ../pysparkppContainerFile
+		podman save -o oci-pysparkpp.tar --format oci-archive localhost/pysparkpp
+		apptainer build --force pysparkpp.sif docker-archive://oci-pysparkpp.tar

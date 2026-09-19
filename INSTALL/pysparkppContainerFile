@@ -1,0 +1,49 @@
+# Layered on pysparkplusbuild rather than rebuilt from ubuntu:22.04, so this
+# image inherits perl-tk, the CPAN set, cudd, OpenSTA, yosys and the python
+# stack without redoing any of it.  Build the parent first:
+#
+#     make artemis       (in INSTALL/podman)
+#
+# then  make qrouter     which produces pysparkpp.sif.
+FROM localhost/pysparkplusbuild
+
+# qrouter's Tcl build links -lX11 in two places -- qrouter.so and qrouterexec --
+# so libx11-dev is needed at build time even though the routing itself runs
+# headless through qrouternullg.  tk-dev is for tkConfig.sh, which configure
+# looks for alongside tclConfig.sh; tcl-dev is already in the base image.
+RUN apt-get update && \
+    apt-get install -y tk-dev libx11-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# qrouter 1.4, Tim Edwards, GPL.  A detail maze router that does its own global
+# routing, so it needs no guide file -- LEF and a placed DEF are the whole
+# input.  That is why it is here and not TritonRoute: it is the cheap way to
+# prove electron's LEF/DEF round trip before taking on OpenROAD.
+#
+# Pinned to a tag rather than master so an image rebuild is reproducible.
+#
+# NOTE the "make install".  The base image builds OpenSTA and never installs
+# it, which is why sta is not on PATH in the parent image.  Do not repeat that
+# here: install-tcl is what puts the qrouter wrapper in /usr/local/bin and
+# qrouter.so, qrouterexec, qrouternullg and qrouter.tcl in the lib dir.  The
+# wrapper is useless without them.
+ARG QROUTER_TAG=1.4.90
+RUN git clone https://github.com/RTimothyEdwards/qrouter.git /tmp/qrouter && \
+    cd /tmp/qrouter && \
+    git checkout ${QROUTER_TAG} && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && rm -rf /tmp/qrouter
+
+# Proves the install landed, and fails the build here rather than three
+# commands into a routing run if it did not.  qrouter -h exits non-zero by
+# design (runqrouter returns 1 after printing the help), so test for the files
+# instead: the wrapper in bin, and in share/qrouter the no-graphics
+# interpreter and the startup script the wrapper sources.
+RUN test -x /usr/local/bin/qrouter && \
+    test -x /usr/local/share/qrouter/qrouternullg && \
+    test -f /usr/local/share/qrouter/qrouter.tcl && \
+    echo "qrouter installed"
+
+ENV LANG=C.UTF-8

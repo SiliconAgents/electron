@@ -168,10 +168,30 @@ my ($self,$conn) = @_;
    push(@{$self->{C}}, $conn);
 }#sub dbPortSetConn
 
+#<!-- Port locations are database units, the same as %CADB, and get written
+#     straight into a DEF PINS section by dbgGetPortsDB.  The flat placer
+#     places ports as well as instances -- dbfFlatApplyPlacement handles both
+#     -- through the same unrounded micron-times-DBU arithmetic, so a
+#     fractional value lands here for exactly the same reason it lands in
+#     %CADB.  legalize_flat snaps components but not ports, so without this
+#     guard the ports stay fractional even after legalisation.
+#
+#     Same rules as dbCadbRoundDBU: a non-numeric value is passed through
+#     rather than turned into zero, and $DEBUG = 401 reports what it rounds. -->
+sub dbPortRoundDBU {
+my ($v) = @_;
+return $v unless ( defined $v );
+return $v unless ( $v =~ /^-?\d*\.?\d+([eE][-+]?\d+)?$/ );
+return $v if ( $v == int($v) );
+my $r = int( $v + ( $v < 0 ? -0.5 : 0.5 ) );
+print "DBG-DB-PORT : 001 : rounding fractional DBU $v to $r\n" if ( $main::DEBUG == 401 );
+return $r;
+}# sub dbPortRoundDBU
+
 sub dbPortSetLoc {
 my ($self,$x,$y) = @_;
-   $self->{L}[0] =  $x;
-   $self->{L}[1] =  $y;
+   $self->{L}[0] =  &dbPortRoundDBU($x);
+   $self->{L}[1] =  &dbPortRoundDBU($y);
 }# sub dbPortSetLoc
 
 sub dbPortSetSignal {

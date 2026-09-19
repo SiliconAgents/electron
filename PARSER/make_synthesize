@@ -279,35 +279,13 @@ return $plain;
 }# sub dbfSynthPrepareLiberty
 #------------------------------------------------------------------------------------------#
 #<!-- yosys lives in the container on this setup and is not on the host PATH.
-#     Run it directly when it is there, otherwise through apptainer.  The binds
-#     are the ones the tech and project trees need to be visible. -->
+#     dbfElectronToolCommand in UTILS/make_container_exec decides whether to
+#     run it directly or through apptainer; qroute uses the same helper for
+#     qrouter. -->
 sub dbfSynthYosysCommand {
 my ($scriptName, $logFile) = @_;
 
-my $onPath = `which yosys 2>/dev/null`;
-chomp($onPath);
-if ( $onPath ne "" && -x $onPath ) {
-  return "yosys -s $scriptName 2>&1 | tee $logFile";
-}
-
-my $sif = $ENV{ELECTRON_CONTAINER};
-unless ( defined $sif && -f $sif ) {
-  my $home = $GLOBAL->dbfGlobalGetElectronHome;
-  $sif = "$home/INSTALL/podman/pysparkplusbuild.sif" if ( defined $home && $home ne "" );
-}
-return undef unless ( defined $sif && -f $sif );
-
-my $user = $ENV{USER};
-$user = "" unless ( defined $user );
-my $binds = "";
-foreach my $dir ( "/tech", "/proj_pd", "/home/$user" ) {
-  $binds .= "--bind $dir:$dir " if ( -d $dir );
-}
-my $cwd = `pwd`;
-chomp($cwd);
-
-print "INFO-PAR-SYNTH : 031 : yosys is not on PATH, running it in $sif\n";
-return "apptainer exec $binds$sif bash -lc 'cd $cwd && yosys -s $scriptName' 2>&1 | tee $logFile";
+return &dbfElectronToolCommand("yosys", "yosys -s $scriptName", $logFile);
 
 }# sub dbfSynthYosysCommand
 #------------------------------------------------------------------------------------------#

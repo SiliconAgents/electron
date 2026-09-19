@@ -34,6 +34,32 @@ return $inst;
 }#sub new
 
 #-----------------------------------#
+#<!-- %CADB instance locations are in database units, and the DBU is the
+#     atomic unit -- a fractional one is not a finer measurement, it is not a
+#     measurement.  Placers reach this setter having multiplied a floating
+#     point micron position by the DBU without rounding, which is how
+#     "22421.2" ends up in the database and then in a DEF, where a detail
+#     router cannot land the pin on a track and reports it as having no taps.
+#
+#     Guarded here rather than at each of the several dozen call sites, so no
+#     future writer has to remember.  Anything that is not a plain number is
+#     passed through untouched, so an "UND" or a name is never silently turned
+#     into zero.
+#
+#     Set $DEBUG = 401 to hear about each value that had to be rounded; it is
+#     silent otherwise because the rounding itself is harmless and the noise
+#     would be per instance. -->
+sub dbCadbRoundDBU {
+my ($v) = @_;
+return $v unless ( defined $v );
+return $v unless ( $v =~ /^-?\d*\.?\d+([eE][-+]?\d+)?$/ );
+return $v if ( $v == int($v) );
+my $r = int( $v + ( $v < 0 ? -0.5 : 0.5 ) );
+print "DBG-DB-CADB : 001 : rounding fractional DBU $v to $r\n" if ( $main::DEBUG == 401 );
+return $r;
+}#sub dbCadbRoundDBU
+
+#-----------------------------------#
 sub dbCadbSetbBox{
 my ($self,$llx,$lly,$urx,$ury)=@_;
     ${$self->{bbox}}[0] = $llx;
@@ -112,8 +138,8 @@ return($num);
 
 sub dbCadbSetLoc {
 my ($self,$x,$y) = @_;
-    ${$self->{L}}[0] = $x;
-    ${$self->{L}}[1] = $y;
+    ${$self->{L}}[0] = &dbCadbRoundDBU($x);
+    ${$self->{L}}[1] = &dbCadbRoundDBU($y);
 }#sub dbCadbSetLoc
 
 sub dbCadbGetLoc {

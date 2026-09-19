@@ -296,6 +296,22 @@ my $type = $PSEUDO_BLKG_ALREADY{$moduleName}{$blkgName}->dbaTstgenGetPseudoBlkgT
 
 }#sub get_blockage
 
+#<!-- DEF coordinates are integers in database units -- the DBU *is* the
+#     atomic unit, so "22421.2" is not a finer measurement, it is not a
+#     measurement.  Placers here leave fractional values in %CADB and in the
+#     port locations, and readers downstream vary in how they cope: qrouter
+#     takes the fractional pin locations, fails to land them on a track, and
+#     reports every one of them as "has no taps".
+#
+#     Round on the way out rather than forbidding fractions in the database,
+#     which is a bigger change and would fight every placer that writes one. -->
+sub dbfDefRoundDBU {
+my ($v) = @_;
+return 0 unless ( defined $v && $v ne "" );
+return $v unless ( $v =~ /^-?\d*\.?\d+([eE][-+]?\d+)?$/ );
+return int( $v + ( $v < 0 ? -0.5 : 0.5 ) );
+}# sub dbfDefRoundDBU
+#---------------------------------------------------------------------------------#
 sub dbgGetPortsDB {
 my $moduleName = $_[0];
 my $dbu = $GLOBAL->dbfGlobalGetDBU;
@@ -326,10 +342,15 @@ foreach $pinName ( keys %{$PORTS_ALREADY{$moduleName}} ) {
 #        $x2 *= $dbu;
 #        $y1 *= $dbu;
         print "DBG-PAR-DEF : 002 :\t\t$orient \n" if ($DEBUG == 300);
+        my $px  = &dbfDefRoundDBU($loc[0]);
+        my $py  = &dbfDefRoundDBU($loc[1]);
+        my $rx1 = &dbfDefRoundDBU($x1);
+        my $rx2 = &dbfDefRoundDBU($x2);
+        my $ry1 = &dbfDefRoundDBU($y1);
         if( $status == 2 ) {
-          print WRITE " \+ PLACED \( $loc[0] $loc[1] \) $orient + LAYER $layer \( $x1 0 \) \( $x2 $y1 \) \;\n";
+          print WRITE " \+ PLACED \( $px $py \) $orient + LAYER $layer \( $rx1 0 \) \( $rx2 $ry1 \) \;\n";
         }elsif( $status == 3 ) {
-          print WRITE " \+ FIXED \( $loc[0] $loc[1] \) $orient + LAYER $layer \( $x1 0 \) \( $x2 $y1 \) \;\n";
+          print WRITE " \+ FIXED \( $px $py \) $orient + LAYER $layer \( $rx1 0 \) \( $rx2 $ry1 \) \;\n";
         }
                             }
 
@@ -344,8 +365,11 @@ foreach $instance ( keys %COMP_ALREADY ) {
       #  if( exists $CADB{$instance} ){
            my @loc = $CADB{$instance}->dbCadbGetLoc; 
            my $status = $CADB{$instance}->dbCadbGetStatus; 
-           my $orient = $CADB{$instance}->dbCadbGetOrient; 
-              if ( $status eq "PLACED" || $status eq "FIXED" ) { print WRITE "\+ $status \( $loc[0] $loc[1] \) $orient "; }
+           my $orient = $CADB{$instance}->dbCadbGetOrient;
+              if ( $status eq "PLACED" || $status eq "FIXED" ) {
+                print WRITE "\+ $status \( " . &dbfDefRoundDBU($loc[0]) . " " .
+                            &dbfDefRoundDBU($loc[1]) . " \) $orient ";
+              }
                                      }
         print WRITE "\;\n";
                                          }
@@ -360,8 +384,11 @@ foreach my $instance ( keys %CADB ) {
   print WRITE "- $instance $cellref \n";
   my @loc = $CADB{$instance}->dbCadbGetLoc; 
   my $status = $CADB{$instance}->dbCadbGetStatus; 
-  my $orient = $CADB{$instance}->dbCadbGetOrient; 
-  if ( $status eq "PLACED" || $status eq "FIXED" ) { print WRITE "\+ $status \( $loc[0] $loc[1] \) $orient "; }
+  my $orient = $CADB{$instance}->dbCadbGetOrient;
+  if ( $status eq "PLACED" || $status eq "FIXED" ) {
+    print WRITE "\+ $status \( " . &dbfDefRoundDBU($loc[0]) . " " .
+                &dbfDefRoundDBU($loc[1]) . " \) $orient ";
+  }
     print WRITE "\;\n";
   }
 }#sub get_componentDb_with_unconnected_instance
@@ -1327,13 +1354,24 @@ $netName = (split(/\s+/, $_))[1];
 print "DBG-PAR-DEF : 012 : $netName\n"if ($DEBUG == 10) ;
 if ( !defined $NETS_ALREADY{$netName} ) {
 $NETS_ALREADY{$netName} = NetDB::new();
-$NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
 $NADB{$netName} = NetsAttrDB::new();
 $NADB{$netName}->dbNadbSetNetType(0);
                                         } else {
    my $currType = $NADB{$netName}->dbNadbGetNetType if(exists $NADB{$netName});
    if ( $currType == 1 ) { $NADB{$netName}->dbNadbSetNetType(2); }
                                                }
+#<!-- The routing object is needed whether or not the net is new.
+#
+#     It used to be created only inside the "net not seen before" branch, but
+#     this sub empties %NETS_ROUTING_ALREADY on entry and never empties
+#     %NETS_ALREADY.  So reading a routed DEF into a session that already has
+#     the netlist -- read_verilog, elaborate, route, read the result back --
+#     took the else branch for every net, left no routing object, and died on
+#     the first "+ ROUTED" line with "Can't call method
+#     dbNetRoutingDBSetRegularRoute on an undefined value". -->
+if ( !defined $NETS_ROUTING_ALREADY{$netName} ) {
+$NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
+                                                }
 #push(@net_data,$_);
 
 ###########################################################
@@ -1535,13 +1573,16 @@ $netName = (split(/\s+/, $_))[1];
 print "DBG-PAR-DEF : 032 : $netName\n" if ($DEBUG > 10);
 if ( !defined $NETS_ALREADY{$netName} ) {
 $NETS_ALREADY{$netName} = NetDB::new();
-$NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
 $NADB{$netName} = NetsAttrDB::new();
 $NADB{$netName}->dbNadbSetNetType(1);
                                         } else {
 $NADB{$netName}->dbNadbSetNetType(2);
 #$SNETS_ALREADY{$netName} = $NETS_ALREADY{$netName};
                                                }
+#<!-- as in the NETS section above: needed whether or not the net is new -->
+if ( !defined $NETS_ROUTING_ALREADY{$netName} ) {
+$NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
+                                                }
 $SNETS_ALREADY{$netName} = $NETS_ALREADY{$netName};
 push(@net_data,$_);
                  }

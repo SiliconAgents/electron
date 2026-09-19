@@ -1,0 +1,97 @@
+#<!-- Running third-party binaries that live in the container.
+#
+#     The host this was developed on has no Tk and no yosys and no qrouter; the
+#     container has all three but no scipy.  So a command that shells out to an
+#     external tool cannot assume the tool is on PATH, and cannot assume it is
+#     not either -- inside the container it is.
+#
+#     dbfElectronToolCommand answers that once, for every such command, rather
+#     than each of them growing its own copy of the apptainer invocation. -->
+
+#------------------------------------------------------------------------------------------#
+#<!-- The image to run things in: ELECTRON_CONTAINER if it is set, otherwise
+#     the ones shipped under INSTALL/podman, newest capability first.  pysparkpp
+#     is pysparkplusbuild with qrouter added, so it can run anything the other
+#     can and is preferred. -->
+sub dbfElectronContainerImage {
+
+my $sif = $ENV{ELECTRON_CONTAINER};
+return $sif if ( defined $sif && $sif ne "" && -f $sif );
+
+my $home = $GLOBAL->dbfGlobalGetElectronHome;
+return undef unless ( defined $home && $home ne "" );
+
+foreach my $name ( "pysparkpp.sif", "pysparkplusbuild.sif", "pysparkcad.sif" ) {
+  my $path = "$home/INSTALL/podman/$name";
+  return $path if ( -f $path );
+}
+return undef;
+
+}# sub dbfElectronContainerImage
+#------------------------------------------------------------------------------------------#
+#<!-- Returns a shell command that runs $innerCmd with $tool available, or
+#     undef when there is no way to do that.
+#
+#     $tool is the binary the caller needs -- when it is already on PATH we are
+#     inside the container (or someone installed it on the host) and the
+#     command runs directly.  Otherwise it goes through apptainer with the
+#     trees a PDK flow needs bound in.
+#
+#     Output is teed to $logFile, so the caller can parse the log afterwards
+#     whichever way the command ran. -->
+sub dbfElectronToolCommand {
+my ($tool, $innerCmd, $logFile) = @_;
+
+my $onPath = `which $tool 2>/dev/null`;
+chomp($onPath);
+if ( $onPath ne "" && -x $onPath ) {
+  return "$innerCmd 2>&1 | tee $logFile";
+}
+
+my $sif = &dbfElectronContainerImage();
+return undef unless ( defined $sif );
+
+my $user = $ENV{USER};
+$user = "" unless ( defined $user );
+my $cwd = `pwd`;
+chomp($cwd);
+
+my @bindDirs = ();
+foreach my $dir ( "/tech", "/proj_pd", "/home/$user" ) {
+  push(@bindDirs, $dir) if ( $dir ne "/home/" && -d $dir );
+}
+
+#<!-- The working directory has to be visible too, and a scratch area under
+#     /tmp is not inside any of the trees above.  Bind its top level when it
+#     is not already covered. -->
+my $covered = 0;
+foreach my $dir ( @bindDirs ) {
+  $covered = 1 if ( $cwd =~ /^\Q$dir\E(\/|$)/ );
+}
+unless ( $covered == 1 ) {
+  if ( $cwd =~ /^(\/[^\/]+)/ && -d $1 ) { push(@bindDirs, $1); }
+}
+
+my $binds = "";
+foreach my $dir ( @bindDirs ) { $binds .= "--bind $dir:$dir "; }
+
+print "INFO-UTS-CNTNR : 001 : $tool is not on PATH, running it in $sif\n";
+#<!-- "bash -c", deliberately not "bash -lc".
+#
+#     A login shell sources the user's ~/.bashrc, and because the home
+#     directory is bound in, that is the *host's* bashrc.  It prepends host
+#     paths -- a miniconda on this setup -- and the container's own PATH loses.
+#     The visible symptom is python3 resolving to the host interpreter and
+#     place_flat_design dying on "No module named 'scipy'" inside an image that
+#     has scipy installed.  A non-login shell keeps the image's environment,
+#     which apptainer applies for us.
+#
+#     apptainer keeps the working directory when it can, but say so anyway:
+#     the bind above is what makes the path exist inside, and without the cd a
+#     relative filename in $innerCmd resolves somewhere else. -->
+return "apptainer exec $binds$sif bash -c 'cd $cwd && $innerCmd' 2>&1 | tee $logFile";
+
+}# sub dbfElectronToolCommand
+#------------------------------------------------------------------------------------------#
+
+1;

@@ -1,33 +1,313 @@
+#<!-- qroute: detail routing through qrouter.
+#
+#     qrouter (Tim Edwards, GPL) is a detail maze router that does its own
+#     global routing, so LEF plus a placed DEF is the whole input -- no guide
+#     file, which is what makes it a cheap way to prove this round trip before
+#     taking on OpenROAD.  It lives in the pysparkpp container; see
+#     INSTALL/pysparkppContainerFile.
+#
+#     Three things about the old version of this sub, all of which stopped it
+#     working:
+#
+#       - it ran "qrouter -noc".  The wrapper script maps -noc to qrouterexec,
+#         which links -lX11 and wants a display.  Only -nog selects
+#         qrouternullg, the no-graphics interpreter.  Headless needs both.
+#       - it read the result back with defIn --nets.  qrouter emits a VIAS
+#         section for the vias it generates, and defIn has no VIAS branch;
+#         read_def does, into %DEFVIAS_ALREADY.
+#       - it stopped after stage2.  stage3 is the rip-up-and-reroute pass that
+#         clears most of what stage2 leaves failing. -->
 
+#------------------------------------------------------------------------------------------#
 sub qroute {
-# first export lef and def 
 
-&write_lef (qw/-tech also -output all.lef/ );
-&write_def (qw/-output route_in.def --overwrite/);
-# write the config file
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
+  print "Usage : qroute [-out <dir>] [-lef <file>[,<file>...]] [-def <file>]\n";
+  print "               [-effort <n>] [-vdd <net>] [-gnd <net>]\n";
+  print "               [--no_stage3] [--no_run] [--no_read] [--force_routable]\n";
+  print "\n";
+  print "        -out    work directory, default route\n";
+  print "        -lef    LEF for the router.  Omitted, one is written with\n";
+  print "                write_lef -tech also, which may not carry everything\n";
+  print "                the router needs -- prefer the PDK LEFs when you have them.\n";
+  print "        -def    placed DEF to route.  Omitted, one is written with write_def.\n";
+  print "        -effort how hard to keep trying, passed to stage3\n";
+  print "        --no_read  leave the routed DEF on disk instead of reading it back\n";
+  return;
+}
 
-open(WRITE,">route.tcl");
-print WRITE "read_lef all.lef\n";
-print WRITE "read_def route_in.def\n";
-print WRITE "stage1\n";
-print WRITE "stage2\n";
-print WRITE "write_def\n";
-print WRITE "quit\n";
-close(WRITE);
+my $outDir = "route";
+my $defFile;
+my @lefFiles = ();
+my $effort;
+my $vddNet;
+my $gndNet;
+my $doStage3 = 1;
+my $noRun = 0;
+my $noRead = 0;
+my $forceRoutable = 0;
 
-# invoke qrouter 
-#system("qrouter -noc -c route.cfg route_in.def");
-system("qrouter -noc -s route.tcl route_in.def");
-# if qrouter finsihes then read bac the output def from the router
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-out"){$outDir = $_[$i+1];}
+  if($_[$i] eq "-def"){$defFile = $_[$i+1];}
+  if($_[$i] eq "-lef"){ push(@lefFiles, split(/\s*\,\s*/, $_[$i+1])); }
+  if($_[$i] eq "-effort"){$effort = $_[$i+1];}
+  if($_[$i] eq "-vdd"){$vddNet = $_[$i+1];}
+  if($_[$i] eq "-gnd"){$gndNet = $_[$i+1];}
+  if($_[$i] eq "--no_stage3"){$doStage3 = 0;}
+  if($_[$i] eq "--no_run"){$noRun = 1;}
+  if($_[$i] eq "--no_read"){$noRead = 1;}
+  if($_[$i] eq "--force_routable"){$forceRoutable = 1;}
+}#for
 
-defIn (qw/ -def route_in_route.def --nets/);
+unless ( -d $outDir ) {
+  system("mkdir -p $outDir");
+  unless ( -d $outDir ) {
+    print "ERROR-RTR-QROUTE : 001 : cannot create the work directory $outDir\n";
+    return;
+  }
+}
 
+#<!-- the LEF -->
+unless ( @lefFiles ) {
+  my $allLef = "$outDir/all.lef";
+  print "INFO-RTR-QROUTE : 002 : no -lef given, writing one from the database into $allLef\n";
+  &write_lef("-tech", "also", "-output", $allLef);
+  unless ( -s $allLef ) {
+    print "ERROR-RTR-QROUTE : 003 : write_lef produced nothing at $allLef\n";
+    return;
+  }
+  push(@lefFiles, $allLef);
+}
+foreach my $lef ( @lefFiles ) {
+  unless ( -f $lef ) {
+    print "ERROR-RTR-QROUTE : 004 : LEF $lef does not exist\n";
+    return;
+  }
+}
 
+#<!-- the DEF.  qrouter writes <input>_route.def beside the input, so the name
+#     of the input decides the name of the output. -->
+unless ( defined $defFile && $defFile ne "" ) {
+  $defFile = "$outDir/route_in.def";
+  unlink($defFile) if ( -f $defFile );
+  &write_def("-output", $defFile, "--overwrite");
+}
+unless ( -s $defFile ) {
+  print "ERROR-RTR-QROUTE : 005 : no DEF to route at $defFile\n";
+  return;
+}
 
+#<!-- qrouter takes its routing pitches from the LEF, but a DEF with no TRACKS
+#     is a sign the floorplan never got them, and that will bite the OpenROAD
+#     path even if it survives here. -->
+my $trackCount = `grep -c "^TRACKS" $defFile 2>/dev/null`;
+chomp($trackCount);
+if ( $trackCount eq "" || $trackCount == 0 ) {
+  print "WARN-RTR-QROUTE : 006 : $defFile has no TRACKS section\n";
+  print "WARN-RTR-QROUTE : 007 : qrouter derives pitches from the LEF so it may still route,\n";
+  print "WARN-RTR-QROUTE : 008 :   but generate_tracks is registered and unimplemented, and a\n";
+  print "WARN-RTR-QROUTE : 009 :   detail router that wants DEF tracks will refuse this file\n";
+}
 
+my $defBase = $defFile;
+$defBase =~ s/\.def$//;
+my $routedDef = "${defBase}_route.def";
+my $scriptFile = "$outDir/route.tcl";
+my $logFile = "$outDir/route.log";
+my $failedFile = "$outDir/failed.nets";
 
-}#sub qroute 
+unlink($routedDef) if ( -f $routedDef );
 
+unless ( open(ROUTE_TCL, ">$scriptFile") ) {
+  print "ERROR-RTR-QROUTE : 010 : cannot write $scriptFile : $!\n";
+  return;
+}
+foreach my $lef ( @lefFiles ) { print ROUTE_TCL "read_lef $lef\n"; }
+print ROUTE_TCL "read_def $defFile\n";
+print ROUTE_TCL "vdd $vddNet\n" if ( defined $vddNet && $vddNet ne "" );
+print ROUTE_TCL "gnd $gndNet\n" if ( defined $gndNet && $gndNet ne "" );
+print ROUTE_TCL "stage1\n";
+print ROUTE_TCL "stage2\n";
+if ( $doStage3 == 1 ) {
+  #<!-- stage3 is the rip-up-and-reroute pass; effort is how long it keeps at
+  #     it.  Written as an if rather than a ternary inside print, which perl
+  #     would read as print(LIST) ? a : b. -->
+  if ( defined $effort && $effort ne "" ) { print ROUTE_TCL "stage3 effort $effort\n"; }
+  else                                    { print ROUTE_TCL "stage3\n"; }
+}
+#<!-- "cleanup" on its own is a Tcl error: the command wants a subcommand and
+#     answers 'wrong # args: should be "?option?"', which aborts the script
+#     before write_def and leaves no routed DEF at all. -->
+print ROUTE_TCL "cleanup all\n";
+print ROUTE_TCL "write_failed $failedFile\n";
+print ROUTE_TCL "write_def\n";
+print ROUTE_TCL "quit\n";
+close(ROUTE_TCL);
+print "INFO-RTR-QROUTE : 011 : wrote $scriptFile\n";
 
+if ( $noRun == 1 ) {
+  print "INFO-RTR-QROUTE : 012 : --no_run, so qrouter was not started\n";
+  return;
+}
+
+#<!-- -noc drops the TkCon console, -nog selects qrouternullg over qrouterexec
+#     so nothing tries to open a display.  Both are needed; -noc alone still
+#     wants X. -->
+my $switches = "-noc -nog";
+$switches .= " -f" if ( $forceRoutable == 1 );
+my $inner = "qrouter $switches -s $scriptFile $defFile";
+
+my $cmd = &dbfElectronToolCommand("qrouter", $inner, $logFile);
+unless ( defined $cmd ) {
+  print "ERROR-RTR-QROUTE : 013 : no qrouter on PATH and no container image to run it in\n";
+  print "ERROR-RTR-QROUTE : 014 : build it with  cd INSTALL/podman && make qrouter\n";
+  print "ERROR-RTR-QROUTE : 015 : or point ELECTRON_CONTAINER at a .sif that has qrouter\n";
+  return;
+}
+print "INFO-RTR-QROUTE : 016 : routing, log in $logFile\n";
+system($cmd);
+
+unless ( -s $routedDef ) {
+  print "ERROR-RTR-QROUTE : 017 : qrouter wrote no routed DEF at $routedDef; see $logFile\n";
+  &dbfQrouteReportLog($logFile, $failedFile, $defFile);
+  return;
+}
+
+&dbfQrouteReportLog($logFile, $failedFile, $defFile);
+
+if ( $noRead == 1 ) {
+  print "INFO-RTR-QROUTE : 018 : --no_read, the routed DEF is at $routedDef\n";
+  print "INFO-RTR-QROUTE : 019 : read it with  read_def -def $routedDef --all\n";
+  return;
+}
+
+#<!-- read_defII, and the name matters.
+#
+#     The "read_def" *command* is mapped to sub read_defII in commandsFile;
+#     sub read_def is an older reader that is not reachable from the command
+#     line.  Calling &read_def from perl gets that older one, which stores
+#     each net's routing as a plain hash reference rather than a
+#     NetRoutingDB object -- so the routing reads in, and then the next
+#     write_def dies with "Can't call method dbNetRoutingDBGetRegularRoute on
+#     unblessed reference".
+#
+#     read_defII is also the one that parses the VIAS section, which defIn
+#     does not.  Note it rebuilds the design from the DEF rather than merging
+#     into what is already in memory. -->
+print "INFO-RTR-QROUTE : 020 : reading $routedDef back in\n";
+&read_defII("-def", $routedDef, "--all");
+
+return;
+
+}# sub qroute
+#------------------------------------------------------------------------------------------#
+#<!-- qrouter says how it did on stdout: a line per failed net, then either
+#     "No failed routes!" or "Failed net routes: N".  That is the number worth
+#     surfacing; the routed DEF exists either way. -->
+sub dbfQrouteReportLog {
+my ($logFile, $failedFile, $defFile) = @_;
+
+unless ( -f $logFile ) {
+  print "WARN-RTR-QROUTE : 021 : no log at $logFile to report on\n";
+  return;
+}
+unless ( open(ROUTE_LOG, "<$logFile") ) {
+  print "WARN-RTR-QROUTE : 022 : cannot read $logFile : $!\n";
+  return;
+}
+
+my $failCount = -1;
+my $clean = 0;
+my $routed = -1;
+my %failedSeen = ();
+my @failedNets = ();
+my @errors = ();
+
+while ( my $line = <ROUTE_LOG> ) {
+  chomp($line);
+  if ( $line =~ /^\s*Failed net routes:\s+(\d+)/ ) { $failCount = $1; }
+  #<!-- NOT a net count.  "total routes completed" accumulates across stage1,
+  #     stage2 and stage3 and counts route segments, so a 46 net design
+  #     reports 131.  The net total comes from the DEF instead. -->
+  if ( $line =~ /total routes completed:\s+(\d+)/ ) { $routed = $1; }
+  $clean = 1 if ( $line =~ /No failed routes/ );
+  #<!-- Every stage reports its own failures, and a net that stage1 could not
+  #     do is usually done by stage3, so the raw list over-counts badly -- 5
+  #     lines for 2 actual failures.  The trailing full stop varies between
+  #     messages too ("Failed to route net x" and "... net x."), so strip it
+  #     before deciding whether a name has been seen. -->
+  if ( $line =~ /Failed to route net\s+(\S+)/ ) {
+    my $net = $1;
+    $net =~ s/[\.\;\,]+$//;
+    unless ( exists $failedSeen{$net} ) {
+      $failedSeen{$net} = 1;
+      push(@failedNets, $net);
+    }
+  }
+  push(@errors, $line) if ( $line =~ /Cannot open|Major error|error:/i );
+}
+close(ROUTE_LOG);
+
+#<!-- write_failed is the authoritative list -- it is what qrouter still had
+#     outstanding at the end, rather than the union of what every stage tried
+#     and dropped.  Prefer it and fall back to the log. -->
+if ( defined $failedFile && -s $failedFile && open(FAILED_NETS, "<$failedFile") ) {
+  my @fromFile = ();
+  while ( my $line = <FAILED_NETS> ) {
+    chomp($line);
+    next if ( $line =~ /nets failed to route/ );
+    $line =~ s/^\s+//;
+    $line =~ s/\s+$//;
+    next if ( $line eq "" );
+    push(@fromFile, $line);
+  }
+  close(FAILED_NETS);
+  @failedNets = @fromFile if ( @fromFile );
+}
+
+if ( @errors ) {
+  print "ERROR-RTR-QROUTE : 023 : qrouter reported " . scalar(@errors) . " problem(s)\n";
+  my $shown = 0;
+  foreach my $e ( @errors ) {
+    last if ( $shown >= 10 );
+    print "ERROR-RTR-QROUTE : 024 :   $e\n";
+    $shown++;
+  }
+}
+
+my $totalNets = 0;
+if ( defined $defFile && -f $defFile ) {
+  my $netLine = `grep -m1 "^NETS " $defFile 2>/dev/null`;
+  $totalNets = $1 if ( $netLine =~ /^NETS\s+(\d+)/ );
+}
+my $ofText = ( $totalNets > 0 ) ? " of $totalNets" : "";
+
+if ( $clean == 1 && $failCount <= 0 ) {
+  print "INFO-RTR-QROUTE : 025 : all $totalNets net(s) routed, none failed\n" if ( $totalNets > 0 );
+  print "INFO-RTR-QROUTE : 031 : routed with no failed nets\n"               if ( $totalNets <= 0 );
+}
+elsif ( $failCount > 0 ) {
+  print "WARN-RTR-QROUTE : 026 : $failCount net(s)$ofText failed to route\n";
+  my $shown = 0;
+  foreach my $net ( @failedNets ) {
+    last if ( $shown >= 10 );
+    print "WARN-RTR-QROUTE : 027 :   $net\n";
+    $shown++;
+  }
+  if ( scalar(@failedNets) > $shown ) {
+    print "WARN-RTR-QROUTE : 028 :   ... and " . ( scalar(@failedNets) - $shown ) . " more\n";
+  }
+  print "WARN-RTR-QROUTE : 029 : the full list is in $failedFile\n" if ( -s $failedFile );
+}
+else {
+  print "WARN-RTR-QROUTE : 030 : the log does not say whether any net failed; check $logFile\n";
+}
+
+return;
+
+}# sub dbfQrouteReportLog
+#------------------------------------------------------------------------------------------#
 
 1;

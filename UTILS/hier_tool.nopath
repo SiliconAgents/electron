@@ -229,6 +229,7 @@ require "$BEEHOME/executables";
 require "$BEEHOME/UTILS/make_err_msg";
 require "$BEEHOME/UTILS/perl_dump";
 #require "$BEEHOME/UTILS/make_rw_shareable_data";
+require "$BEEHOME/UTILS/make_container_exec";
 require "$BEEHOME/UTILS/make_Robi_func";
 require "$BEEHOME/UTILS/make_unix_shell";
 require "$BEEHOME/UTILS/make_Robi_write_graph";

@@ -788,9 +788,15 @@ while ( my $line = <READ_FLAT_XY> ) {
   }
 
   my $instance = $nodeName{$node};
-  #<!-- back to DEF units for the database -->
-  my $defX = $x * $dbu;
-  my $defY = $y * $dbu;
+  #<!-- Back to DEF units for the database, rounded.
+  #
+  #     $x and $y are floating point microns from the placer, so the product
+  #     is fractional almost every time.  The database setters round as well,
+  #     but do it here too: this is where the unit conversion happens, and
+  #     leaving the caller to produce a value it knows is invalid and rely on
+  #     the setter to clean it up is how the bug got in. -->
+  my $defX = int( $x * $dbu + ( $x < 0 ? -0.5 : 0.5 ) );
+  my $defY = int( $y * $dbu + ( $y < 0 ? -0.5 : 0.5 ) );
 
   my ($applied, $wasFixed, $orientFixed) = &dbfFlatApplyPlacement($instance, $defX, $defY, $dbu);
   if ( $applied ) {
