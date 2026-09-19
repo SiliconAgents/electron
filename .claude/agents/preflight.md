@@ -89,8 +89,11 @@ apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/h
 The usage text appearing proves the fragment loaded and the command dispatched.
 Do this for `electron_hier` too if the command belongs to the hier flow.
 
-`electron_proto` cannot compile in this container — `Tk::Splashscreen` is
-missing — and fails the same way at HEAD. Do not report that as a regression.
+All three tools start in this container now, `electron_proto` included, so
+check it too. It used to die at BEGIN with `Can't locate Tk/Splashscreen.pm`
+— `proto_tool.nopath` was the only one still asking for a module the image
+does not have. That `use` and the splash block in `GUI/make_rw_gui_proto`
+are commented out, matching the other two.
 
 ## Reporting
 

@@ -34,18 +34,21 @@ sub start_gui {
 
 $top = MainWindow->new();
 #------------------ adding a splash screen ---------#
-$sp = $top->Splashscreen();
-    
-    $sp->Label(
-         -text   => 'Starting up',
-         -width  => 20,
-         -height => 10,
-         -font => [-size => 50]
-    )->pack();
-    
-    $sp->Splash(500); # init splash screen
-    
-    $sp->update;  # and display it
+# Commented to match make_rw_gui and make_rw_gui_hier.  Tk::Splashscreen is
+# not in the container, and the "use" in proto_tool.nopath stopped
+# electron_proto starting at all.
+# $sp = $top->Splashscreen();
+#     
+#     $sp->Label(
+#          -text   => 'Starting up',
+#          -width  => 20,
+#          -height => 10,
+#          -font => [-size => 50]
+#     )->pack();
+#     
+#     $sp->Splash(500); # init splash screen
+#     
+#     $sp->update;  # and display it
     
     #$mw->withdraw; # hide main widow during init
 
@@ -2072,7 +2075,7 @@ my $description_baloon = $leftFrame->Balloon();
 
 ############################## Main Event ####################################################
 
-$sp->Destroy(); # get rid of Splash
+#$sp->Destroy(); # get rid of Splash
 $top->deiconify; # and show main window
 MainLoop();
 }# sub start_gui

@@ -216,7 +216,13 @@ use Verilog::VCD;
 
 ################################################################################################
 ################################################################################################
-use Tk::Splashscreen;
+#<!-- Tk::Splashscreen is not in the container, and this was the only one of
+#     the three tools still asking for it, so electron_proto could not start
+#     at all: "Can't locate Tk/Splashscreen.pm" at BEGIN time, before any
+#     command runs and whether or not --nogui was given.  tool.nopath and
+#     hier_tool.nopath have had this commented out for a long time; the
+#     splash block in GUI/make_rw_gui_proto is commented to match. -->
+# use Tk::Splashscreen;
 use JSON;
 
 
