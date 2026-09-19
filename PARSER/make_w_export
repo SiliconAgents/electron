@@ -4,13 +4,45 @@ sub export_all {
 my $moduleName = $TOP_MODULE ;
 
 &write_def("-output","${TOP_MODULE}.def", "--overwrite");
-&def2lef("-output"," ${TOP_MODULE}.lef");
-my $gds = "/home/ubuntu/ef-xfab-xh035/EFXH035A/libs.ref/gds/D_CELLS/xh035_D_CELLS.gds";
-my $layerMapFile = "/ef/tech/XFAB/EFXH035A/libs.ref/gds/rtl2gds_layer_map.xml";
-&def2gds (qw/--pin --inst --include_cell --net --spnet --inst --add_lvs_label -userUnits 1e-3 -dbUnit 1e-9 --include_gds_cells -gds_file_path $gds -layer_map_file $layerMapFile  -boundary_layer BOUNDARYLAYER -boundary_data_type BOUNDARYDATATYPE/);
+#<!-- the filename had a leading space, so this wrote " <top>.lef" -->
+&def2lef("-output","${TOP_MODULE}.lef");
 
+#<!-- Cell GDS and layer map.
+#
+#     These were hardcoded to an XFAB PDK on two efabless machines, one of them
+#     under a developer's home directory.  Environment now, and when a path is
+#     not given the option is left off entirely rather than passed empty --
+#     def2gds defaults -gds_file_path to the working directory. -->
+my $gds = $ENV{ELECTRON_CELL_GDS};
+my $layerMapFile = $ENV{ELECTRON_LAYER_MAP};
 
+#<!-- Built as a real list, not qw//.
+#
+#     qw// does not interpolate, so the previous call passed the seven
+#     characters "$gds" as the gds path and "$layerMapFile" as the layer map,
+#     and def2gds went looking for files by those names.  The same qw// also
+#     passed BOUNDARYLAYER and BOUNDARYDATATYPE, which are template
+#     placeholders nothing ever substituted, where def2gds wants layer numbers
+#     -- it defaults them to 149 and 150, so they are simply left out now.
+#     --inst appeared twice. -->
+my @args = ("--pin", "--inst", "--net", "--spnet",
+            "--include_cell", "--add_lvs_label",
+            "-userUnits", "1e-3", "-dbUnit", "1e-9");
 
+if ( defined $gds && $gds ne "" ) {
+  push(@args, "--include_gds_cells", "-gds_file_path", $gds);
+}
+else {
+  print "INFO-PAR-EXPORT : 001 : ELECTRON_CELL_GDS is not set, so no cell GDS is merged\n";
+}
+if ( defined $layerMapFile && $layerMapFile ne "" ) {
+  push(@args, "-layer_map_file", $layerMapFile);
+}
+else {
+  print "INFO-PAR-EXPORT : 002 : ELECTRON_LAYER_MAP is not set, so def2gds uses its built-in layers\n";
+}
+
+&def2gds(@args);
 
 }# sub export_all
 
