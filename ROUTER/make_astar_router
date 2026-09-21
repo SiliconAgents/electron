@@ -1,0 +1,1046 @@
+#<!-- astar_route: routing through the A* router in pyspark_cad/scala.
+#
+#     This replaces jroute, which shelled out to 3RDBIN/jr_u_1404_100816 -- a
+#     binary that is not in this repository, so it never ran as shipped.  The
+#     reader here is jroute's reader rewritten for a different input: the A*
+#     router does not speak DEF, it has its own two-file text format, which is
+#     a good deal easier to produce correctly than a LEF.
+#
+#     Three pieces, usable separately:
+#
+#       write_astar_files   database -> <top>.tech and <top>.design
+#       astar_route         writes them, runs route.sh, reads the result back
+#       read_astar_routes   <top>.routed -> %NETS_ROUTING_ALREADY
+#
+#     UNITS.  This is the usual trap.  The tech file carries UNITS <dbu> and
+#     everything else in both input files is microns; the router builds its
+#     grid in DBU internally and writes microns back out.  %CADB locations and
+#     the die are DBU, %PLDB sizes and LEF pin rects are microns, and the DEF
+#     route strings this stores are DBU.  So the writer divides by the DBU and
+#     the reader multiplies by it. -->
+
+#------------------------------------------------------------------------------------------#
+#<!-- The routing layers, bottom first.
+#
+#     %PTDB is keyed by layer name and dbTechGetLayerNum is the insertion
+#     order, not the metal number, which is what we want here: a LEF lists
+#     layers from the bottom up, so insertion order is stack order.  Only
+#     TYPE ROUTING layers can carry a wire. -->
+sub dbfAstarRoutingLayers {
+my ($loName, $hiName) = @_;
+
+my @all = sort { $PTDB{$a}->dbTechGetLayerNum <=> $PTDB{$b}->dbTechGetLayerNum }
+          grep { $PTDB{$_}->dbTechGetLayerType =~ /ROUTING/i } keys %PTDB;
+
+return @all unless ( defined $loName && $loName ne "" );
+
+my ($lo, $hi) = (-1, -1);
+for ( my $i = 0; $i <= $#all; $i++ ) {
+  $lo = $i if ( $all[$i] =~ /^$loName$/i );
+  $hi = $i if ( defined $hiName && $hiName ne "" && $all[$i] =~ /^$hiName$/i );
+}
+if ( $lo < 0 ) {
+  print "WARN-RTR-ASTAR : 001 : -layers names $loName, which is not a routing layer; using all of them\n";
+  return @all;
+}
+$hi = $#all if ( $hi < 0 );
+($lo, $hi) = ($hi, $lo) if ( $lo > $hi );
+return @all[$lo..$hi];
+
+}# sub dbfAstarRoutingLayers
+#------------------------------------------------------------------------------------------#
+#<!-- A LEF via that joins two named routing layers.
+#
+#     %VDB holds the vias read from the LEF, each with a list of ViaLayerDB
+#     entries naming the layers its shapes sit on -- the two metals and the
+#     cut.  A tech usually offers several vias per layer pair (Nangate has
+#     via1_0 through via1_8); any of them is legal, so take the first by name
+#     and stay with it.  The name matters because it is what ends up in the
+#     DEF, where it has to resolve to a via the LEF actually defines. -->
+sub dbfAstarViaForPair {
+my ($lower, $upper) = @_;
+
+foreach my $viaName ( sort keys %VDB ) {
+  my @viaLayers = $VDB{$viaName}->dbGetViaLayer;
+  my $seenLower = 0;
+  my $seenUpper = 0;
+  foreach my $vl ( @viaLayers ) {
+    next unless ( defined $vl );
+    my $name = $vl->dbGetViaLayerName;
+    next unless ( defined $name );
+    $seenLower = 1 if ( $name =~ /^$lower$/i );
+    $seenUpper = 1 if ( $name =~ /^$upper$/i );
+  }
+  return $viaName if ( $seenLower == 1 && $seenUpper == 1 );
+}
+return undef;
+
+}# sub dbfAstarViaForPair
+#------------------------------------------------------------------------------------------#
+#<!-- Where a net's terminal actually is, in DBU.
+#
+#     Two cases.  A top-level port keeps its own location in PORTS_ALREADY,
+#     already DBU.  An instance pin is a rect in the cell's own coordinates,
+#     in microns, which xformCellPinToInstPin places and orients -- it takes
+#     the instance origin in DBU and the cell data in microns and returns DBU.
+#     The centre of the first rect is the terminal; a pin with several shapes
+#     is reachable from any of them, and the router is given one point. -->
+sub dbfAstarPinLocation {
+my ($instance, $pinName, $portLayer) = @_;
+
+#<!-- A top-level port keeps its own location, already DBU.  Its layer is
+#     often unset -- PortDB defaults it to 0, and nothing in the flat flow
+#     assigns one unless hier_place_pins -layers has run -- so a caller may
+#     name a layer to use for those.  0 is not a layer name. -->
+foreach my $key ( $instance, $pinName ) {
+  next unless ( defined $key && exists $PORTS_ALREADY{$TOP_MODULE}{$key} );
+  my @loc = $PORTS_ALREADY{$TOP_MODULE}{$key}->dbPortGetLoc;
+  my $layer = $PORTS_ALREADY{$TOP_MODULE}{$key}->dbPortGetLayer;
+  if ( ( !defined $layer || $layer eq "" || $layer eq "0" || $layer eq "UND" )
+       && defined $portLayer && $portLayer ne "" ) {
+    $layer = $portLayer;
+  }
+  return ( $loc[0], $loc[1], $layer );
+}
+
+unless ( exists $CADB{$instance} ) {
+  print "DBG-RTR-ASTAR : 040 : $instance is not in CADB\n" if ( $DEBUG == 501 );
+  return ();
+}
+my $cellref = $CADB{$instance}->dbCadbGetCellref;
+unless ( defined $cellref && exists $PLDB{$cellref} ) {
+  print "DBG-RTR-ASTAR : 041 : $instance cellref " .
+        ( defined $cellref ? $cellref : "undef" ) . " is not in PLDB\n" if ( $DEBUG == 501 );
+  return ();
+}
+
+#<!-- Pin geometry comes as RECT or as POLYGON, and which one depends on the
+#     library rather than on anything we control: Nangate45 describes every
+#     standard cell pin as a POLYGON and has no RECT at all, so a router that
+#     only looked at dbMdbGetPinRect found no pin anywhere and routed nothing.
+#     A polygon is reduced to its bounding box, which is what a terminal point
+#     needs; the exact outline matters to a DRC checker, not to the search. -->
+my ($layer, $llx, $lly, $urx, $ury);
+
+my @pinRects = $PLDB{$cellref}->dbMdbGetPinRect($pinName);
+if ( @pinRects ) {
+  ($layer, $llx, $lly, $urx, $ury) = (split(/\s+/, $pinRects[0]))[0,2,3,4,5];
+}
+else {
+  my @polys = $PLDB{$cellref}->dbMdbGetPinPolygon($pinName);
+  unless ( @polys ) {
+    if ( $DEBUG == 501 ) {
+      my @known = $PLDB{$cellref}->dbMdbGetPins;
+      print "DBG-RTR-ASTAR : 042 : $cellref has no shape for pin $pinName; its pins are " .
+            join(",", @known) . "\n";
+    }
+    return ();
+  }
+  my @f = split(/\s+/, $polys[0]);
+  $layer = $f[0];
+  #<!-- "<layer> POLYGON x y x y ..." -- take the numbers and bound them -->
+  my @nums = grep { /^-?\d*\.?\d+$/ } @f;
+  unless ( @nums >= 4 ) {
+    print "DBG-RTR-ASTAR : 043 : $cellref pin $pinName polygon has too few points\n" if ( $DEBUG == 501 );
+    return ();
+  }
+  my (@xs, @ys);
+  for ( my $i = 0; $i + 1 <= $#nums; $i += 2 ) {
+    push(@xs, $nums[$i]);
+    push(@ys, $nums[$i+1]);
+  }
+  my @sx = sort { $a <=> $b } @xs;
+  my @sy = sort { $a <=> $b } @ys;
+  ($llx, $lly, $urx, $ury) = ($sx[0], $sy[0], $sx[$#sx], $sy[$#sy]);
+}
+
+my @instLoc    = $CADB{$instance}->dbCadbGetLoc;
+my $instOrient = $CADB{$instance}->dbCadbGetOrient;
+$instOrient = "N" unless ( defined $instOrient && $instOrient ne "" && $instOrient ne "UND" );
+my @cellOrigin = $PLDB{$cellref}->dbMdbGetOrigin;
+my @cellSize   = $PLDB{$cellref}->dbMdbGetSize;
+
+return () unless ( defined $ury );
+
+my @r = &xformCellPinToInstPin($instLoc[0], $instLoc[1], $cellOrigin[0], $cellOrigin[1],
+                               $instOrient, $cellSize[0], $cellSize[1],
+                               $llx, $lly, $urx, $ury);
+return () unless ( @r == 4 );
+my $cx = ( $r[0] + $r[2] ) / 2;
+my $cy = ( $r[1] + $r[3] ) / 2;
+return ( $cx, $cy, $layer );
+
+}# sub dbfAstarPinLocation
+#------------------------------------------------------------------------------------------#
+sub write_astar_files {
+
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
+  print "Usage : write_astar_files [-tech <file>] [-design <file>] [-layers <lo>:<hi>]\n";
+  print "                          [-via_cost <um>] [-ports_on <layer>] [-out <dir>]\n";
+  print "\n";
+  print "        -ports_on <layer> puts top-level ports that have no layer assigned\n";
+  print "        on that layer.  PortDB defaults the layer to 0 and the flat flow\n";
+  print "        never sets one, so without this every port is dropped and any net\n";
+  print "        reaching one loses a terminal.\n";
+  print "\n";
+  print "        Writes the two input files the A* router in pyspark_cad/scala reads.\n";
+  print "        Both are plain text in microns; the tech file carries the DBU.\n";
+  return;
+}
+
+my $outDir  = "astar";
+my $techFile;
+my $designFile;
+my $layerSpec;
+my $viaCost;
+my $portLayer;
+
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-out"){$outDir = $_[$i+1];}
+  if($_[$i] eq "-tech"){$techFile = $_[$i+1];}
+  if($_[$i] eq "-design"){$designFile = $_[$i+1];}
+  if($_[$i] eq "-layers"){$layerSpec = $_[$i+1];}
+  if($_[$i] eq "-via_cost"){$viaCost = $_[$i+1];}
+  if($_[$i] eq "-ports_on"){$portLayer = $_[$i+1];}
+}#for
+
+unless ( -d $outDir ) {
+  system("mkdir -p $outDir");
+  unless ( -d $outDir ) {
+    print "ERROR-RTR-ASTAR : 002 : cannot create the work directory $outDir\n";
+    return ();
+  }
+}
+my $top = $TOP_MODULE;
+$top = "design" unless ( defined $top && $top ne "" );
+$techFile   = "$outDir/$top.tech"   unless ( defined $techFile   && $techFile   ne "" );
+$designFile = "$outDir/$top.design" unless ( defined $designFile && $designFile ne "" );
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) {
+  print "ERROR-RTR-ASTAR : 003 : the database unit is not set; read a LEF first\n";
+  return ();
+}
+
+my ($loName, $hiName) = ( "", "" );
+if ( defined $layerSpec && $layerSpec ne "" ) {
+  ($loName, $hiName) = split(/\s*:\s*/, $layerSpec);
+}
+my @layers = &dbfAstarRoutingLayers($loName, $hiName);
+unless ( @layers ) {
+  print "ERROR-RTR-ASTAR : 004 : no TYPE ROUTING layers in the technology\n";
+  return ();
+}
+my %isRouting = ();
+$isRouting{lc $_} = 1 foreach ( @layers );
+
+#-------------------------------------------------------------------- tech ----#
+unless ( open(ASTAR_TECH, ">$techFile") ) {
+  print "ERROR-RTR-ASTAR : 005 : cannot write $techFile : $!\n";
+  return ();
+}
+print ASTAR_TECH "# tech for the A* router, written by electron\n";
+print ASTAR_TECH "# widths, spacings and pitches are microns; UNITS is DBU per micron\n";
+print ASTAR_TECH "UNITS $dbu\n";
+
+my $viaLines = 0;
+foreach my $l ( @layers ) {
+  my $dir = $PTDB{$l}->dbTechGetLayerDir;
+  $dir = "" unless ( defined $dir );
+  #<!-- the router wants the preferred direction as H or V; it will still jog
+  #     across it, just at a higher cost -->
+  my $hv = ( $dir =~ /VERT/i ) ? "V" : "H";
+  my $w  = $PTDB{$l}->dbTechGetLayerWidth;
+  my $sp = $PTDB{$l}->dbTechGetLayerSpacing;
+  my $p  = $PTDB{$l}->dbTechGetLayerPitch;
+  $w  = 0 unless ( defined $w  && $w  =~ /\d/ );
+  $sp = 0 unless ( defined $sp && $sp =~ /\d/ );
+  $p  = 0 unless ( defined $p  && $p  =~ /\d/ );
+  if ( $w <= 0 ) {
+    print "WARN-RTR-ASTAR : 006 : layer $l has no WIDTH, skipping it\n";
+    next;
+  }
+  #<!-- no pitch in the LEF means the closest two wires may legally sit, which
+  #     is what the router assumes when the field is left off anyway -->
+  $p = $w + $sp if ( $p <= 0 );
+  printf ASTAR_TECH "LAYER %s %s %.4f %.4f %.2f %.4f\n", $l, $hv, $w, $sp, 1.0, $p;
+}
+
+#<!-- One via per adjacent pair, named after a via the LEF defines so the DEF
+#     this eventually produces refers to something real.  The cost is a length
+#     equivalent: a via charged one track step of the layer below is enough to
+#     stop the router changing layer for no reason without making it unwilling
+#     to climb. -->
+for ( my $i = 0; $i < $#layers; $i++ ) {
+  my $lower = $layers[$i];
+  my $upper = $layers[$i+1];
+  my $name  = &dbfAstarViaForPair($lower, $upper);
+  unless ( defined $name ) {
+    print "WARN-RTR-ASTAR : 007 : no LEF via joins $lower and $upper, so the router cannot change layer there\n";
+    next;
+  }
+  my $cost = $viaCost;
+  unless ( defined $cost && $cost =~ /\d/ ) {
+    $cost = $PTDB{$lower}->dbTechGetLayerPitch;
+    $cost = 0 unless ( defined $cost && $cost =~ /\d/ );
+    $cost = $PTDB{$lower}->dbTechGetLayerWidth if ( $cost <= 0 );
+    $cost = 0.1 unless ( defined $cost && $cost > 0 );
+  }
+  printf ASTAR_TECH "VIA %s %s %s %.4f\n", $name, $lower, $upper, $cost;
+  $viaLines++;
+}
+close(ASTAR_TECH);
+print "INFO-RTR-ASTAR : 008 : wrote $techFile : " . scalar(@layers) .
+      " routing layer(s) $layers[0]..$layers[$#layers], $viaLines via(s)\n";
+
+#------------------------------------------------------------------ design ----#
+unless ( open(ASTAR_DES, ">$designFile") ) {
+  print "ERROR-RTR-ASTAR : 009 : cannot write $designFile : $!\n";
+  return ();
+}
+print ASTAR_DES "# design for the A* router, written by electron.  Microns.\n";
+
+#<!-- the die, DBU in the database -->
+my @die = ();
+@die = @{$DIE_ALREADY{dieArea}} if ( exists $DIE_ALREADY{dieArea} );
+unless ( @die == 4 && $die[2] > $die[0] && $die[3] > $die[1] ) {
+  print "ERROR-RTR-ASTAR : 010 : no die area; run set_floorplan or read a DEF first\n";
+  close(ASTAR_DES);
+  return ();
+}
+printf ASTAR_DES "DIEAREA %.4f %.4f %.4f %.4f\n",
+       $die[0]/$dbu, $die[1]/$dbu, $die[2]/$dbu, $die[3]/$dbu;
+
+#<!-- Components, as blockage.  A standard cell blocks the bottom routing
+#     layer over its own area and nothing above; a macro blocks everything.
+#     The router un-blocks each pin node afterwards, so a cell does not block
+#     its own pins. -->
+my $compCnt = 0;
+my $unplacedCnt = 0;
+foreach my $instance ( keys %CADB ) {
+  my $status = $CADB{$instance}->dbCadbGetStatus;
+  unless ( defined $status && ( $status eq "PLACED" || $status eq "FIXED" ) ) {
+    $unplacedCnt++;
+    next;
+  }
+  my $cellref = $CADB{$instance}->dbCadbGetCellref;
+  next unless ( defined $cellref && exists $PLDB{$cellref} );
+  my @loc  = $CADB{$instance}->dbCadbGetLoc;
+  my @size = $PLDB{$cellref}->dbMdbGetSize;
+  next unless ( @size == 2 && $size[0] > 0 && $size[1] > 0 );
+  my $orient = $CADB{$instance}->dbCadbGetOrient;
+  $orient = "N" unless ( defined $orient );
+  my ($w, $h) = @size;
+  #<!-- a cell turned on its side is as wide as it was tall -->
+  ($w, $h) = ($h, $w) if ( $orient =~ /^(E|W|FE|FW)$/ );
+
+  my $class = $PLDB{$cellref}->dbMdbGetClass;
+  $class = "CORE" unless ( defined $class );
+  my $on = ( $class =~ /BLOCK|PAD|AREAIO/i ) ? "*" : $layers[0];
+
+  printf ASTAR_DES "COMP %s %.4f %.4f %.4f %.4f %s\n",
+         $instance, $loc[0]/$dbu, $loc[1]/$dbu, $w, $h, $on;
+  $compCnt++;
+}
+print "WARN-RTR-ASTAR : 011 : $unplacedCnt instance(s) are not placed and were left out\n"
+  if ( $unplacedCnt > 0 );
+
+#<!-- Pins, then nets.  Every terminal has to be a declared PIN before a NET
+#     can name it, so both passes walk the same connectivity and the first one
+#     records what the second may refer to. -->
+my %pinOf = ();      #<!-- net -> list of pin names emitted for it -->
+my %pinSeen = ();
+my $pinCnt = 0;
+my $noLocCnt = 0;
+my $offLayerCnt = 0;
+my @pinLines = ();
+
+foreach my $netName ( keys %NETS_ALREADY ) {
+  my $netType = 0;
+  $netType = $NADB{$netName}->dbNadbGetNetType if ( exists $NADB{$netName} );
+  #<!-- type 0 is an ordinary signal net; power and ground are someone else's
+  #     problem and are handed to the router as SNET blockage if at all -->
+  next unless ( $netType == 0 );
+
+  foreach my $instance ( keys %{$NETS_ALREADY{$netName}} ) {
+    my $pinName = $NETS_ALREADY{$netName}{$instance};
+    next unless ( defined $pinName );
+    my ($x, $y, $layer) = &dbfAstarPinLocation($instance, $pinName, $portLayer);
+    unless ( defined $layer ) {
+      $noLocCnt++;
+      next;
+    }
+    unless ( exists $isRouting{lc $layer} ) {
+      $offLayerCnt++;
+      next;
+    }
+    my $term = "$instance/$pinName";
+    $term = $pinName if ( $instance eq "PIN" );
+    unless ( exists $pinSeen{$term} ) {
+      $pinSeen{$term} = 1;
+      push(@pinLines, sprintf("PIN %s %s %.4f %.4f", $term, $layer, $x/$dbu, $y/$dbu));
+      $pinCnt++;
+    }
+    push(@{$pinOf{$netName}}, $term);
+  }
+}
+
+print ASTAR_DES "$_\n" foreach ( @pinLines );
+
+my $netCnt = 0;
+my $oneTermCnt = 0;
+foreach my $netName ( sort keys %pinOf ) {
+  my @terms = @{$pinOf{$netName}};
+  if ( @terms < 2 ) {
+    #<!-- nothing to connect: a net with one terminal is already routed -->
+    $oneTermCnt++;
+    next;
+  }
+  print ASTAR_DES "NET $netName " . join(" ", @terms) . "\n";
+  $netCnt++;
+}
+close(ASTAR_DES);
+
+print "INFO-RTR-ASTAR : 012 : wrote $designFile : $compCnt component(s), $pinCnt pin(s), $netCnt net(s)\n";
+print "WARN-RTR-ASTAR : 013 : $noLocCnt connection(s) had no findable pin location\n"   if ( $noLocCnt > 0 );
+print "WARN-RTR-ASTAR : 014 : $offLayerCnt pin(s) sit on a layer outside the routing range\n" if ( $offLayerCnt > 0 );
+print "INFO-RTR-ASTAR : 015 : $oneTermCnt net(s) have one terminal and need no routing\n" if ( $oneTermCnt > 0 );
+
+return ( $techFile, $designFile );
+
+}# sub write_astar_files
+#------------------------------------------------------------------------------------------#
+#<!-- How many nodes a flat grid over this die would need.
+#
+#     One lattice per layer at that layer's own pitch, which is what
+#     astarRoute builds.  The number grows with the square of the die, so it
+#     is the thing that decides whether the die can be routed in one piece at
+#     all: astarRoute refuses over 100M nodes, and the sequential search is
+#     already the slow part well before that. -->
+sub dbfAstarGridNodes {
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+return 0 unless ( defined $dbu && $dbu > 0 );
+my @die = ();
+@die = @{$DIE_ALREADY{dieArea}} if ( exists $DIE_ALREADY{dieArea} );
+return 0 unless ( @die == 4 && $die[2] > $die[0] && $die[3] > $die[1] );
+
+my $w = $die[2] - $die[0];
+my $h = $die[3] - $die[1];
+my $total = 0;
+foreach my $l ( &dbfAstarRoutingLayers("", "") ) {
+  my $p = $PTDB{$l}->dbTechGetLayerPitch;
+  $p = 0 unless ( defined $p && $p =~ /\d/ );
+  if ( $p <= 0 ) {
+    my $wd = $PTDB{$l}->dbTechGetLayerWidth;
+    my $sp = $PTDB{$l}->dbTechGetLayerSpacing;
+    $wd = 0 unless ( defined $wd && $wd =~ /\d/ );
+    $sp = 0 unless ( defined $sp && $sp =~ /\d/ );
+    $p = $wd + $sp;
+  }
+  next unless ( $p > 0 );
+  my $pd = $p * $dbu;
+  next unless ( $pd >= 1 );
+  $total += ( int($w/$pd) + 1 ) * ( int($h/$pd) + 1 );
+}
+return $total;
+
+}# sub dbfAstarGridNodes
+#------------------------------------------------------------------------------------------#
+#<!-- Global then detail, which is the flow that scales.
+#
+#     The coarse pass answers which gcells a net runs through; the detail pass
+#     then routes one gcell region per Spark task at track resolution.  Every
+#     boundary crossing is pinned to a point first, so neighbouring regions
+#     meet by construction rather than by luck, and no region can affect
+#     another -- which is what makes it distributable.
+#
+#     There is no route.sh for this path, only for the flat and chunked ones,
+#     so the driver is generated here.  pyspark_cad is a separate repository
+#     and nothing in electron writes to it. -->
+sub dbfAstarRunGlobalDetail {
+my ($scalaDir, $techFile, $designFile, $routedFile, $logFile, $outDir, $top,
+    $gcell, $order, $wrongDir, $maxExpand, $dtParts, $driverMem, $cores,
+    $noRun, $noRead) = @_;
+
+foreach my $f ( "astarRoute.sca", "astarGlobal.sca", "astarDetail.sca" ) {
+  unless ( -f "$scalaDir/$f" ) {
+    print "ERROR-RTR-ASTAR : 046 : $scalaDir/$f is missing, so global plus detail cannot run\n";
+    return;
+  }
+}
+
+$gcell = 50 unless ( defined $gcell && $gcell =~ /\d/ && $gcell > 0 );
+$order = "short-first" unless ( defined $order && $order ne "" );
+$wrongDir  = 2.0    unless ( defined $wrongDir  && $wrongDir  =~ /\d/ );
+$maxExpand = 400000 unless ( defined $maxExpand && $maxExpand =~ /\d/ );
+
+#<!-- A gcell grid only means anything if the die is several cells across; at
+#     one or two cells the coarse pass has nothing to decide and the detail
+#     pass gets one enormous region, which is the case the split exists to
+#     avoid. -->
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+my @die = @{$DIE_ALREADY{dieArea}};
+my $dieW = ( $die[2] - $die[0] ) / $dbu;
+my $dieH = ( $die[3] - $die[1] ) / $dbu;
+my $across = ( $dieW < $dieH ? $dieW : $dieH ) / $gcell;
+if ( $across < 4 ) {
+  printf("WARN-RTR-ASTAR : 047 : a %.1f um gcell over a %.1f x %.1f um die is only %.1f cell(s) across\n",
+         $gcell, $dieW, $dieH, $across);
+  print "WARN-RTR-ASTAR : 048 : the global pass has little to decide at that size; lower -gcell or use -mode flat\n";
+}
+
+my $grFile     = "$outDir/$top.gr";
+my $scriptFile = "$outDir/$top.astar.scala";
+unless ( open(ASTAR_SCALA, ">$scriptFile") ) {
+  print "ERROR-RTR-ASTAR : 049 : cannot write $scriptFile : $!\n";
+  return;
+}
+print ASTAR_SCALA ":load $scalaDir/astarRoute.sca\n";
+print ASTAR_SCALA ":load $scalaDir/astarGlobal.sca\n";
+print ASTAR_SCALA ":load $scalaDir/astarDetail.sca\n";
+print ASTAR_SCALA "RT_WRONG_DIR = $wrongDir\n";
+print ASTAR_SCALA "RT_DT_PARTS = $dtParts\n" if ( defined $dtParts && $dtParts =~ /\d/ );
+print ASTAR_SCALA "rt_load(\"$techFile\", \"$designFile\")\n";
+print ASTAR_SCALA "rt_gc_route(gcell = $gcell, order = \"$order\")\n";
+print ASTAR_SCALA "rt_gc_report()\n";
+print ASTAR_SCALA "rt_gc_write(\"$grFile\")\n";
+print ASTAR_SCALA "rt_dt_load(\"$grFile\")\n";
+print ASTAR_SCALA "rt_dt_route(wrongDir = $wrongDir, maxExpand = $maxExpand)\n";
+print ASTAR_SCALA "rt_dt_report()\n";
+print ASTAR_SCALA "rt_dt_write(\"$routedFile\")\n";
+print ASTAR_SCALA ":quit\n";
+close(ASTAR_SCALA);
+print "INFO-RTR-ASTAR : 050 : wrote $scriptFile\n";
+
+if ( $noRun == 1 ) {
+  print "INFO-RTR-ASTAR : 051 : --no_run, so the router was not started\n";
+  return;
+}
+
+$driverMem = "8g" unless ( defined $driverMem && $driverMem ne "" );
+$cores = "*" unless ( defined $cores && $cores ne "" );
+my $inner = "spark-shell --master 'local[$cores]'" .
+            " --conf spark.ui.enabled=false" .
+            " --conf spark.driver.memory=$driverMem" .
+            " --conf spark.log.level=ERROR" .
+            " < $scriptFile";
+
+my $cmd = &dbfElectronToolCommand("spark-shell", $inner, $logFile);
+unless ( defined $cmd ) {
+  print "ERROR-RTR-ASTAR : 052 : no spark-shell on PATH and no container image to run it in\n";
+  return;
+}
+printf("INFO-RTR-ASTAR : 053 : routing %s global then detail, %.0f um gcells, log in %s\n",
+       $top, $gcell, $logFile);
+system($cmd);
+
+&dbfAstarReportGlobalDetail($logFile);
+
+unless ( -s $routedFile ) {
+  print "ERROR-RTR-ASTAR : 054 : the router wrote no result at $routedFile; see $logFile\n";
+  return;
+}
+if ( $noRead == 1 ) {
+  print "INFO-RTR-ASTAR : 055 : --no_read, the segments are in $routedFile\n";
+  return;
+}
+&read_astar_routes("-file", $routedFile);
+return;
+
+}# sub dbfAstarRunGlobalDetail
+#------------------------------------------------------------------------------------------#
+#<!-- The global and detail passes print tables rather than the JSON route.sh
+#     emits, and rt_json reports the flat router's state, which is empty on
+#     this path -- so read the lines that matter out of the log.
+#
+#     Cells over capacity is the one to watch: a global result with overflow
+#     cannot be detailed, and saying so here is cheaper than working out why
+#     the detail pass failed afterwards. -->
+sub dbfAstarReportGlobalDetail {
+my ($logFile) = @_;
+
+unless ( -f $logFile && open(ASTAR_GDLOG, "<$logFile") ) {
+  print "WARN-RTR-ASTAR : 056 : no log at $logFile to report on\n";
+  return;
+}
+my $over;
+my $globalLine = "";
+my $wrote = "";
+my @errors = ();
+while ( my $l = <ASTAR_GDLOG> ) {
+  chomp($l);
+  #<!-- spark-shell echoes the prompt, so a line the router printed can arrive
+  #     as "scala> Wrote ..." and an anchored match never fires -->
+  $l =~ s/^(scala>\s*)+//;
+  $l =~ s/^\s+//;
+  $l =~ s/\s+$//;
+  $over       = $1 if ( $l =~ /cells over capacity:\s*([\d,]+)/ );
+  #<!-- Two lines begin "Global :".  rt_gc_route prints the one that counts
+  #     what happened -- routed, already inside one cell, over capacity,
+  #     failed -- and rt_gc_report prints a grid summary afterwards.  Keep the
+  #     first, and only overwrite with a later one if it also carries the
+  #     counts, or the useful line is lost to the summary. -->
+  if ( $l =~ /^Global\s*:/ ) {
+    $globalLine = $l if ( $globalLine eq "" || $l =~ /over capacity/ );
+  }
+  $wrote      = $l if ( $l =~ /^Wrote\s+\S+\s+\([\d,]+ segments/ );
+  push(@errors, $l) if ( $l =~ /^(error:|java\.lang|Exception)/ );
+}
+close(ASTAR_GDLOG);
+$over =~ s/,//g if ( defined $over );
+
+if ( @errors ) {
+  print "ERROR-RTR-ASTAR : 057 : the router reported " . scalar(@errors) . " problem(s)\n";
+  my $shown = 0;
+  foreach my $e ( @errors ) { last if ( $shown >= 5 ); print "ERROR-RTR-ASTAR : 058 :   $e\n"; $shown++; }
+}
+#<!-- The global line carries the numbers that explain the detail result:
+#     nets it routed, nets whose pins were already inside one cell and needed
+#     no global route at all, nets it had to push through a cell that was
+#     already full, and nets it gave up on.  The over-capacity count is the
+#     one that predicts detail failures. -->
+if ( $globalLine ne "" ) {
+  print "INFO-RTR-ASTAR : 059 : $globalLine\n";
+  if ( $globalLine =~ /([\d,]+)\s+over capacity/ ) {
+    my $oc = $1;
+    $oc =~ s/,//g;
+    print "WARN-RTR-ASTAR : 063 : $oc net(s) were pushed through a full gcell; expect them to fail in detail\n"
+      if ( $oc > 0 );
+  }
+}
+if ( defined $over ) {
+  if ( $over == 0 ) { print "INFO-RTR-ASTAR : 060 : every gcell is within capacity, so the global result can be detailed\n"; }
+  else { print "WARN-RTR-ASTAR : 061 : $over gcell(s) are over capacity; raise -gcell or spread the placement\n"; }
+}
+if ( $wrote =~ /\(([\d,]+) segments,\s*([\d,]+) vias,\s*([\d,]+) unrouted\)/ ) {
+  my ($sg, $vi, $un) = ($1, $2, $3);
+  $sg =~ s/,//g; $vi =~ s/,//g; $un =~ s/,//g;
+  print "INFO-RTR-ASTAR : 062 : detail pass: $sg segment(s), $vi via(s), $un unrouted\n";
+}
+return;
+
+}# sub dbfAstarReportGlobalDetail
+#------------------------------------------------------------------------------------------#
+sub astar_route {
+
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
+  print "Usage : astar_route [-out <dir>] [-layers <lo>:<hi>] [-mode auto|flat|dc|gd]\n";
+  print "                    [-gcell <um>] [-flat_limit <nodes>] [-chunks <k>]\n";
+  print "                    [-parts <n>] [-driver_mem <size>] [-cores <n>]\n";
+  print "                    [-local_top <n>] [-order <mode>] [-pitch <um>]\n";
+  print "                    [-scala_dir <dir>] [-via_cost <um>] [-ports_on <layer>]\n";
+  print "                    [-max_expand <n>] [-bbox_margin <n>] [-wrong_dir <x>]\n";
+  print "\n";
+  print "        -mode gd routes coarse global on gcells and then detail, one gcell\n";
+  print "        region per Spark task.  That is the one that scales and the only one\n";
+  print "        that can route a die whose flat grid will not fit in memory.\n";
+  print "        -mode flat routes the whole die on one grid at each layer's own\n";
+  print "        pitch: exact, and sequential.  -mode dc is the k by k partition,\n";
+  print "        which is parallel but uses the coarsest pitch for every layer.\n";
+  print "        -mode auto (the default) picks gd once the flat grid passes\n";
+  print "        -flat_limit nodes, 20M by default.\n";
+  print "                    [--no_run] [--no_read]\n";
+  print "\n";
+  print "        Writes the tech and design files, runs route.sh from\n";
+  print "        pyspark_cad/scala, and reads the routed segments back in.\n";
+  print "        -chunks 1 routes the whole die on one grid; k routes a k by k\n";
+  print "        partition in parallel.  ELECTRON_ASTAR_DIR overrides where\n";
+  print "        route.sh is looked for.\n";
+  return;
+}
+
+my $outDir = "astar";
+my $layerSpec;
+#<!-- 1, not 2.  route.sh sends k<=1 to rt_route, which gives every layer its
+#     own pitch, and k>1 to the divide-and-conquer router, which predates that
+#     and uses a single pitch for all layers -- the coarsest one, so every
+#     layer stays legal.  On Nangate45 that means including metal4 (0.28)
+#     coarsens metal1 to metal3 from 0.19 and throws away a third of the
+#     tracks on the layers the pins are on: measured on vedic_16x16, 2534 of
+#     3784 nets failed at -chunks 2 against far fewer at -chunks 1.  Ask for
+#     chunks only when the die is too big to route in one piece, and then
+#     restrict -layers to a group that shares a pitch.
+my $chunks = 1;
+my $localTop;
+my $order;
+my $pitch;
+my $scalaDir;
+my $viaCost;
+my $portLayer;
+my $maxExpand;
+my $bboxMargin;
+my $wrongDir;
+my $mode = "auto";
+my $flatLimit = 20000000;
+my $gcell = 50;
+my $dtParts;
+my $driverMem = "8g";
+my $cores = "*";
+my $noRun = 0;
+my $noRead = 0;
+
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-out"){$outDir = $_[$i+1];}
+  if($_[$i] eq "-layers"){$layerSpec = $_[$i+1];}
+  if($_[$i] eq "-chunks"){$chunks = $_[$i+1];}
+  if($_[$i] eq "-local_top"){$localTop = $_[$i+1];}
+  if($_[$i] eq "-order"){$order = $_[$i+1];}
+  if($_[$i] eq "-pitch"){$pitch = $_[$i+1];}
+  if($_[$i] eq "-scala_dir"){$scalaDir = $_[$i+1];}
+  if($_[$i] eq "-via_cost"){$viaCost = $_[$i+1];}
+  if($_[$i] eq "-ports_on"){$portLayer = $_[$i+1];}
+  if($_[$i] eq "-max_expand"){$maxExpand = $_[$i+1];}
+  if($_[$i] eq "-bbox_margin"){$bboxMargin = $_[$i+1];}
+  if($_[$i] eq "-wrong_dir"){$wrongDir = $_[$i+1];}
+  if($_[$i] eq "-mode"){$mode = lc $_[$i+1];}
+  if($_[$i] eq "-flat_limit"){$flatLimit = $_[$i+1];}
+  if($_[$i] eq "-gcell"){$gcell = $_[$i+1];}
+  if($_[$i] eq "-parts"){$dtParts = $_[$i+1];}
+  if($_[$i] eq "-driver_mem"){$driverMem = $_[$i+1];}
+  if($_[$i] eq "-cores"){$cores = $_[$i+1];}
+  if($_[$i] eq "--global_detail"){$mode = "gd";}
+  if($_[$i] eq "--flat"){$mode = "flat";}
+  if($_[$i] eq "--no_run"){$noRun = 1;}
+  if($_[$i] eq "--no_read"){$noRead = 1;}
+}#for
+
+my @writeArgs = ("-out", $outDir);
+push(@writeArgs, "-layers", $layerSpec)  if ( defined $layerSpec && $layerSpec ne "" );
+push(@writeArgs, "-via_cost", $viaCost)  if ( defined $viaCost   && $viaCost   ne "" );
+push(@writeArgs, "-ports_on", $portLayer) if ( defined $portLayer && $portLayer ne "" );
+my ($techFile, $designFile) = &write_astar_files(@writeArgs);
+return unless ( defined $designFile && -s $designFile );
+
+my $top = $TOP_MODULE;
+$top = "design" unless ( defined $top && $top ne "" );
+my $routedFile = "$outDir/$top.routed";
+my $jsonFile   = "$outDir/$top.json";
+my $logFile    = "$outDir/$top.astar.log";
+unlink($routedFile) if ( -f $routedFile );
+
+#<!-- route.sh lives with the scala it loads, so it has to be found rather
+#     than copied.  pyspark_cad is a separate repository; nothing here writes
+#     to it. -->
+unless ( defined $scalaDir && $scalaDir ne "" ) {
+  $scalaDir = $ENV{ELECTRON_ASTAR_DIR};
+}
+unless ( defined $scalaDir && $scalaDir ne "" ) {
+  $scalaDir = "/proj_pd/user_dev/rsrivastava/pyspark_cad/scala";
+}
+my $routeSh = "$scalaDir/route.sh";
+unless ( -f $routeSh ) {
+  print "ERROR-RTR-ASTAR : 016 : no route.sh at $routeSh\n";
+  print "ERROR-RTR-ASTAR : 017 : point ELECTRON_ASTAR_DIR or -scala_dir at pyspark_cad/scala\n";
+  return;
+}
+
+#<!-- Which of the three routers to use.
+#
+#     flat  rt_route, one grid over the whole die at each layer's own pitch.
+#           Exact and simple, and sequential: net n+1 has to see what net n
+#           claimed, so it is one core and each search scans the whole die.
+#     dc    rt_route_dc, a k by k partition routed in parallel.  Faster, but
+#           it uses one pitch for every layer -- the coarsest -- so it throws
+#           away tracks on the finer layers.
+#     gd    rt_gc_route then rt_dt_route: coarse global routing on gcells,
+#           then detail routing one gcell region per Spark task.  This is the
+#           one that scales, and the only one that can route a die whose flat
+#           grid will not fit in memory at all.
+#
+#     auto picks gd once the flat grid passes -flat_limit nodes.  A flat grid
+#     grows with the square of the die: astarRoute refuses to build one over
+#     100M nodes, and long before that the sequential search is the slow part. -->
+my $nodes = &dbfAstarGridNodes();
+if ( $mode eq "auto" ) {
+  if ( $nodes > $flatLimit ) {
+    $mode = "gd";
+    printf("INFO-RTR-ASTAR : 044 : the flat grid would be %.1fM nodes, over the %.1fM limit, so routing global then detail\n",
+           $nodes/1e6, $flatLimit/1e6);
+  }
+  else {
+    $mode = "flat";
+    printf("INFO-RTR-ASTAR : 045 : the flat grid is %.1fM nodes, small enough to route in one piece\n",
+           $nodes/1e6);
+  }
+}
+
+if ( $mode eq "gd" ) {
+  return &dbfAstarRunGlobalDetail($scalaDir, $techFile, $designFile, $routedFile, $logFile,
+                                  $outDir, $top, $gcell, $order, $wrongDir, $maxExpand,
+                                  $dtParts, $driverMem, $cores, $noRun, $noRead);
+}
+$chunks = 1 if ( $mode eq "flat" );
+
+if ( $noRun == 1 ) {
+  print "INFO-RTR-ASTAR : 018 : --no_run, so the router was not started\n";
+  print "INFO-RTR-ASTAR : 019 : $routeSh --tech $techFile --design $designFile --out $routedFile\n";
+  return;
+}
+
+my $inner = "bash $routeSh --tech $techFile --design $designFile" .
+            " --out $routedFile --json $jsonFile --chunks $chunks";
+$inner .= " --local-top $localTop" if ( defined $localTop && $localTop ne "" );
+$inner .= " --order $order"        if ( defined $order    && $order    ne "" );
+$inner .= " --pitch $pitch"        if ( defined $pitch    && $pitch    ne "" );
+#<!-- how hard the search tries before giving a net up, and how far outside a
+#     net's own bounding box it may look.  A net abandoned on max-expand is a
+#     different problem from one that is genuinely blocked, and these are the
+#     two knobs that tell them apart. -->
+$inner .= " --max-expand $maxExpand"  if ( defined $maxExpand  && $maxExpand  ne "" );
+$inner .= " --bbox-margin $bboxMargin" if ( defined $bboxMargin && $bboxMargin ne "" );
+$inner .= " --wrong-dir $wrongDir"    if ( defined $wrongDir   && $wrongDir   ne "" );
+
+#<!-- bash, not sh: route.sh opens with "set -uo pipefail", which dash rejects
+#     with "Illegal option -o pipefail" and then writes nothing at all.
+#<!-- route.sh needs spark-shell, which is in the container and not on the
+#     host; dbfElectronToolCommand decides which way to run it -->
+my $cmd = &dbfElectronToolCommand("spark-shell", $inner, $logFile);
+unless ( defined $cmd ) {
+  print "ERROR-RTR-ASTAR : 020 : no spark-shell on PATH and no container image to run it in\n";
+  return;
+}
+print "INFO-RTR-ASTAR : 021 : routing $top with the A* router, log in $logFile\n";
+system($cmd);
+
+&dbfAstarReportJson($jsonFile, $logFile);
+
+unless ( -s $routedFile ) {
+  print "ERROR-RTR-ASTAR : 022 : the router wrote no result at $routedFile; see $logFile\n";
+  return;
+}
+
+if ( $noRead == 1 ) {
+  print "INFO-RTR-ASTAR : 023 : --no_read, the segments are in $routedFile\n";
+  print "INFO-RTR-ASTAR : 024 : read them with  read_astar_routes -file $routedFile\n";
+  return;
+}
+
+&read_astar_routes("-file", $routedFile);
+return;
+
+}# sub astar_route
+#------------------------------------------------------------------------------------------#
+#<!-- route.sh prints one line of JSON, tagged ROUTE_JSON in the log so it can
+#     be found among the Spark banners, and also writes it to --json.  Read the
+#     file when it is there; it is the same content. -->
+sub dbfAstarReportJson {
+my ($jsonFile, $logFile) = @_;
+
+my $line = "";
+if ( -s $jsonFile && open(ASTAR_JSON, "<$jsonFile") ) {
+  local $/;
+  $line = <ASTAR_JSON>;
+  close(ASTAR_JSON);
+}
+if ( $line eq "" && -f $logFile && open(ASTAR_LOG, "<$logFile") ) {
+  while ( my $l = <ASTAR_LOG> ) {
+    if ( $l =~ /^ROUTE_JSON\s+(.*)$/ ) { $line = $1; last; }
+  }
+  close(ASTAR_LOG);
+}
+unless ( $line =~ /\S/ ) {
+  print "WARN-RTR-ASTAR : 025 : the router produced no summary; see $logFile\n";
+  if ( -f $logFile && open(ASTAR_LOG2, "<$logFile") ) {
+    my $shown = 0;
+    while ( my $l = <ASTAR_LOG2> ) {
+      next unless ( $l =~ /error:|Exception|no such file/ );
+      chomp($l);
+      print "WARN-RTR-ASTAR : 026 :   $l\n";
+      last if ( ++$shown >= 5 );
+    }
+    close(ASTAR_LOG2);
+  }
+  return;
+}
+chomp($line);
+
+my ($nets, $routed, $failed, $wl, $segs, $vias);
+$nets   = $1 if ( $line =~ /"nets":(\d+)/ );
+$routed = $1 if ( $line =~ /"routed":(\d+)/ );
+$failed = $1 if ( $line =~ /"failed":(\d+)/ );
+$wl     = $1 if ( $line =~ /"wirelength_um":([\d\.]+)/ );
+$segs   = $1 if ( $line =~ /"segments":(\d+)/ );
+$vias   = $1 if ( $line =~ /"vias":(\d+)/ );
+
+$nets = 0 unless ( defined $nets );
+$routed = 0 unless ( defined $routed );
+$failed = 0 unless ( defined $failed );
+
+print "INFO-RTR-ASTAR : 027 : $routed of $nets net(s) routed" .
+      ( defined $wl   ? ", $wl um of wire" : "" ) .
+      ( defined $segs ? ", $segs segment(s)" : "" ) .
+      ( defined $vias ? ", $vias via(s)"  : "" ) . "\n";
+if ( $failed > 0 ) {
+  print "WARN-RTR-ASTAR : 028 : $failed net(s) failed to route\n";
+  #<!-- greedy to the last bracket: a net name may itself contain "]", as
+  #     every bit-blasted name does, so stopping at the first one truncates
+  #     "a[4]" to "a[4" -->
+  if ( $line =~ /"failed_nets":\[(.*)\]/ ) {
+    my $list = $1;
+    $list =~ s/"//g;
+    my @bad = grep { /\S/ } split(/\s*,\s*/, $list);
+    my $shown = 0;
+    foreach my $n ( @bad ) {
+      last if ( $shown >= 10 );
+      print "WARN-RTR-ASTAR : 029 :   $n\n";
+      $shown++;
+    }
+    print "WARN-RTR-ASTAR : 030 :   ... and " . ( scalar(@bad) - $shown ) . " more\n"
+      if ( scalar(@bad) > $shown );
+  }
+}
+#<!-- per layer wirelength, which is the number worth watching when the layer
+#     costs in the tech file are being tuned -->
+while ( $line =~ /\{"layer":"([^"]+)","length_um":([\d\.]+),"segments":(\d+),"vias":(\d+)\}/g ) {
+  print "INFO-RTR-ASTAR : 031 :   $1 : $2 um, $3 segment(s), $4 via(s)\n";
+}
+
+return;
+
+}# sub dbfAstarReportJson
+#------------------------------------------------------------------------------------------#
+#<!-- The result file, back into the database.
+#
+#       NET <name>
+#         SEG <layer> <x1> <y1> <x2> <y2>
+#         VIA <name> <x> <y>
+#       END
+#       UNROUTED <name>
+#
+#     Microns out, DBU in: %NETS_ROUTING_ALREADY holds DEF route strings, and
+#     a DEF coordinate is an integer in database units.
+#
+#     Each stored string is a complete standalone route, because write_def
+#     turns the first into "+ ROUTED <str>" and the rest into "NEW <str>".  A
+#     via becomes "<lower layer> ( x y ) <via name>", which is the DEF way of
+#     saying "put this via here", and needs the via's lower layer -- taken
+#     from %VDB rather than guessed from the name. -->
+sub read_astar_routes {
+
+my $noOfArguments = @_;
+my $inFile;
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-file"){$inFile = $_[$i+1];}
+  if($_[$i] eq "-f"){$inFile = $_[$i+1];}
+}
+if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
+  print "Usage : read_astar_routes -file <routed file>\n";
+  return;
+}
+unless ( defined $inFile && -f $inFile ) {
+  print "ERROR-RTR-ASTAR : 032 : no such file : $inFile\n";
+  return;
+}
+unless ( open(ASTAR_IN, "<$inFile") ) {
+  print "ERROR-RTR-ASTAR : 033 : cannot read $inFile : $!\n";
+  return;
+}
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) {
+  print "ERROR-RTR-ASTAR : 034 : the database unit is not set\n";
+  close(ASTAR_IN);
+  return;
+}
+
+#<!-- lower layer of each via, for the DEF form of a via placement -->
+my %viaLower = ();
+my @routing = &dbfAstarRoutingLayers("", "");
+my %order = ();
+for ( my $i = 0; $i <= $#routing; $i++ ) { $order{lc $routing[$i]} = $i; }
+foreach my $viaName ( keys %VDB ) {
+  my @viaLayers = $VDB{$viaName}->dbGetViaLayer;
+  my $best;
+  foreach my $vl ( @viaLayers ) {
+    next unless ( defined $vl );
+    my $n = $vl->dbGetViaLayerName;
+    next unless ( defined $n && exists $order{lc $n} );
+    $best = $n if ( !defined $best || $order{lc $n} < $order{lc $best} );
+  }
+  $viaLower{$viaName} = $best if ( defined $best );
+}
+
+my $netName = "";
+my $netCnt = 0;
+my $segCnt = 0;
+my $viaCnt = 0;
+my $unrouted = 0;
+my $unknownNet = 0;
+my $noViaLayer = 0;
+
+while ( my $line = <ASTAR_IN> ) {
+  chomp($line);
+  $line =~ s/#.*$//;
+  $line =~ s/^\s+//;
+  $line =~ s/\s+$//;
+  next if ( $line eq "" );
+
+  if ( $line =~ /^NET\s+(\S+)/ ) {
+    $netName = $1;
+    if ( exists $NETS_ALREADY{$netName} ) {
+      #<!-- fresh routing for this net, not added to whatever was there -->
+      $NETS_ROUTING_ALREADY{$netName} = NetRoutingDB::new();
+      my $curr = $NADB{$netName}->dbNadbGetNetType if ( exists $NADB{$netName} );
+      $NADB{$netName}->dbNadbSetNetType(2) if ( defined $curr && $curr == 1 );
+      $netCnt++;
+    }
+    else {
+      print "WARN-RTR-ASTAR : 035 : the router returned net $netName, which is not in the database\n"
+        if ( $unknownNet < 5 );
+      $unknownNet++;
+      $netName = "";
+    }
+    next;
+  }
+  if ( $line =~ /^END\b/ ) { $netName = ""; next; }
+  if ( $line =~ /^UNROUTED\s+(\S+)/ ) { $unrouted++; next; }
+  next if ( $netName eq "" );
+
+  if ( $line =~ /^SEG\s+(\S+)\s+([-\d\.eE\+]+)\s+([-\d\.eE\+]+)\s+([-\d\.eE\+]+)\s+([-\d\.eE\+]+)/ ) {
+    my ($layer, $x1, $y1, $x2, $y2) = ($1, $2, $3, $4, $5);
+    my $str = sprintf("%s ( %d %d ) ( %d %d )", $layer,
+                      &dbfAstarToDbu($x1, $dbu), &dbfAstarToDbu($y1, $dbu),
+                      &dbfAstarToDbu($x2, $dbu), &dbfAstarToDbu($y2, $dbu));
+    $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetRegularRoute($str);
+    $segCnt++;
+    next;
+  }
+  if ( $line =~ /^VIA\s+(\S+)\s+([-\d\.eE\+]+)\s+([-\d\.eE\+]+)/ ) {
+    my ($via, $x, $y) = ($1, $2, $3);
+    my $layer = $viaLower{$via};
+    unless ( defined $layer ) {
+      $noViaLayer++;
+      next;
+    }
+    my $str = sprintf("%s ( %d %d ) %s", $layer,
+                      &dbfAstarToDbu($x, $dbu), &dbfAstarToDbu($y, $dbu), $via);
+    $NETS_ROUTING_ALREADY{$netName}->dbNetRoutingDBSetRegularRoute($str);
+    $viaCnt++;
+    next;
+  }
+}
+close(ASTAR_IN);
+
+print "INFO-RTR-ASTAR : 036 : read $segCnt segment(s) and $viaCnt via(s) on $netCnt net(s) from $inFile\n";
+print "WARN-RTR-ASTAR : 037 : $unrouted net(s) were reported unrouted\n"   if ( $unrouted > 0 );
+print "WARN-RTR-ASTAR : 038 : $unknownNet net name(s) did not match the database\n" if ( $unknownNet > 0 );
+print "WARN-RTR-ASTAR : 039 : $noViaLayer via(s) name no layer in %VDB and were dropped\n" if ( $noViaLayer > 0 );
+
+return;
+
+}# sub read_astar_routes
+#------------------------------------------------------------------------------------------#
+#<!-- microns to database units, rounded.  A DEF coordinate is an integer in
+#     DBU; the router prints four decimal places of microns. -->
+sub dbfAstarToDbu {
+my ($v, $dbu) = @_;
+return 0 unless ( defined $v && $v =~ /\d/ );
+my $d = $v * $dbu;
+return int( $d + ( $d < 0 ? -0.5 : 0.5 ) );
+}# sub dbfAstarToDbu
+#------------------------------------------------------------------------------------------#
+
+1;

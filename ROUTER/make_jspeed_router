@@ -1,19 +1,21 @@
 ########################################################################################
 #################################### run jrouter #######################################
 ########################################################################################
+#<!-- run_jroute cannot work: it shells out to 3RDBIN/jr_u_1404_100816, and no
+#     such binary is in this repository or has been for as long as the history
+#     goes back.  astar_route is the replacement -- the A* router in
+#     pyspark_cad/scala, driven through ROUTER/make_astar_router.
+#
+#     Kept rather than deleted because the reader below is the only worked
+#     example of turning a foreign router's segments into the DEF strings
+#     %NETS_ROUTING_ALREADY wants, and simplify_routing_segments in particular
+#     documents the shapes a DEF route line can take. -->
 sub run_jroute {
-  use Benchmark;
-  my $t0 = new Benchmark;
-
-  &write_lef(qw/-tech also -output all.lef --simple/);
-  #&write_def(qw/-output jroute_in.def --overwrite -max_net_degree 20 -debug 5/);
-  &write_def(qw/-output jroute_in.def --overwrite -max_net_degree 99/);
-  system("$BEEHOME/3RDBIN/jr_u_1404_100816 -lef all.lef -def_in jroute_in.def");
-  &read_jspeed_def(qw/-def design_out.def/);
-
-  my $t1 = new Benchmark;
-  my $td = timediff($t1, $t0);
-  print "jrouter took:",timestr($td),"\n";
+  print "WARN-RTR-JROUTE : 001 : run_jroute needs 3RDBIN/jr_u_1404_100816, which is not in this tree\n";
+  print "WARN-RTR-JROUTE : 002 : use astar_route instead -- the A* router in pyspark_cad/scala\n";
+  print "WARN-RTR-JROUTE : 003 :   astar_route -out astar -layers metal1:metal4 -ports_on metal1\n";
+  print "WARN-RTR-JROUTE : 004 : or qroute, which runs qrouter from the pysparkpp container\n";
+  return;
 }#sub run_jroute
 
 
