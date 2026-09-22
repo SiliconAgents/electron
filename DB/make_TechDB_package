@@ -8,12 +8,22 @@ my $layer = {
               Lname => "UND",
               Lnum => "UND",
               Lpitch => 0,
-              LArea => 0,
-              Lspacing => 0, 
-              Lwidth => 0, 
-              Ltype => "UND", 
-              Ldir => "UND", 
-              Lcolor => "UND", 
+              #<!-- LEF allows "PITCH xPitch yPitch" and "OFFSET xOff yOff".
+              #     Lpitch and Loffset hold the x value, these hold the y.  They
+              #     stay 0 when the LEF gave a single number, which means the
+              #     same value applies to both axes. -->
+              LpitchY => 0,
+              LoffsetY => 0,
+              #<!-- Larea, not LArea: dbTechSetLayerArea and GetLayerArea both
+              #     use Larea, so the capitalised key here was initialising a
+              #     field nothing reads and leaving GetLayerArea undef until
+              #     something set it. -->
+              Larea => 0,
+              Lspacing => 0,
+              Lwidth => 0,
+              Ltype => "UND",
+              Ldir => "UND",
+              Lcolor => "UND",
               Loffset => "UND",
               Lresis => 0, 
               Llenforspacingtable => "UND",
@@ -47,6 +57,65 @@ my ($self) = @_;
 my $pitch = $self->{Lpitch};
 return($pitch);
 }#sub dbTechGetLayerPitch
+
+#---------------------------------------------------------------------#
+sub dbTechSetLayerPitchY {
+my ($self,$pitch) = @_;
+$self->{LpitchY} = $pitch;
+}#sub dbTechSetLayerPitchY
+
+sub dbTechGetLayerPitchY {
+my ($self) = @_;
+my $pitch = $self->{LpitchY};
+return($pitch);
+}#sub dbTechGetLayerPitchY
+
+sub dbTechSetLayerOffsetY {
+my ($self,$offset) = @_;
+$self->{LoffsetY} = $offset;
+}#sub dbTechSetLayerOffsetY
+
+sub dbTechGetLayerOffsetY {
+my ($self) = @_;
+my $offset = $self->{LoffsetY};
+return($offset);
+}#sub dbTechGetLayerOffsetY
+
+#---------------------------------------------------------------------#
+#<!-- The pitch and offset that actually govern this layer's track grid.
+#
+#     LEF gives a pitch per axis, and which one matters depends on the
+#     preferred direction: a HORIZONTAL layer's wires run in x, so consecutive
+#     parallel wires are separated in y and the y pitch is the track pitch.  A
+#     VERTICAL layer is the other way round.  Nangate45 metal1 is HORIZONTAL
+#     with "PITCH 0.19 0.14", and 0.14 is the real routing pitch -- the cell is
+#     1.4 um tall, which is the ten tracks that library is named for.  Reading
+#     the x value for it, as everything here used to, under-counts the tracks
+#     on every horizontal layer by a quarter.
+#
+#     A LEF that gave one number leaves the y field 0, and then the single
+#     value applies to both axes. -->
+sub dbTechGetLayerRoutePitch {
+my ($self) = @_;
+my $dir = $self->{Ldir};
+my $py  = $self->{LpitchY};
+if ( defined $dir && $dir =~ /HORIZ/i && defined $py && $py =~ /\d/ && $py > 0 ) {
+  return($py);
+}
+return($self->{Lpitch});
+}#sub dbTechGetLayerRoutePitch
+
+sub dbTechGetLayerRouteOffset {
+my ($self) = @_;
+my $dir = $self->{Ldir};
+my $oy  = $self->{LoffsetY};
+if ( defined $dir && $dir =~ /HORIZ/i && defined $oy && $oy =~ /\d/ && $oy > 0 ) {
+  return($oy);
+}
+my $ox = $self->{Loffset};
+return(0) unless ( defined $ox && $ox =~ /\d/ );
+return($ox);
+}#sub dbTechGetLayerRouteOffset
 
 #---------------------------------------------------------------------#
 sub dbTechSetLayerArea {

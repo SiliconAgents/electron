@@ -239,16 +239,31 @@ if($stop_reading_tech_lef == 0 && $start_reading_tech_layers == 1){
                            $PTDB{$layerName}->dbTechSetLayerWidth($layerWidth);
                            } else{}
                                          }
-                     elsif($_ =~ /\bPITCH/) { ($layerPitch)=(split(/\s+/,$_))[2];
+                     #<!-- "PITCH xPitch [yPitch]".  The y value was being
+                     #     dropped, and it is the one that governs the track
+                     #     grid on a horizontal layer -- see
+                     #     dbTechGetLayerRoutePitch. -->
+                     elsif($_ =~ /\bPITCH/) { my @pf = (split(/\s+/,$_));
+                                       ($layerPitch) = $pf[2];
                                        ${$layerName}{'PITCH'} = $layerPitch;
                         $PTDB{$layerName}->dbTechSetLayerPitch($layerPitch);
+                        if ( defined $pf[3] && $pf[3] =~ /^[\d\.]+$/ ) {
+                          ${$layerName}{'PITCHY'} = $pf[3];
+                          $PTDB{$layerName}->dbTechSetLayerPitchY($pf[3]);
+                        }
                                           }
                      elsif($_ =~ /\bAREA/) { ($layerArea)=(split(/\s+/,$_))[2];
                                        ${$layerName}{'AREA'} = $layerArea;
                         $PTDB{$layerName}->dbTechSetLayerArea($layerArea);
                                           }
-                     elsif($_ =~ /\bOFFSET/) { ($layerOffset)=(split(/\s+/,$_))[2];
+                     #<!-- "OFFSET xOffset [yOffset]", same story: the y value
+                     #     is where a horizontal layer's first track sits. -->
+                     elsif($_ =~ /\bOFFSET/) { my @of = (split(/\s+/,$_));
+                        ($layerOffset) = $of[2];
                         $PTDB{$layerName}->dbTechSetLayerOffset($layerOffset);
+                        if ( defined $of[3] && $of[3] =~ /^[\d\.]+$/ ) {
+                          $PTDB{$layerName}->dbTechSetLayerOffsetY($of[3]);
+                        }
                      }
                      elsif($_ =~ /\bSPACINGTABLE\b/){
                        $spacing_table_start = 1;
@@ -2014,14 +2029,42 @@ my %layer_hash = ();
     my $layerName = $layer_hash{$layerNum};
     my ($width,$spacing,$dir,$type) = &write_layer($layerName);
     my $pitch = $PTDB{$layerName}->dbTechGetLayerPitch;
+    #<!-- Both pitch values and the offset, which were being dropped.
+    #
+    #     A router reading this LEF builds its track grid from PITCH and
+    #     OFFSET, so leaving OFFSET out moves every track by up to half a
+    #     pitch and pins stop landing on them.  Measured with qrouter on
+    #     vedic_16x16, same placement: 624 nets failed against the LEF this
+    #     writes and 351 against the PDK's own, and every "has no taps"
+    #     failure came from this one.  Dropping the y pitch on a horizontal
+    #     layer is worse than cosmetic too -- on Nangate45 metal1 it turns
+    #     0.14 into 0.19 and loses a quarter of the tracks. -->
+    my $pitchY  = $PTDB{$layerName}->dbTechGetLayerPitchY;
+    my $offset  = $PTDB{$layerName}->dbTechGetLayerOffset;
+    my $offsetY = $PTDB{$layerName}->dbTechGetLayerOffsetY;
     my $parallelrunlength = $PTDB{$layerName}->dbTechGetLayerParallelRunLengthForSpacingTable;
     my @width_list_for_spacing_table = $PTDB{$layerName}->dbTechGetLayerWidthForSpacingTable;
     print $filehandle "LAYER $layerName\n";
-    print $filehandle "  TYPE $type \;\n"if($type ne "UND"); 
+    print $filehandle "  TYPE $type \;\n"if($type ne "UND");
     print $filehandle "  WIDTH $width \;\n"if($width != 0);
     print $filehandle "  SPACING $spacing \;\n"if($spacing != 0);
-    print $filehandle "  PITCH $pitch \;\n"if($pitch != 0);
+    if ( $pitch != 0 ) {
+      if ( defined $pitchY && $pitchY =~ /\d/ && $pitchY > 0 ) {
+        print $filehandle "  PITCH $pitch $pitchY \;\n";
+      }
+      else {
+        print $filehandle "  PITCH $pitch \;\n";
+      }
+    }
     print $filehandle "  DIRECTION $dir \;\n"if($dir ne "UND");
+    if ( defined $offset && $offset =~ /^[\d\.]+$/ ) {
+      if ( defined $offsetY && $offsetY =~ /\d/ && $offsetY > 0 ) {
+        print $filehandle "  OFFSET $offset $offsetY \;\n";
+      }
+      else {
+        print $filehandle "  OFFSET $offset \;\n";
+      }
+    }
     if($parallelrunlength eq "UND"){ 
       print $filehandle "  SPACINGTABLE INFLUENCE\n" if(@width_list_for_spacing_table != 0);
       foreach my $width (@width_list_for_spacing_table){

@@ -269,7 +269,7 @@ foreach my $l ( @layers ) {
   my $hv = ( $dir =~ /VERT/i ) ? "V" : "H";
   my $w  = $PTDB{$l}->dbTechGetLayerWidth;
   my $sp = $PTDB{$l}->dbTechGetLayerSpacing;
-  my $p  = $PTDB{$l}->dbTechGetLayerPitch;
+  my $p  = $PTDB{$l}->dbTechGetLayerRoutePitch;
   $w  = 0 unless ( defined $w  && $w  =~ /\d/ );
   $sp = 0 unless ( defined $sp && $sp =~ /\d/ );
   $p  = 0 unless ( defined $p  && $p  =~ /\d/ );
@@ -298,7 +298,7 @@ for ( my $i = 0; $i < $#layers; $i++ ) {
   }
   my $cost = $viaCost;
   unless ( defined $cost && $cost =~ /\d/ ) {
-    $cost = $PTDB{$lower}->dbTechGetLayerPitch;
+    $cost = $PTDB{$lower}->dbTechGetLayerRoutePitch;
     $cost = 0 unless ( defined $cost && $cost =~ /\d/ );
     $cost = $PTDB{$lower}->dbTechGetLayerWidth if ( $cost <= 0 );
     $cost = 0.1 unless ( defined $cost && $cost > 0 );
@@ -452,7 +452,7 @@ my $w = $die[2] - $die[0];
 my $h = $die[3] - $die[1];
 my $total = 0;
 foreach my $l ( &dbfAstarRoutingLayers("", "") ) {
-  my $p = $PTDB{$l}->dbTechGetLayerPitch;
+  my $p = $PTDB{$l}->dbTechGetLayerRoutePitch;
   $p = 0 unless ( defined $p && $p =~ /\d/ );
   if ( $p <= 0 ) {
     my $wd = $PTDB{$l}->dbTechGetLayerWidth;

@@ -141,10 +141,13 @@ if(%DEF_TRACKS_ALREADY){
       if ($LD eq "HORIZONTAL"){
         my $trackDir = "Y";
         #my $max_pitch = &get_pitch_for_track($LD);
-        my $max_pitch = $PTDB{$layerName}->dbTechGetLayerPitch ; 
+        #<!-- A horizontal layer's tracks are spaced in y, so the y pitch and
+        #     y offset are the ones that govern them.  These used to read the
+        #     x values for both directions, which on Nangate45 metal1 wrote a
+        #     0.19 step where the library's own tracks are 0.14 apart. -->
+        my $max_pitch = $PTDB{$layerName}->dbTechGetLayerRoutePitch ;
         my $step_dbu = $max_pitch*$dbu;
-        #my $start = ($max_pitch/2)*$dbu;
-        my $start = $PTDB{$layerName}->dbTechGetLayerOffset * $dbu; 
+        my $start = $PTDB{$layerName}->dbTechGetLayerRouteOffset * $dbu; 
         #my $tracks = int(($DIE_ALREADY{dieArea}[3]-$DIE_ALREADY{dieArea}[1])/$step_dbu);
         my $tracks = int(($dieArea[3]-$dieArea[1])/$step_dbu);
         #my $new_metal_layer = &metal_layer_name_changed($layerName);
@@ -155,10 +158,11 @@ if(%DEF_TRACKS_ALREADY){
       if ($LD eq "VERTICAL"){
         my $trackDir = "X";
         #my $max_pitch = &get_pitch_for_track($LD);
-        my $max_pitch = $PTDB{$layerName}->dbTechGetLayerPitch ; 
+        #<!-- and a vertical layer's are spaced in x, which is what
+        #     dbTechGetLayerRoutePitch returns for it -->
+        my $max_pitch = $PTDB{$layerName}->dbTechGetLayerRoutePitch ;
         my $step_dbu = $max_pitch*$dbu;
-        #my $start2 = ($max_pitch/2)*$dbu;
-        my $start2 = $PTDB{$layerName}->dbTechGetLayerOffset * $dbu; 
+        my $start2 = $PTDB{$layerName}->dbTechGetLayerRouteOffset * $dbu; 
         #my $tracks2 = int(($DIE_ALREADY{dieArea}[2]-$DIE_ALREADY{dieArea}[0])/$step_dbu);
         my $tracks2 = int(($dieArea[2]-$dieArea[0])/$step_dbu);
         #my $new_metal_layer = &metal_layer_name_changed($layerName);
