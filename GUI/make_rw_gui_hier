@@ -638,8 +638,8 @@ $routemenu = $routebutton->Menu();
 $routebutton->configure(-menu=>$routemenu);
 
      $routemenu->command(
-    -command => \&run_jroute,
-    -label => "J-Route",
+    -command => \&astar_route,
+    -label => "A-Route",
     -underline => 0); # D in Display
 #$routemenu->separator;
 #     $routemenu->command(

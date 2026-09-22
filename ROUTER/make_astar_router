@@ -235,6 +235,22 @@ unless ( @layers ) {
 my %isRouting = ();
 $isRouting{lc $_} = 1 foreach ( @layers );
 
+#<!-- Ports with no layer go on the bottom routing layer unless told otherwise.
+#
+#     PortDB defaults a port's layer to 0 and nothing in the flat flow assigns
+#     one, so on a normal flat design every port has no layer.  Dropping them
+#     is the wrong default: the port has a perfectly good location, and any net
+#     reaching one silently loses a terminal, which makes the whole command
+#     look like it works while routing nothing to the outside.  The bottom
+#     routing layer is where the standard cell pins are, so it is where a port
+#     can actually be reached from.  -ports_on overrides, and
+#     hier_place_pins -layers is the real fix. -->
+my $portDefaulted = 0;
+unless ( defined $portLayer && $portLayer ne "" ) {
+  $portLayer = $layers[0];
+  $portDefaulted = 1;
+}
+
 #-------------------------------------------------------------------- tech ----#
 unless ( open(ASTAR_TECH, ">$techFile") ) {
   print "ERROR-RTR-ASTAR : 005 : cannot write $techFile : $!\n";
@@ -349,6 +365,7 @@ print "WARN-RTR-ASTAR : 011 : $unplacedCnt instance(s) are not placed and were l
 #<!-- Pins, then nets.  Every terminal has to be a declared PIN before a NET
 #     can name it, so both passes walk the same connectivity and the first one
 #     records what the second may refer to. -->
+my $portsOnDefault = 0;
 my %pinOf = ();      #<!-- net -> list of pin names emitted for it -->
 my %pinSeen = ();
 my $pinCnt = 0;
@@ -375,6 +392,9 @@ foreach my $netName ( keys %NETS_ALREADY ) {
       $offLayerCnt++;
       next;
     }
+    $portsOnDefault++ if ( $portDefaulted == 1 && exists $PORTS_ALREADY{$TOP_MODULE}{$instance}
+                           && lc($layer) eq lc($portLayer)
+                           && !exists $pinSeen{"$instance/$pinName"} );
     my $term = "$instance/$pinName";
     $term = $pinName if ( $instance eq "PIN" );
     unless ( exists $pinSeen{$term} ) {
@@ -405,6 +425,8 @@ close(ASTAR_DES);
 print "INFO-RTR-ASTAR : 012 : wrote $designFile : $compCnt component(s), $pinCnt pin(s), $netCnt net(s)\n";
 print "WARN-RTR-ASTAR : 013 : $noLocCnt connection(s) had no findable pin location\n"   if ( $noLocCnt > 0 );
 print "WARN-RTR-ASTAR : 014 : $offLayerCnt pin(s) sit on a layer outside the routing range\n" if ( $offLayerCnt > 0 );
+print "WARN-RTR-ASTAR : 064 : $portsOnDefault port(s) had no layer assigned and were put on $portLayer; -ports_on overrides\n"
+  if ( $portsOnDefault > 0 );
 print "INFO-RTR-ASTAR : 015 : $oneTermCnt net(s) have one terminal and need no routing\n" if ( $oneTermCnt > 0 );
 
 return ( $techFile, $designFile );

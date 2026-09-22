@@ -11,10 +11,11 @@
 #     %NETS_ROUTING_ALREADY wants, and simplify_routing_segments in particular
 #     documents the shapes a DEF route line can take. -->
 sub run_jroute {
-  print "WARN-RTR-JROUTE : 001 : run_jroute needs 3RDBIN/jr_u_1404_100816, which is not in this tree\n";
-  print "WARN-RTR-JROUTE : 002 : use astar_route instead -- the A* router in pyspark_cad/scala\n";
-  print "WARN-RTR-JROUTE : 003 :   astar_route -out astar -layers metal1:metal4 -ports_on metal1\n";
-  print "WARN-RTR-JROUTE : 004 : or qroute, which runs qrouter from the pysparkpp container\n";
+  #<!-- Telling the caller to run a different command was not much use: this is
+  #     wired to the Route menu in all three GUIs, where a menu item cannot take
+  #     arguments and printing advice means the button does nothing.  Route. -->
+  print "INFO-RTR-JROUTE : 001 : jrouter is not in this tree; routing with astar_route instead\n";
+  &astar_route(@_);
   return;
 }#sub run_jroute
 
