@@ -15,15 +15,45 @@ make                    # writes electron, electron_hier, electron_proto from UT
 release-ID from `git log --oneline | wc -l`, so the built scripts change on every
 commit. They are gitignored — run `make` after cloning, don't track them.
 
-Running needs the container (Tk, Proc::Simple, and the CPAN set live there):
+## Everything runs in the container. Everything.
+
+Running, testing and checking all happen inside `INSTALL/podman/pysparkpp.sif`
+(pysparkplusbuild plus qrouter). The host cannot do any of it: no Tk, so every
+GUI fragment and all three `.nopath` wrappers fail to compile; no scipy, so the
+placers die; no yosys, qrouter or spark-shell, so nothing that shells out runs.
+A "syntax OK" from the host proves very little, and a failure there usually
+means nothing at all.
+
+```
+make check              # both checks below, in the container
+make check-load         # the one that matters: loads all three tools for real
+make check-syntax       # perl -c on all 323 required fragments
+make app                # interactive shell in that image
+```
+
+To run a flow:
 
 ```
 apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/home/$USER \
-  INSTALL/podman/pysparkplusbuild.sif \
-  bash -lc 'export PATH=<repo>:$PATH; cd <workarea> && electron --nogui --cleanlog --nolog -f run.tcl'
+  INSTALL/podman/pysparkpp.sif \
+  bash -c 'cd <workarea> && PATH=/usr/bin:$PATH <repo>/electron --nogui --cleanlog --nolog -f run.tcl'
 ```
 
-The host has no Tk; the container has no scipy. Neither alone runs the whole flow.
+**`bash -c`, not `bash -lc`.** A login shell sources the host `~/.bashrc`
+through the bound home directory, which puts a miniconda ahead of `/usr/bin`;
+only `python3` is shadowed, and that one has no scipy, so `place_flat_design`
+dies with "No module named scipy" inside an image that has scipy 1.15.3. The
+`PATH=/usr/bin:$PATH` prefix fixes the same thing from inside an interactive
+container shell, which sources that bashrc too.
+
+`make check-syntax` reports six fragments to look at, and all six are false
+positives — `GUI/make_design_browser`, `GUI/make_gui_support_func`,
+`GUI_SERVER/make_server_rpc`, `RTL/Fifo`, `TE/make_x_characterize`,
+`UTILS/perl_dump`. Each uses a name the wrapper imports, in a form perl can
+only parse once the name is declared: `Exists $h{...}` (Tk), `retrieve "f"`
+(Storable), `FileHandle "> $f"`, and a bareword `sub @args`. Read a failure
+before believing it, and check the *first* error, not the last — the rest are
+cascades.
 
 ## Adding or changing a command — the checklist
 
@@ -34,8 +64,10 @@ The host has no Tk; the container has no scipy. Neither alone runs the whole flo
 3. End every required file with **`1;`**. Without it the load dies with
    *"did not return a true value"*.
 4. **`perl -c` does not execute a runtime `require`.** It will report "syntax OK"
-   on a tool whose fragments cannot load. Always run the command for real —
-   `<cmd> -h` through the container is enough to prove the file loads.
+   on a tool whose fragments cannot load — a file missing its `1;` passes
+   `perl -c` and then kills the tool at startup. Run `make check-load`, or the
+   command for real through the container; `<cmd> -h` is enough to prove the
+   file loads.
 5. Message numbers must be unique per prefix. Check:
    `grep -o "PREFIX : [0-9]*" file | sort | uniq -d`
 6. Message prefixes abbreviate the command they belong to (`WR_PS_GRPH`,

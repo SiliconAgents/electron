@@ -37,12 +37,15 @@ Everything runs through:
 
 ```
 apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/home/$USER \
-  <electron>/INSTALL/podman/pysparkplusbuild.sif \
-  bash -lc 'cd <workarea> && yosys -s <script> 2>&1 | tee <log>'
+  <electron>/INSTALL/podman/pysparkpp.sif \
+  bash -c 'cd <workarea> && yosys -s <script> 2>&1 | tee <log>'
 ```
 
-The container's shell prints several harmless startup errors about missing
-module files and aliases. Ignore them; they are not synthesis failures.
+bash -c, not bash -lc: a login shell sources the host ~/.bashrc through the
+bound home directory, which puts a miniconda ahead of /usr/bin. Only python3
+is shadowed by it, so yosys itself is fine, but anything else you run in the
+same shell may not be. Everything runs in the container -- never check or run
+any of this on the host, which has no yosys at all.
 
 Yosys 0.9 is old. If a script uses a command or flag that does not exist, say so
 rather than working around it silently.

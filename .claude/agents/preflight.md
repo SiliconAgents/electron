@@ -75,25 +75,49 @@ Check methods as well as subs. A sweep for `&sub` alone misses every accessor
 call, and a missing accessor is a runtime death on the first use, not a compile
 error.
 
-## 6. Prove it loads
+## 6. Prove it loads — in the container, always
 
-This is the only check that actually settles it:
+**Never check anything on the host.** It has no Tk, so every GUI fragment and
+all three `.nopath` wrappers fail to compile there; no scipy, so the placers
+die; no yosys, qrouter or spark-shell. A host "syntax OK" proves very little
+and a host failure usually means nothing at all. Do not report either.
+
+The two checks are targets, so run them rather than assembling the invocation:
 
 ```
-make
+make check          # both of the below
+make check-load     # the one that settles it: loads all three tools for real
+make check-syntax   # perl -c on all 323 required fragments, in the container
+```
+
+`check-load` is the check that matters, because `perl -c` does not execute a
+runtime `require`: a fragment missing its trailing `1;` passes `perl -c` and
+then kills the tool at startup. All three tools must load, `electron_proto`
+included.
+
+To prove a specific command dispatches, and not just that the tool starts:
+
+```
 apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/home/$USER \
-  INSTALL/podman/pysparkplusbuild.sif bash -lc \
-  'export PATH=<repo>:$PATH; cd /tmp && echo "<cmd> -h" > p.tcl && electron --nogui --cleanlog --nolog -f p.tcl'
+  INSTALL/podman/pysparkpp.sif bash -c \
+  'cd /tmp && echo "<cmd> -h" > p.tcl && PATH=/usr/bin:$PATH <repo>/electron --nogui --cleanlog --nolog -f p.tcl'
 ```
 
 The usage text appearing proves the fragment loaded and the command dispatched.
-Do this for `electron_hier` too if the command belongs to the hier flow.
+Do it for `electron_hier` too if the command belongs to the hier flow.
 
-All three tools start in this container now, `electron_proto` included, so
-check it too. It used to die at BEGIN with `Can't locate Tk/Splashscreen.pm`
-— `proto_tool.nopath` was the only one still asking for a module the image
-does not have. That `use` and the splash block in `GUI/make_rw_gui_proto`
-are commented out, matching the other two.
+`bash -c`, not `bash -lc`: a login shell sources the host `~/.bashrc` through
+the bound home directory and puts a miniconda `python3` without scipy ahead of
+the container's. That is what the `PATH=/usr/bin:$PATH` prefix is for as well.
+
+`make check-syntax` reports six fragments to look at and **all six are false
+positives** — `GUI/make_design_browser`, `GUI/make_gui_support_func`,
+`GUI_SERVER/make_server_rpc`, `RTL/Fifo`, `TE/make_x_characterize`,
+`UTILS/perl_dump`. Each uses a name the wrapper imports in a form perl can only
+parse once that name is declared: `Exists $h{...}` (Tk), `retrieve "f"`
+(Storable), `FileHandle "> $f"`, a bareword `sub @args`. Do not report these as
+regressions. If a seventh appears, read its **first** error, not its last — the
+rest are cascades from it.
 
 ## Reporting
 

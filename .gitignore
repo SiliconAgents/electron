@@ -40,3 +40,7 @@ __pycache__/
 *.orig
 *.rej
 .DS_Store
+
+# Scratch from the make check targets.
+.frags.txt
+.checkwork/
