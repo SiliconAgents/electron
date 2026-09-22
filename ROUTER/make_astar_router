@@ -1,4 +1,4 @@
-#<!-- astar_route: routing through the A* router in pyspark_cad/scala.
+#<!-- flat_route: routing through the A* router in pyspark_cad/scala.
 #
 #     This replaces jroute, which shelled out to 3RDBIN/jr_u_1404_100816 -- a
 #     binary that is not in this repository, so it never ran as shipped.  The
@@ -9,7 +9,7 @@
 #     Three pieces, usable separately:
 #
 #       write_astar_files   database -> <top>.tech and <top>.design
-#       astar_route         writes them, runs route.sh, reads the result back
+#       flat_route         writes them, runs route.sh, reads the result back
 #       read_astar_routes   <top>.routed -> %NETS_ROUTING_ALREADY
 #
 #     UNITS.  This is the usual trap.  The tech file carries UNITS <dbu> and
@@ -645,11 +645,11 @@ return;
 
 }# sub dbfAstarReportGlobalDetail
 #------------------------------------------------------------------------------------------#
-sub astar_route {
+sub flat_route {
 
 my $noOfArguments = @_;
 if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
-  print "Usage : astar_route [-out <dir>] [-layers <lo>:<hi>] [-mode auto|flat|dc|gd]\n";
+  print "Usage : flat_route [-out <dir>] [-layers <lo>:<hi>] [-mode auto|flat|dc|gd]\n";
   print "                    [-gcell <um>] [-flat_limit <nodes>] [-chunks <k>]\n";
   print "                    [-parts <n>] [-driver_mem <size>] [-cores <n>]\n";
   print "                    [-local_top <n>] [-order <mode>] [-pitch <um>]\n";
@@ -843,7 +843,7 @@ if ( $noRead == 1 ) {
 &read_astar_routes("-file", $routedFile);
 return;
 
-}# sub astar_route
+}# sub flat_route
 #------------------------------------------------------------------------------------------#
 #<!-- route.sh prints one line of JSON, tagged ROUTE_JSON in the log so it can
 #     be found among the Spark banners, and also writes it to --json.  Read the

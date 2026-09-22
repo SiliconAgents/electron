@@ -3,7 +3,7 @@
 ########################################################################################
 #<!-- run_jroute cannot work: it shells out to 3RDBIN/jr_u_1404_100816, and no
 #     such binary is in this repository or has been for as long as the history
-#     goes back.  astar_route is the replacement -- the A* router in
+#     goes back.  flat_route is the replacement -- the A* router in
 #     pyspark_cad/scala, driven through ROUTER/make_astar_router.
 #
 #     Kept rather than deleted because the reader below is the only worked
@@ -14,8 +14,8 @@ sub run_jroute {
   #<!-- Telling the caller to run a different command was not much use: this is
   #     wired to the Route menu in all three GUIs, where a menu item cannot take
   #     arguments and printing advice means the button does nothing.  Route. -->
-  print "INFO-RTR-JROUTE : 001 : jrouter is not in this tree; routing with astar_route instead\n";
-  &astar_route(@_);
+  print "INFO-RTR-JROUTE : 001 : jrouter is not in this tree; routing with flat_route instead\n";
+  &flat_route(@_);
   return;
 }#sub run_jroute
 
