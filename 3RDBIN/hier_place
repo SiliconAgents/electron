@@ -2722,6 +2722,13 @@ Controls:
     parser.add_argument("--height", type=int, default=900, help="window height")
     parser.add_argument("--report-only", action="store_true",
                         help="parse, print the summary and exit without opening a window")
+    parser.add_argument("--batch", type=int, default=0, metavar="N",
+                        help="place headlessly: run N physics steps, write the nodefile "
+                             "given by --save and exit without opening a window. Needs "
+                             "PyQt5 but no display; the platform is forced to offscreen.")
+    parser.add_argument("--save", metavar="FILE",
+                        help="where --batch writes the placed nodefile (default: the "
+                             "input nodefile with .placed.nodefile in place of .nodefile)")
     args = parser.parse_args()
 
     print(__banner__)
@@ -2829,6 +2836,20 @@ Controls:
                  "start.\n       Run with --report-only for the headless summary, or use "
                  "a python with PyQt5 installed.")
 
+    # Batch placement.
+    #
+    # The model, the physics and the writer are all independent of painting, so the
+    # only thing standing between this tool and a scripted flow was the window and
+    # the wait for a click. Qt still has to exist -- the view is a QWidget -- but the
+    # offscreen platform gives it somewhere to live without a display, so this runs
+    # over ssh and in a container. No app.exec_(), so nothing waits for a user.
+    #
+    # It is the same placement the window would show after the same number of steps,
+    # which is what makes it worth testing: a flow driven this way exercises the real
+    # placer rather than a stand-in.
+    if args.batch > 0:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
     app = QApplication(sys.argv)
     window = MainWindow(args.nodefile, args.edgefile, args.kinds,
                         args.port_fanout_limit, args.seed,
@@ -2845,6 +2866,24 @@ Controls:
     window.spread_note.setText(f"{int(round(window.view.pin_spread * 100))}%")
     window.view.aspect_limit = args.aspect_limit
     window.setGeometry(100, 100, args.width, args.height)
+
+    if args.batch > 0:
+        out = args.save
+        if not out:
+            out = args.nodefile.replace(".nodefile", ".placed.nodefile")
+            if out == args.nodefile:
+                out = args.nodefile + ".placed.nodefile"
+        # step() returns early unless the animation is running, which is what the
+        # Start button sets; in batch there is no button to press.
+        window.view.animation_running = True
+        print(f"Batch: {args.batch} step(s), writing {out}")
+        for i in range(args.batch):
+            window.view.step()
+        window.view.animation_running = False
+        window.view.save_nodefile(out)
+        print(f"Batch: wrote {out}")
+        return 0
+
     window.show()
     sys.exit(app.exec_())
 

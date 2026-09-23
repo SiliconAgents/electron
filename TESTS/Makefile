@@ -53,6 +53,21 @@ nangate_flat-place:
 	cd workarea ; sed '/^qroute/,$$d' ../nangate_flat.tcl > place_only.tcl ; echo exit >> place_only.tcl
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron --nogui --cleanlog --nolog -f place_only.tcl
 
+# Hierarchical placement of the same design: edit_module, hier_place,
+# commit_module, hier2flat.  Needs electron_hier, not electron -- the pseudo
+# model and these commands live in the hier tool.
+#
+# hier_place runs with -batch, so no window opens and nothing waits for a
+# click.  It still needs PyQt5, which the container has; it does not need a
+# display.
+nangate_hier:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_hier.tcl
+
+# Both tests, flat then hierarchical, on the same netlist.
+nangate_both: nangate_flat nangate_hier
+
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
 app:

@@ -97,10 +97,15 @@ if ( exists $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"} ) {
     my $gDBU = $GLOBAL->dbfGlobalGetDBU;
     my $mulFactor = $gDBU / $fpUnit ;
 
-    my $llx = $dieArea[0]*$mulFactor;
-    my $lly = $dieArea[1]*$mulFactor;
-    my $urx = $dieArea[2]*$mulFactor;
-    my $ury = $dieArea[3]*$mulFactor;
+    #<!-- Rounded, like the components and the pins.  A die that came from a
+    #     module size estimated off cell area is fractional almost every time,
+    #     and the hier flow produced
+    #     "DIEAREA ( 0 0 ) ( 341014.580333451 341014.580333451 )" -- as
+    #     unreadable to a DEF reader as a fractional instance location. -->
+    my $llx = &dbfDefRoundDBU($dieArea[0]*$mulFactor);
+    my $lly = &dbfDefRoundDBU($dieArea[1]*$mulFactor);
+    my $urx = &dbfDefRoundDBU($dieArea[2]*$mulFactor);
+    my $ury = &dbfDefRoundDBU($dieArea[3]*$mulFactor);
 
 print WRITE "DIEAREA ( $llx $lly ) ( $urx $ury ) \;\n";
 print WRITE "\n";

@@ -539,19 +539,28 @@ my $origin = "lower_left";
 my $fanoutLimit = 0;
 my ($writeOnly, $reportOnly, $keepFiles, $noSize, $noPorts) = (0, 0, 0, 0, 0);
 my $hierOnly = 0;
+my $batch = 0;
 my $extra = "";
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : hier_place -module <module name>\n";
   print "                   -placer <path to hier_place>\n";
   print "                         defaults to ELECTRON_HOME/3RDBIN/hier_place\n";
-  print "                   -kinds <\"INST PORT\" | INST>\n";
+  print "                   -kinds <INST,PORT | INST>\n";
+  print "                         comma separated, or space separated in quotes\n";
+  print "                         when typing it at the prompt.  Default INST,PORT.\n";
   print "                   -input <nodefile to read back, if not the default>\n";
   print "                   -layer <layer for pin shapes that have none>\n";
   print "                   -origin <lower_left|center>\n";
   print "                         what hier_place writes; lower_left\n";
   print "                   -fanout_limit <high fan out threshold for the graph>\n";
   print "                   -args <extra options passed straight to hier_place>\n";
+  print "                   -batch <steps>\n";
+  print "                         place headlessly: run that many steps of the\n";
+  print "                         placer and read the result back, with no window\n";
+  print "                         and nothing to click.  Needs PyQt5 but no\n";
+  print "                         display.  This is how a script or a test drives\n";
+  print "                         hier_place; a few hundred steps is usually enough.\n";
   print "                   --report_only\n";
   print "                         parse and summarise without opening a window\n";
   print "                   --write_only\n";
@@ -573,6 +582,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-origin")        { $origin = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
+  elsif ($_[$i] eq "-batch")         { $batch = $_[$i+1]; }
   elsif ($_[$i] eq "--report_only")  { $reportOnly = 1; }
   elsif ($_[$i] eq "--write_only")   { $writeOnly = 1; }
   elsif ($_[$i] eq "--no_size")      { $noSize = 1; }
@@ -654,7 +664,17 @@ unless ( -e $placer ) {
 #     not be either of those, so fall back to the interpreter for that case. -->
 my $cmd = ( -x $placer ) ? "$placer $nodeFile $graphFile"
                          : "python3 $placer $nodeFile $graphFile";
-if ( defined $kinds && $kinds ne "" ) { $cmd .= " --kinds $kinds"; }
+#<!-- -kinds takes a list, and a list is awkward to pass from a flow file: the
+#     command parser splits on whitespace and keeps the quotes, so
+#     -kinds "INST PORT" arrives as two tokens and the second half of the quote
+#     ends up in the shell command as an unterminated string.  Accept commas
+#     instead, and strip any quotes that did survive, so INST,PORT works from a
+#     script and "INST PORT" still works when typed at the prompt. -->
+if ( defined $kinds && $kinds ne "" ) {
+  $kinds =~ s/["']//g;
+  $kinds =~ s/\s*,\s*/ /g;
+  $cmd .= " --kinds $kinds";
+}
 if ( $reportOnly )                    { $cmd .= " --report-only"; }
 if ( defined $extra && $extra ne "" ) { $cmd .= " $extra"; }
 
@@ -664,10 +684,25 @@ if ( $reportOnly ) {
   return;
 }
 
-print "INFO-TST-HIER_PL : 009 : opening hier_place on $module\n";
-print "INFO-TST-HIER_PL : 010 : place the blocks and pins, then press Save \& Close\n";
-print "INFO-TST-HIER_PL : 011 : electron is waiting; the default save name is $placedFile\n";
-my $rc = system($cmd);
+#<!-- -batch is the scripted path.
+#
+#     Without it hier_place opens a window and waits for Save & Close, which is
+#     the right thing for a person and useless to a script: under --nogui, with
+#     no display, Qt aborts and the placement never happens.  -batch runs the
+#     same physics for a fixed number of steps, writes the nodefile and exits,
+#     so a flow file can place a hierarchy unattended. -->
+my $rc;
+if ( $batch > 0 ) {
+  $cmd .= " --batch $batch --save $inFile";
+  print "INFO-TST-HIER_PL : 015 : placing $module headlessly, $batch step(s)\n";
+  $rc = system($cmd);
+}
+else {
+  print "INFO-TST-HIER_PL : 009 : opening hier_place on $module\n";
+  print "INFO-TST-HIER_PL : 010 : place the blocks and pins, then press Save \& Close\n";
+  print "INFO-TST-HIER_PL : 011 : electron is waiting; the default save name is $placedFile\n";
+  $rc = system($cmd);
+}
 if ( $rc != 0 ) {
   print "ERR-TST-HIER_PL : 012 : hier_place exited with status $rc, nothing read back\n";
   return;
@@ -675,7 +710,8 @@ if ( $rc != 0 ) {
 
 unless ( -e $inFile ) {
   print "WARN-TST-HIER_PL : 013 : $inFile was not written, so nothing was saved and nothing is applied\n";
-  print "WARN-TST-HIER_PL : 014 : press Save before closing, or pass -input with the name you used\n";
+  print "WARN-TST-HIER_PL : 014 : press Save before closing, or pass -input with the name you used\n"
+    if ( $batch <= 0 );
   return;
 }
 
