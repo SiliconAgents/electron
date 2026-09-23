@@ -417,6 +417,53 @@ return @picked;
 
 }# sub get_std_cell_libs
 #------------------------------------------------------------------------------------------#
+#<!-- $VAR and ${VAR} in a config path, expanded from the environment.
+#
+#     A config that ships with the repository cannot name an absolute path:
+#     the one checked in pointed at /home/ubuntu/proton, which was somebody
+#     else's machine years ago.  Expanding the environment lets it say
+#     $ELECTRON_HOME/TESTS/library/... and be right in any checkout.
+#
+#     ELECTRON_HOME falls back to the tool's own idea of where it lives, so it
+#     works whether or not the variable is exported.  A name that resolves to
+#     nothing is left alone rather than silently becoming an empty string,
+#     because "no such file: $FOO/x.lef" says what went wrong and
+#     "no such file: /x.lef" does not. -->
+sub dbfConfigExpandVars {
+    my ($value) = @_;
+    return $value unless ( defined $value && $value =~ /\$/ );
+
+    my $home = $ENV{ELECTRON_HOME};
+    unless ( defined $home && $home ne "" ) {
+        $home = $GLOBAL->dbfGlobalGetElectronHome;
+    }
+
+    $value =~ s{\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)}{
+        my $name = defined $1 ? $1 : $2;
+        my $sub;
+        if ( $name eq "ELECTRON_HOME" && defined $home && $home ne "" ) { $sub = $home; }
+        elsif ( defined $ENV{$name} && $ENV{$name} ne "" )              { $sub = $ENV{$name}; }
+        defined $sub ? $sub : ( defined $1 ? "\${$name}" : "\$$name" );
+    }ge;
+
+    return $value;
+}
+
+#<!-- Walk the decoded config and expand every string in it, so no reader has
+#     to remember to do it per key. -->
+sub dbfConfigExpandTree {
+    my ($node) = @_;
+    if ( ref($node) eq 'HASH' ) {
+        foreach my $k ( keys %$node ) { $node->{$k} = &dbfConfigExpandTree($node->{$k}); }
+        return $node;
+    }
+    if ( ref($node) eq 'ARRAY' ) {
+        for ( my $i = 0; $i <= $#{$node}; $i++ ) { $node->[$i] = &dbfConfigExpandTree($node->[$i]); }
+        return $node;
+    }
+    return &dbfConfigExpandVars($node);
+}
+
 sub parse_config {
     my ($config_file) = @_;
 
@@ -428,7 +475,7 @@ sub parse_config {
     my $config = eval { $json->decode($json_text) };
     die "Error parsing JSON in $config_file: $@\n" if $@;
 
-    return $config;
+    return &dbfConfigExpandTree($config);
 }
 
 
