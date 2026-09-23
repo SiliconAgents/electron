@@ -65,8 +65,20 @@ nangate_hier:
 	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_hier.tcl
 
-# Both tests, flat then hierarchical, on the same netlist.
+# From the registered RTL instead of the checked-in netlist: synthesise, then
+# floorplan, then place hierarchically.  This is the only test with flops in
+# it -- vedic.vg, which the other two read, was synthesised from the
+# combinational version of the design.
+#
+# No vedic_filter.vg here: synthesize runs yosys itself and does its own
+# attribute filtering.
+nangate_rtl_hier:
+	mkdir -p workarea
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_rtl_hier.tcl
+
+# Every test, in order of what they cover.
 nangate_both: nangate_flat nangate_hier
+nangate_all:  nangate_flat nangate_hier nangate_rtl_hier
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

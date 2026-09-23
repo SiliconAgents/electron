@@ -1,0 +1,48 @@
+# Cell function map for NangateOpenCellLibrary_PDKv1_2_v2008_10.
+#
+# read_cell_func_map stamps a function and a type onto the cells in PLDB, so a
+# LEF-only flow can tell combinational cells from sequential ones without
+# parsing Liberty. read_lib sets the same thing, but this library's liberty is
+# 27 MB and reading it to learn that DFF_X2 is a flop is a poor trade.
+#
+# It matters to hier_place. The anchor hypergraph keeps the blocks, the ports
+# and the sequential cells as anchors and collapses each cone of combinational
+# logic between them into one hyperedge. A flop the tool cannot type is not an
+# anchor, so it gets collapsed away with the logic around it and the placement
+# loses the very nodes whose position it should be deciding.
+#
+#   <cell>  <type>  [function]     cell may glob with * and ?
+#                                  the first line that matches a cell wins
+#
+# Order matters, so the catch-all is last. Every family here is a real macro
+# in that LEF, taken from its MACRO lines rather than assumed.
+
+# Flops, both plain and scan, with every reset/set variant
+DFF_*       seq     flop
+DFFR_*      seq     flop
+DFFS_*      seq     flop
+DFFRS_*     seq     flop
+SDFF_*      seq     flop
+SDFFR_*     seq     flop
+SDFFS_*     seq     flop
+SDFFRS_*    seq     flop
+
+# Latches. DLH is active high, DLL active low, TLAT is the transparent latch
+DLH_*       seq     latch
+DLL_*       seq     latch
+TLAT_*      seq     latch
+
+# Clock cells. A gate holds state, the buffer does not
+CLKGATETST_* seq    clockgate
+CLKGATE_*   seq     clockgate
+CLKBUF_*    comb    buffer
+
+# Physical-only cells: no logic, but they are not sequential either
+FILLCELL_*  comb    fill
+ANTENNA_*   comb    antenna
+LOGIC0_*    comb    tielow
+LOGIC1_*    comb    tiehigh
+
+# Everything else in this library is combinational: the gates, the adders
+# (FA, HA), the muxes, and the tristates
+*           comb
