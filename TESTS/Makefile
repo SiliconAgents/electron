@@ -75,6 +75,24 @@ nangate_recurse:
 	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_recurse.tcl
 
+# The same run left running: no exit at the end, so it stops at the electron
+# prompt with the placed design in memory.  Type "gui" there for the window --
+# Hier-View for the blocks, FlatView plus Refresh GUI for all 4233 cells --
+# and "legalize_flat" to see what legalization costs.
+#
+# --nogui is what keeps the prompt, which reads backwards and is not a
+# mistake: without it the wrapper forks the GUI and the parent exits, leaving
+# a window and no prompt.  With it the wrapper falls through to the STDIN
+# loop, and "gui" still gets you the window afterwards.  See the header of
+# nangate_recurse_interactive.tcl.
+#
+# The placement is left UNLEGALIZED on purpose; the DEF is written before you
+# legalize, so there is a before to go back to.
+nangate_recurse-interactive:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_recurse_interactive.tcl
+
 # From the registered RTL instead of the checked-in netlist: synthesise, then
 # floorplan, then place hierarchically.  This is the only test with flops in
 # it -- vedic.vg, which the other two read, was synthesised from the

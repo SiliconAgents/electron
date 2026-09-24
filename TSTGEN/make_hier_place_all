@@ -452,6 +452,26 @@ unless ( $noFlatten ) {
   &hier2flat("--physical");
 }
 
+#<!-- Redraw the Hier-View on the top.
+#
+#     hier_place redraws it for each module it places, so with the GUI up the
+#     walk leaves the view showing the LAST module it touched -- halfAdder, at
+#     the bottom of the tree, which looks like the placement went badly wrong.
+#     Put the top back on screen, the same way the refresh button does.
+#
+#     Pins go after, on purpose: activate_HierViewTab does delete('all'), which
+#     takes the HIERPINS tag with it, so drawing them first would just have them
+#     wiped.
+#
+#     The flat view is deliberately NOT touched.  design_display is a command;
+#     whether the flat side is on screen at all is the caller's business, and a
+#     flow that wants it says so. -->
+if ( $GLOBAL->dbGlobalGetGuiStatus == 1 && defined $hier_canvas ) {
+  &activate_HierViewTab;
+  &display_hier_inst_pin;
+  print "INFO-TST-HR_PL_ALL : 020 : the Hier-View has been redrawn on $top\n";
+}
+
 print "INFO-TST-HR_PL_ALL : 016 : $doneCnt module(s) placed";
 print ", $keptCnt kept as found" if ( $keptCnt > 0 );
 print ", $failCnt skipped" if ( $failCnt > 0 );
