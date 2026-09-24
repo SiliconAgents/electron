@@ -1,0 +1,92 @@
+#!/bin/bash
+# pre-push -- build and load-check electron before anything reaches origin.
+#
+# Activate it once per clone:
+#
+#     git config core.hooksPath INSTALL/hooks
+#
+# .git/hooks is not version controlled, so a hook that lives only there ships
+# to nobody; core.hooksPath points git at this directory instead.
+#
+# WHY THIS EXISTS
+#
+# perl -c does not execute a runtime require. A fragment missing its trailing
+# "1;" passes perl -c and then kills all three tools at startup, and that is
+# the mistake this repository keeps making. Deleting the "1;" from
+# ROUTER/make_astar_router and running the two checks:
+#
+#     check-load    FAIL on all three tools, names the file, exit 2
+#     check-syntax  exit 0 -- it cannot see the bug at all
+#
+# So the check that gates a push is check-load: build the tools, start each
+# one, run a command. It takes about 15 seconds.
+#
+# WHAT BLOCKS AND WHAT DOES NOT
+#
+# Only a genuine failure blocks. make check-syntax reports six fragments that
+# use a name the wrapper imports in a form perl only parses once declared --
+# "Exists $h{...}" from Tk, "retrieve" from Storable, and so on -- and exits 0,
+# so the hook does not cry wolf about known noise. If it ever exits non-zero
+# something new is wrong.
+#
+# ESCAPE HATCHES
+#
+#     git push --no-verify              skip every hook, git's own way
+#     ELECTRON_SKIP_PREPUSH=1 git push  skip just this one
+#     ELECTRON_PREPUSH_TESTS=1 git push also run TESTS/nangate_all (~50 s,
+#                                       needs /tech bound in the container)
+#
+# A machine without apptainer or without the .sif cannot run the checks. This
+# refuses the push and says so rather than passing silently: a hook that
+# quietly does nothing is worse than no hook, because it is trusted.
+
+set -uo pipefail
+
+if [[ "${ELECTRON_SKIP_PREPUSH:-0}" == "1" ]]; then
+  echo "pre-push: ELECTRON_SKIP_PREPUSH=1, checks skipped" >&2
+  exit 0
+fi
+
+REPO="$(git rev-parse --show-toplevel)"
+cd "$REPO" || exit 1
+
+SIF="$REPO/INSTALL/podman/pysparkpp.sif"
+
+say()  { echo "pre-push: $*" >&2; }
+fail() { echo "pre-push: $*" >&2; echo "pre-push: push refused. --no-verify overrides." >&2; exit 1; }
+
+command -v apptainer >/dev/null 2>&1 || \
+  fail "apptainer is not on PATH, so the checks cannot run"
+[[ -f "$SIF" ]] || \
+  fail "no container image at $SIF -- build it with 'cd INSTALL/podman && make qrouter'"
+
+# Build first. The tools are gitignored and stamped with the commit count, so
+# whatever is sitting in the tree may predate the changes being pushed; a check
+# against a stale binary proves nothing.
+say "building"
+make >/dev/null 2>&1 || fail "make failed"
+
+say "loading all three tools in the container"
+if ! out="$(make check-load 2>&1)"; then
+  echo "$out" | sed 's/^/  /' >&2
+  fail "a tool failed to load -- see the file named above"
+fi
+echo "$out" | grep -E "loads|FAIL" | sed 's/^/  /' >&2
+
+# Advisory: reported, never blocking, because its six standing failures are
+# artefacts of checking a fragment outside the wrapper that imports its names.
+say "perl -c over every required fragment (advisory)"
+make check-syntax 2>&1 | grep -E "checked|MISSING" | sed 's/^/  /' >&2
+
+if [[ "${ELECTRON_PREPUSH_TESTS:-0}" == "1" ]]; then
+  say "running TESTS/nangate_all"
+  if ! out="$(make -C TESTS nangate_all 2>&1)"; then
+    echo "$out" | grep -E "ERR-|ERROR|no such command" | head -20 | sed 's/^/  /' >&2
+    fail "a test failed"
+  fi
+  echo "$out" | grep -E "RPT_DES : 001|RTR-QROUTE : 026|RD_PS_ND : 005" | sed 's/^/  /' >&2
+  make -C TESTS clean >/dev/null 2>&1
+fi
+
+say "ok"
+exit 0

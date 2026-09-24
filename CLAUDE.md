@@ -31,6 +31,21 @@ make check-syntax       # perl -c on all 323 required fragments
 make app                # interactive shell in that image
 ```
 
+`make check` runs on every push, via a `pre-push` hook. It is committed at
+`INSTALL/hooks/pre-push` and has to be switched on once per clone, because
+`.git/hooks` is not version controlled:
+
+```
+git config core.hooksPath INSTALL/hooks
+```
+
+It builds, then runs `check-load`, and refuses the push if a tool fails to
+load — naming the file. About 15 seconds. `check-syntax` is advisory and never
+blocks, because its six standing failures are artefacts. `git push
+--no-verify` or `ELECTRON_SKIP_PREPUSH=1` skips it;
+`ELECTRON_PREPUSH_TESTS=1` adds `TESTS/nangate_all`. On a machine with no
+apptainer or no `.sif` it refuses rather than passing silently.
+
 To run a flow:
 
 ```
