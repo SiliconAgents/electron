@@ -1104,6 +1104,8 @@ my $fanoutLimit = 0;
 my $nodeFileOnly = 0;
 my $hierOnly = 0;
 my $anchorMode = 0;
+my $fixPlaced = 0;
+my $fixedCnt = 0;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : write_pseudo_graph -module <module name>\n";
@@ -1118,6 +1120,16 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                 memories, hard blocks and ports, and collapse each\n";
   print "                                 cone of combinational logic between them into one\n";
   print "                                 hyperedge, so connectivity through logic survives\n";
+  print "                           --fix_anchors\n";
+  print "                                 write the placed ANCHORS -- hierarchical blocks,\n";
+  print "                                 flops, memories -- and the ports as FIXED rather\n";
+  print "                                 than PLACED, so a second pass places what is left\n";
+  print "                                 without moving them.  Combinational cells stay\n";
+  print "                                 free: one that nothing has placed still reads as\n";
+  print "                                 PLACED at the origin, and fixing those pins the\n";
+  print "                                 whole module there.  Give neither --anchors nor\n";
+  print "                                 --hier_only with this and every leaf cell becomes\n";
+  print "                                 a node, which is what hier_place_cells does.\n";
   print "                           --nodefile_only\n";
   return;
 }
@@ -1128,6 +1140,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "--hier_only")    { $hierOnly = 1; }
   elsif ($_[$i] eq "--anchors")      { $anchorMode = 1; }
+  elsif ($_[$i] eq "--fix_anchors")  { $fixPlaced = 1; }
   elsif ($_[$i] eq "--nodefile_only"){ $nodeFileOnly = 1; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-WR_PS_GRPH : 001 : invalid option $_[$i]\n"; }
 }
@@ -1227,7 +1240,11 @@ foreach my $pin ( sort @ports ) {
     }
   }
   if ( defined $px && defined $py && $st >= 2 ) {
-    $line .= ( $st == 3 ? "FIXED" : "PLACED" ) . " $px $py";
+    #<!-- a port already on its edge is held there by --fix_anchors too:
+    #     hier_place put it on that edge and the cell pass must not slide it -->
+    my $stStr = ( $st == 3 || $fixPlaced ) ? "FIXED" : "PLACED";
+    $line .= "$stStr $px $py";
+    $fixedCnt++ if ( $stStr eq "FIXED" );
     $portLocCnt++;
   }
   else {
@@ -1314,7 +1331,21 @@ foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   my $line = "$nodeCnt $inst INST $w $h ";
   if ( defined $x && defined $y &&
        ($status eq "FIXED" || $status eq "PLACED") ) {
-    $line .= "$status $x $y";
+    #<!-- --fix_anchors writes FIXED instead of PLACED, which is the difference
+    #     between "start it here" and "do not move it", so a second pass can
+    #     place what is left without stirring the module again.
+    #
+    #     Anchors only, and that distinction is the whole point.  A
+    #     combinational cell nothing has placed still carries status PLACED at
+    #     ( 0 0 ) -- 88 of them in vedic_16x16's top level -- so fixing
+    #     everything PLACED pinned the entire module at the origin and the
+    #     placer had nothing left to move.  An anchor is what hier_place
+    #     actually placed: a hierarchical block, a flop, a memory. -->
+    my $holdIt = ( $fixPlaced && $status eq "PLACED" &&
+                   &dbfTstgenPseudoIsAnchor($module, $inst) );
+    my $st = $holdIt ? "FIXED" : $status;
+    $line .= "$st $x $y";
+    $fixedCnt++ if ( $st eq "FIXED" );
   }
   else {
     $line .= "UNPLACED";
@@ -1355,6 +1386,8 @@ my @typeSummary = ();
 foreach my $t ( sort keys %typeCnt ) {
   push(@typeSummary, "$t $typeCnt{$t}");
 }
+print "INFO-TST-WR_PS_GRPH : 030 : $fixedCnt anchor(s) and port(s) written FIXED, the placer will not move them\n"
+  if ( $fixedCnt > 0 );
 print "INFO-TST-WR_PS_GRPH : 008 : node types: ", join(", ", @typeSummary), "\n";
 if ( $anchorMode ) {
   print "INFO-TST-WR_PS_GRPH : 023 : $collapsedCnt instance(s) are not anchors and were collapsed into hyperedges\n";
@@ -3231,5 +3264,146 @@ sub copy_port_loc_from_pseudo_to_flat
     }
   }
 }
+
+
+#------------------------------------------------------------------------------------------#
+#<!-- hier_place_cells: the combinational cells of one module.
+#
+#     hier_place places what its anchor graph keeps -- the hierarchical blocks,
+#     the sequential cells, the memories and the ports -- and collapses every
+#     cone of combinational logic between them into a hyperedge.  That is the
+#     right graph for deciding where the blocks go, and it leaves the bulk of
+#     the module unplaced: 88 of the 159 leaf instances in vedic_16x16's top
+#     level.
+#
+#     This is the second pass.  Same placer, a different graph: every leaf cell
+#     is a node, and everything the first pass settled is written FIXED so it
+#     cannot move.  The combinational cells then arrange themselves around the
+#     blocks, the flops and the ports rather than being placed in a vacuum.
+#
+#     Blocks are handed over as blockage, so a cell cannot land inside one.
+#
+#     What this does NOT do is legalise.  The placer spreads on a continuous
+#     field and snaps nothing to a row, so the result overlaps and sits off
+#     grid.  Row legalisation happens once, on the flat database, after
+#     hier2flat: legalize_flat.  Doing it per module would need a legaliser
+#     that works on the pseudo database, and there is not one. -->
+sub hier_place_cells {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+my $module = $TOP_MODULE;
+my $placer;
+my $batch = 400;
+my $fanoutLimit = 0;
+my $extra = "";
+my ($writeOnly, $keepFiles, $noBlockage) = (0, 0, 0);
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : hier_place_cells -module <module name>\n";
+  print "                         -batch <steps>       placer steps, default 400\n";
+  print "                         -placer <path>       defaults to ELECTRON_HOME/3RDBIN/hier_place\n";
+  print "                         -fanout_limit <n>    high fan out threshold for the graph\n";
+  print "                         -args <extra>        passed straight to hier_place\n";
+  print "                         --no_blockage        let cells sit inside a block\n";
+  print "                         --write_only         write the graph and stop\n";
+  print "                         --keep               keep the graph files\n";
+  print "\n";
+  print "        Places the leaf cells hier_place left out.  Run hier_place first:\n";
+  print "        the blocks, flops and ports it placed are held FIXED here, and this\n";
+  print "        fills in the combinational logic around them.\n";
+  print "\n";
+  print "        It does not legalise.  Run hier2flat then legalize_flat for that.\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-module")        { $module = $_[$i+1]; }
+  elsif ($_[$i] eq "-placer")        { $placer = $_[$i+1]; }
+  elsif ($_[$i] eq "-batch")         { $batch = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_blockage")  { $noBlockage = 1; }
+  elsif ($_[$i] eq "--write_only")   { $writeOnly = 1; }
+  elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_CL : 001 : invalid option $_[$i]\n"; }
+}
+
+unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$module} ) {
+  print "ERR-TST-HR_PL_CL : 002 : module $module is not being edited, run edit_module first\n";
+  return;
+}
+
+unless ( defined $placer && $placer ne "" ) { $placer = $ENV{HIER_PLACE}; }
+unless ( defined $placer && $placer ne "" ) {
+  my $electronHome = $GLOBAL->dbfGlobalGetElectronHome;
+  $placer = "$electronHome/3RDBIN/hier_place";
+}
+
+my $nodeFile   = "$module.cells.nodefile";
+my $graphFile  = "$module.cells.txt";
+my $placedFile = "$module.cells.placed.nodefile";
+unlink($placedFile) if ( -e $placedFile );
+
+#<!-- Neither --anchors nor --hier_only, so every leaf cell is a node, and
+#     --fix_placed so the first pass's work is held still. -->
+my @writeArgs = ("-module", $module, "-nodefile", $nodeFile,
+                 "-graph", $graphFile, "--fix_anchors");
+push(@writeArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
+&write_pseudo_graph(@writeArgs);
+
+unless ( -e $nodeFile && -e $graphFile ) {
+  print "ERR-TST-HR_PL_CL : 003 : the nodefile and graph were not written, stopping\n";
+  return;
+}
+if ( $writeOnly ) {
+  print "INFO-TST-HR_PL_CL : 004 : --write_only given, $nodeFile and $graphFile left in place\n";
+  return;
+}
+unless ( -e $placer ) {
+  print "WARN-TST-HR_PL_CL : 005 : hier_place not found at $placer\n";
+  print "WARN-TST-HR_PL_CL : 006 : $nodeFile and $graphFile are written, nothing was placed\n";
+  return;
+}
+
+my $cmd = ( -x $placer ) ? "$placer $nodeFile $graphFile"
+                         : "python3 $placer $nodeFile $graphFile";
+$cmd .= " --kinds INST PORT";
+$cmd .= " --blockage" unless ( $noBlockage );
+#<!-- nothing may reshape here: a block whose module is already placed inside
+#     has a size its contents were arranged for, and changing it would leave
+#     that arrangement hanging outside its own box -->
+$cmd .= " --no-reshape";
+$cmd .= " --batch $batch --save $placedFile";
+$cmd .= " $extra" if ( defined $extra && $extra ne "" );
+
+print "INFO-TST-HR_PL_CL : 007 : placing the cells of $module headlessly, $batch step(s)\n";
+my $rc = system($cmd);
+if ( $rc != 0 ) {
+  print "ERR-TST-HR_PL_CL : 008 : hier_place exited with status $rc, nothing read back\n";
+  return;
+}
+unless ( -e $placedFile ) {
+  print "ERR-TST-HR_PL_CL : 009 : $placedFile was not written, nothing is applied\n";
+  return;
+}
+
+#<!-- --no_size: a leaf cell's size is its LEF footprint and is not the
+#     placer's to change.  Only the locations come back. -->
+&read_pseudo_nodefile("-module", $module, "-input", $placedFile, "--no_size");
+
+unless ( $keepFiles ) {
+  unlink($nodeFile);
+  unlink($graphFile);
+  unlink($placedFile);
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command hier_place_cells took:",timestr($td),"\n";
+
+}# sub hier_place_cells
+#------------------------------------------------------------------------------------------#
 
 1;
