@@ -9,10 +9,12 @@
 # vedic.vg -- a netlist synthesised years ago from the combinational version
 # of the same design, with no flop in it anywhere.
 #
-# So the three tests are:
+# So the four tests are:
 #
 #   nangate_flat.tcl      vedic.vg, combinational, flat place and route
-#   nangate_hier.tcl      vedic.vg, combinational, hierarchical placement
+#   nangate_hier.tcl      vedic.vg, combinational, the top level only
+#   nangate_recurse.tcl   vedic.vg, combinational, the whole tree placed by
+#                         hier_place_all, then legalised
 #   nangate_rtl_hier.tcl  this one: registered RTL, synthesised here, then
 #                         floorplanned and placed hierarchically
 #
@@ -83,7 +85,8 @@ write_def -output vedic_16x16.fplan.def --overwrite
 # marks a leaf instance PLACED on the strength of its orientation, so a cell
 # nothing ever placed still comes out PLACED at the origin.  The leaf cells
 # inside the seven blocks are not placed at all; filling those is a second
-# pass per module, walked bottom up.
+# pass per module, which is what hier_place_all does -- see
+# nangate_recurse.tcl, which runs it over the same design.
 #-----------------------------------------------------------------------------
 edit_module --top
 hier_place -kinds INST,PORT -batch 400

@@ -65,6 +65,16 @@ nangate_hier:
 	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_hier.tcl
 
+# The same design placed all the way down instead of one level deep:
+# hier_place_all walks the eleven modules of the tree, placing and committing
+# each one, then flattens and legalises.  This is the target that produces a
+# fully placed DEF from the hierarchical flow; nangate_hier stops after the
+# top's seven blocks.
+nangate_recurse:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_recurse.tcl
+
 # From the registered RTL instead of the checked-in netlist: synthesise, then
 # floorplan, then place hierarchically.  This is the only test with flops in
 # it -- vedic.vg, which the other two read, was synthesised from the
@@ -78,7 +88,7 @@ nangate_rtl_hier:
 
 # Every test, in order of what they cover.
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_rtl_hier
+nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_rtl_hier
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

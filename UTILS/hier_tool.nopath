@@ -517,6 +517,7 @@ require "$BEEHOME/TSTGEN/GEOMETRYENG/make_subdesign";
 require "$BEEHOME/TSTGEN/make_populate_designLib";
 require "$BEEHOME/TSTGEN/make_router_graph_file";
 require "$BEEHOME/TSTGEN/make_hier_place_graph";
+require "$BEEHOME/TSTGEN/make_hier_place_all";
 require "$BEEHOME/TSTGEN/make_pseudo_floorplan";
 require "$BEEHOME/TSTGEN/make_hier_pin_placement";
 require "$BEEHOME/TSTGEN/make_HierPinBySide_db";

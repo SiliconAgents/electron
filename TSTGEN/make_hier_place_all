@@ -1,0 +1,472 @@
+#<!-- hier_place_all: place a whole hierarchy, one module at a time.
+#
+#     WHAT IT DRIVES
+#
+#     Everything here already existed as a single-module command.  Placing one
+#     module by hand is:
+#
+#         edit_module   -module M      open M, take its box from the parent
+#         hier_place    -module M      blocks, flops and ports
+#         hier_place_cells -module M   the combinational logic around them
+#         commit_module -module M --physical_only
+#
+#     and that is exactly what this runs, once per module, walking down from
+#     the top.  Nothing new is placed by this file; what is new is the order
+#     and the bookkeeping, because getting either wrong silently loses a
+#     placement.
+#
+#     WHY THE ORDER IS TOP DOWN AND WHY EACH LEVEL MUST BE COMMITTED
+#
+#     A module has no size of its own until something gives it one.  What gives
+#     it one is its instance box in the PARENT's floorplan:
+#     dbfTstgenCalcModuleSizeFromParentFlplan reads the parent floorplan's hier
+#     inst extent and hands it to the child.  The parent floorplan only carries
+#     that box once the parent has been committed.
+#
+#     So the parent must be placed AND committed before the child is opened.
+#     Open the child first and it comes up with no box, which a placer reads as
+#     zero area -- no density, nothing to spread, and every node lands on top
+#     of every other.
+#
+#     WHY THE WALK IS OVER DISTINCT MODULES, NOT INSTANCES
+#
+#     A module's internal placement is stored once, in its own floorplan.  Two
+#     instances of the same module therefore share one arrangement -- there is
+#     nowhere to put a second one.  The walk visits each module once and says
+#     so when a module has more than one instance, because the boxes then have
+#     to agree: whichever instance the size is taken from, the other instances
+#     get the same contents, and a smaller box would have those contents
+#     hanging outside it.
+#
+#     Visiting distinct modules also terminates on a cycle, which a verilog
+#     netlist cannot have but a hand-built VNOM can.
+#
+#     THE TWO MODES THE FLOW ASKED FOR
+#
+#     Auto, the default: every module in the walk is placed by the tool.
+#
+#     Interactive top, auto rest -- --skip_placed.  Place the top, or the top
+#     few levels, by hand with the GUI, then hand the rest over:
+#
+#         edit_module --top
+#         hier_place                      the window, a person, a mouse
+#         commit_module --physical_only
+#         hier_place_all --skip_placed
+#
+#     A module whose floorplan already places something keeps that arrangement:
+#     hier_place is not run on it.  hier_place_cells still is, so the
+#     combinational logic gets filled in around the hand placement rather than
+#     left at the origin -- the blocks and flops a person placed come back
+#     PLACED and are written FIXED, so they cannot move.  -depth stops the walk
+#     at a level if you would rather do the lower ones yourself.
+#
+#     WHAT IT DOES NOT DO
+#
+#     It does not legalise.  hier_place spreads on a continuous field and snaps
+#     nothing to a row, so every level comes out overlapping and off grid.  Row
+#     legalisation happens once, on the flat database, after hier2flat:
+#     legalize_flat.  There is no legaliser that works on the pseudo database.
+#
+#     It does not route, and it does not size a module by anything but its
+#     parent's box: -util is passed to edit_module for the one case where there
+#     is no parent box to inherit. -->
+
+
+#<!-- The floorplan of a module, by cellref.
+#
+#     Deliberately not get_floorplanID_of_module, whose last resort is
+#     $flplanName =~ /$module/ -- an unanchored substring match that hands back
+#     a different module's floorplan whenever one name contains another, which
+#     in a design of vedic_2x2 and vedic_4x4 is most of them. -->
+sub dbfTstgenHierModuleFlplanID {
+
+my ($module) = @_;
+unless ( defined $module && $module ne "" ) {
+  return 0;
+}
+if ( exists $FLOORPLAN_LOOKUP{"$module/_self_"} ) {
+  return $FLOORPLAN_LOOKUP{"$module/_self_"};
+}
+if ( exists $FLOORPLAN_LOOKUP{$module} ) {
+  return $FLOORPLAN_LOOKUP{$module};
+}
+foreach my $id ( sort keys %FLOORPLAN_ALREADY ) {
+  if ( $FLOORPLAN_ALREADY{$id}->dbFlplanGetCellref eq $module ) {
+    return $id;
+  }
+}
+return 0;
+
+}# sub dbfTstgenHierModuleFlplanID
+
+
+#<!-- Has anything in this module's floorplan actually been placed?
+#
+#     "Has a box" is not the question.  edit_module gives every instance a box
+#     the moment it learns the instance's size, and hier2flat marks a leaf
+#     PLACED on the strength of its orientation alone, so an untouched module
+#     is full of instances that carry a size and sit at ( 0 0 ).  The question
+#     is whether anything sits anywhere ELSE.
+#
+#     One instance legitimately at exactly the origin therefore reads as
+#     unplaced.  That is the direction to be wrong in: the cost is re-placing a
+#     module, where believing an unplaced module is placed leaves the whole
+#     level stacked in the corner and says nothing. -->
+sub dbfTstgenHierModuleIsPlaced {
+
+my ($module) = @_;
+
+my $flplanID = &dbfTstgenHierModuleFlplanID($module);
+unless ( $flplanID && exists $FLOORPLAN_ALREADY{$flplanID} ) {
+  return 0;
+}
+
+foreach my $inst ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstList ) {
+  my @ext = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetHierInstExtent($inst);
+  if ( @ext >= 4 && ($ext[0] != 0 || $ext[1] != 0) ) {
+    return 1;
+  }
+}
+foreach my $inst ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetLeafInstList ) {
+  my @loc = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetLeafInstLoc($inst);
+  if ( @loc >= 2 && ($loc[0] != 0 || $loc[1] != 0) ) {
+    return 1;
+  }
+}
+
+return 0;
+
+}# sub dbfTstgenHierModuleIsPlaced
+
+
+#<!-- The module's own box, in microns, as the pseudo database has it. -->
+sub dbfTstgenHierPseudoSize {
+
+my ($module) = @_;
+unless ( exists $PSEUDO_MODULE_ALREADY{$module} ) {
+  return (0, 0);
+}
+#<!-- dbaTstgenGetSize returns microns already, unlike the flat floorplan -->
+my @size = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetSize;
+unless ( @size >= 4 && defined $size[2] && defined $size[3] ) {
+  return (0, 0);
+}
+return ($size[2] - $size[0], $size[3] - $size[1]);
+
+}# sub dbfTstgenHierPseudoSize
+
+
+#<!-- Depth first pre-order over the distinct modules under $mod.
+#
+#     Pre-order, so a parent is always in the list before its children: that is
+#     the order the placement has to happen in, because a child takes its size
+#     from the parent's committed floorplan.
+#
+#     %$seen keys the modules already in the list and values the instance paths
+#     each was reached by, so the caller can report a module used more than
+#     once.  It is also what terminates the walk: a module is expanded once,
+#     cycle or no cycle. -->
+sub dbfTstgenHierPlaceWalk {
+
+my ($mod, $depth, $path, $maxDepth, $order, $seen, $instCnt) = @_;
+
+if ( exists $seen->{$mod} ) {
+  push(@{$seen->{$mod}}, $path);
+  return;
+}
+$seen->{$mod} = [ $path ];
+push(@$order, [ $mod, $depth, $path ]);
+
+if ( $maxDepth >= 0 && $depth >= $maxDepth ) {
+  return;
+}
+unless ( exists $MODULE_ALREADY{$mod} ) {
+  return;
+}
+
+my %childInsts = ();
+foreach my $inst ( $MODULE_ALREADY{$mod}->dbVNOMGetHierInst ) {
+  my $cellref = $MODULE_ALREADY{$mod}->dbVNOMGetHierInstCell($inst);
+  #<!-- dbVNOMGetHierInstCell answers UND for an instance it has no cell for -->
+  unless ( defined $cellref && $cellref ne "" && $cellref ne "UND" ) {
+    next;
+  }
+  #<!-- A cell in the library is a leaf whatever VNOM filed it under: its
+  #     contents are the LEF's business and there is nothing to place inside
+  #     it. -->
+  unless ( exists $MODULE_ALREADY{$cellref} ) {
+    next;
+  }
+  push(@{$childInsts{$cellref}}, $inst);
+  $instCnt->{$cellref}++;
+}
+
+foreach my $child ( sort keys %childInsts ) {
+  my $inst = (sort @{$childInsts{$child}})[0];
+  &dbfTstgenHierPlaceWalk($child, $depth + 1, "$path/$inst",
+                          $maxDepth, $order, $seen, $instCnt);
+}
+
+}# sub dbfTstgenHierPlaceWalk
+
+
+#****f* /hier_place_all
+#  hier_place_all
+# FUNCTION
+#  Place every module of a hierarchy, walking down from the top.
+#
+#  Runs edit_module, hier_place, hier_place_cells and commit_module once per
+#  distinct module, parents before children, then reopens the top and expands
+#  the result into the flat database with hier2flat.
+#****
+sub hier_place_all {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $top = $GLOBAL->dbfGlobalGetTOP;
+my $batch = 400;
+my $cellsBatch;
+my $maxDepth = -1;
+my $util;
+my $placer;
+my $fanoutLimit = 0;
+my $extra = "";
+my ($noCells, $noFlatten, $skipPlaced, $reportOnly, $keepFiles) = (0, 0, 0, 0, 0);
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : hier_place_all -module <top module>    default: the current top\n";
+  print "                       -batch <steps>          blocks and ports, per module, default 400\n";
+  print "                       -cells_batch <steps>    cells, per module, default -batch\n";
+  print "                       -depth <levels>         0 is the top only, unset is the whole tree\n";
+  print "                       -util <percent>         for a module with no parent box to inherit\n";
+  print "                       -placer <path>          defaults to ELECTRON_HOME/3RDBIN/hier_place\n";
+  print "                       -fanout_limit <n>       high fan out threshold for the graphs\n";
+  print "                       -args <extra>           passed straight to hier_place\n";
+  print "                       --skip_placed           keep an existing placement, fill in the cells\n";
+  print "                       --no_cells              blocks and ports only\n";
+  print "                       --no_flatten            skip the closing hier2flat\n";
+  print "                       --report_only           show the walk, place nothing\n";
+  print "                       --keep                  keep the per module graph files\n";
+  print "\n";
+  print "        Places every module under the top, parents first: a module takes its\n";
+  print "        size from its instance box in the parent's floorplan, so the parent\n";
+  print "        has to be placed and committed before the child is opened.\n";
+  print "\n";
+  print "        --skip_placed is the hand off.  Place the top levels yourself with\n";
+  print "        the hier_place window, commit them, then run this: a module whose\n";
+  print "        floorplan already places something keeps that arrangement and only\n";
+  print "        gets its combinational cells filled in around it.\n";
+  print "\n";
+  print "        It does not legalise.  Run legalize_flat afterwards: the placer\n";
+  print "        snaps nothing to a row, so every level comes out overlapping.\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-module")        { $top = $_[$i+1]; }
+  elsif ($_[$i] eq "-batch")         { $batch = $_[$i+1]; }
+  elsif ($_[$i] eq "-cells_batch")   { $cellsBatch = $_[$i+1]; }
+  elsif ($_[$i] eq "-depth")         { $maxDepth = $_[$i+1]; }
+  elsif ($_[$i] eq "-util")          { $util = $_[$i+1]; }
+  elsif ($_[$i] eq "-placer")        { $placer = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
+  elsif ($_[$i] eq "--skip_placed")  { $skipPlaced = 1; }
+  elsif ($_[$i] eq "--no_cells")     { $noCells = 1; }
+  elsif ($_[$i] eq "--no_flatten")   { $noFlatten = 1; }
+  elsif ($_[$i] eq "--report_only")  { $reportOnly = 1; }
+  elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_ALL : 001 : invalid option $_[$i]\n"; }
+}
+
+unless ( defined $top && $top ne "" && exists $MODULE_ALREADY{$top} ) {
+  print "ERR-TST-HR_PL_ALL : 002 : there is no module $top to place, read a netlist first\n";
+  return;
+}
+unless ( defined $cellsBatch && $cellsBatch ne "" ) {
+  $cellsBatch = $batch;
+}
+
+#--------------------------------------------------------------------------
+# The walk
+#--------------------------------------------------------------------------
+my @order = ();
+my %seen = ();
+my %instCnt = ();
+&dbfTstgenHierPlaceWalk($top, 0, $top, $maxDepth, \@order, \%seen, \%instCnt);
+
+my $modCnt = @order;
+print "INFO-TST-HR_PL_ALL : 003 : $modCnt module(s) to place under $top\n";
+foreach my $rec ( @order ) {
+  my ($mod, $depth, $path) = @{$rec};
+  my $indent = "  " x $depth;
+  my $n = $instCnt{$mod};
+  my $note = "";
+  if ( defined $n && $n > 1 ) { $note = "   ($n instances, one shared floorplan)"; }
+  if ( $skipPlaced && &dbfTstgenHierModuleIsPlaced($mod) ) {
+    $note .= "   (already placed)";
+  }
+  print "    $indent$mod$note\n";
+}
+
+#<!-- One floorplan per module, so every instance of a module gets the same
+#     contents.  Worth saying out loud: the size comes from one instance box
+#     and the others have to match it, and nothing downstream checks that. -->
+my @shared = ();
+foreach my $rec ( @order ) {
+  my $mod = $rec->[0];
+  if ( defined $instCnt{$mod} && $instCnt{$mod} > 1 ) { push(@shared, $mod); }
+}
+if ( @shared ) {
+  my $verb = ( @shared > 1 ) ? "are" : "is";
+  print "WARN-TST-HR_PL_ALL : 004 : @shared $verb instantiated more than once\n";
+  print "WARN-TST-HR_PL_ALL : 005 : a module has one floorplan, so every instance of it gets the\n";
+  print "WARN-TST-HR_PL_ALL : 006 : same internal placement, sized from the first instance found;\n";
+  print "WARN-TST-HR_PL_ALL : 007 : an instance given a smaller box will have its contents outside it\n";
+}
+
+if ( $reportOnly ) {
+  print "INFO-TST-HR_PL_ALL : 008 : --report_only given, nothing was placed\n";
+  return;
+}
+
+#--------------------------------------------------------------------------
+# Place, one module at a time, parents first
+#--------------------------------------------------------------------------
+my ($doneCnt, $keptCnt, $failCnt) = (0, 0, 0);
+my $step = 0;
+
+foreach my $rec ( @order ) {
+  my ($mod, $depth, $path) = @{$rec};
+  $step++;
+
+  #<!-- Don't reopen a module that is already open with a size.
+  #
+  #     The first module in the walk is normally the one the flow just set up
+  #     by hand -- "edit_module --top -util 50" -- and reopening it throws that
+  #     away: edit_module has no memory of -util, so with no floorplan to load
+  #     yet it re-estimates the size at the default 70% and the die silently
+  #     shrinks by sqrt(50/70).  A module that is open, sized, and has its
+  #     instances loaded needs nothing done to it.
+  #
+  #     A child is never in that state on the way down: opening its parent
+  #     leaves it with pins and, after the parent commits, a size, but no
+  #     instances and no nets -- so it is opened properly here. -->
+  my ($openW, $openH) = &dbfTstgenHierPseudoSize($mod);
+  if ( $TOP_MODULE eq $mod && exists $PSEUDO_VINST_ALREADY{$mod} &&
+       $openW > 0 && $openH > 0 ) {
+    print "INFO-TST-HR_PL_ALL : 019 : $mod is already open at its current size, using it as it is\n";
+  }
+  else {
+    my @editArgs = ("-module", $mod);
+    push(@editArgs, "-util", $util) if ( defined $util && $util ne "" );
+    &editModule(@editArgs);
+  }
+
+  unless ( exists $PSEUDO_MODULE_ALREADY{$mod} ) {
+    print "WARN-TST-HR_PL_ALL : 009 : $mod could not be opened for edit, skipping it\n";
+    $failCnt++;
+    next;
+  }
+
+  #<!-- No box means no area, and a placer handed a design of zero area has no
+  #     density to spread: every node ends up on top of every other.  Say which
+  #     module and why rather than placing into nothing. -->
+  my ($w, $h) = &dbfTstgenHierPseudoSize($mod);
+  if ( $w <= 0 || $h <= 0 ) {
+    print "WARN-TST-HR_PL_ALL : 010 : $mod has no size, so there is nothing to place into\n";
+    print "WARN-TST-HR_PL_ALL : 011 : its instance box in the parent floorplan is empty; commit the\n";
+    print "WARN-TST-HR_PL_ALL : 012 : parent first, or give -util so the size is estimated from cell area\n";
+    $failCnt++;
+    next;
+  }
+
+  my $keepExisting = ( $skipPlaced && &dbfTstgenHierModuleIsPlaced($mod) );
+
+  printf("INFO-TST-HR_PL_ALL : 013 : [%d/%d] %s, %.3f x %.3f um at depth %d\n",
+         $step, $modCnt, $mod, $w, $h, $depth);
+
+  if ( $keepExisting ) {
+    print "INFO-TST-HR_PL_ALL : 014 : $mod is already placed, keeping that arrangement\n";
+    $keptCnt++;
+  }
+  else {
+    my @placeArgs = ("-module", $mod, "-kinds", "INST,PORT", "-batch", $batch);
+    push(@placeArgs, "-placer", $placer) if ( defined $placer && $placer ne "" );
+    push(@placeArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
+    push(@placeArgs, "-args", $extra) if ( defined $extra && $extra ne "" );
+    push(@placeArgs, "--keep") if ( $keepFiles );
+    &hier_place(@placeArgs);
+  }
+
+  #<!-- The second pass, and it runs for a hand placed module too: that is the
+  #     whole point of --skip_placed.  hier_place_cells writes the anchors
+  #     FIXED, so whatever was placed above -- by the tool or by a person --
+  #     holds still while the combinational logic arranges itself around it. -->
+  unless ( $noCells ) {
+    my @cellArgs = ("-module", $mod, "-batch", $cellsBatch);
+    push(@cellArgs, "-placer", $placer) if ( defined $placer && $placer ne "" );
+    push(@cellArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
+    push(@cellArgs, "--keep") if ( $keepFiles );
+    &hier_place_cells(@cellArgs);
+  }
+
+  #<!-- Commit before descending.  The child's size is read out of this
+  #     floorplan by dbfTstgenCalcModuleSizeFromParentFlplan when edit_module
+  #     opens it, and until the commit runs the floorplan does not have the
+  #     instance box to read.
+  #
+  #     --physical_only: this places, it does not rewrite netlists.  A full
+  #     commit would rebuild the module's conn lines out of the pseudo
+  #     database, which is a lot of risk for no placement. -->
+  &commitModule("-module", $mod, "--physical_only");
+  $doneCnt++;
+}
+
+#--------------------------------------------------------------------------
+# Put the design top back
+#--------------------------------------------------------------------------
+#<!-- edit_module moves $TOP_MODULE to whatever it opened, and the walk ends on
+#     the deepest module it touched.  $TOP_MODULE is what write_def means by
+#     the design: it names the DESIGN line, picks the floorplan for DIEAREA and
+#     the rows, and reads PORTS_ALREADY{$TOP_MODULE} for the PINS section.
+#     Leave it on a leaf module and write_def emits that module -- the die the
+#     size of the block, no pins, and every component of the real design
+#     outside the boundary.  That is what this looked like before the restore
+#     was here, and it looked like a placement bug rather than a name.
+#
+#     Note that edit_module does NOT move GLOBAL's copy of the top, which is
+#     what hier2flat reads, so the two disagree while the walk is running.
+#     $TOP_MODULE is the one to compare and the one to put back.
+#
+#     Reopening also leaves the session where an interactive user expects it,
+#     which is where edit_module --top would have left it. -->
+if ( $TOP_MODULE ne $top ) {
+  print "INFO-TST-HR_PL_ALL : 015 : reopening $top, the walk ended on $TOP_MODULE\n";
+  &editModule("-module", $top);
+}
+
+unless ( $noFlatten ) {
+  &hier2flat("--physical");
+}
+
+print "INFO-TST-HR_PL_ALL : 016 : $doneCnt module(s) placed";
+print ", $keptCnt kept as found" if ( $keptCnt > 0 );
+print ", $failCnt skipped" if ( $failCnt > 0 );
+print "\n";
+if ( $failCnt > 0 ) {
+  print "WARN-TST-HR_PL_ALL : 017 : $failCnt module(s) were skipped and are not placed, see above\n";
+}
+unless ( $noFlatten ) {
+  print "INFO-TST-HR_PL_ALL : 018 : the placement is not legal; run legalize_flat to snap it to rows\n";
+}
+
+my $t1 = new Benchmark;
+my $td = timediff($t1, $t0);
+print "Command hier_place_all took:",timestr($td),"\n";
+
+}# sub hier_place_all
+
+1;

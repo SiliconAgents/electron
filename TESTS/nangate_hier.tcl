@@ -27,19 +27,16 @@
 # inside those blocks do not: the DEF comes out with its PINS placed and its
 # COMPONENTS unplaced.  That is the flow working as designed, not a failure.
 #
-# Filling the blocks is a second pass, one per module, and it is a different
-# problem: a module whose children are blocks wants hier_place again, and a
-# module whose children are leaf cells wants a flat placer inside its own
-# floorplan.  Doing the whole tree means walking it bottom up -- halfAdder,
-# the adders, vedic_2x2, vedic_4x4, vedic_8x8, then the top -- because
-# commit_module sizes an instance from its child's committed floorplan, so a
-# child has to be placed before its parent can be.  No such loop exists any
-# more: the one that did, place_hier_mpl, drove 3RDBIN/mpl, which is not in
-# this tree, so it placed nothing and committed that nothing over the whole
-# hierarchy.  It has been removed.
+# Filling the blocks is a second pass, one per module, and that loop now
+# exists: hier_place_all, which nangate_recurse.tcl drives over this same
+# design.  It walks the tree TOP DOWN, not bottom up -- a module has no size of
+# its own until its instance box in the parent's committed floorplan gives it
+# one, so the parent has to be placed and committed before the child can be
+# opened at all.
 #
 # So this test covers the three commands it names, on one level of hierarchy.
-# nangate_flat.tcl is the one that produces a fully placed DEF.
+# nangate_recurse.tcl is the hierarchical run that produces a fully placed DEF;
+# nangate_flat.tcl is the flat one.
 
 #-----------------------------------------------------------------------------
 # Library and netlist, exactly as the flat test reads them

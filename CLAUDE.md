@@ -117,6 +117,28 @@ Nothing bridges pseudo → flat automatically. The chain is
 `PORTS_ALREADY`. `hier2flat` is global: it rebuilds from the whole hierarchy, not
 just the edited module.
 
+## Walking the hierarchy — two traps
+
+`$TOP_MODULE` and `$GLOBAL->dbfGlobalGetTOP` are **not the same variable and they
+diverge**. `edit_module` moves `$TOP_MODULE` to whatever it opened and leaves
+GLOBAL's copy alone. `write_def` means `$TOP_MODULE` by "the design" — DESIGN
+line, DIEAREA, rows, `PORTS_ALREADY{$TOP_MODULE}` for PINS — while `hier2flat`
+reads `dbfGlobalGetTOP`. Descend the hierarchy and forget to put `$TOP_MODULE`
+back and `write_def` emits the last module you visited: block-sized die, no pins,
+every component of the real design outside the boundary. It reads as a placement
+bug and is a name.
+
+`dbfTstgenEditModule($M)` **deletes the pseudo model of M and of every
+hierarchical child of M** before reloading. So a walk must go strictly top down
+and must never reopen an ancestor mid-walk: a child's size comes from
+`dbfTstgenCalcModuleSizeFromParentFlplan`, which needs the parent's
+`PSEUDO_VINST_ALREADY` still in place *and* the parent's floorplan already
+committed. Parent placed, parent committed, then child — in that order, or the
+child opens with zero area and the placer stacks everything at one point.
+
+`edit_module` also has no memory of `-util`: reopening a module that has no
+floorplan yet re-estimates its size at the default 70%.
+
 ## Conn lines
 
 A VNOM conn line must be a complete verilog statement ending `") ;"`. Readers strip
