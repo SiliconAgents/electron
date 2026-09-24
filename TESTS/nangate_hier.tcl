@@ -33,9 +33,10 @@
 # floorplan.  Doing the whole tree means walking it bottom up -- halfAdder,
 # the adders, vedic_2x2, vedic_4x4, vedic_8x8, then the top -- because
 # commit_module sizes an instance from its child's committed floorplan, so a
-# child has to be placed before its parent can be.  place_hier_mpl in
-# PLACER/FUNTIONS/make_placer_commands is that loop, and it cannot run here:
-# it drives 3RDBIN/mpl, which is not in this tree.
+# child has to be placed before its parent can be.  No such loop exists any
+# more: the one that did, place_hier_mpl, drove 3RDBIN/mpl, which is not in
+# this tree, so it placed nothing and committed that nothing over the whole
+# hierarchy.  It has been removed.
 #
 # So this test covers the three commands it names, on one level of hierarchy.
 # nangate_flat.tcl is the one that produces a fully placed DEF.

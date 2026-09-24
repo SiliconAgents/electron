@@ -82,28 +82,19 @@ sub doHierPnR {
 }#sub doHierPnR
 
 ##########################################################################################################
-########## command to run mpl placer on full hierarchy and convert design from  hier to flat #############
+# place_hier_mpl is gone.  It walked every module doing editModule,
+# place_graph_mpl_pseudo, commitModuleLocOnly and then hier2flat -- the right
+# shape for a hierarchical placement run, and it could never do any of it: the
+# placer underneath is 3RDBIN/mpl, which is not in this repository and has not
+# been for as long as the history goes back.  Every run placed nothing and
+# committed that nothing over the whole hierarchy.
+#
+# The loop is worth having again when there is a placer to drive.  hier_place
+# now runs headless with -batch, so a replacement would walk the modules bottom
+# up -- commitModule sizes an instance from its child's committed floorplan, so
+# children have to go first -- calling hier_place for a module whose children
+# are blocks and a flat placer for one whose children are leaf cells.
 ##########################################################################################################
-sub place_hier_mpl{
-  use Benchmark;
-  my $t0 = new Benchmark;
-
-  my $incr = $_[0];
-  my $global_top = $GLOBAL->dbfGlobalGetTOP;
-  &editModule('-module', $global_top);
-  foreach my $moduleName (keys %MODULE_ALREADY){
-     &editModule('-module', $moduleName);
-     &set_place_mode('--keepTempFile');
-     &place_graph_mpl_pseudo($incr);
-     &commitModuleLocOnly('-module', $moduleName);  
-  }
-  &editModule('-module', $global_top);
-  &hier2flat;
-
-  my $t1 = new Benchmark;
-  my $td = timediff($t1, $t0);
-  print "Command place_hier_mpl took:",timestr($td),"\n";
-}#sub place_hier_mpl
 
 ##########################################################################################################
 ######## command to run graywolf placer on full hierarchy and convert design from  hier to flat ##########

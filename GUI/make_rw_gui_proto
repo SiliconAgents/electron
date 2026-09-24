@@ -559,11 +559,6 @@ $placemenu->separator;
     -command => \&delete_filler_popup,
     -label => "Delete Filler",
     -underline => 0); # D in Display
-$placemenu->separator;
-     $placemenu->command(
-    -command => \&create_hier_mpl_placer_popup,
-    -label => "Hier MPL Placer",
-    -underline => 0); # D in Display
 #$placemenu->separator;
 #     $placemenu->command(
 #    -command => \&create_hier_graywolf_placer_popup,

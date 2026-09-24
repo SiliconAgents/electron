@@ -552,24 +552,8 @@ sub hier_place_popup {
 
 
 ##########################################################################################################
-############################# Creating popup Gui to run mpl placer on hierarchy ##########################
+# create_hier_mpl_placer_popup went with place_hier_mpl, which was all it did.
 ##########################################################################################################
-sub create_hier_mpl_placer_popup {
-  my $popupgui = MainWindow->new();
-  $popupgui->title ("Hier MPL Placer");
-  $popupgui->geometry("250x100+1000+300"); 
-
-  my ($incr,$keeptempFiles) = ("","");
-  my $Frame1 = $popupgui->Frame()->pack(-side=>'top', -expand=>1,-fill=>'x'); 
-  my $Frame2 = $popupgui->Frame()->pack(-side=>'bottom'); 
-
-  $Frame1->Checkbutton(-text => "incr", -variable =>\$incr, -onvalue => "--incr", -font=>"Times 10 bold")->pack(-side =>"left");
-  $Frame2->Button(-text=>"Ok", -font=>"Times 8 bold", -padx=>5,-pady=>5,-command=>sub{
-                     &place_hier_mpl($incr);
-                     $popupgui->destroy;
-                   })->pack(-side=>"left");
-  $Frame2->Button(-text=>"Cancel", -font=>"Times 8 bold", -padx=>5,-pady=>5,-command=>sub{$popupgui->destroy;})->pack(-side=>"left");
-}#sub create_hier_mpl_placer_popup 
 
 
 ##############################################################################################################
