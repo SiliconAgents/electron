@@ -1,7 +1,8 @@
       /--------------------------------------------------------------------------------------\
       |	                                                                               	|
-      |     Proton is a full feature hierarchical ASIC place and route system          	|
-      |			Copyright (C) 2014 - 2018  efabless corporation			|
+      |     Electron (originally named Proton) is a full feature hierarchical           |
+	  |.                    ASIC place and route system                             	|
+      |			Copyright (C) 2014 - 2018  efabless corporation		                	|
       |	                                                                               	|
       |      This program is free software: you can redistribute it and/or modify      	|
       |          it under the terms of the GNU Affero General Public License           	|
@@ -80,7 +81,7 @@ copyright holder in this fork's contributions.
 
 Original Readme text :
 
-Proton : ASIC Place and Route Suite
+Electron : ASIC Place and Route Suite
 ===================================
 
 This is a framework for ASIC Place and Route. It uses other open source tools like Iverilog, Yosys and few inbuilt engines.
