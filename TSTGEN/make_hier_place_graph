@@ -861,6 +861,7 @@ unless ( defined $layer && $layer ne "" ) {
 
 my $rowHeight = 0;
 my ($instCnt, $portCnt, $reshapeCnt, $noLocCnt, $unknownCnt, $sizedPinCnt) = (0,0,0,0,0,0);
+my $firstSizeCnt = 0;
 my ($polyMovedCnt, $polySquaredCnt) = (0, 0);
 my @unknown = ();
 
@@ -1022,12 +1023,38 @@ while ( my $line = <READ_PSEUDO_ND> ) {
     else {
       ($oldW, $oldH) = &dbfTstgenHierChildSize($cellref);
     }
-    if ( abs($newW - $oldW) > 1e-6 || abs($newH - $oldH) > 1e-6 ) {
+    #<!-- Relative tolerance, not absolute.
+    #
+    #     Comparing a number that came back through a text file against the
+    #     exact one in the database is a comparison of unequal precision, so
+    #     an absolute 1e-6 called every round trip a reshape: hier_place used
+    #     to write six significant figures, which on a 40 um block is an error
+    #     of 4e-5.  It reported a reshape that had not happened and wrote the
+    #     rounded size onto the child module, and a recursive flow running
+    #     this at every level would accumulate that.
+    #
+    #     A reshape is a deliberate change of shape.  Row snapping and the
+    #     aspect limit mean a real one moves a dimension by far more than
+    #     0.01%, so anything under that is formatting, not intent.  The
+    #     absolute floor keeps the test meaningful for a tiny block. -->
+    my $tolW = 1e-6 + 1e-4 * abs($oldW);
+    my $tolH = 1e-6 + 1e-4 * abs($oldH);
+    #<!-- Nothing to compare against is not a reshape.
+    #
+    #     A child module with no floorplan of its own has no size, so oldW and
+    #     oldH come back 0 and every block looks reshaped from 0 to whatever
+    #     the placer was given -- 7 of 7 on a design floorplanned at the top
+    #     but not below.  Record the size, because the child does need to learn
+    #     it, and count it as what it is: a first size, not a change of shape. -->
+    my $haveOld = ( $oldW > 0 && $oldH > 0 );
+    my $changed = ( abs($newW - $oldW) > $tolW || abs($newH - $oldH) > $tolH );
+    if ( ! $haveOld || $changed ) {
       if ( defined $cellref && exists $PSEUDO_MODULE_ALREADY{$cellref} ) {
         $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenSetSize(0, 0, $newW, $newH);
         $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenSetPhysicalDirty(1);
       }
-      $reshapeCnt++;
+      if ( $haveOld ) { $reshapeCnt++; }
+      else            { $firstSizeCnt++; }
     }
   }
 }
@@ -1038,6 +1065,9 @@ if ( $instCnt > 0 || $portCnt > 0 ) {
 }
 
 print "INFO-TST-RD_PS_ND : 005 : placed $instCnt instance(s) and $portCnt port(s) of $module from $inFile\n";
+if ( $firstSizeCnt > 0 ) {
+  print "INFO-TST-RD_PS_ND : 017 : $firstSizeCnt block(s) had no size of their own and took the one the placer used\n";
+}
 if ( $reshapeCnt > 0 ) {
   print "INFO-TST-RD_PS_ND : 006 : $reshapeCnt instance(s) were reshaped, their child module size was updated too\n";
 }

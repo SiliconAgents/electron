@@ -2249,7 +2249,17 @@ class PlaceWidget(QWidget):
                 if n.kind.upper() != "PORT":
                     # A block's size is real and may have been reshaped
                     w, h = n.width, n.height
-                fh.write(f"{n.index} {n.name} {n.kind} {w:g} {h:g} "
+                # Sizes at full working precision, not %g.
+                #
+                # %g rounds to six significant figures, so a block read in at
+                # 39.969938703981 was written back as 39.9699 -- and electron
+                # compares the two to decide whether the block was reshaped,
+                # calls a 4e-5 difference a reshape, and writes the rounded
+                # value onto the child module. Nothing had been reshaped; the
+                # physics never touches width or height. One pass was
+                # harmless, but a recursive flow that runs this at every level
+                # accumulates the loss.
+                fh.write(f"{n.index} {n.name} {n.kind} {w:.6f} {h:.6f} "
                          f"{status} {n.x - w / 2.0:.4f} {n.y - h / 2.0:.4f} "
                          f"TYPE={n.ntype}\n")
         print(f"Wrote {path}")
