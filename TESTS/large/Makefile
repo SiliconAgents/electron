@@ -11,29 +11,40 @@
 #
 #   target      design        mults  modules  levels   cells    instances  wall   peak
 #   ----------  ------------  -----  -------  ------  -------  ----------  -----  ----
-#   matmul_hier matmul_4x4      64      13      7     164,336    204,816   ~3m    1.3G
-#   mxu_64      mxu_tile64      64      14      8     172,416    213,568   ~2m    1.7G
+#   matmul_hier matmul_4x4      64      13      7     164,336    204,816   1m30   1.2G
+#   mxu_64      mxu_tile64      64      14      8     172,416    213,568   1m29   1.2G
 #   mxu_256     mxu_256        256      15      9     689,664    855,424   5m23   4.2G
 #
-# WHAT THIS TEST ALREADY PAID FOR
+# WHAT THIS DIRECTORY ALREADY PAID FOR
 #
-# mxu_256 took 16m19 and 5.8GB the first time it ran, and the breakdown was
-# not where anyone would have guessed:
+# Those numbers used to be 3m43, 3m46 and 16m19.  Half of each run was
+# hier2flat's second loop, which walks the hierarchy once per net to transfer
+# ROUTING -- and in a place-only flow no floorplan holds a net, so it walked
+# 952,833 times to produce 1.9 million empty objects.  hier2flat now checks
+# first.  Measured by running each design twice in the same build, once with
+# the skip and once with --routing to force the old behaviour back:
 #
-#   synthesis + elaborate                        0m32
-#   hier_place_all, the 15 module walk           ~4m
-#   hier2flat, components (855,424)              ~1m
-#   hier2flat, NETS (952,833)                    ~8m     <-- half the run
-#   write_def x2 (174MB each)                    0m34
-#   legalize_flat (855,424 cells)                1m49
+#   design        nets      skipped   walked   the walk    per net
+#   ----------  ---------   -------   ------   --------   --------
+#   matmul_4x4    224,305    1m30      3m43      133s      0.59ms
+#   mxu_tile64    238,209    1m29      3m46      137s      0.58ms
+#   mxu_256       952,833    5m23     16m19      656s      0.69ms
 #
-# That net loop transfers ROUTING, not connectivity, and in a place-only flow
-# no floorplan holds a net -- so it walked the hierarchy 952,833 times to
-# produce 1.9 million empty objects.  hier2flat now checks first and skips it,
-# which is what turned 16m19 into 5m23 and freed 1.6GB.
+# Cost per net is flat to within a fifth, and the drift upwards is the
+# hierarchy getting deeper -- nine levels against seven -- which is what the
+# walk climbs.  Memory went with it: 1.55G to 1.15G on matmul, 5.8G to 4.2G on
+# mxu_256, being the 1.9 million objects never allocated.
 #
-# Nothing but a design this size would have made that visible: at 4,233
-# instances the same loop costs under a second.
+# Nothing smaller would have shown any of this.  At the 4,233 instances of
+# TESTS/nangate_recurse the same loop costs under a second.
+#
+# A WARNING FOR ANYONE COMPARING TWO RUNS HERE
+#
+# legalize_flat is NOT deterministic run to run.  Two identical runs of
+# matmul_hier leave 88.8% of cells in the same place and move the rest by 11um
+# on average.  hier_place_all is deterministic -- before legalization two runs
+# agree on all 204,816 cells exactly -- so compare the .recurse.def, never the
+# .legal.def, when you want to know whether a change did anything.
 #
 # matmul_4x4 is a plain 4x4 matrix product: sixteen dot product units, four
 # multipliers each.  mxu_tile64 and mxu_256 are systolic matrix units -- the

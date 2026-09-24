@@ -172,6 +172,17 @@ a 2D rectangle sweep for overlaps, a net-to-pin map for connectivity. A checker
 that groups cells by exact Y silently undercounts overlaps in an unlegalized
 placement.
 
+Two DEFs of the same design are **not** comparable byte for byte. `write_def`
+walks `keys %CADB`, and Perl randomises hash order per process, so the records
+come out in a different order every run. Sort and hash the records instead.
+
+`legalize_flat` is **not deterministic** run to run: two identical runs of
+`TESTS/large` matmul_hier agree on 88.8% of cells and move the rest ~11 µm.
+`hier_place_all` is — two runs agree on all 204,816 cells exactly. So compare
+the pre-legalisation DEF when asking whether a change did anything, or you will
+be reading the legaliser's noise. A control run of the *unchanged* code is the
+only way to know which you are looking at.
+
 ## Off limits
 
 `/proj_pd/user_dev/rsrivastava/pyspark_cad` is read-only: shared repo, and
