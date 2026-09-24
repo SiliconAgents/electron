@@ -13,9 +13,16 @@
 electron.log*
 electron.cmd*
 
-# Scratch directory the TESTS Makefile builds in: filtered netlist, DEFs,
-# router logs.  All reproducible from what is checked in.
+# Scratch directories the TESTS Makefiles build in: filtered netlist, DEFs,
+# synthesis output, router logs.  All reproducible from what is checked in.
+#
+# Both levels, and the glob rather than two literal paths, because every test
+# directory gets one: TESTS/workarea and TESTS/large/workarea today.  The large
+# one is the reason this matters -- three DEFs of a 204,816 instance design run
+# to 100MB, and synthesize decompresses the liberty into the same place when
+# the config points at a .gz, which is a couple of GB more.
 TESTS/workarea/
+TESTS/**/workarea/
 
 # What rtls/vedic/synthesis.tcl writes.  vedic.vg beside it is the checked-in
 # netlist that nangate_flat.tcl reads; this is a fresh one from yosys.

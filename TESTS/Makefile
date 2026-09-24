@@ -105,6 +105,11 @@ nangate_rtl_hier:
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_rtl_hier.tcl
 
 # Every test, in order of what they cover.
+#
+# The large ones are NOT here.  TESTS/large holds a 4x4 matrix multiply built
+# from 64 of the same vedic_16x16 these place one of -- 204,816 instances --
+# and it takes about five minutes end to end, which is too long for something
+# the push hook can be asked to run.  "cd large && make matmul_hier".
 nangate_both: nangate_flat nangate_hier
 nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_rtl_hier
 
