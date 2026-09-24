@@ -6,16 +6,50 @@
 #
 # WHAT IS HERE
 #
-#   matmul_4x4     a 4x4 by 4x4 matrix multiply, 16 bit elements, built from
-#                  the same vedic_16x16 the small tests place one of.  64
-#                  multipliers, 164k mapped cells, 13 distinct modules, 7
-#                  levels of hierarchy.
+# Three designs, all built from the same vedic_16x16 the small tests place one
+# of, and all measured on this machine:
 #
-# The split that makes it worth having: hier_place_all works on the 13 distinct
-# MODULES, which does not grow with the matrix, while hier2flat, write_def and
-# legalize_flat work on all 200k+ INSTANCES, which does.  A change that makes
-# the placer slower shows up in TESTS/nangate_recurse; a change that makes the
-# flat side quadratic only shows up here.
+#   target      design        mults  modules  levels   cells    instances  wall   peak
+#   ----------  ------------  -----  -------  ------  -------  ----------  -----  ----
+#   matmul_hier matmul_4x4      64      13      7     164,336    204,816   5m00   1.3G
+#   mxu_64      mxu_tile64      64      14      8     172,416    213,568   3m45   1.7G
+#   mxu_256     mxu_256        256      15      9     689,664    855,424  16m19   5.8G
+#
+# Where mxu_256's sixteen minutes go, because it is not where you would guess:
+#
+#   synthesis + elaborate                        0m32
+#   hier_place_all, the 15 module walk           ~4m
+#   hier2flat, components (855,424)              ~1m
+#   hier2flat, NETS (952,833)                    ~8m     <-- the real cost
+#   write_def x2 (174MB each)                    0m34
+#   legalize_flat (855,424 cells)                1m49
+#
+# Half the run is hier2flat's net loop, which walks the hierarchy once per net.
+# That is the thing to watch, and the reason this test exists.
+#
+# matmul_4x4 is a plain 4x4 matrix product: sixteen dot product units, four
+# multipliers each.  mxu_tile64 and mxu_256 are systolic matrix units -- the
+# shape an AI engine's matrix unit has, weights and partial sums shifting down
+# the columns and activations along the rows, every path registered, no
+# broadcast and no wire longer than one PE.  A TPU MXU is mxu_256 with 256 rows
+# instead of 16, and the only difference that makes to the hierarchy is one
+# more level of the same composition.
+#
+# WHY THERE ARE THREE AND NOT ONE
+#
+# Because the two halves of the flow scale differently and no single design
+# separates them.
+#
+# hier_place_all works on the DISTINCT MODULES, and that column barely moves:
+# 13, 14, 15.  A module has one floorplan, so all 256 copies of vedic_16x16
+# share one arrangement and the walk places it once.  hier2flat, write_def and
+# legalize_flat work on every INSTANCE, and that column goes up four times
+# between mxu_64 and mxu_256 -- which are the SAME SOURCES with a different
+# -top, so nothing else differs.
+#
+# Run the pair and the two are separated: if both slow down it is the placer,
+# if only mxu_256 does it is the flat side.  TESTS/nangate_recurse, at 4,233
+# instances, is the third point on that line.
 #
 # Like the tests one directory up, nothing in here launches apptainer.  Start
 # the container first -- "make app" -- then run a target at its prompt.  PATH
@@ -53,6 +87,24 @@ matmul_hier-interactive:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../matmul_hier_interactive.tcl
 
+# The 8x8 systolic matrix unit: 64 mac_pe, 8 levels, 213,568 instances.  About
+# four minutes.  The cheaper of the two MXUs and the one to use while
+# iterating -- same code paths, a quarter of the cost.
+mxu_64:
+	mkdir -p workarea
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu64_hier.tcl
+
+# The 16x16 systolic matrix unit: 256 mac_pe, 9 levels, 855,424 instances,
+# about 1mm2 of cell area.  The largest thing in this repository.  Same sources
+# as mxu_64 -- synthesize -top picks which -- so a difference between the two
+# is a difference in scale and nothing else.
+mxu_256:
+	mkdir -p workarea
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu_hier.tcl
+
+# The pair, for the comparison the header describes.
+mxu_both: mxu_64 mxu_256
+
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
 app:
@@ -63,4 +115,4 @@ app:
 clean:
 	rm -rf workarea
 
-.PHONY: matmul_synth matmul_hier matmul_hier-interactive app clean
+.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_both app clean
