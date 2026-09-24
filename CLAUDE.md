@@ -117,6 +117,20 @@ Nothing bridges pseudo → flat automatically. The chain is
 `PORTS_ALREADY`. `hier2flat` is global: it rebuilds from the whole hierarchy, not
 just the edited module.
 
+`hier2flat`'s second loop, over `%NETS_ALREADY`, transfers **routing**, not
+connectivity — connectivity comes from `%NETS_ALREADY` itself and is never
+written. Every write in it is gated on `dbFlplanIsNet`, and the only two things
+that put a net into a floorplan are `read_def` and a **full** `commit_module`
+(its net section is inside `unless ($physOnly)`, and `dbFlplanCopyRouting`
+clears the target's net list first). So after `commit_module --physical_only`
+no floorplan holds a net and that loop cannot do anything;
+`dbfHier2FlatHasNetData` checks and skips it. `--routing` / `--no_routing`
+override. Skipping it took the 855k-instance MXU from 16m19 to 5m23.
+
+`%NADB` and `%NETS_ROUTING_ALREADY` must be populated together or not at all:
+`write_def` reads `$NADB{$net}->dbNadbGetNetType` with no `exists` guard inside
+a block guarded only on `exists $NETS_ROUTING_ALREADY{$net}`.
+
 ## Walking the hierarchy — two traps
 
 `$TOP_MODULE` and `$GLOBAL->dbfGlobalGetTOP` are **not the same variable and they

@@ -11,21 +11,29 @@
 #
 #   target      design        mults  modules  levels   cells    instances  wall   peak
 #   ----------  ------------  -----  -------  ------  -------  ----------  -----  ----
-#   matmul_hier matmul_4x4      64      13      7     164,336    204,816   5m00   1.3G
-#   mxu_64      mxu_tile64      64      14      8     172,416    213,568   3m45   1.7G
-#   mxu_256     mxu_256        256      15      9     689,664    855,424  16m19   5.8G
+#   matmul_hier matmul_4x4      64      13      7     164,336    204,816   ~3m    1.3G
+#   mxu_64      mxu_tile64      64      14      8     172,416    213,568   ~2m    1.7G
+#   mxu_256     mxu_256        256      15      9     689,664    855,424   5m23   4.2G
 #
-# Where mxu_256's sixteen minutes go, because it is not where you would guess:
+# WHAT THIS TEST ALREADY PAID FOR
+#
+# mxu_256 took 16m19 and 5.8GB the first time it ran, and the breakdown was
+# not where anyone would have guessed:
 #
 #   synthesis + elaborate                        0m32
 #   hier_place_all, the 15 module walk           ~4m
 #   hier2flat, components (855,424)              ~1m
-#   hier2flat, NETS (952,833)                    ~8m     <-- the real cost
+#   hier2flat, NETS (952,833)                    ~8m     <-- half the run
 #   write_def x2 (174MB each)                    0m34
 #   legalize_flat (855,424 cells)                1m49
 #
-# Half the run is hier2flat's net loop, which walks the hierarchy once per net.
-# That is the thing to watch, and the reason this test exists.
+# That net loop transfers ROUTING, not connectivity, and in a place-only flow
+# no floorplan holds a net -- so it walked the hierarchy 952,833 times to
+# produce 1.9 million empty objects.  hier2flat now checks first and skips it,
+# which is what turned 16m19 into 5m23 and freed 1.6GB.
+#
+# Nothing but a design this size would have made that visible: at 4,233
+# instances the same loop costs under a second.
 #
 # matmul_4x4 is a plain 4x4 matrix product: sixteen dot product units, four
 # multipliers each.  mxu_tile64 and mxu_256 are systolic matrix units -- the

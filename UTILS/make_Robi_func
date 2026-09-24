@@ -1412,6 +1412,50 @@ sub flatdb2Floorplan{
 }#sub flatdb2Floorplan
 
 #############################################################################################
+#<!-- Does any floorplan hold a net at all?
+#
+#     This decides whether hier2flat's net loop can possibly do anything, and
+#     that loop is the most expensive thing in the hierarchical flow: on the
+#     256 multiplier MXU it ran for about ten of the sixteen minutes.
+#
+#     What the loop does is transfer ROUTING.  For each flat net it walks back
+#     up the hierarchy to find the per module floorplan that owns the
+#     corresponding local net, and copies that module's wire segments into the
+#     flat database with the instance's absolute offset added.  Connectivity
+#     comes from %NETS_ALREADY and is never touched -- the loop only reads its
+#     keys.
+#
+#     Every one of its writes is inside
+#
+#         if ( $FLOORPLAN_ALREADY{$fpid}->dbFlplanIsNet($local_net_name) )
+#
+#     so if NO floorplan holds a net, the body cannot execute and the loop's
+#     entire output is one empty NetsAttrDB and one empty NetRoutingDB per net.
+#     That is the case in a place-only flow, because the only two things that
+#     ever put a net into a floorplan are read_def and commit_module -- and
+#     commit_module's net section sits inside "unless ( $physOnly )", while
+#     dbFlplanCopyRouting at the end of dbfTstgenUpdateFlplanByID CLEARS the
+#     target's net list before copying.  So after "commit_module
+#     --physical_only" the floorplans have no nets, and there is nothing for
+#     the walk to find however long it looks.
+#
+#     Checking is O(floorplans) -- fifteen on that design -- against O(nets)
+#     for the walk, and it is a proof rather than a guess: no nets anywhere
+#     means the loop is a no-op, not merely a probable one. -->
+sub dbfHier2FlatHasNetData {
+
+foreach my $id ( keys %FLOORPLAN_ALREADY ) {
+  my @nets = $FLOORPLAN_ALREADY{$id}->dbFlplanGetNets;
+  if ( @nets > 0 ) {
+    return 1;
+  }
+}
+return 0;
+
+}#sub dbfHier2FlatHasNetData
+
+
+#############################################################################################
 #################### adding logical & physical infor from VNOM to flat ######################
 #############################################################################################
 sub hier2flat{
@@ -1419,13 +1463,23 @@ sub hier2flat{
   if($_[0] eq "-h" || $_[0] eq "-H" || $_[0] eq "-help" || $_[0] eq "-HELP"){
      print "Usage: hier2flat  --logical (to add logical info)\n";
      print "                  --physical (to add physical info)\n";
-     print "Note: If not given any switch it will add physical info\n"; 
+     print "                  --no_routing\n";
+     print "                        skip the per net routing transfer.  It is skipped\n";
+     print "                        automatically when no floorplan holds a net, which\n";
+     print "                        is every place-only flow; this forces it.\n";
+     print "                  --routing\n";
+     print "                        do the routing transfer even if no floorplan appears\n";
+     print "                        to hold a net.  An escape hatch, not a normal option.\n";
+     print "Note: If not given any switch it will add physical info\n";
      return;
   }else{
      my ($add_logical_info, $add_physical_info) = (0, 0);
+     my ($forceRouting, $forceNoRouting) = (0, 0);
      for(my $i=0; $i<$numOfArg; $i++){
          if($_[$i] eq "--logical"){$add_logical_info = 1;}
          if($_[$i] eq "--physical"){$add_physical_info = 1;}
+         if($_[$i] eq "--no_routing"){$forceNoRouting = 1;}
+         if($_[$i] eq "--routing"){$forceRouting = 1;}
      }
      if($add_logical_info == 0 && $add_physical_info == 0){
         $add_physical_info = 1;
@@ -1503,8 +1557,44 @@ sub hier2flat{
         ################################# Adding NETS ####################################
         #my @nets = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetNets;
         #foreach my $net (@nets){
+        #<!-- Both hashes are cleared whatever happens next, and they must be
+        #     cleared TOGETHER.  write_def reads
+        #
+        #         if ( exists $NETS_ROUTING_ALREADY{$netName} ) {
+        #           my $netType = $NADB{$netName}->dbNadbGetNetType;
+        #
+        #     with no guard on the second line, so a net present in one hash
+        #     and missing from the other dies there.  Empty is fine -- every
+        #     other consumer guards with exists, and write_def's $netType
+        #     defaults to 0 with empty routes printing nothing, so absent and
+        #     present-but-empty produce byte identical output.
+        #
+        #     Clearing also matters on its own: routing that predates this
+        #     placement is stale, and silently keeping it would have write_def
+        #     emit wires that no longer join the cells they claim to. -->
         %NADB = ();
         %NETS_ROUTING_ALREADY = ();
+
+        #<!-- Is the walk below worth starting?  See dbfHier2FlatHasNetData:
+        #     with no net in any floorplan it cannot write anything, and on a
+        #     large design it cannot do so for ten minutes. -->
+        my $doRouting = 1;
+        my $netCnt = keys %NETS_ALREADY;
+        if ( $forceNoRouting ) {
+           $doRouting = 0;
+           #<!-- Say so.  A skip that was asked for still has to be visible, or
+           #     a DEF with no routing in it looks like a router that failed
+           #     rather than a transfer that was declined. -->
+           print "INFO-UTS-HIER2FLAT : 006 : --no_routing given, the routing transfer for\n";
+           print "INFO-UTS-HIER2FLAT : 007 : $netCnt net(s) was skipped\n";
+        }
+        elsif ( ! $forceRouting && ! &dbfHier2FlatHasNetData() ) {
+           $doRouting = 0;
+           print "INFO-UTS-HIER2FLAT : 004 : no floorplan holds a net, so the routing transfer\n";
+           print "INFO-UTS-HIER2FLAT : 005 : for $netCnt net(s) was skipped; --routing forces it\n";
+        }
+
+        if ( $doRouting ) {
         foreach my $net (keys %NETS_ALREADY){
            $NADB{$net} = NetsAttrDB::new();
            $NETS_ROUTING_ALREADY{$net} = NetRoutingDB::new();
@@ -1558,6 +1648,7 @@ sub hier2flat{
               }#if floorplan exists
            }#foreach intenal net
         }#foreach net
+        }#if doRouting
         ##################################################################################
      }#add phisical info
   }
