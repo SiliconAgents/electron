@@ -81,7 +81,7 @@ copyright holder in this fork's contributions.
 
 Original Readme text :
 
-Proton : ASIC Place and Route Suite
+Electron : ASIC Place and Route Suite
 ===================================
 
 This is a framework for ASIC Place and Route. It uses other open source tools like Iverilog, Yosys and few inbuilt engines.
