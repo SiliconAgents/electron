@@ -106,9 +106,9 @@ matmul_hier-interactive:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../matmul_hier_interactive.tcl
 
-# The 8x8 systolic matrix unit: 64 mac_pe, 8 levels, 213,568 instances.  About
-# four minutes.  The cheaper of the two MXUs and the one to use while
-# iterating -- same code paths, a quarter of the cost.
+# The 8x8 systolic matrix unit: 64 mac_pe, 8 levels, 213,568 instances, 1m29.
+# The cheaper of the two MXUs and the one to use while iterating -- same code
+# paths, a quarter of the cost.
 mxu_64:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu64_hier.tcl
@@ -120,6 +120,14 @@ mxu_64:
 mxu_256:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu_hier.tcl
+
+# The same run left at the prompt, with the legalisation undone so you can see
+# the placement on both sides of it: "gui" for the window, "legalize_flat" to
+# watch 855,424 cells snap into rows.  About 5m30 to get there and roughly 4GB
+# held while you work.
+mxu_256-interactive:
+	mkdir -p workarea
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu_hier_interactive.tcl
 
 # The pair, for the comparison the header describes.
 mxu_both: mxu_64 mxu_256
@@ -134,4 +142,4 @@ app:
 clean:
 	rm -rf workarea
 
-.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_both app clean
+.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_256-interactive mxu_both app clean
