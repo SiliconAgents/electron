@@ -883,47 +883,9 @@ sub read_hier_router {
  }
 }#sub read_hier_router
 
-sub route_hier {
-
-#****f* / route_hier
-# NAME
-#   route_hier
-# FUNCTION
-#   runs router on design and storing router data in pseudo database 
-# Assumptions
-#   works for all nets
-# SYNOPSIS
-#   route_hier 
-# OUTPUTS
-#    router data is stored in pseudo DB
-# ****
-
-if($_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
-   print "Usage: route_hier\n";
-   return;
-}
-my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
-#if(-e "router_new.txt"){system("rm router_new.txt");}
-#if(-e "router_new.txt.output"){system("rm router_new.txt.output");}
-if(-e "hier_routes.grf"){system("rm hier_routes.grf");}
-if(-e "hier_routes.grf.output"){system("rm hier_routes.grf.output");}
-my $INPUT_NET_FILE = &write_hier_router_graph_new("--shrink");
-#my $INPUT_NET_FILE = &write_hier_router_graph_new("--noblkg");
-print "INFO-TST-ROUTE_HIER : 001 : ELECTRON_HOME is $env_electron_home\n";
-if ( -e $INPUT_NET_FILE) {
-  system("cp $env_electron_home/3RDBIN/._po* .");
-  system("$env_electron_home/3RDBIN/eeRouter $INPUT_NET_FILE");
-  system("rm -rf ._po*");
-  &read_hier_router("-file" ,"$INPUT_NET_FILE.output");
-  ##----------------------------------------------------------#
-  ##my $flplan = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetFloorplan;
-  ##&hier_route_display("-floorplan", $flplan);
-  ##----------------------------------------------------------#
-} else {
-  print "WARN-TST-ROUTE_HIER : 002 : $INPUT_NET_FILE FILE DOES NOT EXIST\n";
-}
-$GLOBAL->dbGlobalSetHRouterStatus(1);
-}#sub route_hier
+#<!-- sub route_hier removed: it ran 3RDBIN/eeRouter-g, which is
+#     not in this repository.  It wrote its graph, failed to route, and then
+#     read back a result file that was never produced. -->
 
 ###################################################################################################
 ###################### Subroutins to write/read router files for flat view ########################
@@ -1372,66 +1334,9 @@ sub read_flat_router {
  }
 }#sub read_flat_router
 
-sub route_flat {
-use Benchmark;
-my $t0 = new Benchmark;
-
-
-#****f* / route_flat
-# NAME
-#   route_flat
-# FUNCTION
-#   runs router on design and storing router data in database 
-# Assumptions
-#   works for all nets
-# SYNOPSIS
-#   route_flat 
-# OUTPUTS
-#    router data is stored in DB
-# ****
-my $INPUT_NET_FILE = "";
-my $includefile = "";
-my $includefile = "";
-my $include = 0;
-my $exclude = 0;
-if($_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){
-                     print "Usage: route_flat\n";
-                     print "        -include <file name>\n";
-                     print "        -exclude <file name>\n";
-   return;
-}
-else {
-  for ( my $i = 0; $i < $noOfArguments; $i++ ) {
-    if ($_[$i] eq "-include") { $includefile = $_[$i+1]; $include = 1;}
-    if ($_[$i] eq "-exclude") { $excludefile = $_[$i+1]; $exclude = 1;}
-  }
-}
-my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
-if(-e "router_new.txt"){system("rm router_new.txt");}
-if(-e "router_new.txt.output"){system("rm router_new.txt.output");}
-if($include == 1){
-  $INPUT_NET_FILE = &write_flat_router_graph("-include", $includefile);
-}
-elsif($exclude == 1){
-  $INPUT_NET_FILE = &write_flat_router_graph("-exclude", $excludefile);
-}
-else{
-  $INPUT_NET_FILE = &write_flat_router_graph();
-}
-
-print "INFO-TST-ROUTE_FLT : 001 : ELECTRON_HOME is $env_electron_home\n";
-if ( -e $INPUT_NET_FILE) {
-  system("cp $env_electron_home/3RDBIN/._po* .");
-  system("$env_electron_home/3RDBIN/eeRouter-g");
-  system("rm -rf ._po*");
-  &read_flat_router("-file" ,"router_new.txt.output");
-} else {
-  print "WARN-TST-ROUTE_FLT : 002 : $INPUT_NET_FILE FILE DOES NOT EXIST\n";
-}
-my $t1 = new Benchmark;
-my $td = timediff($t1,$t0);
-print "route_flat :",timestr($td),"\n";
-}#sub route_flat
+#<!-- sub route_flat removed: it ran 3RDBIN/eeRouter-g, which is
+#     not in this repository.  It wrote its graph, failed to route, and then
+#     read back a result file that was never produced. -->
 
 #sub specify_module_rblkg {
 #

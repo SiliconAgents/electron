@@ -489,10 +489,9 @@ sub rpcCmdEditModule {
   return "<root><infomsg>Module has been edited</infomsg></root>";
 }#sub rpcCmdEditModule
 ############################################
-sub rpcCmdPlaceGraphMplPseudo {
-  place_graph_mpl_pseudo();
-  return "<root><infomsg>PLACEMENT has been done</infomsg></root>";
-}#sub rpcCmdPlaceGraphMplPseudo
+#<!-- rpcCmdPlaceGraphMplPseudo removed with place_graph_mpl_pseudo.  It was
+#     not in the dispatch table at the top of this file either, so nothing
+#     could reach it. -->
 ############################################
 
 1;

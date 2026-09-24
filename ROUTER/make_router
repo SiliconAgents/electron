@@ -1,84 +1,19 @@
-sub groute {
-#****f* /groute
-# NAME
-#   groute
-# FUNCTION
-#    groute command performs global routing on a placed design. Design can be placed within the tool or placement of cells and macros can be annotated using the defIn command
-#    groute has the following command line options and switches.
-# SYNOPSIS
-# groute --accurate --basic
-# INPUTS
-#      options :
-
-#      switches :
-#       --basic, invokes the global router in basic mode, basic mode is faster, spends minimal effort in layer assignment or remove congestion
-#       --accurate, gives a more accurate analysis of the routing congestion, especially if you have lot of big hard macros 
-# OUTPUTS
-#      none
-#****
-
-my $basic = 1;
-
-# the groute command encapsulates 3 steps
-# step-1 : write the boxroute graph file
-# step-2 : call the appropriate router executable
-# step-3 : read the congestion map back into the tool
-#------------------------ Step-1 -------------------------------------#
-&write_router_graph(-file, 'groute.grf');
-if ($basic == 1){
-system("/home/rajeevs/Projects/proton/3RDBIN/gr1 groute.grf -o groute.route -labyrinth -maxRipIter 10");
-                }
-#------------------------ Step-3 -------------------------------------#
-&read_congestion_map('-f', 'groute.grf', 'groute.route');
-
-
-
-}#sub groute
-
-sub groute_new {
-#****f* /groute_new
-# NAME
-#   groute_new
-# FUNCTION
-#    groute_new command performs global routing on a placed design. Design can be placed within the tool or placement of cells and macros can be annotated using the defIn command
-#    groute_new has the following command line options and switches.
-# SYNOPSIS
-# groute_new --accurate --basic
-# INPUTS
-#      options : -size <gridSize>
-
-#      switches :
-#       --basic, invokes the global router in basic mode, basic mode is faster, spends minimal effort in layer assignment or remove congestion
-#       --accurate, gives a more accurate analysis of the routing congestion, especially if you have lot of big hard macros 
-# OUTPUTS
-#      none
-#****
-
-my $gridSize = 0;
-my $inputOne eq "";
-if($_[0] eq "-size"){$gridSize = $_[1];
-                     $inputOne = "-size";}     
-if($_[0] eq "-h") {print"usage: groute_new -size <gridSize>\n";
-                   print"-size  : optional\n"; return;   }
-
-my $basic = 1;
-#print "inputone $inputOne,grid size $gridSize\n";
-# the groute command encapsulates 3 steps
-# step-1 : write the boxroute graph file
-# step-2 : call the appropriate router executable
-# step-3 : read the congestion map back into the tool
-#------------------------ Step-1 -------------------------------------#
-&write_router_graph_new(-file, 'groute.grf',$inputOne, $gridSize );
-#------------------------ Step-2 -------------------------------------#
-if ($basic == 1){
-system("/home/rajeevs/Projects/proton/3RDBIN/gr1 groute.grf -o groute.route -labyrinth -maxRipIter 10");
-                }
-#------------------------ Step-3 -------------------------------------#
-&read_congestion_map('-f', 'groute.grf', 'groute.route');
-
-
-
-}#sub groute_new
-
+#<!-- groute and groute_new are gone.
+#
+#     Both wrote a graph, shelled out to 3RDBIN/gr1 and read a congestion map
+#     back.  gr1 is not in this repository and the path they used was
+#     /home/rajeevs/Projects/proton/3RDBIN/gr1 -- a developer's home directory
+#     on a machine that has not existed for years.  So both wrote their graph,
+#     failed silently to route it, and then read a congestion map that was
+#     never written.
+#
+#     There is no global router here to put in their place.  flat_route -mode gd
+#     does global routing as the first half of its own flow, on gcells, and
+#     keeps the result to itself; qroute's global routing is internal to
+#     qrouter.  Neither exposes a congestion map, which is what these were for.
+#
+#     The graph writers they called -- write_router_graph, write_router_graph_new
+#     and read_congestion_map -- are still here and still registered commands.
+#     They have no caller now. -->
 
 1;

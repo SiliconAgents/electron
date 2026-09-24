@@ -2403,7 +2403,12 @@ sub create_placement_command_file_hierarchically
 {
   open(HIER_PLACE_CMD,">hier_place_command.tcl");
   my $start_module =  $GLOBAL->dbfGlobalGetTOP();
-  print HIER_PLACE_CMD "\nedit_module -module $start_module\nplace_graph_mpl_pseudo\ncommitModuleLocOnly -module $start_module\n" ;
+  #<!-- place_graph_mpl_pseudo used to go here.  It drove 3RDBIN/mpl, which is
+  #     not in this repository, and has been removed -- so emitting it would
+  #     write a script that stops on "no such command".  The edit and the commit
+  #     are still what the flow needs; put a placer between them.  hier_place
+  #     -batch is the one that runs headless. -->
+  print HIER_PLACE_CMD "\nedit_module -module $start_module\n# place the module here: hier_place -kinds INST,PORT -batch 400\ncommitModuleLocOnly -module $start_module\n" ;
   &create_placement_command_file_hierarchically_sub_module($start_module,0);
   print HIER_PLACE_CMD "\nedit_module -module $start_module\n" ;
   close(HIER_PLACE_CMD);
@@ -2422,7 +2427,7 @@ sub create_placement_command_file_hierarchically_sub_module
   my @insts =  sort {$a cmp $b} @insts0 ;
   foreach my $inst ( @insts) {
     my $cellref = $MODULE_ALREADY{$moduleName}->dbVNOMGetHierInstCell($inst);
-    print HIER_PLACE_CMD "\nedit_module -module $cellref\nplace_graph_mpl_pseudo\ncommitModuleLocOnly -module $cellref\n" ;
+    print HIER_PLACE_CMD "\nedit_module -module $cellref\n# place the module here: hier_place -kinds INST,PORT -batch 400\ncommitModuleLocOnly -module $cellref\n" ;
   }
   foreach my $inst ( @insts) {
     my $cellref = $MODULE_ALREADY{$moduleName}->dbVNOMGetHierInstCell($inst);

@@ -150,64 +150,12 @@ sub place_graph_plan_4_pseudo {
     }
 }#sub place_graph_plan_4_pseudo
 
-sub place_graph_mpl_pseudo 
-{
-  my $noOfArguments = @_;
-  my $incrMode = 0;
-  my $path = "";
-  
-  if ( $_[0] eq '-h') { 
-    print "Usage : place_graph_mpl_pseudo \n";
-    print "                               --incr\n";
-  } else {
-    for (my $i = 0; $i < $noOfArguments; $i++) {
-      if ($_[$i] eq "--incr") {
-       $incrMode = 1;
-      }
-      if ($_[$i] eq "-path") {
-          $path = $_[$i+1];
-      }
-    }#for
-    $MPL_BINARY_IS_RUNNING = 1;
-    &delete_all_tmp_placer_files;
-    my @size = $PSEUDO_MODULE_ALREADY{$TOP_MODULE}->dbaTstgenGetSize;
-    if(($size[2] == $size[0])||($size[3] == $size[1])){
-      print "WARN-UTS-PL_GRPH_MPL_PSUDO : 001 : No need to place the design $TOP_MODULE, size is zero\n";
-      return;
-    }
-    if ( $incrMode == 1 ) {
-      &write_hier_place_graph ("-module",$TOP_MODULE,"--incr");
-    } else {
-      &write_hier_place_graph ("-module",$TOP_MODULE);
-    }
-    $INPUT_NET_FILE = $TOP_MODULE.".txt" ;
-    $NODE_FILE = "nodefile" ;
-    $LIB_FILE = "libfile" ;
-    my $env_electron_home = $GLOBAL->dbfGlobalGetElectronHome;
-    my $placeLogFileName = "mpl_place.log";
-    if( $NOLOG != 1 ) {
-      closeTee(*STDOUT);
-      open (TEST, ">>$logFileName");
-      my $ofh = select TEST;
-      $| = 1;
-      select $ofh;
-      openTee(*STDOUT, *STDOUT, *TEST);
-    }
-    if ( -e $INPUT_NET_FILE) {
-      print "INFO-UTS-PL_GRPH_MPL_PSUDO : 001 : Begin placing the design $TOP_MODULE \n";
-      if($path eq ""){
-         system( "$env_electron_home/3RDBIN/mpl $INPUT_NET_FILE $NODE_FILE") ;
-      }else{
-         system( "$path/mpl $INPUT_NET_FILE $NODE_FILE");
-      }
-      print "INFO-UTS-PL_GRPH_MPL_PSUDO : 002 : End placing the design $TOP_MODULE \n";
-    }
-    &read_hier_place_graph();
-    &delete_tmp_placer_files;
-    $MPL_BINARY_IS_RUNNING = 0;
-    &fix_mpl_output;
-  }#if correct arguments
-}#sub place_graph_mpl_pseudo
+#<!-- sub place_graph_mpl_pseudo removed: it ran 3RDBIN/mpl, which is not in
+#     this repository.  It wrote its graph and node file, failed to place, and
+#     left whatever was in the database untouched -- which a caller that
+#     committed afterwards then wrote out as though it were a placement.
+#     place_hier_mpl, the loop that did exactly that over every module, went
+#     with it. -->
 
 
 sub place_graph_plan_4

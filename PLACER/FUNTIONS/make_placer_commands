@@ -61,9 +61,17 @@ sub doHierPnR {
   # This command will execute PnR on a hierarchical design. This is intended to be used on a design created from xls sheet interface.
   
   # step 1 : place the current edited top module #
-  &set_place_mode(qw/--keepTempFile/);
-  &place_graph_mpl_pseudo;
-  print "MPL done\n";
+  #<!-- The placement step was place_graph_mpl_pseudo, which drove 3RDBIN/mpl.
+  #     That binary is not in this repository, so this printed "MPL done" and
+  #     placed nothing -- and the commit below then wrote that nothing out as a
+  #     placement.  Both are removed.
+  #
+  #     hier_place -batch is the headless hierarchical placer that does work;
+  #     it is not substituted in here because it needs a graph per module and
+  #     this flow was built around a different one. -->
+  print "INFO-PLC-HIER_PNR : 003 : there is no hierarchical placer wired into this flow\n";
+  print "INFO-PLC-HIER_PNR : 004 : place the module with hier_place -kinds INST,PORT -batch 400\n";
+  return;
   &commitModule(qw/ -module mychip/);
   print "post place commit done\n";
   &hier_place_pins("--honorbus");
@@ -76,9 +84,15 @@ sub doHierPnR {
   &edit_module_hierarchy;
   print "edit all module done\n";
   
-  # route the edited module using eeRouter
-  &route_hier;
-  print "route done\n";
+  #<!-- The routing step was route_hier, which ran 3RDBIN/eeRouter-g.  That
+  #     binary is not in this repository, so the step never routed anything and
+  #     printed "route done" regardless.  Both are removed.
+  #
+  #     Nothing replaces it: the routers here -- flat_route and qroute -- work
+  #     on the flat database, and this flow stops with the hierarchy still
+  #     edited.  Run hier2flat and then flat_route to route what this placed. -->
+  print "INFO-PLC-HIER_PNR : 001 : placement done; there is no hierarchical router\n";
+  print "INFO-PLC-HIER_PNR : 002 : run hier2flat then flat_route to route it\n";
 }#sub doHierPnR
 
 ##########################################################################################################
@@ -173,10 +187,14 @@ sub place_hier_fractal{
         }elsif(@leafInsts > 0 && $flag == 0 ){
            #print " graywolf running\n";
            &place_graph_graywolf_pseudo;
-        }else{  
-           #print " mpl running\n";
-           &set_place_mode('--keepTempFile');
-           &place_graph_mpl_pseudo($incr);
+        }else{
+           #<!-- place_graph_mpl_pseudo was here, driving 3RDBIN/mpl, which is
+           #     not in this repository: the branch placed nothing and the
+           #     commit below recorded that as a placement.  Leave the
+           #     instances where they are and say so. -->
+           print "INFO-PLC-HIER_FRAC : 001 : $moduleName needs a placer and there is none;",
+                 " left unplaced\n";
+           print "INFO-PLC-HIER_FRAC : 002 : place it with hier_place -kinds INST,PORT -batch 400\n";
         }  
         &commitModuleLocOnly('-module', $moduleName);
      }

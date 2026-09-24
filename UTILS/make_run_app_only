@@ -888,7 +888,12 @@ sub routeDefSub{
     if(!exists $ENV{"ELECTRON_HOME"}){
       $GLOBAL->dbfGlobalSetElectronHome("$cloud_share_path/apps/content/drupal_app/");
     }
-    &route_flat;
+    #<!-- was route_flat, which ran 3RDBIN/eeRouter-g and has been removed.
+    #     flat_route is the router that works: the A* router in
+    #     pyspark_cad/scala, reading the LEF and the placed DEF already loaded
+    #     above.  It says so and stops if it cannot find spark-shell, rather
+    #     than writing an unrouted DEF as though it had routed it. -->
+    &flat_route();
     &write_def('-output', $outFile, '--overwrite');
  }#if correct num of Arg
 }#sub routeDefSub
