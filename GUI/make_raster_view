@@ -109,6 +109,91 @@ $RASTER_TAB_STATUS = sprintf("%.1f x %.1f um  |  %.4f um per pixel  |  %d cells"
 }# sub dbfRasterTabDraw
 
 
+#<!-- Coalesce a burst of zooms into one raster.
+#
+#     Every wheel notch and every key repeat changes the viewport, and
+#     rastering each one runs python synchronously with the Tk event loop
+#     blocked -- the window would stop responding for as long as the queue took
+#     and the zoom would feel broken even though each frame is right.
+#
+#     So the viewport moves immediately and the picture follows once the view
+#     has been still for a moment.  Each new event cancels the pending draw. -->
+sub dbfRasterTabSchedule {
+
+return unless ( defined $img_canvas );
+if ( defined $RASTER_TAB_AFTER ) {
+  eval { $RASTER_TAB_AFTER->cancel };
+  undef $RASTER_TAB_AFTER;
+}
+$RASTER_TAB_AFTER = $img_canvas->after(140, sub {
+    undef $RASTER_TAB_AFTER;
+    &dbfRasterTabDraw;
+  });
+
+}# sub dbfRasterTabSchedule
+
+
+#<!-- Zoom by $fac about a point, or about the middle of the view if no point
+#     is given.  Keeping the point under the cursor fixed is what makes a wheel
+#     zoom feel right: you zoom into what you are pointing at, not into the
+#     centre of the window, which is the one thing WorldCanvas does not do. -->
+sub dbfRasterTabZoom {
+
+my ($fac, $px, $py) = @_;
+return unless ( @RASTER_TAB_VIEW == 4 && defined $fac && $fac > 0 );
+
+my ($w, $h) = ( $RASTER_TAB_VIEW[2] - $RASTER_TAB_VIEW[0],
+                $RASTER_TAB_VIEW[3] - $RASTER_TAB_VIEW[1] );
+return unless ( $w > 0 && $h > 0 );
+my ($nw, $nh) = ( $w / $fac, $h / $fac );
+
+#<!-- Stop at something sensible at both ends: a few nanometres across is
+#     past any cell, and a thousand times the die is a dot in a black field. -->
+my ($hw, $hh) = ( $RASTER_TAB_HOME[2]-$RASTER_TAB_HOME[0],
+                  $RASTER_TAB_HOME[3]-$RASTER_TAB_HOME[1] );
+if ( $hw > 0 && ($nw < $hw/100000 || $nw > $hw*1000) ) { return; }
+
+my ($fx, $fy) = (0.5, 0.5);
+if ( defined $px && defined $py ) {
+  my $cv = $img_canvas;
+  my $sub = eval { $img_canvas->Subwidget('scrolled') };
+  $cv = $sub if ( defined $sub );
+  my $cw = $cv->width;  my $ch = $cv->height;
+  if ( $cw > 0 && $ch > 0 ) {
+    $fx = $px / $cw;
+    $fy = $py / $ch;
+    $fx = 0 if ( $fx < 0 ); $fx = 1 if ( $fx > 1 );
+    $fy = 0 if ( $fy < 0 ); $fy = 1 if ( $fy > 1 );
+  }
+}
+#<!-- the world point under the cursor, which must not move.  Canvas y runs
+#     down and the die's y runs up, hence 1-$fy on that axis. -->
+my $ux = $RASTER_TAB_VIEW[0] + $fx * $w;
+my $uy = $RASTER_TAB_VIEW[1] + (1 - $fy) * $h;
+
+@RASTER_TAB_VIEW = ( $ux - $fx * $nw,
+                     $uy - (1 - $fy) * $nh,
+                     $ux + (1 - $fx) * $nw,
+                     $uy + $fy * $nh );
+&dbfRasterTabSchedule;
+
+}# sub dbfRasterTabZoom
+
+
+#<!-- Pan by a fraction of the view. -->
+sub dbfRasterTabPan {
+
+my ($dxf, $dyf) = @_;
+return unless ( @RASTER_TAB_VIEW == 4 );
+my $dx = ($RASTER_TAB_VIEW[2] - $RASTER_TAB_VIEW[0]) * $dxf;
+my $dy = ($RASTER_TAB_VIEW[3] - $RASTER_TAB_VIEW[1]) * $dyf;
+@RASTER_TAB_VIEW = ( $RASTER_TAB_VIEW[0]+$dx, $RASTER_TAB_VIEW[1]+$dy,
+                     $RASTER_TAB_VIEW[2]+$dx, $RASTER_TAB_VIEW[3]+$dy );
+&dbfRasterTabSchedule;
+
+}# sub dbfRasterTabPan
+
+
 #<!-- Raising the tab.  Dumps the design if it has not been dumped, or if the
 #     instance count has changed since it was, then draws it.  No arguments, no
 #     files, nothing to pick. -->
@@ -139,8 +224,10 @@ unless ( $RASTER_TAB_READY ) {
   $bar->Button(-text => 'Redraw', -command => sub {
         undef $RASTER_TAB_N; &activate_RasterTab;
       })->pack(-side => 'left');
-  $bar->Label(-textvariable => \$RASTER_TAB_STATUS, -anchor => 'w')
-      ->pack(-side => 'left', -fill => 'x', -expand => 1);
+  $bar->Label(-text => '  wheel / i o : zoom   drag: zoom to box   2 f : fit   arrows: pan',
+              -font => "Times 8")->pack(-side => 'left');
+  $bar->Label(-textvariable => \$RASTER_TAB_STATUS, -anchor => 'e')
+      ->pack(-side => 'right', -fill => 'x', -expand => 1);
 
   #<!-- drag a rectangle to zoom into it -->
   my $cv = $img_canvas;
@@ -181,6 +268,53 @@ unless ( $RASTER_TAB_READY ) {
                              $RASTER_TAB_VIEW[3] - $py0 * $sy );
         &dbfRasterTabDraw;
       }, Ev('x'), Ev('y') ]);
+
+  #<!-- The same gestures Tk::WorldCanvas is bound to in the flat view, so the
+  #     muscle memory carries over -- design_ZoomIn_ZoomOut_new binds <2> to
+  #     fit, <i> and <o> to zoom, <f> to fit and the arrows to pan.
+  #
+  #     Plus the wheel, which WorldCanvas does not have.  Button-4 and Button-5
+  #     are how X11 delivers wheel up and down, and the zoom is about the
+  #     CURSOR rather than the middle of the window, so you zoom into what you
+  #     are pointing at. -->
+  $cv->Tk::bind('<Button-4>', [ sub { my ($c,$x,$y)=@_;
+        &dbfRasterTabZoom(1.25, $c->canvasx($x), $c->canvasy($y)); },
+        Ev('x'), Ev('y') ]);
+  $cv->Tk::bind('<Button-5>', [ sub { my ($c,$x,$y)=@_;
+        &dbfRasterTabZoom(0.80, $c->canvasx($x), $c->canvasy($y)); },
+        Ev('x'), Ev('y') ]);
+  #<!-- and the way a wheel arrives on toolkits that send MouseWheel instead -->
+  $cv->Tk::bind('<MouseWheel>', [ sub { my ($c,$d,$x,$y)=@_;
+        &dbfRasterTabZoom(($d > 0 ? 1.25 : 0.80), $c->canvasx($x), $c->canvasy($y)); },
+        Ev('D'), Ev('x'), Ev('y') ]);
+
+  $cv->Tk::bind('<2>', sub { @RASTER_TAB_VIEW = @RASTER_TAB_HOME;
+                             &dbfRasterTabSchedule; });
+  $cv->Tk::bind('<i>', [ sub { my ($c,$x,$y)=@_;
+        &dbfRasterTabZoom(1.25, $c->canvasx($x), $c->canvasy($y)); },
+        Ev('x'), Ev('y') ]);
+  $cv->Tk::bind('<o>', [ sub { my ($c,$x,$y)=@_;
+        &dbfRasterTabZoom(0.80, $c->canvasx($x), $c->canvasy($y)); },
+        Ev('x'), Ev('y') ]);
+  $cv->Tk::bind('<f>', sub { @RASTER_TAB_VIEW = @RASTER_TAB_HOME;
+                             &dbfRasterTabSchedule; });
+  $cv->Tk::bind('<KeyPress-Up>',    sub { &dbfRasterTabPan(0,  0.2); });
+  $cv->Tk::bind('<KeyPress-Down>',  sub { &dbfRasterTabPan(0, -0.2); });
+  $cv->Tk::bind('<KeyPress-Left>',  sub { &dbfRasterTabPan(-0.2, 0); });
+  $cv->Tk::bind('<KeyPress-Right>', sub { &dbfRasterTabPan( 0.2, 0); });
+
+  #<!-- A canvas needs the keyboard focus before any of those keys reach it.
+  #     CanvasFocus is what activate_flatViewTab uses on the flat view, so the
+  #     two tabs behave the same way; taking it on entry is friendlier than
+  #     making people click first.
+  #
+  #     The MOUSE does not depend on any of this: wheel, drag and middle click
+  #     are pointer events and go to the widget under the pointer whatever has
+  #     the keyboard.  So zooming works even if the keys do not. -->
+  $cv->configure(-takefocus => 1);
+  $cv->Tk::bind('<Enter>', sub {
+      eval { $cv->CanvasFocus } or eval { $cv->Tk::focus };
+    });
 
   $RASTER_TAB_READY = 1;
 }
