@@ -970,7 +970,7 @@ $tab9 = $book->add( "Sheet 9", -label=>"Hier-View", -raisecmd=>\&activate_HierVi
 #$tab10 = $book->add( "Sheet 10", -label=>"rtl-edit",-justify => "center" );
 $tab12 = $book->add( "Sheet 12", -label=>"Specify",-justify => "center" );
 #$tab13 = $book->add( "Sheet 13", -label=>"Img-View", -raisecmd=>\&activate_imgViewTab,-justify => "center" );
-$tab13 = $book->add( "Sheet 13", -label=>"Img-View", -justify => "center" );
+$tab13 = $book->add( "Sheet 13", -label=>"Raster", -raisecmd=>\&activate_RasterTab, -justify => "center" );
 
 #&design_canvas;
 &create_design_worldCanv;

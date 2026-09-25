@@ -972,6 +972,12 @@ $tab2 = $book->add( "Sheet 2", -label=>"Library", -raisecmd=>\&activate_LibraryT
 $tab9 = $book->add( "Sheet 9", -label=>"Hier-View", -raisecmd=>\&activate_HierViewTab,-justify => "center" );
 #$tab10 = $book->add( "Sheet 10", -label=>"rtl-edit",-justify => "center" );
 $tab12 = $book->add( "Sheet 12", -label=>"Specify",-justify => "center" );
+#<!-- The Raster tab.  Draws the whole design as one image rather than one
+#     canvas item per instance, which is what makes a million cell design
+#     openable; the FlatView beside it is untouched and stays the place where
+#     selection and highlight work.  Nothing to load: it rasterises whatever is
+#     in memory. -->
+$tab13 = $book->add( "Sheet 13", -label=>"Raster", -raisecmd=>\&activate_RasterTab, -justify => "center" );
 
 &design_canvas;
 &create_design_worldCanv;
@@ -985,6 +991,11 @@ $tab12 = $book->add( "Sheet 12", -label=>"Specify",-justify => "center" );
 &hierview_canvas;
 #&rtledit_canvas;
 &prepare_specify_tab;
+#<!-- a plain Scrolled Canvas: the Raster tab owns its own zoom, so there is no
+#     WorldCanvas scaling to fight -->
+$img_canvas = $tab13->Scrolled(qw/Canvas -bg black -confine 1 -scrollbars se/,
+                               -width => 540, -height => 540);
+$img_canvas->pack(qw/-fill both -expand 1 -side left/);
 
 sub hierview_canvas {
 use Tk::WorldCanvas;

@@ -35,10 +35,191 @@
 #     costs another half second and never gets slower. -->
 
 #<!-- ======================================================================
-#     The flat view's raster mode.
+#     The Raster tab.
 #
-#     Everything above this is the standalone window.  This is the part that
-#     makes the EXISTING flat view fast, which is what was actually asked for.
+#     This is where the raster lives, and the flat view is left completely
+#     alone -- byte for byte the code it has always been.  That is a better
+#     split than the one I tried first, which wired the raster into
+#     design_display and spent two rounds breaking its zoom: the flat view owns
+#     item-per-instance drawing, selection and highlight, and is what you want
+#     on a design small enough to click around in.  The Raster tab owns the
+#     "show me a million cells" case and owns its own zoom, so the two cannot
+#     interfere.
+#
+#     It takes no input.  The design is already in memory -- every location and
+#     every cell size -- so the tab dumps four numbers per cell and rasterises
+#     that.  No DEF to write, no LEF to name, no file to browse for.
+#
+#     $img_canvas is a Scrolled('Canvas'), a plain one, which is exactly right
+#     here: there is no WorldCanvas zoom to fight, so the viewport is ours and
+#     a zoom is just a smaller rectangle handed to the rasteriser. -->
+
+#<!-- Draw the current viewport into the Raster tab. -->
+sub dbfRasterTabDraw {
+
+return unless ( defined $img_canvas );
+return unless ( @RASTER_TAB_VIEW == 4 );
+return if ( $RASTER_TAB_BUSY );
+$RASTER_TAB_BUSY = 1;
+
+#<!-- canvas operations go to the real Canvas, not the Scrolled Frame around
+#     it: a Frame has its own lower, which wants a window path and dies on a
+#     tag.  createImage and delete have no Frame equivalent and would delegate,
+#     but taking the subwidget once is simpler than remembering which is which. -->
+my $cv = $img_canvas;
+my $sub = eval { $img_canvas->Subwidget('scrolled') };
+$cv = $sub if ( defined $sub );
+
+my $W = $cv->width;
+my $H = $cv->height;
+$W = 540 if ( ! defined $W || $W < 10 );
+$H = 540 if ( ! defined $H || $H < 10 );
+
+my $ok = eval {
+  my $home = $GLOBAL->dbfGlobalGetElectronHome;
+  my $bin  = "$home/3RDBIN/def_raster";
+  my $cmd  = ( -x $bin ) ? "$bin $RASTER_TAB_FILE $RASTER_TAB_PNG"
+                         : "python3 $bin $RASTER_TAB_FILE $RASTER_TAB_PNG";
+  $cmd .= " --cells --quiet --width $W --height $H";
+  $cmd .= sprintf(" --bbox %.6f %.6f %.6f %.6f", @RASTER_TAB_VIEW);
+  my $rc = system($cmd);
+  die "the rasteriser exited with $rc\n" if ( $rc != 0 );
+  die "no image was produced\n" unless ( -e $RASTER_TAB_PNG );
+  $cv->delete('all');
+  my $new = $cv->Photo(-file => $RASTER_TAB_PNG);
+  $cv->createImage(0, 0, -anchor => 'nw', -image => $new, -tags => ['RASTER']);
+  $cv->configure(-scrollregion => [0, 0, $new->width, $new->height]);
+  $RASTER_TAB_PHOTO->delete if ( defined $RASTER_TAB_PHOTO );
+  $RASTER_TAB_PHOTO = $new;
+  1;
+};
+my $err = $@;
+$RASTER_TAB_BUSY = 0;
+unless ( $ok ) {
+  $RASTER_TAB_STATUS = "could not draw: $err";
+  $RASTER_TAB_STATUS =~ s/\s+$//;
+  return;
+}
+$RASTER_TAB_STATUS = sprintf("%.1f x %.1f um  |  %.4f um per pixel  |  %d cells",
+    $RASTER_TAB_VIEW[2]-$RASTER_TAB_VIEW[0],
+    $RASTER_TAB_VIEW[3]-$RASTER_TAB_VIEW[1],
+    ($RASTER_TAB_VIEW[2]-$RASTER_TAB_VIEW[0]) / ($W > 0 ? $W : 1),
+    $RASTER_TAB_COUNT);
+
+}# sub dbfRasterTabDraw
+
+
+#<!-- Raising the tab.  Dumps the design if it has not been dumped, or if the
+#     instance count has changed since it was, then draws it.  No arguments, no
+#     files, nothing to pick. -->
+sub activate_RasterTab {
+
+return unless ( defined $img_canvas );
+
+my $n = keys %CADB;
+unless ( $n > 0 ) {
+  $RASTER_TAB_STATUS = "no design loaded";
+  return;
+}
+
+#<!-- the controls, built once and packed above the canvas -->
+unless ( $RASTER_TAB_READY ) {
+  my $bar = $tab13->Frame()->pack(-side => 'top', -fill => 'x', -before => $img_canvas);
+  $bar->Button(-text => 'Fit', -command => sub {
+        @RASTER_TAB_VIEW = @RASTER_TAB_HOME; &dbfRasterTabDraw;
+      })->pack(-side => 'left');
+  $bar->Button(-text => 'Zoom out', -command => sub {
+        my ($cx, $cy) = ( ($RASTER_TAB_VIEW[0]+$RASTER_TAB_VIEW[2])/2,
+                          ($RASTER_TAB_VIEW[1]+$RASTER_TAB_VIEW[3])/2 );
+        my ($w, $h) = ( $RASTER_TAB_VIEW[2]-$RASTER_TAB_VIEW[0],
+                        $RASTER_TAB_VIEW[3]-$RASTER_TAB_VIEW[1] );
+        @RASTER_TAB_VIEW = ($cx-$w, $cy-$h, $cx+$w, $cy+$h);
+        &dbfRasterTabDraw;
+      })->pack(-side => 'left');
+  $bar->Button(-text => 'Redraw', -command => sub {
+        undef $RASTER_TAB_N; &activate_RasterTab;
+      })->pack(-side => 'left');
+  $bar->Label(-textvariable => \$RASTER_TAB_STATUS, -anchor => 'w')
+      ->pack(-side => 'left', -fill => 'x', -expand => 1);
+
+  #<!-- drag a rectangle to zoom into it -->
+  my $cv = $img_canvas;
+  my $sub = eval { $img_canvas->Subwidget('scrolled') };
+  $cv = $sub if ( defined $sub );
+  $cv->Tk::bind('<ButtonPress-1>', [ sub {
+        my ($c, $x, $y) = @_;
+        ($RASTER_TAB_DX, $RASTER_TAB_DY) = ($c->canvasx($x), $c->canvasy($y));
+        $c->delete('band');
+        $c->createRectangle($RASTER_TAB_DX, $RASTER_TAB_DY,
+                            $RASTER_TAB_DX, $RASTER_TAB_DY,
+                            -outline => 'white', -tags => 'band');
+      }, Ev('x'), Ev('y') ]);
+  $cv->Tk::bind('<B1-Motion>', [ sub {
+        my ($c, $x, $y) = @_;
+        return unless ( defined $RASTER_TAB_DX );
+        $c->coords('band', $RASTER_TAB_DX, $RASTER_TAB_DY,
+                   $c->canvasx($x), $c->canvasy($y));
+      }, Ev('x'), Ev('y') ]);
+  $cv->Tk::bind('<ButtonRelease-1>', [ sub {
+        my ($c, $x, $y) = @_;
+        return unless ( defined $RASTER_TAB_DX );
+        my ($x1, $y1) = ($c->canvasx($x), $c->canvasy($y));
+        $c->delete('band');
+        my ($px0, $px1) = ( $RASTER_TAB_DX < $x1 ? ($RASTER_TAB_DX, $x1) : ($x1, $RASTER_TAB_DX) );
+        my ($py0, $py1) = ( $RASTER_TAB_DY < $y1 ? ($RASTER_TAB_DY, $y1) : ($y1, $RASTER_TAB_DY) );
+        undef $RASTER_TAB_DX;
+        #<!-- a click is not a zoom -->
+        return if ( $px1 - $px0 < 5 || $py1 - $py0 < 5 );
+        my $w = $c->width;  my $h = $c->height;
+        return unless ( $w > 0 && $h > 0 );
+        my $sx = ($RASTER_TAB_VIEW[2] - $RASTER_TAB_VIEW[0]) / $w;
+        my $sy = ($RASTER_TAB_VIEW[3] - $RASTER_TAB_VIEW[1]) / $h;
+        #<!-- canvas y runs down, the die's y runs up -->
+        @RASTER_TAB_VIEW = ( $RASTER_TAB_VIEW[0] + $px0 * $sx,
+                             $RASTER_TAB_VIEW[3] - $py1 * $sy,
+                             $RASTER_TAB_VIEW[0] + $px1 * $sx,
+                             $RASTER_TAB_VIEW[3] - $py0 * $sy );
+        &dbfRasterTabDraw;
+      }, Ev('x'), Ev('y') ]);
+
+  $RASTER_TAB_READY = 1;
+}
+
+#<!-- dump, unless the same design is already dumped -->
+unless ( defined $RASTER_TAB_N && $RASTER_TAB_N == $n && -e $RASTER_TAB_FILE ) {
+  my $scale = $GLOBAL->dbfGlobalGetDBU;
+  $scale = 1 unless ( defined $scale && $scale > 0 );
+  my @die = ( 0, 0, 0, 0 );
+  if ( exists $DIE_ALREADY{dieArea} && @{$DIE_ALREADY{dieArea}} >= 4 ) {
+    @die = @{$DIE_ALREADY{dieArea}};
+  }
+  unless ( $die[2] > $die[0] && $die[3] > $die[1] ) {
+    $RASTER_TAB_STATUS = "the design has no die area";
+    return;
+  }
+  $RASTER_TAB_FILE = "$TOP_MODULE.rastertab.cells";
+  $RASTER_TAB_PNG  = "$TOP_MODULE.rastertab.png";
+  $RASTER_TAB_STATUS = "dumping $n instances ...";
+  $img_canvas->update if ( defined $img_canvas );
+  undef $FLAT_RASTER_DUMP_N;
+  my $cnt = &dbfRasterDumpCells($RASTER_TAB_FILE, $scale, \@die);
+  unless ( $cnt > 0 ) {
+    $RASTER_TAB_STATUS = "no placed instance has a size to draw";
+    return;
+  }
+  $RASTER_TAB_COUNT = $cnt;
+  $RASTER_TAB_N = $n;
+  @RASTER_TAB_HOME = ( $die[0]/$scale, $die[1]/$scale, $die[2]/$scale, $die[3]/$scale );
+  @RASTER_TAB_VIEW = @RASTER_TAB_HOME;
+}
+
+&dbfRasterTabDraw;
+
+}# sub activate_RasterTab
+
+
+#<!-- ======================================================================
+#     Shared: the cell dump.
 #
 #     WHAT design_display SPENDS ITS TIME ON
 #
@@ -64,61 +245,10 @@
 #     image has to line up with that transform rather than with the truth.
 #     CLAUDE.md records that the two diverge. -->
 
-#<!-- off | auto | always.  auto means raster above the threshold. -->
-$FLAT_RASTER_MODE = "auto" unless ( defined $FLAT_RASTER_MODE );
-$FLAT_RASTER_LIMIT = 50000 unless ( defined $FLAT_RASTER_LIMIT );
-
-sub flat_raster {
-
-my $noOfArguments = @_;
-if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
-  print "Usage : flat_raster -mode <off|auto|always>\n";
-  print "                    -limit <instances>\n";
-  print "\n";
-  print "        How the flat view draws.  auto, the default, draws the design as\n";
-  print "        one image when it holds more than -limit instances ($FLAT_RASTER_LIMIT)\n";
-  print "        and one canvas rectangle per instance below that -- so selection\n";
-  print "        and highlight keep working on the designs where they are usable,\n";
-  print "        and a million cell design opens at all.\n";
-  print "\n";
-  print "        off restores the old behaviour exactly.  It is one word, and it\n";
-  print "        is there because the old path is the one that has been trusted\n";
-  print "        for years.\n";
-  print "\n";
-  print "        Currently: -mode $FLAT_RASTER_MODE -limit $FLAT_RASTER_LIMIT\n";
-  return;
-}
-for (my $i = 0; $i < $noOfArguments; $i++) {
-  if    ($_[$i] eq "-mode")  { $FLAT_RASTER_MODE = $_[$i+1]; }
-  elsif ($_[$i] eq "-limit") { $FLAT_RASTER_LIMIT = $_[$i+1]; }
-  elsif ($_[$i] =~ m/^-+\w/) { print "WARN-GUI-RASTER : 014 : invalid option $_[$i]\n"; }
-}
-unless ( $FLAT_RASTER_MODE =~ m/^(off|auto|always)$/ ) {
-  print "WARN-GUI-RASTER : 015 : -mode must be off, auto or always; keeping auto\n";
-  $FLAT_RASTER_MODE = "auto";
-}
-print "INFO-GUI-RASTER : 016 : flat view raster mode $FLAT_RASTER_MODE, limit $FLAT_RASTER_LIMIT\n";
-
-}# sub flat_raster
-
-
-#<!-- Should design_display raster instead of drawing items? -->
-sub dbfFlatRasterWanted {
-
-return 0 if ( $FLAT_RASTER_MODE eq "off" );
-my $home = $GLOBAL->dbfGlobalGetElectronHome;
-return 0 unless ( -e "$home/3RDBIN/def_raster" );
-return 1 if ( $FLAT_RASTER_MODE eq "always" );
-my $n = keys %CADB;
-return ( $n > $FLAT_RASTER_LIMIT ) ? 1 : 0;
-
-}# sub dbfFlatRasterWanted
-
-
 #<!-- Walk %CADB once into a flat file.  Re-walked only when the instance count
 #     changes, which is the cheap test that catches a new design being read
 #     without costing anything on a pan. -->
-sub dbfFlatRasterDump {
+sub dbfRasterDumpCells {
 
 my ($file, $scale, $die) = @_;
 
@@ -165,168 +295,7 @@ $FLAT_RASTER_DUMP_F = $file;
 print "INFO-GUI-RASTER : 018 : dumped $cnt placed instance(s) for the raster view\n";
 return $cnt;
 
-}# sub dbfFlatRasterDump
-
-
-#<!-- Rasterise the canvas's current view and put it on as one image.
-#
-#     The image is placed to cover exactly the visible world rectangle at
-#     exactly the canvas's pixel size, so it lines up one for one.  A Tk image
-#     does not scale with a WorldCanvas zoom, which is why this has to run
-#     again on every view change rather than once -- and is why -changeView
-#     exists. -->
-sub dbfFlatRasterDraw {
-
-my ($canvas) = @_;
-return unless ( defined $canvas );
-unless ( defined $FLAT_RASTER_FILE && -e $FLAT_RASTER_FILE ) {
-  print "WARN-GUI-RASTER : 022 : no cell dump to draw from; nothing was rastered\n";
-  return;
-}
-
-#<!-- Re-entrancy guard.  This runs from the -changeView callback and then
-#     creates a canvas item; if item creation ever nudged the view the callback
-#     would fire again and the GUI would hang rather than merely look wrong.
-#     Tk::WorldCanvas only fires -changeView from xview, yview, zoom, center
-#     and viewArea, so it should not -- but a hung window is a much worse
-#     failure than a missing picture, and the guard is one variable. -->
-return if ( $FLAT_RASTER_BUSY );
-$FLAT_RASTER_BUSY = 1;
-
-my @v = $canvas->getView();              #<!-- world: x1 y1 x2 y2 -->
-unless ( @v >= 4 && $v[2] > $v[0] && $v[3] > $v[1] ) { $FLAT_RASTER_BUSY = 0; return; }
-my $px = $canvas->pixelSize();
-unless ( defined $px && $px > 0 ) { $FLAT_RASTER_BUSY = 0; return; }
-
-my $W = int( ($v[2] - $v[0]) / $px );
-my $H = int( ($v[3] - $v[1]) / $px );
-$W = 1 if ( $W < 1 );  $H = 1 if ( $H < 1 );
-#<!-- a very deep zoom would ask for an enormous image; the view is only so
-#     many screen pixels wide, so cap it at something a screen can show -->
-if ( $W > 4000 ) { $H = int($H * 4000 / $W); $W = 4000; $H = 1 if ($H < 1); }
-if ( $H > 4000 ) { $W = int($W * 4000 / $H); $H = 4000; $W = 1 if ($W < 1); }
-
-#<!-- world -> the units the dump is in.  design_display builds the canvas as
-#     world = dbu * MulFactor + dieShift, so this is that inverted. -->
-my $mf = $FLAT_RASTER_MULFACTOR;
-my $sh = $FLAT_RASTER_SHIFT;
-unless ( defined $mf && $mf != 0 ) {
-  print "WARN-GUI-RASTER : 023 : the canvas transform is not set; nothing was rastered\n";
-  $FLAT_RASTER_BUSY = 0;
-  return;
-}
-my @bb = ( ($v[0]-$sh)/$mf, ($v[1]-$sh)/$mf, ($v[2]-$sh)/$mf, ($v[3]-$sh)/$mf );
-#<!-- and the dump is in $DBSCALEFACTOR units, so those are microns already if
-#     the scale written was $DBSCALEFACTOR -->
-my $sc = $FLAT_RASTER_SCALE;
-$sc = 1 unless ( defined $sc && $sc > 0 );
-@bb = map { $_ / $sc } @bb;
-
-my $home = $GLOBAL->dbfGlobalGetElectronHome;
-my $bin = "$home/3RDBIN/def_raster";
-my $png = ( defined $FLAT_RASTER_PNG ) ? $FLAT_RASTER_PNG : "flat_raster.png";
-my $cmd = ( -x $bin ) ? "$bin $FLAT_RASTER_FILE $png" : "python3 $bin $FLAT_RASTER_FILE $png";
-$cmd .= " --cells --quiet --width $W --height $H";
-$cmd .= sprintf(" --bbox %.6f %.6f %.6f %.6f", @bb);
-my $rc = system($cmd);
-if ( $rc != 0 || ! -e $png ) {
-  print "WARN-GUI-RASTER : 019 : the rasteriser failed ($cmd), the view is empty\n";
-  $FLAT_RASTER_BUSY = 0;
-  return;
-}
-
-#<!-- Everything from here is wrapped, because $FLAT_RASTER_BUSY must be
-#     cleared on EVERY path out.  It was not: delete, Photo and createImage
-#     were unguarded, and a throw from any of them -- a half written PNG is
-#     enough -- escaped the callback with the flag still set.  Every later
-#     -changeView then returned immediately and the view never updated again,
-#     which reads as "the image drew once and then zoom stopped working". -->
-my $drew = eval {
-$canvas->delete('RASTER');
-my $new = $canvas->Photo(-file => $png);
-#<!-- anchor nw at the top left of the view: world y runs up, canvas y down -->
-$canvas->createImage($v[0], $v[3], -anchor => 'nw', -image => $new,
-                     -tags => ['RASTER']);
-
-#<!-- Lower through the REAL canvas, not the Scrolled wrapper.
-#
-#     $design_worldcanvas is a Scrolled('WorldCanvas'), which IS a Frame, and a
-#     Frame has its own lower -- the window stacking one, which wants a window
-#     path.  So "$canvas->lower('RASTER')" finds that instead of the canvas's
-#     item lower and dies with: bad window path name "RASTER".
-#
-#     createImage and delete are fine because a Frame has neither, so they
-#     delegate to the canvas.  lower is the one name that collides, which is
-#     why everything else worked and only this blew up.
-#
-#     Subwidget('scrolled') is the Tk::WorldCanvas itself.  It is undef for a
-#     bare canvas, so this falls back rather than assuming a wrapper. -->
-my $cv = $canvas;
-my $sub = eval { $canvas->Subwidget('scrolled') };
-$cv = $sub if ( defined $sub );
-unless ( eval { $cv->lower('RASTER'); 1; } ) {
-  #<!-- Not fatal.  The image ends up on top of the rows and the ports instead
-  #     of under them, which is worth one line rather than a dead callback and
-  #     a view that never updates again. -->
-  unless ( $FLAT_RASTER_LOWERWARN ) {
-    print "WARN-GUI-RASTER : 025 : could not put the image under the rows: $@";
-    $FLAT_RASTER_LOWERWARN = 1;
-  }
-}
-$FLAT_RASTER_PHOTO->delete if ( defined $FLAT_RASTER_PHOTO );
-$FLAT_RASTER_PHOTO = $new;
-1;
-};
-my $err = $@;
-#<!-- cleared before anything can return or throw again -->
-$FLAT_RASTER_BUSY = 0;
-unless ( $drew ) {
-  unless ( $FLAT_RASTER_DRAWWARN ) {
-    print "WARN-GUI-RASTER : 026 : could not put the image on the canvas: $err";
-    print "WARN-GUI-RASTER : 027 : flat_raster -mode off goes back to drawing items\n";
-    $FLAT_RASTER_DRAWWARN = 1;
-  }
-  return;
-}
-
-#<!-- Say so the first time.  Not every time: this runs on every pan and every
-#     zoom step, and a line each would bury everything else.  Once is enough to
-#     tell the difference between "drawn" and "silently did nothing", which is
-#     the failure this had. -->
-unless ( $FLAT_RASTER_SAID ) {
-  printf("INFO-GUI-RASTER : 024 : flat view drawn as a %dx%d image over %.1f x %.1f um\n",
-         $W, $H, ($v[2]-$v[0])/$mf/$sc, ($v[3]-$v[1])/$mf/$sc);
-  $FLAT_RASTER_SAID = 1;
-}
-
-}# sub dbfFlatRasterDraw
-
-
-#<!-- Coalesce a burst of view changes into one re-raster.
-#
-#     -changeView fires on every xview, yview, zoom, center and viewArea, and a
-#     drag or a held key produces a stream of them.  Rastering each one runs
-#     python synchronously with the Tk event loop blocked, so the window stops
-#     responding for as long as the queue takes -- which looks exactly like
-#     zoom being broken even though every frame is eventually correct.
-#
-#     after() puts it off until the view has been still for a moment, and each
-#     new event cancels the pending one.  The picture lands once, when you stop
-#     moving, which is the only time it is worth having. -->
-sub dbfFlatRasterSchedule {
-
-my ($canvas) = @_;
-return unless ( defined $canvas );
-if ( defined $FLAT_RASTER_AFTER ) {
-  eval { $FLAT_RASTER_AFTER->cancel };
-  undef $FLAT_RASTER_AFTER;
-}
-$FLAT_RASTER_AFTER = $canvas->after(180, sub {
-    undef $FLAT_RASTER_AFTER;
-    &dbfFlatRasterDraw($canvas);
-  });
-
-}# sub dbfFlatRasterSchedule
+}# sub dbfRasterDumpCells
 
 
 sub raster_view {
@@ -342,8 +311,11 @@ my $width = 1200;
 my ($noWindow, $keepFiles) = (0, 0);
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
-  print "Usage : raster_view -lef <file>      cell sizes; repeat for more than one\n";
-  print "                    -def <file>      a DEF to draw; default is to write one\n";
+  print "Usage : raster_view -def <file>      a DEF on disk to draw.  With no -def it\n";
+  print "                                     draws what is in memory and needs nothing\n";
+  print "                                     else -- no LEF, no DEF, no file to pick.\n";
+  print "                    -lef <file>      cell sizes, and ONLY needed with -def,\n";
+  print "                                     because a DEF does not carry them\n";
   print "                    -out <file.png>  default <top>.raster.png\n";
   print "                    -width <pixels>  default 1200\n";
   print "                    -mode <util|count|outline>\n";
@@ -357,8 +329,11 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "\n";
   print "        Draws the design as an image instead of one canvas item per\n";
   print "        instance, which is what makes a million cell design openable.\n";
-  print "        Opens its own window; the flat view is untouched and both can\n";
-  print "        be up at once.  Drag a rectangle in it to zoom.\n";
+  print "        Opens its own window; drag a rectangle in it to zoom.\n";
+  print "\n";
+  print "        The Raster TAB in the main window does the same thing without a\n";
+  print "        command -- raise it and it draws.  This is for when you want a\n";
+  print "        second view, or a DEF that is not the loaded design.\n";
   return;
 }
 for (my $i = 0; $i < $noOfArguments; $i++) {
@@ -434,7 +409,7 @@ if ( $fromMemory ) {
   }
   #<!-- forget any earlier dump: this one may be of a different design -->
   undef $FLAT_RASTER_DUMP_N;
-  my $cnt = &dbfFlatRasterDump($defFile, $scale, \@dieDbu);
+  my $cnt = &dbfRasterDumpCells($defFile, $scale, \@dieDbu);
   unless ( $cnt > 0 ) {
     print "ERR-GUI-RASTER : 006 : no placed instance has a size; nothing to draw\n";
     return;
