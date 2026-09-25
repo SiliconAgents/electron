@@ -176,12 +176,28 @@ Two DEFs of the same design are **not** comparable byte for byte. `write_def`
 walks `keys %CADB`, and Perl randomises hash order per process, so the records
 come out in a different order every run. Sort and hash the records instead.
 
-`legalize_flat` is **not deterministic** run to run: two identical runs of
-`TESTS/large` matmul_hier agree on 88.8% of cells and move the rest ~11 µm.
-`hier_place_all` is — two runs agree on all 204,816 cells exactly. So compare
-the pre-legalisation DEF when asking whether a change did anything, or you will
-be reading the legaliser's noise. A control run of the *unchanged* code is the
-only way to know which you are looking at.
+A control run of the *unchanged* code is the only way to know whether a
+difference is yours. `legalize_flat` used to be nondeterministic run to run and
+it cost real time to discover that a "regression" was its own noise; it is
+deterministic now, and `hier_place_all` always was.
+
+## legalize_flat
+
+Abacus, and it produces **zero** overlaps — check that in integer DBU, never in
+microns: a float checker comparing `y + 1.4` against the next row's `y` invents
+one phantom overlap per row boundary and reported 682 that did not exist.
+
+Its density pass (`--spread`) is **off by default** and that is deliberate: on
+nangate_flat it triples the unrouted nets (523-544 against 77-98) for no gain
+anywhere else, because a move there retargets a cell to the centre of a
+neighbouring bin, a whole bin away, chosen on area with no idea what the cell
+drives. Turn it on when pass 2 reports cells that found no row at all.
+
+`-placer <path>` hands the whole problem to an external legalizer;
+`3RDBIN/legalize_flat` is a NumPy one that reproduces the Perl cell for cell and
+additionally reserves the rows above a multi-row cell, which the Perl one does
+not. The Perl is the reference — keep them agreeing, including the tie breaks
+(bin indices compare numerically, not as `"bx,by"` strings).
 
 ## Off limits
 

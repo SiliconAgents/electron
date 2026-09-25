@@ -1,0 +1,516 @@
+#!/usr/bin/env python3
+"""Standalone row legalizer for electron's flat placement.
+
+Reads the file ALGO/PLACE_NEW/make_legalize_flat writes, legalizes, and writes
+the new locations back.  Driven as
+
+    legalize_flat -placer <path to this file>
+
+which is how 3RDBIN/eplacer, mincut_placer, seed_placer and hier_place are all
+driven: text in, text out, no library in common.
+
+WHAT IT IS FOR
+
+The Perl legalizer in ALGO/PLACE_NEW/make_legalize_flat is the reference: it is
+short, it is readable, and on a small single-height-cell design it is the thing
+to check against.  This exists because two of its remaining limitations are
+awkward to fix there and natural here.
+
+  multi-row cells   The Perl one counts cells taller than a row and says out
+                    loud that it does not reserve the rows above them, so a
+                    double-height cell overlaps whatever is in the row above.
+                    Nangate is entirely single-height so nothing in TESTS
+                    catches it.  This one reserves the rows.
+
+  speed at size     The dominant cost is per-cell work over millions of cells,
+                    which is what NumPy is for.  Note the honest caveat: the
+                    round trip through a text file is itself tens of seconds at
+                    three million cells, so the end-to-end win over the fixed
+                    Perl is smaller than the compute-time win.  If you are
+                    legalizing 200k cells, use the Perl one.
+
+WHAT IT DELIBERATELY DOES NOT DO
+
+No connectivity term.  Same as the Perl one, and for the same reason: there is
+no net in the input, so a cell has no reason to be anywhere except near where
+the placer left it, and the only objective is displacement.  Adding a net term
+means passing the netlist in, which is a different and larger job.
+
+THE ALGORITHM, WHICH IS THE SAME ONE ON PURPOSE
+
+Two passes, matching the Perl so the two can be compared on the same design:
+
+  1  spreading.  Bin the core, compare each bin's movable cell area with the
+     free area it has, and hand cells from an over-full bin to whichever
+     neighbour has room -- roomiest neighbour first, and the SMALLEST cell
+     first by default.  See spread() for why small and not large.
+
+  2  rows and Abacus.  Assign each cell to a row near its own y, then legalize
+     along x by Abacus: cells in x order, a cell that would overlap its left
+     neighbour joins its cluster, the cluster sits at the weighted mean of its
+     members' targets, and clusters collapse into each other when they overlap.
+     That is the minimum total squared displacement for a given row assignment.
+
+Everything is integer DBU end to end.  Nothing here uses floats for a
+coordinate, because the last time a checker did that on this flow it reported
+682 overlaps that were not there.
+"""
+
+import argparse
+import sys
+import time
+
+import numpy as np
+
+
+# --------------------------------------------------------------------------- #
+#  input
+# --------------------------------------------------------------------------- #
+class Design:
+    """Everything the legalizer needs, all integers in DBU."""
+
+    def __init__(self):
+        self.dbu = 1
+        self.die = (0, 0, 0, 0)
+        self.rowh = 0
+        self.sitex = 1
+        self.row_y = []                 # sorted
+        self.row_x0 = {}
+        self.row_x1 = {}
+        self.obs = []                   # (llx, lly, urx, ury)
+        self.names = []                 # index -> name
+        self.w = []
+        self.h = []
+        self.x = []
+        self.y = []
+
+    def finish(self):
+        self.row_y.sort()
+        self.rowY = np.array(self.row_y, dtype=np.int64)
+        self.rowX0 = np.array([self.row_x0[y] for y in self.row_y], dtype=np.int64)
+        self.rowX1 = np.array([self.row_x1[y] for y in self.row_y], dtype=np.int64)
+        self.cw = np.array(self.w, dtype=np.int64)
+        self.ch = np.array(self.h, dtype=np.int64)
+        self.cx = np.array(self.x, dtype=np.int64)
+        self.cy = np.array(self.y, dtype=np.int64)
+        self.n = len(self.w)
+
+
+def read_design(path):
+    d = Design()
+    with open(path) as fh:
+        for line in fh:
+            if not line or line[0] == "#":
+                continue
+            f = line.split()
+            if not f:
+                continue
+            k = f[0]
+            if k == "UNITS":
+                d.dbu = int(f[1])
+            elif k == "DIE":
+                d.die = tuple(int(v) for v in f[1:5])
+            elif k == "ROWH":
+                d.rowh = int(f[1])
+            elif k == "SITEX":
+                d.sitex = max(1, int(f[1]))
+            elif k == "ROW":
+                y, x0, x1 = int(f[1]), int(f[2]), int(f[3])
+                if y in d.row_x0:
+                    d.row_x0[y] = min(d.row_x0[y], x0)
+                    d.row_x1[y] = max(d.row_x1[y], x1)
+                else:
+                    d.row_y.append(y)
+                    d.row_x0[y] = x0
+                    d.row_x1[y] = x1
+            elif k == "OBS":
+                d.obs.append(tuple(int(v) for v in f[1:5]))
+            elif k == "CELL":
+                # CELL <idx> <w> <h> <x> <y> <name>   -- name last, may hold anything
+                d.w.append(int(f[2]))
+                d.h.append(int(f[3]))
+                d.x.append(int(f[4]))
+                d.y.append(int(f[5]))
+                d.names.append(f[6] if len(f) > 6 else str(len(d.names)))
+    d.finish()
+    return d
+
+
+# --------------------------------------------------------------------------- #
+#  pass 1: spread the density
+# --------------------------------------------------------------------------- #
+def spread(d, tx, ty, bin_um, iters, order_large, log):
+    """Move targets out of over-full bins.  tx/ty are modified in place."""
+    binsz = max(d.rowh, int(bin_um * d.dbu))
+    x0, y0, x1, y1 = d.die
+    nbx = (x1 - x0) // binsz + 1
+    nby = (y1 - y0) // binsz + 1
+
+    # capacity: each bin's own area, less whatever an obstacle covers of it.
+    # Built with the die clipped in, so the partial bins along the top and
+    # right edges do not claim area they do not have.
+    bxs = np.minimum(x0 + (np.arange(nbx) + 1) * binsz, x1) - (x0 + np.arange(nbx) * binsz)
+    bys = np.minimum(y0 + (np.arange(nby) + 1) * binsz, y1) - (y0 + np.arange(nby) * binsz)
+    cap = np.outer(np.maximum(bxs, 0), np.maximum(bys, 0)).astype(np.int64)
+
+    for (olx, oly, oux, ouy) in d.obs:
+        i0 = max(0, (olx - x0) // binsz)
+        i1 = min(nbx - 1, (oux - x0) // binsz)
+        j0 = max(0, (oly - y0) // binsz)
+        j1 = min(nby - 1, (ouy - y0) // binsz)
+        if i1 < i0 or j1 < j0:
+            continue
+        gi = np.arange(i0, i1 + 1)
+        gj = np.arange(j0, j1 + 1)
+        ox = np.minimum(oux, x0 + (gi + 1) * binsz) - np.maximum(olx, x0 + gi * binsz)
+        oy = np.minimum(ouy, y0 + (gj + 1) * binsz) - np.maximum(oly, y0 + gj * binsz)
+        ox = np.maximum(ox, 0)
+        oy = np.maximum(oy, 0)
+        cap[i0:i1 + 1, j0:j1 + 1] -= np.outer(ox, oy)
+    np.maximum(cap, 0, out=cap)
+
+    area = d.cw * d.ch
+    moved_total = 0
+    it = 0
+    while it < iters:
+        it += 1
+        bx = np.clip((tx + d.cw // 2 - x0) // binsz, 0, nbx - 1)
+        by = np.clip((ty + d.ch // 2 - y0) // binsz, 0, nby - 1)
+        load = np.zeros_like(cap)
+        np.add.at(load, (bx, by), area)
+
+        over = load - cap
+        oi, oj = np.nonzero(over > 0)
+        if oi.size == 0:
+            break
+
+        # worst bin first, and the bin index as the tie break so that two runs
+        # relieve the same bins in the same order.  The Perl one had this wrong
+        # for years: it sorted over "keys %load" with no tie break, and Perl
+        # randomises hash order per process.
+        order = np.lexsort((oj, oi, -over[oi, oj]))
+        oi, oj = oi[order], oj[order]
+
+        # cells grouped by bin, once per iteration rather than per bin
+        flat = bx.astype(np.int64) * nby + by
+        sortidx = np.argsort(flat, kind="stable")
+        fsorted = flat[sortidx]
+        starts = np.searchsorted(fsorted, np.arange(nbx * nby), side="left")
+        ends = np.searchsorted(fsorted, np.arange(nbx * nby), side="right")
+
+        moved_this = 0
+        for bi, bj in zip(oi.tolist(), oj.tolist()):
+            excess = int(load[bi, bj] - cap[bi, bj])
+            if excess <= 0:
+                continue
+            # neighbours with room, roomiest first, index as tie break
+            cand = []
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    ni, nj = bi + dx, bj + dy
+                    if ni < 0 or ni >= nbx or nj < 0 or nj >= nby:
+                        continue
+                    room = int(cap[ni, nj] - load[ni, nj])
+                    if room > 0:
+                        cand.append([room, ni, nj])
+            if not cand:
+                continue
+            cand.sort(key=lambda c: (-c[0], c[1], c[2]))
+
+            k = bi * nby + bj
+            members = sortidx[starts[k]:ends[k]]
+            # Which cell to give away.  Default is the SMALL one, and that is
+            # not the obvious choice: largest first relieves more excess per
+            # move and gives a lower total displacement.  It also routes
+            # measurably worse -- three runs of nangate_flat each way gave
+            # 360/371/395 nets unrouted smallest first against 501/522/544
+            # largest first.  A move here retargets a cell to the centre of a
+            # neighbouring bin, a whole bin away, and the big cells are the
+            # drivers with the most pins; total displacement is blind to that.
+            # Matches the Perl reference, which takes -spread_order.
+            if order_large:
+                members = sorted(members.tolist(), key=lambda i: (-int(area[i]), d.names[i]))
+            else:
+                members = sorted(members.tolist(), key=lambda i: (int(area[i]), d.names[i]))
+
+            for i in members:
+                if excess <= 0:
+                    break
+                a = int(area[i])
+                for c in cand:
+                    if c[0] < a:
+                        continue
+                    tx[i] = x0 + c[1] * binsz + binsz // 2 - int(d.cw[i]) // 2
+                    ty[i] = y0 + c[2] * binsz + binsz // 2 - int(d.ch[i]) // 2
+                    c[0] -= a
+                    load[c[1], c[2]] += a
+                    excess -= a
+                    moved_this += 1
+                    moved_total += 1
+                    break
+        if moved_this == 0:
+            break
+
+    log(f"spreading: {moved_total} cell(s) rebinned in {it} pass(es) over {bin_um}um bins")
+
+
+# --------------------------------------------------------------------------- #
+#  pass 2: rows, then Abacus along each segment
+# --------------------------------------------------------------------------- #
+def row_segments(d):
+    """Free x intervals per row: [(row index, seg index, x0, x1)] plus a lookup."""
+    segs = []
+    per_row = []
+    for r, y in enumerate(d.row_y):
+        cuts = []
+        for (olx, oly, oux, ouy) in d.obs:
+            if ouy <= y or oly >= y + d.rowh:
+                continue
+            a = max(olx, int(d.rowX0[r]))
+            b = min(oux, int(d.rowX1[r]))
+            if b > a:
+                cuts.append((a, b))
+        cuts.sort()
+        free = []
+        x = int(d.rowX0[r])
+        for (a, b) in cuts:
+            if a > x:
+                free.append((x, a))
+            x = max(x, b)
+        if int(d.rowX1[r]) > x:
+            free.append((x, int(d.rowX1[r])))
+        ids = []
+        for s, (a, b) in enumerate(free):
+            ids.append(len(segs))
+            segs.append([r, s, a, b, b - a])     # last field is remaining width
+        per_row.append(ids)
+    return segs, per_row
+
+
+def abacus(cells, xlo, xhi):
+    """cells: [(idx, w, tx)] in x order.  Returns [(idx, x)].
+
+    Clusters as in Spindler/Schlichtmann's Abacus: a cell that will not fit
+    after the last cluster starts a new one, otherwise it joins and the cluster
+    slides to the weighted mean of its members' targets, collapsing into its
+    left neighbour when that now overlaps.  Weights are 1, so the mean is
+    unweighted and the result minimises the sum of squared displacement.
+    """
+    # cluster: [x, count, q, width, ncells]
+    cl = []
+    for (_idx, w, t) in cells:
+        if cl and cl[-1][0] + cl[-1][3] > t:
+            k = cl[-1]
+            k[2] += t - k[3]
+            k[1] += 1
+            k[3] += w
+            k[4] += 1
+        else:
+            cl.append([t, 1, t, w, 1])
+        while True:
+            k = cl[-1]
+            k[0] = k[2] // k[1]
+            if k[0] < xlo:
+                k[0] = xlo
+            if k[0] > xhi - k[3]:
+                k[0] = xhi - k[3]
+            if len(cl) < 2:
+                break
+            p = cl[-2]
+            if p[0] + p[3] <= k[0]:
+                break
+            p[2] += k[2] - k[1] * p[3]
+            p[1] += k[1]
+            p[3] += k[3]
+            p[4] += k[4]
+            cl.pop()
+
+    out = []
+    i = 0
+    for k in cl:
+        x = k[0]
+        for _ in range(k[4]):
+            idx, w, _t = cells[i]
+            out.append((idx, x))
+            x += w
+            i += 1
+    return out
+
+
+def legalize(d, tx, ty, rowwin, snap_x, log):
+    segs, per_row = row_segments(d)
+    nrows = len(d.row_y)
+
+    # nearest row for every cell at once: searchsorted, then check the row
+    # below.  This is the whole of what made the Perl version O(n^1.5) -- it
+    # scanned every row for every cell.
+    pos = np.searchsorted(d.rowY, ty)
+    np.clip(pos, 0, nrows - 1, out=pos)
+    lower = np.maximum(pos - 1, 0)
+    take_lower = np.abs(d.rowY[lower] - ty) <= np.abs(d.rowY[pos] - ty)
+    nearest = np.where(take_lower & (pos > 0), lower, pos)
+
+    rows_needed = (d.ch + d.rowh - 1) // d.rowh
+
+    # tallest first, so a multi-row cell chooses before the single-height ones
+    # fill the rows it needs.  Then by target x, then by name: fully ordered,
+    # so the assignment is reproducible.
+    order = sorted(range(d.n), key=lambda i: (-int(rows_needed[i]), int(tx[i]), d.names[i]))
+
+    assigned = [[] for _ in segs]
+    no_room = 0
+    multi = int((rows_needed > 1).sum())
+
+    for i in order:
+        w = int(d.cw[i])
+        t = int(tx[i])
+        need = int(rows_needed[i])
+        r0 = int(nearest[i])
+        best_seg = None
+        best_cost = None
+        for dd in range(rowwin + 1):
+            for r in ({r0 - dd, r0 + dd} if dd else {r0}):
+                if r < 0 or r + need > nrows:
+                    continue
+                for sid in per_row[r]:
+                    seg = segs[sid]
+                    if seg[4] < w:
+                        continue
+                    if seg[3] - seg[2] < w:
+                        continue
+                    # a multi-row cell needs the same x band free in every row
+                    # it spans, and those rows have to be contiguous
+                    if need > 1:
+                        ok = True
+                        for rr in range(r + 1, r + need):
+                            if d.row_y[rr] != d.row_y[r] + (rr - r) * d.rowh:
+                                ok = False
+                                break
+                            hit = None
+                            for s2 in per_row[rr]:
+                                q = segs[s2]
+                                if q[2] <= seg[2] and q[3] >= seg[3] and q[4] >= w:
+                                    hit = s2
+                                    break
+                            if hit is None:
+                                ok = False
+                                break
+                        if not ok:
+                            continue
+                    wx = min(max(t, seg[2]), seg[3] - w)
+                    cost = abs(wx - t) + abs(int(d.rowY[r]) - int(ty[i]))
+                    if best_cost is None or cost < best_cost:
+                        best_cost, best_seg = cost, sid
+            # nothing further out can beat this: a row dd steps away costs at
+            # least dd * rowh in the y term alone
+            if best_cost is not None and best_cost <= (dd + 1) * d.rowh:
+                break
+        if best_seg is None:
+            no_room += 1
+            continue
+        assigned[best_seg].append(i)
+        segs[best_seg][4] -= w
+        # reserve the band in the rows above, which the Perl one does not do
+        if need > 1:
+            seg = segs[best_seg]
+            for rr in range(seg[0] + 1, seg[0] + need):
+                for s2 in per_row[rr]:
+                    q = segs[s2]
+                    if q[2] <= seg[2] and q[3] >= seg[3] and q[4] >= w:
+                        q[4] -= w
+                        break
+
+    if no_room:
+        log(f"{no_room} cell(s) found no row with room within {rowwin} row(s); left where they were")
+    if multi:
+        log(f"{multi} cell(s) span more than one row; the rows above them were reserved")
+
+    # Abacus per segment, then site snapping with a left-to-right cursor so
+    # that snapping cannot push a cell back into its neighbour.
+    out_idx = []
+    out_x = []
+    out_y = []
+    for sid, members in enumerate(assigned):
+        if not members:
+            continue
+        r, _s, sx0, sx1, _free = segs[sid]
+        y = int(d.rowY[r])
+        members.sort(key=lambda i: (int(tx[i]), d.names[i]))
+        cells = [(i, int(d.cw[i]), int(tx[i])) for i in members]
+        cursor = sx0
+        for (i, x) in abacus(cells, sx0, sx1):
+            w = int(d.cw[i])
+            if snap_x:
+                nsite = (x - sx0 + d.sitex // 2) // d.sitex
+                x = sx0 + nsite * d.sitex
+            if x < cursor:
+                nsite = -(-(cursor - sx0) // d.sitex) if snap_x else 0
+                x = sx0 + nsite * d.sitex if snap_x else cursor
+            if x + w > sx1:
+                x = sx1 - w
+            cursor = x + w
+            out_idx.append(i)
+            out_x.append(x)
+            out_y.append(y)
+    return np.array(out_idx), np.array(out_x), np.array(out_y)
+
+
+# --------------------------------------------------------------------------- #
+def main():
+    ap = argparse.ArgumentParser(description="row legalizer for electron")
+    ap.add_argument("infile")
+    ap.add_argument("outfile")
+    ap.add_argument("--grid", type=float, default=10.0, help="bin size in um for pass 1")
+    ap.add_argument("--rows", type=int, default=6, help="rows either side to try")
+    ap.add_argument("--iters", type=int, default=20, help="pass 1 iteration cap")
+    ap.add_argument("--spread-order", choices=("small", "large"), default="small",
+                    help="which cell an over-full bin gives away; see spread()")
+    ap.add_argument("--spread", action="store_true",
+                    help="run pass 1; OFF by default, it costs routability")
+    ap.add_argument("--no-spread", action="store_true", help="the default; kept for symmetry")
+    ap.add_argument("--no-snap-x", action="store_true", help="leave x off the site grid")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    def log(msg):
+        if not args.quiet:
+            print(f"legalize_flat: {msg}", flush=True)
+
+    t0 = time.time()
+    d = read_design(args.infile)
+    if d.n == 0:
+        log("no movable cells in the input, nothing to do")
+        open(args.outfile, "w").close()
+        return 0
+    if len(d.row_y) == 0:
+        print("legalize_flat: ERROR: the input carries no ROW", file=sys.stderr)
+        return 2
+    log(f"{d.n} movable cell(s), {len(d.row_y)} row(s), {len(d.obs)} obstacle(s), read in {time.time()-t0:.1f}s")
+
+    tx = d.cx.copy()
+    ty = d.cy.copy()
+
+    t1 = time.time()
+    if args.spread:
+        spread(d, tx, ty, args.grid, args.iters, args.spread_order == "large", log)
+    t2 = time.time()
+    idx, nx, ny = legalize(d, tx, ty, args.rows, not args.no_snap_x, log)
+    t3 = time.time()
+
+    disp = np.abs(nx - d.cx[idx]) + np.abs(ny - d.cy[idx])
+    log(f"legalized {idx.size} cell(s), average move {disp.mean()/d.dbu:.3f} um, "
+        f"worst {disp.max()/d.dbu:.3f} um on {d.names[int(idx[np.argmax(disp)])]}")
+
+    with open(args.outfile, "w") as fh:
+        fh.write("# idx x y\n")
+        for i, x, y in zip(idx.tolist(), nx.tolist(), ny.tolist()):
+            fh.write(f"PLACE {i} {x} {y}\n")
+    t4 = time.time()
+    log(f"spread {t2-t1:.1f}s, rows+abacus {t3-t2:.1f}s, write {t4-t3:.1f}s, total {t4-t0:.1f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -12,14 +12,36 @@
 #
 #  Two passes, in the order the density has to be fixed before the rows can be:
 #
-#  Pass 1, spreading.  The core is cut into bins -- 10um square by default --
-#  and each bin's movable cell area is compared with the free area it has.  A
-#  bin holding more than it can fit hands cells to whichever neighbour has room,
-#  cheapest move first, until it fits.  This is what stops pass 2 from having to
-#  shove a cell half way across the die because the region it sits in was never
-#  going to hold it.  There is no connectivity term anywhere in here: with no
-#  net to pull on, a cell has no reason to be anywhere except where it already
-#  is, so the only objective is displacement.
+#  Pass 1, spreading -- OFF BY DEFAULT, and the reason is worth reading.
+#  The core is cut into bins, each bin's movable cell area is compared with the
+#  free area it has, and a bin holding more than it can fit hands cells to
+#  whichever neighbour has room.  It is meant to stop pass 2 having to shove a
+#  cell half way across the die because its region was never going to hold it.
+#
+#  On nangate_flat it does far more harm than good.  Three runs each way,
+#  everything else identical:
+#
+#                       unrouted of 4489     avg move     worst move
+#      --spread              523 544 537     12.9-13.2um    83-88um
+#      default (off)          78  98  77     13.0-13.1um    50-52um
+#
+#  Seven times the routing failures for no gain anywhere else, and it only
+#  moves about 300 of the 4233 cells to do it.  The reason is the kind of move
+#  it makes: it retargets a cell to the CENTRE of a neighbouring bin, a full
+#  bin away, chosen purely on area with no idea what the cell is connected to.
+#  Pass 2 resolves ordinary local density perfectly well by sliding cells along
+#  rows, and does it without tearing anything out of its neighbourhood.
+#
+#  Turn it on with --spread when pass 2 reports cells that found no row at all
+#  (WARN 013) -- that is the case it was written for and the case where it
+#  earns its cost.  On the hierarchical tests, which have no obstacles and no
+#  real hotspots, it is worth about 3% of average displacement and nothing
+#  else.
+#
+#  There is no connectivity term anywhere in here: with no net to pull on, a
+#  cell has no reason to be anywhere except where it already is, so the only
+#  objective is displacement.  That is exactly why pass 1 misbehaves -- total
+#  displacement is blind to how many pins a cell has.
 #
 #  Pass 2, rows.  Every movable cell is assigned to a row near its own y and
 #  legalized along x by Abacus: cells are taken in x order, and a cell that
@@ -47,7 +69,8 @@
 #               -iters <n> : pass 1 iteration cap, default 20
 #
 #       switches :
-#               --no_spread : skip pass 1, legalize the rows as they are
+#               --spread : run pass 1; it is off by default, see above
+#               --no_spread : the default, kept so old scripts still run
 #               --no_snap_x : leave x off the site grid
 #               --report_only : say what it would do and change nothing
 #
@@ -67,17 +90,41 @@ my $gridUm = 10;
 my $rowWin = 6;
 my $maxDispUm;
 my $iterCap = 20;
-my ($noSpread, $noSnapX, $reportOnly, $debug) = (0, 0, 0, 0);
+my ($noSnapX, $reportOnly, $debug) = (0, 0, 0);
+#<!-- Pass 1 is OFF by default.  See the measurement above the pass itself. -->
+my $doSpread = 0;
+my ($extPlacer, $extArgs, $keepExt);
+my $spreadOrder = "large";
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : legalize_flat -grid <bin size in um, default 10>\n";
   print "                      -rows <rows either side to try, default 6>\n";
   print "                      -max_disp <um, report cells moved further>\n";
   print "                      -iters <spreading iteration cap, default 20>\n";
-  print "                      --no_spread    skip the density pass\n";
+  print "                      --spread       run the density pass (default OFF,\n";
+  print "                                     see below)\n";
+  print "                      --no_spread    the default; kept so old scripts run\n";
   print "                      --no_snap_x    leave x off the site grid\n";
   print "                      --report_only  change nothing\n";
+  print "                      -spread_order <small|large>\n";
+  print "                            which cell an over-full bin gives away.\n";
+  print "                            large moves fewer cells and lowers total\n";
+  print "                            displacement; small leaves the big drivers\n";
+  print "                            alone and routes better, and is the default.\n";
   print "                      -debug\n";
+  print "\n";
+  print "        -placer <path>   hand the rows, cells and obstacles to an\n";
+  print "                         external legalizer instead of legalizing here.\n";
+  print "                         ELECTRON_HOME/3RDBIN/legalize_flat is the one\n";
+  print "                         that ships: NumPy, and it reserves the rows\n";
+  print "                         above a cell taller than one row, which the\n";
+  print "                         internal path does not.\n";
+  print "        -args <extra>    passed straight to it\n";
+  print "        --keep_files     keep <top>.legal.in and <top>.legal.out\n";
+  print "\n";
+  print "        The code in here is the reference: short, readable, and the\n";
+  print "        thing to check an external legalizer against on a small design\n";
+  print "        whose cells are all one row tall.\n";
   return;
 }
 for (my $i = 0; $i < $noOfArguments; $i++) {
@@ -85,9 +132,14 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-rows")        { $rowWin = $_[$i+1]; }
   elsif ($_[$i] eq "-max_disp")    { $maxDispUm = $_[$i+1]; }
   elsif ($_[$i] eq "-iters")       { $iterCap = $_[$i+1]; }
-  elsif ($_[$i] eq "--no_spread")  { $noSpread = 1; }
+  elsif ($_[$i] eq "--no_spread")  { $doSpread = 0; }
+  elsif ($_[$i] eq "--spread")     { $doSpread = 1; }
   elsif ($_[$i] eq "--no_snap_x")  { $noSnapX = 1; }
   elsif ($_[$i] eq "--report_only"){ $reportOnly = 1; }
+  elsif ($_[$i] eq "-spread_order"){ $spreadOrder = $_[$i+1]; }
+  elsif ($_[$i] eq "-placer")      { $extPlacer = $_[$i+1]; }
+  elsif ($_[$i] eq "-args")        { $extArgs = $_[$i+1]; }
+  elsif ($_[$i] eq "--keep_files") { $keepExt = 1; }
   elsif ($_[$i] eq "-debug")       { $debug = 1; }
   elsif ($_[$i] =~ m/^-+\w/)       { print "WARN-ALG-LEGAL : 001 : invalid option $_[$i]\n"; }
 }
@@ -227,8 +279,136 @@ foreach my $m ( @mov ) {
   $origY{$m->[0]} = $m->[4];
 }
 
+#================== hand the whole thing to an external tool ================#
+#<!-- -placer forks off here, after the rows, the movable cells and the
+#     obstacles have been worked out and before either pass runs, because those
+#     three things are what the external tool needs and everything after this
+#     point is the algorithm it replaces.
+#
+#     3RDBIN/legalize_flat is the one that ships: same two passes, NumPy, and
+#     it reserves the rows above a multi-row cell, which the code below does
+#     not.  Anything that reads the format and writes back "PLACE idx x y" will
+#     do.
+#
+#     The format is deliberately its own rather than the flat placer nodefile:
+#     a legalizer needs rows, sites and obstacles, and needs no nets at all, so
+#     sharing the placer's format would mean writing a netlist nobody reads.
+#     Everything in it is integer DBU. -->
+if ( defined $extPlacer && $extPlacer ne "" ) {
+  unless ( -e $extPlacer ) {
+    print "ERR-ALG-LEGAL : 022 : no legalizer at $extPlacer\n";
+    return;
+  }
+  my $inFile  = "$TOP_MODULE.legal.in";
+  my $outFile = "$TOP_MODULE.legal.out";
+  unlink($outFile) if ( -e $outFile );
+
+  unless ( open(LGL_IN, ">$inFile") ) {
+    print "ERR-ALG-LEGAL : 023 : cannot write $inFile : $!\n";
+    return;
+  }
+  print LGL_IN "# electron legalizer input, all integers in dbu\n";
+  print LGL_IN "UNITS $dbu\n";
+  print LGL_IN "DIE $die[0] $die[1] $die[2] $die[3]\n";
+  print LGL_IN "ROWH $rowH\n";
+  print LGL_IN "SITEX $siteX\n";
+  foreach my $y ( @rowY ) {
+    print LGL_IN "ROW $y $rowX0{$y} $rowX1{$y}\n";
+  }
+  foreach my $o ( @obs ) {
+    print LGL_IN "OBS $o->[0] $o->[1] $o->[2] $o->[3]\n";
+  }
+  #<!-- the index is what comes back, so the mapping has to be kept -->
+  my @byIdx = ();
+  for ( my $i = 0 ; $i < @mov ; $i++ ) {
+    my $m = $mov[$i];
+    push(@byIdx, $m->[0]);
+    print LGL_IN "CELL $i $m->[1] $m->[2] $m->[3] $m->[4] $m->[0]\n";
+  }
+  close(LGL_IN);
+  print "INFO-ALG-LEGAL : 024 : wrote $inFile, " . scalar(@mov) . " cell(s)\n";
+
+  #<!-- run it the way the other 3RDBIN tools are run: executable with a
+  #     python3 shebang, or through the interpreter if it is neither -->
+  my $cmd = ( -x $extPlacer ) ? "$extPlacer $inFile $outFile"
+                              : "python3 $extPlacer $inFile $outFile";
+  $cmd .= " --grid $gridUm --rows $rowWin --iters $iterCap";
+  $cmd .= " --spread-order $spreadOrder";
+  $cmd .= " --spread" if ( $doSpread );
+  $cmd .= " --no-snap-x" if ( $noSnapX );
+  $cmd .= " $extArgs" if ( defined $extArgs && $extArgs ne "" );
+  print "INFO-ALG-LEGAL : 025 : $cmd\n";
+  my $rc = system($cmd);
+  if ( $rc != 0 ) {
+    print "ERR-ALG-LEGAL : 026 : the legalizer exited with status $rc, nothing applied\n";
+    return;
+  }
+  unless ( -e $outFile ) {
+    print "ERR-ALG-LEGAL : 027 : $outFile was not written, nothing applied\n";
+    return;
+  }
+
+  unless ( open(LGL_OUT, "<$outFile") ) {
+    print "ERR-ALG-LEGAL : 028 : cannot read $outFile : $!\n";
+    return;
+  }
+  my ($extN, $extSum, $extMax, $extMaxInst, $extBad) = (0, 0, 0, "", 0);
+  my @extLoc = ();
+  while ( my $line = <LGL_OUT> ) {
+    next if ( $line =~ /^\s*(#|$)/ );
+    my @f = split(/\s+/, $line);
+    next unless ( @f >= 4 && $f[0] eq "PLACE" );
+    my ($i, $x, $y) = ($f[1], $f[2], $f[3]);
+    unless ( $i =~ /^\d+$/ && $i < @byIdx ) { $extBad++; next; }
+    my $inst = $byIdx[$i];
+    push(@extLoc, [$inst, $x, $y]);
+    my $disp = abs($x - $origX{$inst}) + abs($y - $origY{$inst});
+    $extSum += $disp;
+    if ( $disp > $extMax ) { $extMax = $disp; $extMaxInst = $inst; }
+    $extN++;
+  }
+  close(LGL_OUT);
+  if ( $extBad > 0 ) {
+    print "WARN-ALG-LEGAL : 029 : $extBad line(s) of $outFile named no cell and were ignored\n";
+  }
+  unless ( $extN > 0 ) {
+    print "ERR-ALG-LEGAL : 030 : $outFile placed nothing, leaving the placement alone\n";
+    return;
+  }
+  #<!-- a cell the tool did not place keeps its own location, exactly as the
+  #     internal path leaves a cell that found no row -->
+  if ( $extN < @mov ) {
+    my $miss = @mov - $extN;
+    print "WARN-ALG-LEGAL : 031 : $miss cell(s) came back unplaced and keep their location\n";
+  }
+  printf("INFO-ALG-LEGAL : 032 : legalized %d cell(s), average move %.3f um, worst %.3f um%s\n",
+         $extN, ($extSum / $extN) / $dbu, $extMax / $dbu,
+         ( $extMaxInst ne "" ) ? " on $extMaxInst" : "");
+
+  if ( $reportOnly ) {
+    print "INFO-ALG-LEGAL : 033 : --report_only given, nothing was changed\n";
+    my $t1 = new Benchmark;
+    print "Command legalize_flat took:",timestr(timediff($t1,$t0)),"\n";
+    return;
+  }
+  foreach my $n ( @extLoc ) {
+    my ($inst, $x, $y) = @$n;
+    $CADB{$inst}->dbCadbSetLoc($x, $y);
+    $CADB{$inst}->dbCadbSetStatus(PLACED);
+    if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
+      $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
+    }
+  }
+  print "INFO-ALG-LEGAL : 034 : updating instance boxes\n";
+  &set_inst_box;
+  unless ( $keepExt ) { unlink($inFile); unlink($outFile); }
+  my $t1 = new Benchmark;
+  print "Command legalize_flat took:",timestr(timediff($t1,$t0)),"\n";
+  return;
+}
+
 #====================== pass 1: spread the density =========================#
-unless ( $noSpread ) {
+if ( $doSpread ) {
   my $bin = $gridUm * $dbu;
   $bin = $rowH if ( $bin < $rowH );        #<!-- a bin shorter than a row is no use -->
   my $nbx = int( ($die[2] - $die[0]) / $bin ) + 1;
@@ -285,15 +465,58 @@ unless ( $noSpread ) {
       $load{"$bx,$by"} += $m->[1] * $m->[2];
       push(@{$members{"$bx,$by"}}, $m);
     }
-    #<!-- worst bin first, so the relief goes where it is needed most -->
-    my @over = sort { ($load{$b} - $cap{$b}) <=> ($load{$a} - $cap{$a}) }
+    #<!-- Worst bin first, so the relief goes where it is needed most, and the
+    #     bin key as the tie break so that the order is the same every run.
+    #
+    #     Without the tie break this sorts over "keys %load", and Perl
+    #     randomises hash order per process: bins with equal overflow were
+    #     relieved in a different order each time, different cells were handed
+    #     to neighbours, and the whole legalisation came out different.
+    #     Measured on matmul_4x4 before the fix -- two identical runs agreed on
+    #     88.8% of 204,816 cells and moved the rest by 11um on average, which
+    #     is enough to hide a real regression inside the noise.  This was the
+    #     only hash-ordered iteration in the algorithm; the cell loop above
+    #     already sorts. -->
+    #<!-- The tie break compares the bin indices NUMERICALLY, not the "bx,by"
+    #     key as a string: "10,5" sorts before "9,3" as text and after it as a
+    #     pair of numbers.  3RDBIN/legalize_flat does the same comparison the
+    #     numeric way, and the two have to agree or the reference stops being
+    #     one -- it showed up as 48,219 cells rebinned here against 48,216
+    #     there on the same design.
+    #
+    #     Decorated, because a split inside a comparator runs O(n log n) times
+    #     and cost nine seconds of the thirty-five on the 855k cell MXU.  This
+    #     way the key is built once per bin. -->
+    my @over = map  { $_->[0] }
+               sort { $b->[1] <=> $a->[1] || $a->[2] <=> $b->[2] }
+               map  { my ($qx, $qy) = split(/,/, $_);
+                      [ $_, $load{$_} - $cap{$_}, $qx * $nby + $qy ] }
                grep { $load{$_} > $cap{$_} } keys %load;
     last unless ( @over );
 
     my $movedThisPass = 0;
-    foreach my $b ( @over ) {
-      my ($bx, $by) = split(/,/, $b);
-      my $excess = $load{$b} - $cap{$b};
+    #<!-- $bkey, NOT $b.
+    #
+    #     This loop variable used to be called $b, and the two sorts below
+    #     compare $b against $a.  A lexical "my $b" in scope SHADOWS sort's $b,
+    #     and sort cannot assign to a lexical, so inside both comparators $b
+    #     was the bin key string -- "3,7" -- and $b->[3] was a symbolic deref
+    #     of an array that does not exist, i.e. undef.  Each comparator
+    #     degenerated to "0 <=> $a->something", which sorts ASCENDING by that
+    #     something: exactly the reverse of what both were written to do.
+    #
+    #     So the spreading pass handed the SMALLEST cell to the neighbour with
+    #     the LEAST room, where the comments promise the opposite.  It still
+    #     terminated and still produced a legal placement, which is why it
+    #     went unnoticed -- it just relieved very little per iteration, ran
+    #     into the -iters cap, and left pass 2 to shove cells a long way.  perl
+    #     -w reports it as "uninitialized value in multiplication" and nothing
+    #     in this tree runs with -w.
+    #
+    #     Renaming the variable is the whole fix; the comparators were right. -->
+    foreach my $bkey ( @over ) {
+      my ($bx, $by) = split(/,/, $bkey);
+      my $excess = $load{$bkey} - $cap{$bkey};
       next unless ( $excess > 0 );
       #<!-- the cheapest cell to give away is the one nearest a bin with room -->
       my @cand = ();
@@ -308,9 +531,36 @@ unless ( $noSpread ) {
         }
       }
       next unless ( @cand );
-      @cand = sort { $b->[3] <=> $a->[3] } @cand;
+      #<!-- most room first, bin indices numerically as the tie break -->
+      @cand = sort { $b->[3] <=> $a->[3]
+                     || $a->[1] <=> $b->[1] || $a->[2] <=> $b->[2] } @cand;
 
-      foreach my $m ( sort { $b->[1]*$b->[2] <=> $a->[1]*$a->[2] } @{$members{$b}} ) {
+      #<!-- Which cell to give away, and why the default is the SMALL one.
+      #
+      #     Largest first relieves the most excess per move, so it moves fewer
+      #     cells and comes out with a lower total displacement -- 41.9um
+      #     against 43.8um on matmul_4x4.  It also routes measurably worse.
+      #     Three runs of nangate_flat each way, same build, same everything:
+      #
+      #         smallest first   360, 371, 395 nets of 4489 unrouted
+      #         largest first    501, 522, 544
+      #
+      #     Non overlapping, so it is not the placer's run to run spread.  The
+      #     reason is that a move here is not a nudge: it retargets the cell to
+      #     the CENTRE of a neighbouring bin, a full bin away.  The big cells
+      #     are the drivers, they carry the most pins, and tearing one out of
+      #     its neighbourhood costs more wire than nudging several small ones
+      #     -- which total displacement, summed over cells and blind to pin
+      #     count, does not see.
+      #
+      #     So displacement is the wrong thing to optimise here and this picks
+      #     the other way on purpose.  -spread_order large restores it.
+      #     Area ties break on the instance name so two runs pick the same
+      #     cell. -->
+      my @members = ( $spreadOrder eq "large" )
+        ? sort { $b->[1]*$b->[2] <=> $a->[1]*$a->[2] || $a->[0] cmp $b->[0] } @{$members{$bkey}}
+        : sort { $a->[1]*$a->[2] <=> $b->[1]*$b->[2] || $a->[0] cmp $b->[0] } @{$members{$bkey}};
+      foreach my $m ( @members ) {
         last if ( $excess <= 0 );
         my $area = $m->[1] * $m->[2];
         foreach my $c ( @cand ) {
@@ -433,12 +683,32 @@ my @byY = sort { $b->[2] <=> $a->[2] || $a->[3] <=> $b->[3] } @mov;
 my ($noRoom, $tooTall) = (0, 0);
 foreach my $m ( @byY ) {
   my ($inst, $w, $h, $tx, $ty) = @$m;
-  #<!-- nearest row index to the cell's y -->
-  my $best = 0;
-  my $bestD = abs($rowY[0] - $ty);
-  for ( my $r = 1 ; $r < $nRows ; $r++ ) {
-    my $d = abs($rowY[$r] - $ty);
-    if ( $d < $bestD ) { $bestD = $d; $best = $r; }
+  #<!-- Nearest row index to the cell's y, by binary search.
+  #
+  #     This used to scan every row for every cell, which is O(cells x rows)
+  #     -- and rows grow as the square root of cells on a squarish die, so the
+  #     whole legalizer came out O(n^1.5).  Measured on the two MXUs: 1069 rows
+  #     x 855k cells against 2138 x 3.42M is 8.01 times the work for four times
+  #     the cells, and legalize_flat took 7.53 times as long.  That was the
+  #     entire superlinearity; everything else here is linear.
+  #
+  #     @rowY is sorted, so the answer is a bisection.  Arithmetic would do it
+  #     in O(1) for uniformly pitched rows, which is what set_floorplan and
+  #     every LEF site in practice produce -- but a DEF may carry several ROW
+  #     records with gaps between them, and a bisection does not care. -->
+  my $best;
+  {
+    my ($lo, $hi) = (0, $nRows - 1);
+    while ( $lo < $hi ) {
+      my $mid = int( ($lo + $hi) / 2 );
+      if ( $rowY[$mid] < $ty ) { $lo = $mid + 1; }
+      else                     { $hi = $mid; }
+    }
+    #<!-- $lo is the first row at or above $ty; the one below may be nearer -->
+    $best = $lo;
+    if ( $lo > 0 && abs($rowY[$lo-1] - $ty) <= abs($rowY[$lo] - $ty) ) {
+      $best = $lo - 1;
+    }
   }
   my $rowsNeeded = int( ($h + $rowH - 1) / $rowH );
   if ( $rowsNeeded > 1 ) { $tooTall++; }
@@ -465,7 +735,18 @@ foreach my $m ( @byY ) {
         }
       }
     }
-    last if ( defined $pickKey && $d >= 1 );   #<!-- near enough, stop widening -->
+    #<!-- Stop widening once no row further out could possibly win.
+    #
+    #     The cost is |wx - tx| + |y - ty|, so a row d steps away costs at
+    #     least d * rowH in the y term alone.  Once the best cost found is no
+    #     more than that, nothing further out can beat it and the search is
+    #     provably done -- which is the same early exit, made correct.
+    #
+    #     It used to be "last if ( defined $pickKey && $d >= 1 )": stop as soon
+    #     as ANYTHING was found at d >= 1.  That capped the search at three
+    #     rows whatever -rows said, so the option was very nearly a no-op --
+    #     the default of 6 promised thirteen rows and searched three. -->
+    last if ( defined $pickCost && $pickCost <= ($d + 1) * $rowH );
   }
 
   unless ( defined $pickKey ) {
@@ -478,7 +759,8 @@ foreach my $m ( @byY ) {
 
 if ( $noRoom > 0 ) {
   print "WARN-ALG-LEGAL : 013 : $noRoom cell(s) found no row with room within $rowWin row(s)\n";
-  print "WARN-ALG-LEGAL : 014 : they keep their current location.  Raise -rows, or the design does not fit\n";
+  print "WARN-ALG-LEGAL : 014 : they keep their current location.  Raise -rows, try --spread,\n";
+  print "WARN-ALG-LEGAL : 035 : or the design does not fit\n";
 }
 if ( $tooTall > 0 ) {
   print "INFO-ALG-LEGAL : 015 : $tooTall cell(s) are taller than one row; they are placed on\n";

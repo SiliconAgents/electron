@@ -32,9 +32,16 @@
 #
 # hier_place_all comes out sublinear because most of it is the module walk,
 # and that walk is 15 modules against 16 however many instances hang off them.
-# legalize_flat is the one that hurts, and at mxu_1024 it is over half the run
-# -- 13m41 of 25m47.  It is the next thing to look at if these tests get slower
-# to live with, and nothing below 3.4 million instances makes it obvious.
+# legalize_flat was the one that hurt: 13m41 of the 25m47, over half the run,
+# and the only phase getting worse per cell as the design grew.
+#
+# THAT HAS SINCE BEEN FIXED, which is what this test was for.  It was one line
+# -- the nearest row was found by scanning every row for every cell, O(cells x
+# rows), and rows grow as the square root of cells.  A bisection instead took
+# legalize_flat from 821s to 172s on mxu_1024 and from 109s to 27s on mxu_256,
+# and the totals above from 25m47 to 16m12 and from 5m23 to 3m56.  The density
+# pass has also since been turned off by default, which makes it faster again;
+# the numbers in this table predate that and are the pessimistic ones.
 #
 # WHAT THIS DIRECTORY ALREADY PAID FOR
 #
@@ -61,11 +68,15 @@
 #
 # A WARNING FOR ANYONE COMPARING TWO RUNS HERE
 #
-# legalize_flat is NOT deterministic run to run.  Two identical runs of
-# matmul_hier leave 88.8% of cells in the same place and move the rest by 11um
-# on average.  hier_place_all is deterministic -- before legalization two runs
-# agree on all 204,816 cells exactly -- so compare the .recurse.def, never the
-# .legal.def, when you want to know whether a change did anything.
+# legalize_flat WAS not deterministic run to run: two identical runs of
+# matmul_hier agreed on 88.8% of cells and moved the rest by 11um on average.
+# It sorted over "keys %load" with no tie break and Perl randomises hash order
+# per process.  Fixed -- two runs now agree on all 204,816 cells exactly, as
+# hier_place_all already did.
+#
+# The other half of that warning still stands, and always will: two DEFs of
+# one design are not comparable byte for byte, because write_def walks
+# "keys %CADB" and the order differs per process.  Sort the records first.
 #
 # matmul_4x4 is a plain 4x4 matrix product: sixteen dot product units, four
 # multipliers each.  mxu_tile64 and mxu_256 are systolic matrix units -- the
