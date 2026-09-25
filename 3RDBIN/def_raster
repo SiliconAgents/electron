@@ -139,6 +139,35 @@ def read_def(path, log):
     return dbu, die, cells, xs, ys, ors
 
 
+def read_cells(path, log):
+    """The GUI's dump: UNITS, DIE, then 'CELL x y w h' in DBU.
+
+    Widths and heights arrive already turned for orientation, because the
+    caller knows the orientation and we would only have to be told it anyway.
+    """
+    dbu = 1000
+    die = None
+    xs, ys, ws, hs = [], [], [], []
+    t0 = time.time()
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            if line[0] == "C":
+                f = line.split()
+                if len(f) >= 5:
+                    xs.append(int(f[1])); ys.append(int(f[2]))
+                    ws.append(int(f[3])); hs.append(int(f[4]))
+            elif line[0] == "U":
+                f = line.split()
+                if len(f) >= 2:
+                    dbu = int(f[1])
+            elif line[0] == "D":
+                f = line.split()
+                if len(f) >= 5:
+                    die = tuple(int(v) for v in f[1:5])
+    log(f"{len(xs)} cell(s) read in {time.time()-t0:.1f}s")
+    return dbu, die, xs, ys, ws, hs
+
+
 # --------------------------------------------------------------------------- #
 #  PNG, written here so the tool needs nothing but NumPy
 # --------------------------------------------------------------------------- #
@@ -180,8 +209,18 @@ def main():
     ap = argparse.ArgumentParser(description="rasterise a DEF to a PNG")
     ap.add_argument("deffile")
     ap.add_argument("pngfile")
-    ap.add_argument("--lef", action="append", default=[], required=True,
-                    help="LEF for the macro sizes; repeat for more than one")
+    ap.add_argument("--lef", action="append", default=[],
+                    help="LEF for the macro sizes; repeat for more than one. "
+                         "Not needed with --cells, which carries them already")
+    ap.add_argument("--cells", action="store_true",
+                    help="the input is a cell dump, not a DEF: UNITS, DIE and "
+                         "one 'CELL x y w h' per cell, all integers in DBU, "
+                         "sizes already turned for orientation.  This is what "
+                         "the GUI writes -- it has the geometry in memory and "
+                         "dumping it beats writing a DEF and parsing a LEF "
+                         "back, and it is written ONCE so that every later pan "
+                         "and zoom is a re-raster and not another walk of the "
+                         "database")
     ap.add_argument("--width", type=int, default=1200, help="image width in pixels")
     ap.add_argument("--height", type=int, default=0, help="0 keeps the die aspect")
     ap.add_argument("--mode", choices=("util", "count", "outline"), default="util",
@@ -198,32 +237,52 @@ def main():
             print(f"def_raster: {m}", flush=True)
 
     t_all = time.time()
-    size, cls = read_lef(args.lef, log)
-    if size is None:
-        return 2
-    dbu, die, cells, xs, ys, ors = read_def(args.deffile, log)
-    if die is None:
-        print("def_raster: the DEF has no DIEAREA", file=sys.stderr)
-        return 2
-    if not cells:
-        print("def_raster: the DEF has no placed components", file=sys.stderr)
-        return 2
+    if args.cells:
+        dbu, die, xs, ys, ws, hs = read_cells(args.deffile, log)
+        if die is None:
+            print("def_raster: the cell dump has no DIE", file=sys.stderr)
+            return 2
+        if not xs:
+            print("def_raster: the cell dump has no cells", file=sys.stderr)
+            return 2
+        t0 = time.time()
+        x = np.array(xs, dtype=np.float64) / dbu
+        y = np.array(ys, dtype=np.float64) / dbu
+        w = np.array(ws, dtype=np.float64) / dbu
+        h = np.array(hs, dtype=np.float64) / dbu
+        log(f"geometry in {time.time()-t0:.1f}s")
+    else:
+        if not args.lef:
+            print("def_raster: --lef is required when the input is a DEF",
+                  file=sys.stderr)
+            return 2
+        size, cls = read_lef(args.lef, log)
+        if size is None:
+            return 2
+        dbu, die, cells, xs, ys, ors = read_def(args.deffile, log)
+        if die is None:
+            print("def_raster: the DEF has no DIEAREA", file=sys.stderr)
+            return 2
+        if not cells:
+            print("def_raster: the DEF has no placed components", file=sys.stderr)
+            return 2
 
-    t0 = time.time()
-    x = np.array(xs, dtype=np.float64) / dbu
-    y = np.array(ys, dtype=np.float64) / dbu
-    # width and height per instance, transposed for the rotated orientations
-    uniq, inv = np.unique(np.array(cells), return_inverse=True)
-    miss = [c for c in uniq if c not in size]
-    tw = np.array([size.get(c, (0.0, 0.0))[0] for c in uniq])[inv]
-    th = np.array([size.get(c, (0.0, 0.0))[1] for c in uniq])[inv]
-    rot = np.isin(np.array(ors), ("E", "W", "FE", "FW"))
-    w = np.where(rot, th, tw)
-    h = np.where(rot, tw, th)
-    if miss:
-        log(f"WARNING: {len(miss)} cell type(s) are in the DEF and not in the LEF, "
-            f"drawn as points: {', '.join(miss[:4])}{' ...' if len(miss) > 4 else ''}")
-    log(f"geometry in {time.time()-t0:.1f}s")
+        t0 = time.time()
+        x = np.array(xs, dtype=np.float64) / dbu
+        y = np.array(ys, dtype=np.float64) / dbu
+        # width and height per instance, transposed for the rotated orientations
+        uniq, inv = np.unique(np.array(cells), return_inverse=True)
+        miss = [c for c in uniq if c not in size]
+        tw = np.array([size.get(c, (0.0, 0.0))[0] for c in uniq])[inv]
+        th = np.array([size.get(c, (0.0, 0.0))[1] for c in uniq])[inv]
+        rot = np.isin(np.array(ors), ("E", "W", "FE", "FW"))
+        w = np.where(rot, th, tw)
+        h = np.where(rot, tw, th)
+        if miss:
+            log(f"WARNING: {len(miss)} cell type(s) are in the DEF and not in the "
+                f"LEF, drawn as points: {', '.join(miss[:4])}"
+                f"{' ...' if len(miss) > 4 else ''}")
+        log(f"geometry in {time.time()-t0:.1f}s")
 
     # viewport
     if args.bbox:

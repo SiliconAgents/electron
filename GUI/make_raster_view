@@ -34,6 +34,202 @@
 #     Drag a rectangle to zoom; it re-rasterises that region, so zooming in
 #     costs another half second and never gets slower. -->
 
+#<!-- ======================================================================
+#     The flat view's raster mode.
+#
+#     Everything above this is the standalone window.  This is the part that
+#     makes the EXISTING flat view fast, which is what was actually asked for.
+#
+#     WHAT design_display SPENDS ITS TIME ON
+#
+#     Not Tk.  Its instance loop already refuses to draw anything under three
+#     pixels -- "$display_limit" in make_worldCan_def_gui -- so at chip level
+#     most cells never reach createRectangle at all.  What costs is the loop
+#     itself: a hash lookup and several method calls per instance, 3.4 million
+#     times, to decide "no" 3.4 million times.
+#
+#     So the fix is to not walk the database per instance.  Walk it ONCE into a
+#     flat file, and let every later pan and zoom re-rasterise that file
+#     instead of walking the database again.  The first draw costs about what
+#     it costs today; every one after it is a fifth of a second.
+#
+#     WHY A DUMP AND NOT A DEF
+#
+#     Because write_def is 38s on the big design and then the rasteriser has to
+#     parse it back and parse a LEF to find the sizes -- all of which electron
+#     already has in memory.  Four numbers per cell is the whole of it.
+#
+#     The dump is in $DBSCALEFACTOR units, deliberately, NOT the true DBU: the
+#     canvas transform in design_display is built on $DBSCALEFACTOR, and the
+#     image has to line up with that transform rather than with the truth.
+#     CLAUDE.md records that the two diverge. -->
+
+#<!-- off | auto | always.  auto means raster above the threshold. -->
+$FLAT_RASTER_MODE = "auto" unless ( defined $FLAT_RASTER_MODE );
+$FLAT_RASTER_LIMIT = 50000 unless ( defined $FLAT_RASTER_LIMIT );
+
+sub flat_raster {
+
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : flat_raster -mode <off|auto|always>\n";
+  print "                    -limit <instances>\n";
+  print "\n";
+  print "        How the flat view draws.  auto, the default, draws the design as\n";
+  print "        one image when it holds more than -limit instances ($FLAT_RASTER_LIMIT)\n";
+  print "        and one canvas rectangle per instance below that -- so selection\n";
+  print "        and highlight keep working on the designs where they are usable,\n";
+  print "        and a million cell design opens at all.\n";
+  print "\n";
+  print "        off restores the old behaviour exactly.  It is one word, and it\n";
+  print "        is there because the old path is the one that has been trusted\n";
+  print "        for years.\n";
+  print "\n";
+  print "        Currently: -mode $FLAT_RASTER_MODE -limit $FLAT_RASTER_LIMIT\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-mode")  { $FLAT_RASTER_MODE = $_[$i+1]; }
+  elsif ($_[$i] eq "-limit") { $FLAT_RASTER_LIMIT = $_[$i+1]; }
+  elsif ($_[$i] =~ m/^-+\w/) { print "WARN-GUI-RASTER : 014 : invalid option $_[$i]\n"; }
+}
+unless ( $FLAT_RASTER_MODE =~ m/^(off|auto|always)$/ ) {
+  print "WARN-GUI-RASTER : 015 : -mode must be off, auto or always; keeping auto\n";
+  $FLAT_RASTER_MODE = "auto";
+}
+print "INFO-GUI-RASTER : 016 : flat view raster mode $FLAT_RASTER_MODE, limit $FLAT_RASTER_LIMIT\n";
+
+}# sub flat_raster
+
+
+#<!-- Should design_display raster instead of drawing items? -->
+sub dbfFlatRasterWanted {
+
+return 0 if ( $FLAT_RASTER_MODE eq "off" );
+my $home = $GLOBAL->dbfGlobalGetElectronHome;
+return 0 unless ( -e "$home/3RDBIN/def_raster" );
+return 1 if ( $FLAT_RASTER_MODE eq "always" );
+my $n = keys %CADB;
+return ( $n > $FLAT_RASTER_LIMIT ) ? 1 : 0;
+
+}# sub dbfFlatRasterWanted
+
+
+#<!-- Walk %CADB once into a flat file.  Re-walked only when the instance count
+#     changes, which is the cheap test that catches a new design being read
+#     without costing anything on a pan. -->
+sub dbfFlatRasterDump {
+
+my ($file, $scale, $die) = @_;
+
+my $n = keys %CADB;
+if ( defined $FLAT_RASTER_DUMP_N && $FLAT_RASTER_DUMP_N == $n
+     && defined $FLAT_RASTER_DUMP_F && $FLAT_RASTER_DUMP_F eq $file && -e $file ) {
+  return $n;
+}
+
+unless ( open(FRD, ">$file") ) {
+  print "WARN-GUI-RASTER : 017 : cannot write $file : $!\n";
+  return 0;
+}
+printf FRD "UNITS %d\n", $scale;
+printf FRD "DIE %d %d %d %d\n", @$die;
+my %wOf = ();
+my %hOf = ();
+my $cnt = 0;
+foreach my $inst ( keys %CADB ) {
+  my $obj = $CADB{$inst};
+  my $status = $obj->dbCadbGetStatus;
+  next unless ( $status eq "PLACED" || $status eq "FIXED" );
+  my $cellref = $obj->dbCadbGetCellref;
+  next unless ( exists $PLDB{$cellref} );
+  #<!-- size per cellref, not per instance: a design with a million instances
+  #     has a hundred distinct cells -->
+  unless ( exists $wOf{$cellref} ) {
+    my @s = $PLDB{$cellref}->dbMdbGetSize;
+    $wOf{$cellref} = ( @s >= 2 && $s[0] > 0 ) ? $s[0] * $scale : 0;
+    $hOf{$cellref} = ( @s >= 2 && $s[1] > 0 ) ? $s[1] * $scale : 0;
+  }
+  my ($w, $h) = ($wOf{$cellref}, $hOf{$cellref});
+  next unless ( $w > 0 && $h > 0 );
+  my $orient = $obj->dbCadbGetOrient;
+  if ( defined $orient && $orient =~ m/^(E|W|FE|FW)$/ ) { ($w, $h) = ($h, $w); }
+  my @loc = $obj->dbCadbGetLoc;
+  next unless ( @loc >= 2 && defined $loc[1] );
+  printf FRD "CELL %d %d %d %d\n", $loc[0], $loc[1], $w, $h;
+  $cnt++;
+}
+close(FRD);
+$FLAT_RASTER_DUMP_N = $n;
+$FLAT_RASTER_DUMP_F = $file;
+print "INFO-GUI-RASTER : 018 : dumped $cnt placed instance(s) for the raster view\n";
+return $cnt;
+
+}# sub dbfFlatRasterDump
+
+
+#<!-- Rasterise the canvas's current view and put it on as one image.
+#
+#     The image is placed to cover exactly the visible world rectangle at
+#     exactly the canvas's pixel size, so it lines up one for one.  A Tk image
+#     does not scale with a WorldCanvas zoom, which is why this has to run
+#     again on every view change rather than once -- and is why -changeView
+#     exists. -->
+sub dbfFlatRasterDraw {
+
+my ($canvas) = @_;
+return unless ( defined $canvas );
+return unless ( defined $FLAT_RASTER_FILE && -e $FLAT_RASTER_FILE );
+
+my @v = $canvas->getView();              #<!-- world: x1 y1 x2 y2 -->
+return unless ( @v >= 4 && $v[2] > $v[0] && $v[3] > $v[1] );
+my $px = $canvas->pixelSize();
+return unless ( defined $px && $px > 0 );
+
+my $W = int( ($v[2] - $v[0]) / $px );
+my $H = int( ($v[3] - $v[1]) / $px );
+$W = 1 if ( $W < 1 );  $H = 1 if ( $H < 1 );
+#<!-- a very deep zoom would ask for an enormous image; the view is only so
+#     many screen pixels wide, so cap it at something a screen can show -->
+if ( $W > 4000 ) { $H = int($H * 4000 / $W); $W = 4000; $H = 1 if ($H < 1); }
+if ( $H > 4000 ) { $W = int($W * 4000 / $H); $H = 4000; $W = 1 if ($W < 1); }
+
+#<!-- world -> the units the dump is in.  design_display builds the canvas as
+#     world = dbu * MulFactor + dieShift, so this is that inverted. -->
+my $mf = $FLAT_RASTER_MULFACTOR;
+my $sh = $FLAT_RASTER_SHIFT;
+return unless ( defined $mf && $mf != 0 );
+my @bb = ( ($v[0]-$sh)/$mf, ($v[1]-$sh)/$mf, ($v[2]-$sh)/$mf, ($v[3]-$sh)/$mf );
+#<!-- and the dump is in $DBSCALEFACTOR units, so those are microns already if
+#     the scale written was $DBSCALEFACTOR -->
+my $sc = $FLAT_RASTER_SCALE;
+$sc = 1 unless ( defined $sc && $sc > 0 );
+@bb = map { $_ / $sc } @bb;
+
+my $home = $GLOBAL->dbfGlobalGetElectronHome;
+my $bin = "$home/3RDBIN/def_raster";
+my $png = ( defined $FLAT_RASTER_PNG ) ? $FLAT_RASTER_PNG : "flat_raster.png";
+my $cmd = ( -x $bin ) ? "$bin $FLAT_RASTER_FILE $png" : "python3 $bin $FLAT_RASTER_FILE $png";
+$cmd .= " --cells --quiet --width $W --height $H";
+$cmd .= sprintf(" --bbox %.6f %.6f %.6f %.6f", @bb);
+my $rc = system($cmd);
+if ( $rc != 0 || ! -e $png ) {
+  print "WARN-GUI-RASTER : 019 : the rasteriser failed, the view is empty\n";
+  return;
+}
+
+$canvas->delete('RASTER');
+my $new = $canvas->Photo(-file => $png);
+#<!-- anchor nw at the top left of the view: world y runs up, canvas y down -->
+$canvas->createImage($v[0], $v[3], -anchor => 'nw', -image => $new,
+                     -tags => ['RASTER']);
+$canvas->lower('RASTER');
+$FLAT_RASTER_PHOTO->delete if ( defined $FLAT_RASTER_PHOTO );
+$FLAT_RASTER_PHOTO = $new;
+
+}# sub dbfFlatRasterDraw
+
+
 sub raster_view {
 
 use Benchmark;
@@ -79,16 +275,36 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] =~ m/^-+\w/)      { print "WARN-GUI-RASTER : 001 : invalid option $_[$i]\n"; }
 }
 
-unless ( @lefs ) {
-  #<!-- read_lef keeps no file paths, so the LEF has to be named again here --
-  #     the same wart qroute and flat_route have. -->
-  print "ERR-GUI-RASTER : 002 : -lef is required; read_lef does not record the path it read\n";
-  return;
-}
-foreach my $l ( @lefs ) {
-  unless ( -e $l ) {
-    print "ERR-GUI-RASTER : 003 : no LEF at $l\n";
+#<!-- Two ways in, and the default is the one that needs nothing.
+#
+#     -def draws a DEF from disk, which then needs -lef for the cell sizes,
+#     because a DEF does not carry them.  That is for looking at a DEF the
+#     session has not read.
+#
+#     With no -def it dumps what is in memory: electron already knows every
+#     instance's location and size, so writing four numbers per cell beats
+#     writing a DEF and parsing a LEF back to recover what we started with.
+#     It is also what makes the command usable without naming a LEF, which is
+#     the first thing anyone trips over -- read_lef records no path, so -lef
+#     means typing out again what the config already said. -->
+my $fromMemory = ( defined $defFile && $defFile ne "" ) ? 0 : 1;
+if ( $fromMemory ) {
+  my $n = keys %CADB;
+  unless ( $n > 0 ) {
+    print "ERR-GUI-RASTER : 002 : no instances in memory; read a design, or pass -def and -lef\n";
     return;
+  }
+}
+else {
+  unless ( @lefs ) {
+    print "ERR-GUI-RASTER : 003 : -def needs -lef too; a DEF carries no cell sizes\n";
+    return;
+  }
+  foreach my $l ( @lefs ) {
+    unless ( -e $l ) {
+      print "ERR-GUI-RASTER : 020 : no LEF at $l\n";
+      return;
+    }
   }
 }
 
@@ -101,18 +317,33 @@ unless ( -e $rasterBin ) {
   return;
 }
 
-#<!-- A DEF to draw.  Writing one is the honest cost of this approach and it is
-#     not free -- 38s for 3.4 million instances -- so -def reuses one the flow
-#     has already written, which every test does. -->
 my $wroteDef = 0;
-unless ( defined $defFile && $defFile ne "" ) {
-  $defFile = "$TOP_MODULE.raster.def";
-  print "INFO-GUI-RASTER : 005 : writing $defFile to draw from\n";
-  &write_def("-output", $defFile, "--overwrite");
+my $cellsMode = 0;
+if ( $fromMemory ) {
+  #<!-- dump once; a later re-raster for a zoom reuses it -->
+  $defFile = "$TOP_MODULE.raster.cells";
+  $cellsMode = 1;
+  my $scale = $GLOBAL->dbfGlobalGetDBU;
+  $scale = 1 unless ( defined $scale && $scale > 0 );
+  my @dieDbu = ( 0, 0, 0, 0 );
+  if ( exists $DIE_ALREADY{dieArea} && @{$DIE_ALREADY{dieArea}} >= 4 ) {
+    @dieDbu = @{$DIE_ALREADY{dieArea}};
+  }
+  unless ( $dieDbu[2] > $dieDbu[0] && $dieDbu[3] > $dieDbu[1] ) {
+    print "ERR-GUI-RASTER : 005 : the design has no die area to draw in\n";
+    return;
+  }
+  #<!-- forget any earlier dump: this one may be of a different design -->
+  undef $FLAT_RASTER_DUMP_N;
+  my $cnt = &dbfFlatRasterDump($defFile, $scale, \@dieDbu);
+  unless ( $cnt > 0 ) {
+    print "ERR-GUI-RASTER : 006 : no placed instance has a size; nothing to draw\n";
+    return;
+  }
   $wroteDef = 1;
 }
 unless ( -e $defFile ) {
-  print "ERR-GUI-RASTER : 006 : no DEF at $defFile\n";
+  print "ERR-GUI-RASTER : 021 : no input at $defFile\n";
   return;
 }
 unless ( defined $pngFile && $pngFile ne "" ) {
@@ -132,7 +363,22 @@ unless ( defined $pngFile && $pngFile ne "" ) {
 #
 #     It is two lines of the file, and it is the file the picture is of. -->
 my @vp = ();
-if ( open(RV_DEF, "<$defFile") ) {
+if ( $cellsMode ) {
+  #<!-- the dump's own DIE line, in the same units its CELL lines use -->
+  if ( open(RV_DEF, "<$defFile") ) {
+    my $ddbu = 1;
+    while ( my $line = <RV_DEF> ) {
+      if    ( $line =~ m/^UNITS\s+(\d+)/ ) { $ddbu = $1; }
+      elsif ( $line =~ m/^DIE\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)\s+(-?\d+)/ ) {
+        @vp = ( $1/$ddbu, $2/$ddbu, $3/$ddbu, $4/$ddbu );
+        last;
+      }
+      last if ( $line =~ m/^CELL/ );
+    }
+    close(RV_DEF);
+  }
+}
+elsif ( open(RV_DEF, "<$defFile") ) {
   my $ddbu = 0;
   while ( my $line = <RV_DEF> ) {
     if ( $line =~ m/^\s*UNITS\s+DISTANCE\s+MICRONS\s+(\d+)/ ) {
@@ -151,7 +397,7 @@ unless ( @vp == 4 && $vp[2] > $vp[0] && $vp[3] > $vp[1] ) {
   @vp = ();
 }
 
-my $rc = &dbfRasterRun($rasterBin, $defFile, $pngFile, \@lefs, $width, $mode, undef, $extra);
+my $rc = &dbfRasterRun($rasterBin, $defFile, $pngFile, \@lefs, $width, $mode, undef, $extra, $cellsMode);
 if ( $rc != 0 ) {
   print "ERR-GUI-RASTER : 007 : the rasteriser exited with status $rc\n";
   unlink($defFile) if ( $wroteDef && ! $keepFiles );
@@ -178,7 +424,7 @@ elsif ( ! defined $ENV{DISPLAY} || $ENV{DISPLAY} eq "" ) {
   print "INFO-GUI-RASTER : 011 : no DISPLAY, so no window; the PNG is $pngFile\n";
 }
 else {
-  &dbfRasterWindow($pngFile, $defFile, \@lefs, $rasterBin, $width, $mode, $extra, \@vp);
+  &dbfRasterWindow($pngFile, $defFile, \@lefs, $rasterBin, $width, $mode, $extra, \@vp, $cellsMode);
   if ( $GLOBAL->dbGlobalGetGuiStatus != 1 ) {
     print "INFO-GUI-RASTER : 012 : electron is waiting; close the raster view to carry on\n";
     MainLoop();
@@ -199,10 +445,11 @@ print "Command raster_view took:",timestr(timediff($t1,$t0)),"\n";
 #     3RDBIN tool, or through the interpreter if it is neither. -->
 sub dbfRasterRun {
 
-my ($bin, $def, $png, $lefs, $width, $mode, $bbox, $extra) = @_;
+my ($bin, $def, $png, $lefs, $width, $mode, $bbox, $extra, $cells) = @_;
 
 my $cmd = ( -x $bin ) ? "$bin $def $png" : "python3 $bin $def $png";
-foreach my $l ( @$lefs ) { $cmd .= " --lef $l"; }
+if ( $cells ) { $cmd .= " --cells"; }
+else { foreach my $l ( @$lefs ) { $cmd .= " --lef $l"; } }
 $cmd .= " --width $width" if ( defined $width && $width > 0 );
 $cmd .= " --mode $mode"   if ( defined $mode && $mode ne "" );
 if ( defined $bbox && @$bbox == 4 ) {
@@ -223,7 +470,7 @@ return system($cmd);
 #     change -- and it is the whole reason to draw this way. -->
 sub dbfRasterWindow {
 
-my ($png, $def, $lefs, $bin, $width, $mode, $extra, $die) = @_;
+my ($png, $def, $lefs, $bin, $width, $mode, $extra, $die, $cells) = @_;
 
 my $top = MainWindow->new;
 $top->title("Electron raster view - $TOP_MODULE");
@@ -260,7 +507,7 @@ my $show = sub {
 
 my $redraw = sub {
   my @bbox = @view;
-  my $rc = &dbfRasterRun($bin, $def, $png, $lefs, $width, $mode, \@bbox, $extra);
+  my $rc = &dbfRasterRun($bin, $def, $png, $lefs, $width, $mode, \@bbox, $extra, $cells);
   if ( $rc != 0 ) {
     $status = "the rasteriser failed, the view is unchanged";
     return;
