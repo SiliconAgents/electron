@@ -1,0 +1,325 @@
+#<!-- raster_view: look at a large design without making a canvas item per cell.
+#
+#     THE PROBLEM IT AVOIDS
+#
+#     The flat view in make_worldCan_def_gui walks "keys %CADB" and calls
+#     createRectangle once per instance.  Measured on this machine that is
+#     3.0us an item, so 3.4 million instances -- TESTS/large mxu_1024 -- is ten
+#     seconds before anything appears, a canvas item struct each for as long as
+#     the window is open, and every pan and zoom walking all of them again.
+#
+#     Rasterising is O(pixels) instead of O(cells).  3RDBIN/def_raster turns
+#     3.4 million cells into a 1200x1200 PNG in 0.53s, and Tk puts that on a
+#     canvas as ONE item in 0.023s.
+#
+#     SVG was the other idea and it is worse, not better: one <rect> per cell
+#     is the same retained-mode problem moved into an XML parser, and the file
+#     for that design is 196MB.  Measured before writing any of this.
+#
+#     WHY IT IS A SEPARATE WINDOW AND NOT THE FLAT VIEW
+#
+#     Because the flat view works and this must not be able to break it.  Open
+#     both; they share nothing.  Nothing in this file touches
+#     $design_worldcanvas, design_display, or any of their state.
+#
+#     WHAT THE PICTURE MEANS
+#
+#     By default each pixel is coloured by the fraction of it covered by cell
+#     area -- a utilisation map, dark blue empty through to red full.  That is
+#     the right thing to show at chip level: a 3mm die drawn 1200 pixels wide
+#     puts a pixel at 2.5um, and a standard cell is 0.19 to 2um wide, so the
+#     cells are sub-pixel and drawing them individually would show nothing.
+#     Where they are DENSE is visible, and is what you want to see.
+#
+#     Drag a rectangle to zoom; it re-rasterises that region, so zooming in
+#     costs another half second and never gets slower. -->
+
+sub raster_view {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my ($defFile, $pngFile, $rasterBin, $mode, $extra);
+my @lefs = ();
+my $width = 1200;
+my ($noWindow, $keepFiles) = (0, 0);
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : raster_view -lef <file>      cell sizes; repeat for more than one\n";
+  print "                    -def <file>      a DEF to draw; default is to write one\n";
+  print "                    -out <file.png>  default <top>.raster.png\n";
+  print "                    -width <pixels>  default 1200\n";
+  print "                    -mode <util|count|outline>\n";
+  print "                          util  : fraction of each pixel covered by cells,\n";
+  print "                                  which is the useful thing at chip level\n";
+  print "                          count : cells per pixel\n";
+  print "                    -raster <path>   default ELECTRON_HOME/3RDBIN/def_raster\n";
+  print "                    -args <extra>    passed straight to it\n";
+  print "                    --no_window      write the PNG and do not open anything\n";
+  print "                    --keep           keep the DEF this wrote\n";
+  print "\n";
+  print "        Draws the design as an image instead of one canvas item per\n";
+  print "        instance, which is what makes a million cell design openable.\n";
+  print "        Opens its own window; the flat view is untouched and both can\n";
+  print "        be up at once.  Drag a rectangle in it to zoom.\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-lef")        { push(@lefs, $_[$i+1]); }
+  elsif ($_[$i] eq "-def")        { $defFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-out")        { $pngFile = $_[$i+1]; }
+  elsif ($_[$i] eq "-width")      { $width = $_[$i+1]; }
+  elsif ($_[$i] eq "-mode")       { $mode = $_[$i+1]; }
+  elsif ($_[$i] eq "-raster")     { $rasterBin = $_[$i+1]; }
+  elsif ($_[$i] eq "-args")       { $extra = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_window") { $noWindow = 1; }
+  elsif ($_[$i] eq "--keep")      { $keepFiles = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)      { print "WARN-GUI-RASTER : 001 : invalid option $_[$i]\n"; }
+}
+
+unless ( @lefs ) {
+  #<!-- read_lef keeps no file paths, so the LEF has to be named again here --
+  #     the same wart qroute and flat_route have. -->
+  print "ERR-GUI-RASTER : 002 : -lef is required; read_lef does not record the path it read\n";
+  return;
+}
+foreach my $l ( @lefs ) {
+  unless ( -e $l ) {
+    print "ERR-GUI-RASTER : 003 : no LEF at $l\n";
+    return;
+  }
+}
+
+unless ( defined $rasterBin && $rasterBin ne "" ) {
+  my $home = $GLOBAL->dbfGlobalGetElectronHome;
+  $rasterBin = "$home/3RDBIN/def_raster";
+}
+unless ( -e $rasterBin ) {
+  print "ERR-GUI-RASTER : 004 : no rasteriser at $rasterBin\n";
+  return;
+}
+
+#<!-- A DEF to draw.  Writing one is the honest cost of this approach and it is
+#     not free -- 38s for 3.4 million instances -- so -def reuses one the flow
+#     has already written, which every test does. -->
+my $wroteDef = 0;
+unless ( defined $defFile && $defFile ne "" ) {
+  $defFile = "$TOP_MODULE.raster.def";
+  print "INFO-GUI-RASTER : 005 : writing $defFile to draw from\n";
+  &write_def("-output", $defFile, "--overwrite");
+  $wroteDef = 1;
+}
+unless ( -e $defFile ) {
+  print "ERR-GUI-RASTER : 006 : no DEF at $defFile\n";
+  return;
+}
+unless ( defined $pngFile && $pngFile ne "" ) {
+  $pngFile = "$TOP_MODULE.raster.png";
+}
+
+#<!-- The die, so that "fit" has something to fit to.  Microns, because that is
+#     what the rasteriser takes.
+#
+#     Read out of the DEF being drawn, not out of the floorplan, because the
+#     DEF carries its own UNITS and is self consistent where the floorplan is
+#     not: dbFlplanGetDBUnit answered 2000 where dbfGlobalGetDBU says 4000 on
+#     the first design this was pointed at, which is exactly the
+#     $DEF_DATABASE_UNIT divergence CLAUDE.md warns about.  The viewport came
+#     out twice the size of the die and the design sat in a quarter of the
+#     window.
+#
+#     It is two lines of the file, and it is the file the picture is of. -->
+my @vp = ();
+if ( open(RV_DEF, "<$defFile") ) {
+  my $ddbu = 0;
+  while ( my $line = <RV_DEF> ) {
+    if ( $line =~ m/^\s*UNITS\s+DISTANCE\s+MICRONS\s+(\d+)/ ) {
+      $ddbu = $1;
+    }
+    elsif ( $line =~ m/^\s*DIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\).*\(\s*(-?\d+)\s+(-?\d+)\s*\)/ ) {
+      if ( $ddbu > 0 ) { @vp = ( $1/$ddbu, $2/$ddbu, $3/$ddbu, $4/$ddbu ); }
+      last;
+    }
+    last if ( $line =~ m/^\s*COMPONENTS/ );
+  }
+  close(RV_DEF);
+}
+unless ( @vp == 4 && $vp[2] > $vp[0] && $vp[3] > $vp[1] ) {
+  print "WARN-GUI-RASTER : 013 : no DIEAREA found in $defFile, the rasteriser picks the view\n";
+  @vp = ();
+}
+
+my $rc = &dbfRasterRun($rasterBin, $defFile, $pngFile, \@lefs, $width, $mode, undef, $extra);
+if ( $rc != 0 ) {
+  print "ERR-GUI-RASTER : 007 : the rasteriser exited with status $rc\n";
+  unlink($defFile) if ( $wroteDef && ! $keepFiles );
+  return;
+}
+print "INFO-GUI-RASTER : 008 : wrote $pngFile\n";
+
+#<!-- Open the window whenever there is a display to open it on.
+#
+#     NOT gated on dbGlobalGetGuiStatus: that is set inside start_gui, which
+#     runs in the process &win forks, so it is 0 at the ordinary prompt and
+#     gating on it would mean the window never appeared except when the command
+#     was typed into the GUI's own entry box.  A raster view is worth having
+#     without the rest of the GUI.
+#
+#     Inside the GUI process there is already an event loop, so return and let
+#     it run the window.  At the prompt there is not, so run one here and block
+#     until the window is closed -- the same bargain hier_place makes, and the
+#     reason it says so out loud. -->
+if ( $noWindow ) {
+  print "INFO-GUI-RASTER : 009 : --no_window given; the PNG is $pngFile\n";
+}
+elsif ( ! defined $ENV{DISPLAY} || $ENV{DISPLAY} eq "" ) {
+  print "INFO-GUI-RASTER : 011 : no DISPLAY, so no window; the PNG is $pngFile\n";
+}
+else {
+  &dbfRasterWindow($pngFile, $defFile, \@lefs, $rasterBin, $width, $mode, $extra, \@vp);
+  if ( $GLOBAL->dbGlobalGetGuiStatus != 1 ) {
+    print "INFO-GUI-RASTER : 012 : electron is waiting; close the raster view to carry on\n";
+    MainLoop();
+  }
+}
+
+unless ( $keepFiles ) {
+  unlink($defFile) if ( $wroteDef );
+}
+
+my $t1 = new Benchmark;
+print "Command raster_view took:",timestr(timediff($t1,$t0)),"\n";
+
+}# sub raster_view
+
+
+#<!-- Run the rasteriser.  Executable with a python3 shebang, like every other
+#     3RDBIN tool, or through the interpreter if it is neither. -->
+sub dbfRasterRun {
+
+my ($bin, $def, $png, $lefs, $width, $mode, $bbox, $extra) = @_;
+
+my $cmd = ( -x $bin ) ? "$bin $def $png" : "python3 $bin $def $png";
+foreach my $l ( @$lefs ) { $cmd .= " --lef $l"; }
+$cmd .= " --width $width" if ( defined $width && $width > 0 );
+$cmd .= " --mode $mode"   if ( defined $mode && $mode ne "" );
+if ( defined $bbox && @$bbox == 4 ) {
+  $cmd .= sprintf(" --bbox %.4f %.4f %.4f %.4f", @$bbox);
+}
+$cmd .= " $extra" if ( defined $extra && $extra ne "" );
+return system($cmd);
+
+}# sub dbfRasterRun
+
+
+#<!-- The window.  Its own Toplevel, its own canvas, one image item on it, and
+#     no reference to anything the flat view owns.
+#
+#     Zoom is a rubber band: drag a rectangle, and the region under it is
+#     re-rasterised at the same pixel budget.  That is why zooming does not get
+#     slower as you go in -- the cell count falls and the pixel count does not
+#     change -- and it is the whole reason to draw this way. -->
+sub dbfRasterWindow {
+
+my ($png, $def, $lefs, $bin, $width, $mode, $extra, $die) = @_;
+
+my $top = MainWindow->new;
+$top->title("Electron raster view - $TOP_MODULE");
+
+my $bar = $top->Frame()->pack(-side => 'top', -fill => 'x');
+my $status = "";
+my @view = @$die;          #<!-- current viewport, microns -->
+my @home = @$die;
+
+my $canvas = $top->Canvas(-width => $width, -height => $width,
+                          -bg => 'black', -highlightthickness => 0)
+                 ->pack(-side => 'top', -expand => 1, -fill => 'both');
+
+my $photo;
+my $imgItem;
+my ($imgW, $imgH) = ($width, $width);
+
+my $show = sub {
+  #<!-- A fresh Photo each time: reusing one and re-reading into it keeps the
+  #     old pixels where the new image is smaller. -->
+  my $new = $top->Photo(-file => $png);
+  $imgW = $new->width;
+  $imgH = $new->height;
+  $canvas->delete('all');
+  $imgItem = $canvas->createImage(0, 0, -anchor => 'nw', -image => $new);
+  $canvas->configure(-width => $imgW, -height => $imgH,
+                     -scrollregion => [0, 0, $imgW, $imgH]);
+  $photo->delete if ( defined $photo );
+  $photo = $new;
+  $status = sprintf("%.1f x %.1f um at %.4f um/px",
+                    $view[2]-$view[0], $view[3]-$view[1],
+                    ($view[2]-$view[0]) / ($imgW > 0 ? $imgW : 1));
+};
+
+my $redraw = sub {
+  my @bbox = @view;
+  my $rc = &dbfRasterRun($bin, $def, $png, $lefs, $width, $mode, \@bbox, $extra);
+  if ( $rc != 0 ) {
+    $status = "the rasteriser failed, the view is unchanged";
+    return;
+  }
+  $show->();
+};
+
+$bar->Button(-text => 'Fit', -command => sub { @view = @home; $redraw->(); })
+    ->pack(-side => 'left');
+$bar->Button(-text => 'Zoom out', -command => sub {
+      my ($cx, $cy) = (($view[0]+$view[2])/2, ($view[1]+$view[3])/2);
+      my ($w, $h) = (($view[2]-$view[0]), ($view[3]-$view[1]));
+      @view = ($cx-$w, $cy-$h, $cx+$w, $cy+$h);
+      $redraw->();
+    })->pack(-side => 'left');
+$bar->Button(-text => 'Close', -command => sub { $top->destroy; })
+    ->pack(-side => 'right');
+$bar->Label(-textvariable => \$status, -anchor => 'w')
+    ->pack(-side => 'left', -fill => 'x', -expand => 1);
+
+#<!-- rubber band.  Canvas y runs down and the die's y runs up, so the y
+#     mapping is flipped -- the same flip the rasteriser applies to the image
+#     before writing it. -->
+my ($dragX, $dragY, $band);
+$canvas->Tk::bind('<ButtonPress-1>', [ sub {
+    my ($c, $x, $y) = @_;
+    ($dragX, $dragY) = ($c->canvasx($x), $c->canvasy($y));
+    $c->delete('band') if ( defined $band );
+    $band = $c->createRectangle($dragX, $dragY, $dragX, $dragY,
+                                -outline => 'white', -tags => 'band');
+  }, Ev('x'), Ev('y') ]);
+$canvas->Tk::bind('<B1-Motion>', [ sub {
+    my ($c, $x, $y) = @_;
+    return unless ( defined $band );
+    $c->coords($band, $dragX, $dragY, $c->canvasx($x), $c->canvasy($y));
+  }, Ev('x'), Ev('y') ]);
+$canvas->Tk::bind('<ButtonRelease-1>', [ sub {
+    my ($c, $x, $y) = @_;
+    return unless ( defined $band );
+    my ($x1, $y1) = ($c->canvasx($x), $c->canvasy($y));
+    $c->delete('band');
+    undef $band;
+    my ($px0, $px1) = ( $dragX < $x1 ? ($dragX, $x1) : ($x1, $dragX) );
+    my ($py0, $py1) = ( $dragY < $y1 ? ($dragY, $y1) : ($y1, $dragY) );
+    #<!-- a click, not a drag: ignore it rather than zooming to a point -->
+    if ( $px1 - $px0 < 4 || $py1 - $py0 < 4 ) { return; }
+    my $sx = ($view[2] - $view[0]) / ($imgW > 0 ? $imgW : 1);
+    my $sy = ($view[3] - $view[1]) / ($imgH > 0 ? $imgH : 1);
+    my @nv = ( $view[0] + $px0 * $sx,
+               $view[3] - $py1 * $sy,
+               $view[0] + $px1 * $sx,
+               $view[3] - $py0 * $sy );
+    @view = @nv;
+    $redraw->();
+  }, Ev('x'), Ev('y') ]);
+
+$show->();
+print "INFO-GUI-RASTER : 010 : raster view open; drag a rectangle to zoom, Fit to go back\n";
+
+}# sub dbfRasterWindow
+
+1;

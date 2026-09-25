@@ -341,6 +341,7 @@ require "$BEEHOME/GUI/make_tool_display_vars";
 require "$BEEHOME/GUI/make_tstgen_connection";
 require "$BEEHOME/GUI/make_tstgen_func";
 require "$BEEHOME/GUI/make_worldCan_def_gui";
+require "$BEEHOME/GUI/make_raster_view";
 require "$BEEHOME/GUI/make_spice_gui";
 
 require "$BEEHOME/GUI/PROTO/make_display_pseudo_hierarchy";

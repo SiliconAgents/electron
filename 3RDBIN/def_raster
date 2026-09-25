@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""Rasterise a DEF into a PNG: a layout view that does not care how many cells.
+
+    def_raster <design.def> <out.png> --lef <tech.lef> [--lef <more.lef>]
+
+Standalone on purpose -- it reads a DEF and a LEF and writes a PNG, so it can
+be run on any DEF lying around, tested without electron, and driven from the
+GUI.  Same shape as 3RDBIN/legalize_flat: text in, file out, nothing shared.
+
+WHY THIS EXISTS
+
+The Tk flat view makes one canvas rectangle per instance.  That costs 3.0us an
+item to create -- ten seconds for the 3.4 million instances of TESTS/large
+mxu_1024 -- and then every pan and every zoom walks all of them again, with a
+canvas item struct each for as long as the window is open.
+
+Rasterising is O(pixels), not O(cells).  Measured on this machine, 3.4 million
+cells:
+
+    Tk, one rectangle each      ~10s to create, redraw touches all, ~1-2GB
+    SVG, one <rect> each        196MB of XML, and it is the same retained mode
+                                problem moved into an XML parser
+    this, NumPy into a bitmap   0.53s to rasterise, 664KB, ONE canvas item
+                                and 0.023s for Tk to put it on screen
+
+SVG was the obvious idea and it is the wrong one: one node per cell is exactly
+what already hurts.
+
+AND THE PART THAT IS NOT ABOUT SPEED
+
+At full chip zoom the individual cells are not visible anyway.  A 3mm die drawn
+1200 pixels wide puts one pixel at 2.5um, and a standard cell is 0.19 to 2um
+wide by 1.4um tall -- sub-pixel.  Drawing each one is work whose result nobody
+can see.  What IS visible, and what the eye actually wants at that zoom, is
+where the cells are dense, so the default mode is a utilisation map: the
+fraction of each pixel covered by cell area.  Hotspots show up as hotspots.
+
+Drop to --mode outline only when zoomed in far enough that a cell is a few
+pixels across, which is what the caller decides by passing --bbox.
+"""
+
+import argparse
+import gc
+import re
+import sys
+import struct
+import time
+import zlib
+
+import numpy as np
+
+# Millions of small containers come out of the parse, and the generational
+# collector rescans them as the population grows -- it cost 2.4x in
+# 3RDBIN/legalize_flat for the same reason.  Nothing here makes a cycle.
+gc.disable()
+
+
+# --------------------------------------------------------------------------- #
+#  LEF: just the macro sizes, and the class if we are colouring by it
+# --------------------------------------------------------------------------- #
+def read_lef(paths, log):
+    size = {}
+    cls = {}
+    cur = None
+    for p in paths:
+        try:
+            fh = open(p, errors="replace")
+        except OSError as e:
+            print(f"def_raster: cannot read {p}: {e}", file=sys.stderr)
+            return None, None
+        with fh:
+            for line in fh:
+                f = line.split()
+                if not f:
+                    continue
+                if f[0] == "MACRO" and len(f) > 1:
+                    cur = f[1]
+                elif cur and f[0] == "SIZE" and len(f) >= 4 and f[2].upper() == "BY":
+                    try:
+                        size[cur] = (float(f[1]), float(f[3].rstrip(";")))
+                    except ValueError:
+                        pass
+                elif cur and f[0] == "CLASS" and len(f) > 1:
+                    cls[cur] = f[1].rstrip(";")
+                elif f[0] == "END" and len(f) > 1 and f[1] == cur:
+                    cur = None
+    log(f"{len(size)} macro size(s) from {len(paths)} LEF file(s)")
+    return size, cls
+
+
+# --------------------------------------------------------------------------- #
+#  DEF: the die, and one record per placed component
+# --------------------------------------------------------------------------- #
+_PLACED = re.compile(r"[+]\s*(?:PLACED|FIXED|COVER)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*(\w+)")
+
+def read_def(path, log):
+    """Returns (dbu, die, names, cells, xs, ys, orients).
+
+    Hand rolled rather than regex over the whole file: a 763MB DEF is 7 million
+    lines and str.split is C where a global finditer is not.
+    """
+    dbu = 1000
+    die = None
+    cells, xs, ys, ors = [], [], [], []
+    name_of_cell = []
+    in_comp = False
+    pend_cell = None
+    t0 = time.time()
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            if not in_comp:
+                if line.startswith("UNITS"):
+                    f = line.split()
+                    if len(f) >= 4:
+                        dbu = int(f[3])
+                elif line.startswith("DIEAREA"):
+                    v = re.findall(r"-?\d+", line)
+                    if len(v) >= 4:
+                        die = (int(v[0]), int(v[1]), int(v[-2]), int(v[-1]))
+                elif line.startswith("COMPONENTS"):
+                    in_comp = True
+                continue
+            if line.startswith("END COMPONENTS"):
+                break
+            s = line.lstrip()
+            if s.startswith("-"):
+                f = s.split()
+                # "- <instance> <cell>"; the placement may be on this line or the next
+                pend_cell = f[2] if len(f) >= 3 else None
+            if pend_cell is not None:
+                m = _PLACED.search(line)
+                if m:
+                    cells.append(pend_cell)
+                    xs.append(int(m.group(1)))
+                    ys.append(int(m.group(2)))
+                    ors.append(m.group(3))
+                    pend_cell = None
+    log(f"{len(cells)} placed component(s) parsed in {time.time()-t0:.1f}s")
+    return dbu, die, cells, xs, ys, ors
+
+
+# --------------------------------------------------------------------------- #
+#  PNG, written here so the tool needs nothing but NumPy
+# --------------------------------------------------------------------------- #
+def write_png(path, rgb):
+    h, w, _ = rgb.shape
+    # one filter byte per row, then the row's RGB triples
+    rows = bytearray()
+    flat = rgb.reshape(h, w * 3)
+    for y in range(h):
+        rows.append(0)
+        rows += flat[y].tobytes()
+
+    def chunk(tag, data):
+        c = tag + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+
+    png = (b"\x89PNG\r\n\x1a\n"
+           + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+           + chunk(b"IDAT", zlib.compress(bytes(rows), 6))
+           + chunk(b"IEND", b""))
+    with open(path, "wb") as fh:
+        fh.write(png)
+    return len(png)
+
+
+def ramp(v):
+    """v in 0..1 -> RGB.  Dark blue, cyan, green, yellow, red: the usual
+    density ramp, so a hotspot reads as a hotspot without a legend."""
+    stops = np.array([[10, 12, 40], [16, 90, 160], [20, 170, 120],
+                      [220, 200, 40], [220, 40, 30]], dtype=np.float64)
+    t = np.clip(v, 0.0, 1.0) * (len(stops) - 1)
+    i = np.clip(t.astype(np.int64), 0, len(stops) - 2)
+    frac = (t - i)[..., None]
+    return (stops[i] * (1 - frac) + stops[i + 1] * frac).astype(np.uint8)
+
+
+# --------------------------------------------------------------------------- #
+def main():
+    ap = argparse.ArgumentParser(description="rasterise a DEF to a PNG")
+    ap.add_argument("deffile")
+    ap.add_argument("pngfile")
+    ap.add_argument("--lef", action="append", default=[], required=True,
+                    help="LEF for the macro sizes; repeat for more than one")
+    ap.add_argument("--width", type=int, default=1200, help="image width in pixels")
+    ap.add_argument("--height", type=int, default=0, help="0 keeps the die aspect")
+    ap.add_argument("--mode", choices=("util", "count", "outline"), default="util",
+                    help="util: fraction of the pixel covered by cells (default). "
+                         "count: cells per pixel. outline: draw each cell, for "
+                         "when you are zoomed in far enough to see one")
+    ap.add_argument("--bbox", nargs=4, type=float, metavar=("LLX", "LLY", "URX", "URY"),
+                    help="viewport in microns; default is the whole die")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    def log(m):
+        if not args.quiet:
+            print(f"def_raster: {m}", flush=True)
+
+    t_all = time.time()
+    size, cls = read_lef(args.lef, log)
+    if size is None:
+        return 2
+    dbu, die, cells, xs, ys, ors = read_def(args.deffile, log)
+    if die is None:
+        print("def_raster: the DEF has no DIEAREA", file=sys.stderr)
+        return 2
+    if not cells:
+        print("def_raster: the DEF has no placed components", file=sys.stderr)
+        return 2
+
+    t0 = time.time()
+    x = np.array(xs, dtype=np.float64) / dbu
+    y = np.array(ys, dtype=np.float64) / dbu
+    # width and height per instance, transposed for the rotated orientations
+    uniq, inv = np.unique(np.array(cells), return_inverse=True)
+    miss = [c for c in uniq if c not in size]
+    tw = np.array([size.get(c, (0.0, 0.0))[0] for c in uniq])[inv]
+    th = np.array([size.get(c, (0.0, 0.0))[1] for c in uniq])[inv]
+    rot = np.isin(np.array(ors), ("E", "W", "FE", "FW"))
+    w = np.where(rot, th, tw)
+    h = np.where(rot, tw, th)
+    if miss:
+        log(f"WARNING: {len(miss)} cell type(s) are in the DEF and not in the LEF, "
+            f"drawn as points: {', '.join(miss[:4])}{' ...' if len(miss) > 4 else ''}")
+    log(f"geometry in {time.time()-t0:.1f}s")
+
+    # viewport
+    if args.bbox:
+        vx0, vy0, vx1, vy1 = args.bbox
+    else:
+        vx0, vy0, vx1, vy1 = (die[0] / dbu, die[1] / dbu, die[2] / dbu, die[3] / dbu)
+    if vx1 <= vx0 or vy1 <= vy0:
+        print("def_raster: the viewport is empty", file=sys.stderr)
+        return 2
+    W = max(1, args.width)
+    H = args.height if args.height > 0 else max(1, int(round(W * (vy1 - vy0) / (vx1 - vx0))))
+    sx = W / (vx1 - vx0)
+    sy = H / (vy1 - vy0)
+    log(f"viewport {vx1-vx0:.1f} x {vy1-vy0:.1f} um into {W} x {H} px "
+        f"({1/sx:.3f} um per pixel)")
+
+    # cull to the viewport before doing any work per cell
+    keep = (x + w > vx0) & (x < vx1) & (y + h > vy0) & (y < vy1)
+    n_all = x.size
+    x, y, w, h = x[keep], y[keep], w[keep], h[keep]
+    log(f"{x.size} of {n_all} cell(s) intersect the viewport")
+    if x.size == 0:
+        acc = np.zeros((H, W), dtype=np.float64)
+    else:
+        t0 = time.time()
+        # pixel span of every cell, clipped to the image
+        px0 = np.clip(np.floor((x - vx0) * sx).astype(np.int64), 0, W - 1)
+        px1 = np.clip(np.ceil((x + w - vx0) * sx).astype(np.int64), 0, W)
+        py0 = np.clip(np.floor((y - vy0) * sy).astype(np.int64), 0, H - 1)
+        py1 = np.clip(np.ceil((y + h - vy0) * sy).astype(np.int64), 0, H)
+        acc = np.zeros((H, W), dtype=np.float64)
+        if args.mode == "count":
+            acc += np.bincount(py0 * W + px0,
+                               minlength=H * W).reshape(H, W).astype(np.float64)
+        else:
+            # Area, spread over the pixels the cell touches.  A sub-pixel cell
+            # lands wholly in one pixel and contributes its own area, which is
+            # what makes the result a utilisation and not a count.
+            spanx = np.maximum(px1 - px0, 1)
+            spany = np.maximum(py1 - py0, 1)
+            # Every cell gets the EXACT overlap with each pixel it touches, not
+            # its area divided by the pixel count.  Dividing is wrong at the
+            # edges: floor/ceil make the span wider than the cell, so two
+            # abutting cells both contribute to the pixel on their shared
+            # boundary.  That reported 347% utilisation on a placement with no
+            # overlap in it at all.
+            #
+            # Vectorised over the pixel OFFSET rather than over cells.  Looping
+            # per cell looks reasonable -- "only the multi-pixel ones come
+            # through here" -- and is wrong whenever the pixel is near the cell
+            # size: at 1.25um per pixel a 1.4um tall cell spans two rows of
+            # pixels, so every one of 855,424 cells took the slow path and it
+            # cost 7.2s.  Here the work is one pass per (dx, dy) offset, each
+            # pass a whole-array operation, so it is spanx*spany passes rather
+            # than n iterations of Python.  Same 855k cells: 0.4s.
+            ex = vx0 + np.arange(W + 1) / sx        # pixel edges, microns
+            ey = vy0 + np.arange(H + 1) / sy
+            flat = np.zeros(H * W, dtype=np.float64)
+
+            def deposit(sel, maxx, maxy):
+                # nonlocal, because "flat += ..." below would otherwise make
+                # flat a local of this function and it would be unbound
+                nonlocal flat
+                if not np.any(sel):
+                    return
+                sx0, sy0 = px0[sel], py0[sel]
+                cx, cy, cw, ch = x[sel], y[sel], w[sel], h[sel]
+                sxn, syn = spanx[sel], spany[sel]
+                for dy in range(maxy):
+                    # clamped, because the overlap is computed for every cell
+                    # in the selection before "dy < syn" discards the ones
+                    # whose span is shorter -- an unclamped index walks off the
+                    # edge array for those
+                    iy = np.minimum(sy0 + dy, H - 1)
+                    oy = np.minimum(cy + ch, ey[iy + 1]) - np.maximum(cy, ey[iy])
+                    np.clip(oy, 0, None, out=oy)
+                    liney = (dy < syn) & (oy > 0)
+                    if not np.any(liney):
+                        continue
+                    for dx in range(maxx):
+                        ix = np.minimum(sx0 + dx, W - 1)
+                        ox = np.minimum(cx + cw, ex[ix + 1]) - np.maximum(cx, ex[ix])
+                        np.clip(ox, 0, None, out=ox)
+                        use = liney & (dx < sxn) & (ox > 0)
+                        if not np.any(use):
+                            continue
+                        flat += np.bincount(iy[use] * W + ix[use],
+                                            weights=(ox[use] * oy[use]),
+                                            minlength=H * W)
+
+            # Cells whose footprint is a handful of pixels -- everything, at any
+            # zoom where the picture is of the chip rather than of a cell.
+            tiles = spanx * spany
+            near = tiles <= 64
+            if np.any(near):
+                deposit(near, int(spanx[near].max()), int(spany[near].max()))
+            # Zoomed far enough in that a cell covers a lot of pixels.  There
+            # are few of them by then, because the viewport cull ran first.
+            far = ~near
+            for i in np.nonzero(far)[0]:
+                a, b, c, e = px0[i], px1[i], py0[i], py1[i]
+                ox = (np.minimum(x[i] + w[i], ex[a+1:b+1])
+                      - np.maximum(x[i], ex[a:b])).clip(0)
+                oy = (np.minimum(y[i] + h[i], ey[c+1:e+1])
+                      - np.maximum(y[i], ey[c:e])).clip(0)
+                acc[c:e, a:b] += np.outer(oy, ox)
+            acc += flat.reshape(H, W)
+        log(f"rasterised in {time.time()-t0:.1f}s")
+
+    if args.mode == "count":
+        top = acc.max() if acc.max() > 0 else 1.0
+        img = ramp(acc / top)
+        log(f"peak {int(top)} cell(s) in a pixel")
+    else:
+        pix_area = (1 / sx) * (1 / sy)
+        util = acc / pix_area
+        img = ramp(util)
+        occupied = util[util > 0]
+        if occupied.size:
+            log(f"utilisation: mean {occupied.mean()*100:.1f}% over occupied pixels, "
+                f"peak {util.max()*100:.1f}%")
+
+    # DEF y is up, image y is down
+    img = img[::-1]
+    t0 = time.time()
+    nbytes = write_png(args.pngfile, img)
+    log(f"wrote {args.pngfile}, {W}x{H}, {nbytes/1024:.0f} KB in {time.time()-t0:.1f}s")
+    log(f"total {time.time()-t_all:.1f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
