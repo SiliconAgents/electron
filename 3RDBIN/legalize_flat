@@ -23,11 +23,27 @@ awkward to fix there and natural here.
                     catches it.  This one reserves the rows.
 
   speed at size     The dominant cost is per-cell work over millions of cells,
-                    which is what NumPy is for.  Note the honest caveat: the
-                    round trip through a text file is itself tens of seconds at
-                    three million cells, so the end-to-end win over the fixed
-                    Perl is smaller than the compute-time win.  If you are
-                    legalizing 200k cells, use the Perl one.
+                    which is what NumPy is for.  Measured on synthetic designs
+                    at 50% utilisation, nangate rows and site:
+
+                        cells     wall     peak RSS
+                        1M         6.7s      0.5GB
+                        4M        33.8s      2.0GB
+                        10M       79.7s      4.4GB
+                        20M      161.2s      8.7GB
+
+                    Linear, at about 8us and 460 bytes a cell, so a hundred
+                    million cells would be roughly 13 minutes and 44GB.  The
+                    tool is not what runs out first: electron itself holds a
+                    design at about 4.7KB an instance, ten times this, and the
+                    text round trip through the Perl side costs about 23us a
+                    cell -- three times this tool's own compute.  At 20M cells
+                    the marshalling would be 460s against 161s of legalizing.
+
+                    The honest summary: below about a million cells use the
+                    Perl one, it is simpler and the round trip is most of the
+                    cost anyway.  Above that this wins, and it keeps winning
+                    far past any design electron can currently hold.
 
 WHAT IT DELIBERATELY DOES NOT DO
 
@@ -57,10 +73,26 @@ coordinate, because the last time a checker did that on this flow it reported
 """
 
 import argparse
+import gc
 import sys
 import time
 
 import numpy as np
+
+# The cyclic collector is off for the whole run, and it is worth 2.4x.
+#
+# Legalizing builds millions of small containers -- a list per segment, a tuple
+# per cell handed to Abacus, a list per cluster -- and every one of them is a
+# container, so every one goes on the generational GC's watch list.  The
+# collector then rescans that growing population over and over, which is why
+# the cost was superlinear: four times the cells took 13.4 times as long.
+# Measured on a synthetic 4 million cell design, rows+abacus went 65.7s to
+# 24.8s and the total 70.8s to 30.1s, with a byte identical result.
+#
+# It is safe because nothing here makes a reference cycle: lists, tuples, ints
+# and NumPy arrays, all freed by reference counting alone, in a process that
+# exits as soon as it has written its answer.
+gc.disable()
 
 
 # --------------------------------------------------------------------------- #
