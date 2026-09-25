@@ -240,7 +240,32 @@ my $new = $canvas->Photo(-file => $png);
 #<!-- anchor nw at the top left of the view: world y runs up, canvas y down -->
 $canvas->createImage($v[0], $v[3], -anchor => 'nw', -image => $new,
                      -tags => ['RASTER']);
-$canvas->lower('RASTER');
+
+#<!-- Lower through the REAL canvas, not the Scrolled wrapper.
+#
+#     $design_worldcanvas is a Scrolled('WorldCanvas'), which IS a Frame, and a
+#     Frame has its own lower -- the window stacking one, which wants a window
+#     path.  So "$canvas->lower('RASTER')" finds that instead of the canvas's
+#     item lower and dies with: bad window path name "RASTER".
+#
+#     createImage and delete are fine because a Frame has neither, so they
+#     delegate to the canvas.  lower is the one name that collides, which is
+#     why everything else worked and only this blew up.
+#
+#     Subwidget('scrolled') is the Tk::WorldCanvas itself.  It is undef for a
+#     bare canvas, so this falls back rather than assuming a wrapper. -->
+my $cv = $canvas;
+my $sub = eval { $canvas->Subwidget('scrolled') };
+$cv = $sub if ( defined $sub );
+unless ( eval { $cv->lower('RASTER'); 1; } ) {
+  #<!-- Not fatal.  The image ends up on top of the rows and the ports instead
+  #     of under them, which is worth one line rather than a dead callback and
+  #     a view that never updates again. -->
+  unless ( $FLAT_RASTER_LOWERWARN ) {
+    print "WARN-GUI-RASTER : 025 : could not put the image under the rows: $@";
+    $FLAT_RASTER_LOWERWARN = 1;
+  }
+}
 $FLAT_RASTER_PHOTO->delete if ( defined $FLAT_RASTER_PHOTO );
 $FLAT_RASTER_PHOTO = $new;
 
