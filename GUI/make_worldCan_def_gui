@@ -450,8 +450,13 @@ $design_worldcanvas->viewAll;
 #     database. -->
 if ( $FLAT_RASTER_ACTIVE ) {
   &dbfFlatRasterDraw($design_worldcanvas);
+  #<!-- Schedule, not draw.  A drag or a held zoom key fires -changeView many
+  #     times, and rastering each one runs python with the event loop blocked;
+  #     the window stops responding, which looks like zoom being broken.
+  #     dbfFlatRasterSchedule coalesces the burst into one draw once the view
+  #     has been still for a moment. -->
   $design_worldcanvas->configure(-changeView =>
-      sub { &dbfFlatRasterDraw($design_worldcanvas); });
+      sub { &dbfFlatRasterSchedule($design_worldcanvas); });
 }
 @box_org = $design_worldcanvas->getView();
 &design_ZoomIn_ZoomOut_new($design_worldcanvas,\@box_org);

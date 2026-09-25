@@ -235,6 +235,13 @@ if ( $rc != 0 || ! -e $png ) {
   return;
 }
 
+#<!-- Everything from here is wrapped, because $FLAT_RASTER_BUSY must be
+#     cleared on EVERY path out.  It was not: delete, Photo and createImage
+#     were unguarded, and a throw from any of them -- a half written PNG is
+#     enough -- escaped the callback with the flag still set.  Every later
+#     -changeView then returned immediately and the view never updated again,
+#     which reads as "the image drew once and then zoom stopped working". -->
+my $drew = eval {
 $canvas->delete('RASTER');
 my $new = $canvas->Photo(-file => $png);
 #<!-- anchor nw at the top left of the view: world y runs up, canvas y down -->
@@ -268,6 +275,19 @@ unless ( eval { $cv->lower('RASTER'); 1; } ) {
 }
 $FLAT_RASTER_PHOTO->delete if ( defined $FLAT_RASTER_PHOTO );
 $FLAT_RASTER_PHOTO = $new;
+1;
+};
+my $err = $@;
+#<!-- cleared before anything can return or throw again -->
+$FLAT_RASTER_BUSY = 0;
+unless ( $drew ) {
+  unless ( $FLAT_RASTER_DRAWWARN ) {
+    print "WARN-GUI-RASTER : 026 : could not put the image on the canvas: $err";
+    print "WARN-GUI-RASTER : 027 : flat_raster -mode off goes back to drawing items\n";
+    $FLAT_RASTER_DRAWWARN = 1;
+  }
+  return;
+}
 
 #<!-- Say so the first time.  Not every time: this runs on every pan and every
 #     zoom step, and a line each would bury everything else.  Once is enough to
@@ -278,9 +298,35 @@ unless ( $FLAT_RASTER_SAID ) {
          $W, $H, ($v[2]-$v[0])/$mf/$sc, ($v[3]-$v[1])/$mf/$sc);
   $FLAT_RASTER_SAID = 1;
 }
-$FLAT_RASTER_BUSY = 0;
 
 }# sub dbfFlatRasterDraw
+
+
+#<!-- Coalesce a burst of view changes into one re-raster.
+#
+#     -changeView fires on every xview, yview, zoom, center and viewArea, and a
+#     drag or a held key produces a stream of them.  Rastering each one runs
+#     python synchronously with the Tk event loop blocked, so the window stops
+#     responding for as long as the queue takes -- which looks exactly like
+#     zoom being broken even though every frame is eventually correct.
+#
+#     after() puts it off until the view has been still for a moment, and each
+#     new event cancels the pending one.  The picture lands once, when you stop
+#     moving, which is the only time it is worth having. -->
+sub dbfFlatRasterSchedule {
+
+my ($canvas) = @_;
+return unless ( defined $canvas );
+if ( defined $FLAT_RASTER_AFTER ) {
+  eval { $FLAT_RASTER_AFTER->cancel };
+  undef $FLAT_RASTER_AFTER;
+}
+$FLAT_RASTER_AFTER = $canvas->after(180, sub {
+    undef $FLAT_RASTER_AFTER;
+    &dbfFlatRasterDraw($canvas);
+  });
+
+}# sub dbfFlatRasterSchedule
 
 
 sub raster_view {
