@@ -398,6 +398,49 @@ unless ( open(FRD, ">$file") ) {
 }
 printf FRD "UNITS %d\n", $scale;
 printf FRD "DIE %d %d %d %d\n", @$die;
+
+#<!-- The rows, so the picture has the core in it and not just the cells.
+#
+#     Same record shape legalize_flat reads -- "name site x0 y0 orient numX
+#     numY stepX stepY", all dbu -- and the same two fields matter: field 3 is
+#     the row's y and field 2 its left edge, with numX*stepX the width.
+#
+#     They are worth having for two reasons.  At chip level the rows show where
+#     the core is against the die margin, which cells alone do not: an empty
+#     region reads as "no cells here" whether or not it is even part of the
+#     core.  Zoomed in they show the row pitch, which is how you see at a
+#     glance whether a cell is on a row or between two. -->
+my $rowsOut = 0;
+my $flpId = $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"};
+if ( defined $flpId && exists $FLOORPLAN_ALREADY{$flpId} ) {
+  my $rh = $GLOBAL->dbGlobalGetRowHeight;
+  $rh = ( defined $rh && $rh > 0 ) ? $rh * $scale : 0;
+  my %seen = ();
+  foreach my $tag ( $FLOORPLAN_ALREADY{$flpId}->dbFlplanGetRows ) {
+    my @f = split(/\s+/, $tag);
+    next unless ( @f >= 8 );
+    my ($x0, $y, $numX, $stepX) = ($f[2], $f[3], $f[5], $f[7]);
+    next unless ( defined $y && defined $x0 && defined $numX && defined $stepX );
+    #<!-- several records can share a y; widen rather than emit twice -->
+    my $x1 = $x0 + $numX * $stepX;
+    if ( exists $seen{$y} ) {
+      $seen{$y}[0] = $x0 if ( $x0 < $seen{$y}[0] );
+      $seen{$y}[1] = $x1 if ( $x1 > $seen{$y}[1] );
+    }
+    else { $seen{$y} = [ $x0, $x1 ]; }
+  }
+  #<!-- with no site height to go on, the gap between rows is the next best
+  #     thing, and a single row can just be thin -->
+  unless ( $rh > 0 ) {
+    my @ys = sort { $a <=> $b } keys %seen;
+    $rh = ( @ys > 1 ) ? ($ys[1] - $ys[0]) : 0;
+  }
+  printf FRD "ROWH %d\n", $rh if ( $rh > 0 );
+  foreach my $y ( sort { $a <=> $b } keys %seen ) {
+    printf FRD "ROW %d %d %d\n", $y, $seen{$y}[0], $seen{$y}[1];
+    $rowsOut++;
+  }
+}
 my %wOf = ();
 my %hOf = ();
 my $cnt = 0;

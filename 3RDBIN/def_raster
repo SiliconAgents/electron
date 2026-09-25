@@ -101,8 +101,8 @@ def read_def(path, log):
     """
     dbu = 1000
     die = None
+    rows = []
     cells, xs, ys, ors = [], [], [], []
-    name_of_cell = []
     in_comp = False
     pend_cell = None
     t0 = time.time()
@@ -117,6 +117,16 @@ def read_def(path, log):
                     v = re.findall(r"-?\d+", line)
                     if len(v) >= 4:
                         die = (int(v[0]), int(v[1]), int(v[-2]), int(v[-1]))
+                elif line.startswith("ROW "):
+                    # ROW <name> <site> <x> <y> <orient> DO <nx> BY <ny> STEP <sx> <sy> ;
+                    #   0     1      2     3   4      5     6   7   8   9    10  11   12
+                    f = line.split()
+                    if len(f) >= 12 and f[6].upper() == "DO" and f[10].upper() == "STEP":
+                        try:
+                            x, y = int(f[3]), int(f[4])
+                            rows.append((y, x, x + int(f[7]) * int(f[11])))
+                        except ValueError:
+                            pass
                 elif line.startswith("COMPONENTS"):
                     in_comp = True
                 continue
@@ -135,8 +145,16 @@ def read_def(path, log):
                     ys.append(int(m.group(2)))
                     ors.append(m.group(3))
                     pend_cell = None
-    log(f"{len(cells)} placed component(s) parsed in {time.time()-t0:.1f}s")
-    return dbu, die, cells, xs, ys, ors
+    # the row height is the gap between adjacent row origins; a DEF does not
+    # say it outright and the SITE it names is in the LEF, not here
+    rowh = 0
+    if len(rows) > 1:
+        ys_sorted = sorted(set(r[0] for r in rows))
+        if len(ys_sorted) > 1:
+            rowh = min(b - a for a, b in zip(ys_sorted, ys_sorted[1:]))
+    log(f"{len(cells)} placed component(s) and {len(rows)} row(s) parsed "
+        f"in {time.time()-t0:.1f}s")
+    return dbu, die, cells, xs, ys, ors, rowh, rows
 
 
 def read_cells(path, log):
@@ -147,25 +165,34 @@ def read_cells(path, log):
     """
     dbu = 1000
     die = None
+    rowh = 0
+    rows = []                       # (y, x0, x1)
     xs, ys, ws, hs = [], [], [], []
     t0 = time.time()
     with open(path, errors="replace") as fh:
         for line in fh:
-            if line[0] == "C":
+            c = line[0]
+            if c == "C":
                 f = line.split()
                 if len(f) >= 5:
                     xs.append(int(f[1])); ys.append(int(f[2]))
                     ws.append(int(f[3])); hs.append(int(f[4]))
-            elif line[0] == "U":
+            elif c == "R":
+                f = line.split()
+                if f[0] == "ROWH" and len(f) >= 2:
+                    rowh = int(f[1])
+                elif f[0] == "ROW" and len(f) >= 4:
+                    rows.append((int(f[1]), int(f[2]), int(f[3])))
+            elif c == "U":
                 f = line.split()
                 if len(f) >= 2:
                     dbu = int(f[1])
-            elif line[0] == "D":
+            elif c == "D":
                 f = line.split()
                 if len(f) >= 5:
                     die = tuple(int(v) for v in f[1:5])
-    log(f"{len(xs)} cell(s) read in {time.time()-t0:.1f}s")
-    return dbu, die, xs, ys, ws, hs
+    log(f"{len(xs)} cell(s) and {len(rows)} row(s) read in {time.time()-t0:.1f}s")
+    return dbu, die, xs, ys, ws, hs, rowh, rows
 
 
 # --------------------------------------------------------------------------- #
@@ -238,7 +265,7 @@ def main():
 
     t_all = time.time()
     if args.cells:
-        dbu, die, xs, ys, ws, hs = read_cells(args.deffile, log)
+        dbu, die, xs, ys, ws, hs, rowh, rows = read_cells(args.deffile, log)
         if die is None:
             print("def_raster: the cell dump has no DIE", file=sys.stderr)
             return 2
@@ -259,7 +286,7 @@ def main():
         size, cls = read_lef(args.lef, log)
         if size is None:
             return 2
-        dbu, die, cells, xs, ys, ors = read_def(args.deffile, log)
+        dbu, die, cells, xs, ys, ors, rowh, rows = read_def(args.deffile, log)
         if die is None:
             print("def_raster: the DEF has no DIEAREA", file=sys.stderr)
             return 2
@@ -404,6 +431,67 @@ def main():
         if occupied.size:
             log(f"utilisation: mean {occupied.mean()*100:.1f}% over occupied pixels, "
                 f"peak {util.max()*100:.1f}%")
+
+    # ------------------------------------------------------------------ #
+    #  The core and the die, so the picture has a frame of reference.
+    #
+    #  Cells alone cannot tell you whether an empty patch is core with nothing
+    #  in it or margin that was never core at all.  The rows say which.
+    #
+    #  Drawn UNDER the cells -- only where no cell already coloured the pixel
+    #  -- so they never hide what they are there to frame.
+    # ------------------------------------------------------------------ #
+    if rows:
+        ry = np.array([r[0] for r in rows], dtype=np.float64) / dbu
+        rx0 = np.array([r[1] for r in rows], dtype=np.float64) / dbu
+        rx1 = np.array([r[2] for r in rows], dtype=np.float64) / dbu
+        rh = (rowh / dbu) if rowh > 0 else (np.diff(np.sort(ry)).min()
+                                            if ry.size > 1 else 0.0)
+        # world y at the centre of each image row, image row 0 being the BOTTOM
+        # here because the flip happens after this block
+        yc = vy0 + (np.arange(H) + 0.5) / sy
+        xc = vx0 + (np.arange(W) + 0.5) / sx
+        # which row band each image row falls in
+        k = np.searchsorted(np.sort(ry), yc, side="right") - 1
+        sry = np.sort(ry)
+        inband = (k >= 0) & (k < sry.size)
+        kk = np.clip(k, 0, max(sry.size - 1, 0))
+        if rh > 0:
+            inband &= (yc >= sry[kk]) & (yc < sry[kk] + rh)
+        incol = (xc >= rx0.min()) & (xc <= rx1.max())
+        core = np.outer(inband, incol)
+        empty = (acc <= 0) & core
+        base = np.array([26, 30, 52], dtype=np.uint8)      # core, lighter than the die
+        img[empty] = base
+
+        # Row separators, but only once a row is tall enough on screen to see.
+        # Below that they would be a grey wash that says nothing.
+        pitch_px = rh * sy
+        if rh > 0 and pitch_px >= 4:
+            edges = np.round((sry - vy0) * sy).astype(np.int64)
+            edges = edges[(edges >= 0) & (edges < H)]
+            if edges.size:
+                line = np.array([46, 52, 80], dtype=np.uint8)
+                sel = np.zeros((H, W), dtype=bool)
+                sel[edges, :] = True
+                sel &= (acc <= 0) & core
+                img[sel] = line
+            log(f"row pitch is {pitch_px:.1f} px, separators drawn")
+
+    # The die boundary, on top: it is the one line that should never be hidden.
+    dx0, dy0, dx1, dy1 = (die[0]/dbu, die[1]/dbu, die[2]/dbu, die[3]/dbu)
+    edge = np.array([120, 200, 120], dtype=np.uint8)
+    # Clamped, not dropped.  Fitting the whole die puts its far edges at pixel
+    # index exactly W and H, one past the last pixel, so a plain "< W" test
+    # threw away two of the four sides and the boundary looked like a corner.
+    for wx in (dx0, dx1):
+        px = int(round((wx - vx0) * sx))
+        if -1 <= px <= W:
+            img[:, min(max(px, 0), W - 1)] = edge
+    for wy in (dy0, dy1):
+        py = int(round((wy - vy0) * sy))
+        if -1 <= py <= H:
+            img[min(max(py, 0), H - 1), :] = edge
 
     # DEF y is up, image y is down
     img = img[::-1]
