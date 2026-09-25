@@ -1,14 +1,15 @@
 # RTL filelist for the electron synthesize command.
 #
 # A systolic matrix unit built from the same vedic multiplier the rest of TESTS
-# uses.  ONE filelist, TWO tops:
+# uses.  ONE filelist, THREE tops:
 #
 #     synthesize -top mxu_tile64    8x8 array,    64 multipliers
 #     synthesize -top mxu_256      16x16 array,  256 multipliers
+#     synthesize -top mxu_1024     32x32 array, 1024 multipliers
 #
-# Both tops are in here and yosys's "hierarchy -check -top" keeps only what the
-# chosen one reaches, so the small and the large design are literally the same
-# sources.  Nothing is duplicated and the two cannot drift apart.
+# All three tops are in here and yosys's "hierarchy -check -top" keeps only
+# what the chosen one reaches, so the three designs are literally the same
+# sources.  Nothing is duplicated and they cannot drift apart.
 #
 # Paths are relative to THIS file, which is how dbfSynthExpandFileList resolves
 # them.  The multiplier sources are referenced where they live rather than
@@ -32,3 +33,4 @@ mac_pe.v
 mxu_tile16.v
 mxu_tile64.v
 mxu_256.v
+mxu_1024.v

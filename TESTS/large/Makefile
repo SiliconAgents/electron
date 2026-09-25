@@ -6,14 +6,35 @@
 #
 # WHAT IS HERE
 #
-# Three designs, all built from the same vedic_16x16 the small tests place one
+# Four designs, all built from the same vedic_16x16 the small tests place one
 # of, and all measured on this machine:
 #
-#   target      design        mults  modules  levels   cells    instances  wall   peak
-#   ----------  ------------  -----  -------  ------  -------  ----------  -----  ----
-#   matmul_hier matmul_4x4      64      13      7     164,336    204,816   1m30   1.2G
-#   mxu_64      mxu_tile64      64      14      8     172,416    213,568   1m29   1.2G
-#   mxu_256     mxu_256        256      15      9     689,664    855,424   5m23   4.2G
+#   target      design        mults  modules  levels    cells     instances  wall   peak
+#   ----------  ------------  -----  -------  ------  ---------  ----------  -----  ----
+#   matmul_hier matmul_4x4      64      13      7       164,336     204,816   1m30   1.2G
+#   mxu_64      mxu_tile64      64      14      8       172,416     213,568   1m29   1.2G
+#   mxu_256     mxu_256        256      15      9       689,664     855,424   5m23   4.2G
+#   mxu_1024    mxu_1024      1024      16     10     2,758,656   3,424,000  25m47  16.1G
+#
+# WHAT THE SCALING SET ANSWERED
+#
+# mxu_64, mxu_256 and mxu_1024 are the SAME SOURCES with a different -top, and
+# each step is four times the instances and exactly ONE more distinct module.
+# That is the whole design of the experiment, and the answer is that the flow
+# is NOT uniformly linear:
+#
+#   phase              mxu_256   mxu_1024   ratio for 4x the cells
+#   ---------------   --------  ---------  ------------------------
+#   synth + elaborate     0m32      1m57    3.7x   linear
+#   hier_place_all        155s       518s   3.3x   SUBlinear, ~n^0.87
+#   write_def (each)       17s        38s   2.2x   sublinear
+#   legalize_flat         109s       821s   7.5x   SUPERlinear, ~n^1.46
+#
+# hier_place_all comes out sublinear because most of it is the module walk,
+# and that walk is 15 modules against 16 however many instances hang off them.
+# legalize_flat is the one that hurts, and at mxu_1024 it is over half the run
+# -- 13m41 of 25m47.  It is the next thing to look at if these tests get slower
+# to live with, and nothing below 3.4 million instances makes it obvious.
 #
 # WHAT THIS DIRECTORY ALREADY PAID FOR
 #
@@ -50,25 +71,26 @@
 # multipliers each.  mxu_tile64 and mxu_256 are systolic matrix units -- the
 # shape an AI engine's matrix unit has, weights and partial sums shifting down
 # the columns and activations along the rows, every path registered, no
-# broadcast and no wire longer than one PE.  A TPU MXU is mxu_256 with 256 rows
-# instead of 16, and the only difference that makes to the hierarchy is one
-# more level of the same composition.
+# broadcast and no wire longer than one PE.  A TPU v1 MXU is mxu_1024 with 256
+# rows instead of 32, and the only difference that makes to the hierarchy is
+# one more level of the same composition -- which is exactly what mxu_1024 is
+# over mxu_256, and mxu_256 over mxu_64.
 #
-# WHY THERE ARE THREE AND NOT ONE
+# WHY THERE ARE FOUR AND NOT ONE
 #
 # Because the two halves of the flow scale differently and no single design
 # separates them.
 #
 # hier_place_all works on the DISTINCT MODULES, and that column barely moves:
-# 13, 14, 15.  A module has one floorplan, so all 256 copies of vedic_16x16
-# share one arrangement and the walk places it once.  hier2flat, write_def and
-# legalize_flat work on every INSTANCE, and that column goes up four times
-# between mxu_64 and mxu_256 -- which are the SAME SOURCES with a different
-# -top, so nothing else differs.
+# 13, 14, 15, 16.  A module has one floorplan, so all 1024 copies of
+# vedic_16x16 share one arrangement and the walk places it once.  hier2flat,
+# write_def and legalize_flat work on every INSTANCE, and that column goes up
+# four times per step.
 #
-# Run the pair and the two are separated: if both slow down it is the placer,
-# if only mxu_256 does it is the flat side.  TESTS/nangate_recurse, at 4,233
-# instances, is the third point on that line.
+# Run the set and the two are separated: if everything slows down it is the
+# placer, if only the big ones do it is the flat side.  TESTS/nangate_recurse,
+# at 4,233 instances, is the small end of the same line -- five points from
+# 4,233 to 3,424,000, a factor of 800.
 #
 # Like the tests one directory up, nothing in here launches apptainer.  Start
 # the container first -- "make app" -- then run a target at its prompt.  PATH
@@ -114,9 +136,10 @@ mxu_64:
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu64_hier.tcl
 
 # The 16x16 systolic matrix unit: 256 mac_pe, 9 levels, 855,424 instances,
-# about 1mm2 of cell area.  The largest thing in this repository.  Same sources
-# as mxu_64 -- synthesize -top picks which -- so a difference between the two
-# is a difference in scale and nothing else.
+# about 1mm2 of cell area, 5m23.  The middle size, and the biggest one that is
+# still comfortable to sit in front of.  Same sources as mxu_64 and mxu_1024 --
+# synthesize -top picks which -- so a difference between them is a difference
+# in scale and nothing else.
 mxu_256:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu_hier.tcl
@@ -129,8 +152,26 @@ mxu_256-interactive:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu_hier_interactive.tcl
 
-# The pair, for the comparison the header describes.
-mxu_both: mxu_64 mxu_256
+# The 32x32 systolic matrix unit: 1024 mac_pe, 10 levels, 3,424,000 instances,
+# 3.95mm2 of cell area.  The largest thing in this repository, and slow and
+# large enough that it is something you run deliberately.  Same sources again.
+mxu_1024:
+	mkdir -p workarea
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu1024_hier.tcl
+
+# The same run left at the prompt.  Note the cost: it holds ~15GB, and "gui"
+# forks a child with its own copy, so asking for the window roughly doubles
+# that.  The FlatView draws one rectangle per instance and there are 3.4
+# million -- the Hier-View is the one worth looking at at this size, or use
+# mxu_256-interactive, which is a quarter of the size and shows the same thing.
+mxu_1024-interactive:
+	mkdir -p workarea
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu1024_hier_interactive.tcl
+
+# The set, for the scaling comparison the header describes.  Four times the
+# instances per step and one more distinct module per step.
+mxu_both:  mxu_64 mxu_256
+mxu_scale: mxu_64 mxu_256 mxu_1024
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
@@ -142,4 +183,4 @@ app:
 clean:
 	rm -rf workarea
 
-.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_256-interactive mxu_both app clean
+.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_256-interactive mxu_1024 mxu_1024-interactive mxu_both mxu_scale app clean
