@@ -283,8 +283,13 @@ my $dieShift = ($dieIsCentre == 1) ? 270 : 20;
 #     they are what selection, highlight and the property probe work on.
 #
 #     "flat_raster -mode off" puts this path back unconditionally. -->
-my $rasterFlat = &dbfFlatRasterWanted();
-if ( $rasterFlat ) {
+#<!-- A package global, NOT a my.  This is set inside the "if dieArea
+#     exists" block and read after it closes, and a lexical does not
+#     reach: with no use strict in this tree it silently reads as undef
+#     there, so the dump ran and the image was never drawn -- rows and
+#     ports on screen and not one instance. -->
+$FLAT_RASTER_ACTIVE = &dbfFlatRasterWanted();
+if ( $FLAT_RASTER_ACTIVE ) {
    my $nInst = keys %CADB;
    print "INFO-GUI-DEF_DISP : 002 : $nInst instances, drawing the flat view as an image\n";
    print "INFO-GUI-DEF_DISP : 003 : selection needs the items: flat_raster -mode off\n";
@@ -443,7 +448,7 @@ $design_worldcanvas->viewAll;
 #     center and viewArea, which is every way the view can move, and each
 #     re-raster is a fifth of a second because it reads the dump and not the
 #     database. -->
-if ( $rasterFlat ) {
+if ( $FLAT_RASTER_ACTIVE ) {
   &dbfFlatRasterDraw($design_worldcanvas);
   $design_worldcanvas->configure(-changeView =>
       sub { &dbfFlatRasterDraw($design_worldcanvas); });

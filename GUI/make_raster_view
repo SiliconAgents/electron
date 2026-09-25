@@ -179,12 +179,24 @@ sub dbfFlatRasterDraw {
 
 my ($canvas) = @_;
 return unless ( defined $canvas );
-return unless ( defined $FLAT_RASTER_FILE && -e $FLAT_RASTER_FILE );
+unless ( defined $FLAT_RASTER_FILE && -e $FLAT_RASTER_FILE ) {
+  print "WARN-GUI-RASTER : 022 : no cell dump to draw from; nothing was rastered\n";
+  return;
+}
+
+#<!-- Re-entrancy guard.  This runs from the -changeView callback and then
+#     creates a canvas item; if item creation ever nudged the view the callback
+#     would fire again and the GUI would hang rather than merely look wrong.
+#     Tk::WorldCanvas only fires -changeView from xview, yview, zoom, center
+#     and viewArea, so it should not -- but a hung window is a much worse
+#     failure than a missing picture, and the guard is one variable. -->
+return if ( $FLAT_RASTER_BUSY );
+$FLAT_RASTER_BUSY = 1;
 
 my @v = $canvas->getView();              #<!-- world: x1 y1 x2 y2 -->
-return unless ( @v >= 4 && $v[2] > $v[0] && $v[3] > $v[1] );
+unless ( @v >= 4 && $v[2] > $v[0] && $v[3] > $v[1] ) { $FLAT_RASTER_BUSY = 0; return; }
 my $px = $canvas->pixelSize();
-return unless ( defined $px && $px > 0 );
+unless ( defined $px && $px > 0 ) { $FLAT_RASTER_BUSY = 0; return; }
 
 my $W = int( ($v[2] - $v[0]) / $px );
 my $H = int( ($v[3] - $v[1]) / $px );
@@ -198,7 +210,11 @@ if ( $H > 4000 ) { $W = int($W * 4000 / $H); $H = 4000; $W = 1 if ($W < 1); }
 #     world = dbu * MulFactor + dieShift, so this is that inverted. -->
 my $mf = $FLAT_RASTER_MULFACTOR;
 my $sh = $FLAT_RASTER_SHIFT;
-return unless ( defined $mf && $mf != 0 );
+unless ( defined $mf && $mf != 0 ) {
+  print "WARN-GUI-RASTER : 023 : the canvas transform is not set; nothing was rastered\n";
+  $FLAT_RASTER_BUSY = 0;
+  return;
+}
 my @bb = ( ($v[0]-$sh)/$mf, ($v[1]-$sh)/$mf, ($v[2]-$sh)/$mf, ($v[3]-$sh)/$mf );
 #<!-- and the dump is in $DBSCALEFACTOR units, so those are microns already if
 #     the scale written was $DBSCALEFACTOR -->
@@ -214,7 +230,8 @@ $cmd .= " --cells --quiet --width $W --height $H";
 $cmd .= sprintf(" --bbox %.6f %.6f %.6f %.6f", @bb);
 my $rc = system($cmd);
 if ( $rc != 0 || ! -e $png ) {
-  print "WARN-GUI-RASTER : 019 : the rasteriser failed, the view is empty\n";
+  print "WARN-GUI-RASTER : 019 : the rasteriser failed ($cmd), the view is empty\n";
+  $FLAT_RASTER_BUSY = 0;
   return;
 }
 
@@ -226,6 +243,17 @@ $canvas->createImage($v[0], $v[3], -anchor => 'nw', -image => $new,
 $canvas->lower('RASTER');
 $FLAT_RASTER_PHOTO->delete if ( defined $FLAT_RASTER_PHOTO );
 $FLAT_RASTER_PHOTO = $new;
+
+#<!-- Say so the first time.  Not every time: this runs on every pan and every
+#     zoom step, and a line each would bury everything else.  Once is enough to
+#     tell the difference between "drawn" and "silently did nothing", which is
+#     the failure this had. -->
+unless ( $FLAT_RASTER_SAID ) {
+  printf("INFO-GUI-RASTER : 024 : flat view drawn as a %dx%d image over %.1f x %.1f um\n",
+         $W, $H, ($v[2]-$v[0])/$mf/$sc, ($v[3]-$v[1])/$mf/$sc);
+  $FLAT_RASTER_SAID = 1;
+}
+$FLAT_RASTER_BUSY = 0;
 
 }# sub dbfFlatRasterDraw
 
