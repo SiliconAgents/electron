@@ -50,16 +50,33 @@
 #  "is this 1496um row more than 100% full", the answer at 50% utilisation is
 #  almost always no, and the nearest row won every time however crowded it was
 #  AT THAT X.  Abacus then fixed a 300% full patch the only way it can, by
-#  sliding cells along the row.  The bill, on mxu_256 after hier_place_all:
+#  sliding cells along the row.
 #
-#                       avg |dx|   p99 |dx|   worst    total horizontal
-#      --no_dbin          42.9um     351um    879um         36,716 mm
-#      the cap on         10.5um      50um    183um          9,005 mm
+#  Every test in the tree that legalizes, average and worst move in um, each
+#  pair from ONE placement legalized both ways:
 #
-#  and the vertical movement that bought it went from 310mm to 473mm.  27.7
-#  METRES of horizontal movement removed for 163mm of vertical, a trade of
-#  170 to 1, and it is available because 100% of the over-full width on that
-#  design has free space within FOUR ROWS, 5.6um.  Zero overlaps either way.
+#      test              cells    --no_dbin        cap on        avg    worst
+#      ---------------  -------  -------------  -------------  -----  -------
+#      nangate_flat       4,233   12.9 /  49.4   12.4 /  44.7  1.04x   1.11x
+#      nangate_recurse    4,233   11.0 /  72.0    4.2 /  25.3  2.63x   2.85x
+#      matmul_4x4       204,816   46.9 / 453.7   15.1 / 274.8  3.10x   1.65x
+#      mxu_tile64       213,568   28.5 / 477.1   10.9 /  80.3  2.62x   5.94x
+#      mxu_256          855,424   43.3 / 879.0   11.1 / 183.5  3.91x   4.79x
+#
+#  Two and a half to four times less average movement on every design placed
+#  hierarchically, and up to six times less on the worst cell.  nangate_flat is
+#  the exception and the reason is in its numbers, not in the cap: see below.
+#
+#  On mxu_256, measured on the written DEFs rather than from the summary above,
+#  the horizontal total falls from 36,716mm to 9,005mm while the vertical rises
+#  from 310mm to 473mm.  27.7 METRES of horizontal movement removed for 163mm
+#  of vertical, a trade of 170 to 1, and it is there to be had because 100% of
+#  the over-full width on that design has free space within FOUR ROWS, 5.6um.
+#
+#  Legality is unaffected, and that is checked independently rather than taken
+#  from the tool: an integer-DBU overlap sweep over the written DEF says zero
+#  overlaps on every design above, with or without the cap, and zero cells
+#  whose orientation disagrees with their row.
 #
 #  TWO THINGS MAKE IT WORK AND BOTH ARE EASY TO GET WRONG.
 #
@@ -88,7 +105,10 @@
 #  legalized DEF), and nangate_flat is 60 rows on an 85um die where only 62%
 #  of the over-full width can be absorbed vertically at all, against 100% on
 #  mxu_256.  It is the only design in the tree with a router in its flow, and
-#  it is the wrong shape for this.
+#  it is the wrong shape for this -- which is also why it is the one row of
+#  the table above that shows nothing.  Its 1.04x is not a small win, it is
+#  noise: place_flat_design is not deterministic either, so that row is the
+#  only one whose two halves do not come from the same placement.
 #
 #  So: the displacement win is large, measured, and reproducible; the routing
 #  effect is unmeasured on any design where the mechanism applies.  Which is
