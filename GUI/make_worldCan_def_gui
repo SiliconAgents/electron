@@ -268,6 +268,42 @@ my $display_limit = 3 * $pix_size;
 my %inst_ext_tag = ();
 my %inst_is_block = ();
 my $dieShift = ($dieIsCentre == 1) ? 270 : 20;
+
+#<!-- Density for everything under three pixels, instead of nothing at all.
+#
+#     The test below refuses to draw an instance smaller than three screen
+#     pixels, which is right: a sub-pixel rectangle is invisible, and a million
+#     of them are invisible AND slow.  But refusing to draw it and drawing
+#     nothing in its place are different things, and it did the second.  A
+#     1.4um cell needs a die under about 250um to clear three pixels in a 540
+#     pixel window, so on anything bigger the flat view came up empty and
+#     looked broken -- the 2993um die of mxu_1024 puts a standard cell at a
+#     quarter of a pixel.
+#
+#     So the ones too small to draw are counted into a grid instead, and each
+#     bin becomes ONE stippled rectangle weighted by how much cell area landed
+#     in it.  That is O(bins) items and not O(instances): a hundred bins across
+#     is ten thousand rectangles whatever the design, against three and a half
+#     million.
+#
+#     Rectangles and not an image, on purpose.  Canvas items are in world
+#     coordinates and scale with the WorldCanvas zoom; an image does not, and
+#     that is the trap that broke the zoom when this was tried the other way
+#     round.
+#
+#     Bins are sized off the canvas so that one is about five pixels: fine
+#     enough to show structure, coarse enough to stay cheap. -->
+my %DENS = ();
+my $densBin = 0;
+{
+  my $cpx = $design_worldcanvas->width;
+  $cpx = 540 if ( ! defined $cpx || $cpx < 50 );
+  my $densN = int($cpx / 5);
+  $densN = 40 if ( $densN < 40 );  $densN = 150 if ( $densN > 150 );
+  my $spanx = $burx - $bllx;  my $spany = $bury - $blly;
+  my $span = ( $spanx > $spany ) ? $spanx : $spany;
+  $densBin = ( $span > 0 ) ? $span / $densN : 0;
+}
 for(my $i=0; $i<=$#GCellArray ; $i++) {
    for (my $j=0; $j<=$#{@GCellArray[0]} ; $j++) {
         #my @gcell_bbox = $GCellArray[$i][$j]->dbgGcellGetBBox;
@@ -320,6 +356,13 @@ for(my $i=0; $i<=$#GCellArray ; $i++) {
                       }
                    }else{
                       push(@filtered_inst_array,$InstanceName);
+                      #<!-- too small to see: count its area into a bin so it
+                      #     shows up as density rather than as nothing -->
+                      if ( $densBin > 0 ) {
+                         my $bx = int( ($llx - $bllx) / $densBin );
+                         my $by = int( ($lly - $blly) / $densBin );
+                         $DENS{"$bx,$by"} += ($urx - $llx) * ($ury - $lly);
+                      }
                    }
                 }# if component status is fixed or placed
              }else{print "WARN: cell $cellref not found in library\n";}
@@ -338,6 +381,43 @@ for(my $i=0; $i<=$#GCellArray ; $i++) {
         ##------------------------------------------------------------------#
         $GCellArray[$i][$j]->dbgGcellSetFilteredList(@filtered_inst_array);
    }
+ }
+
+ #<!-- One rectangle per non-empty bin, stippled by how full it is.
+ #
+ #     Tk gives four stipple densities, so that is the resolution of the shade
+ #     -- coarse, but it is the difference between seeing where the design is
+ #     and seeing a black window.  Same red as the instances themselves, so it
+ #     reads as "cells are here, too small to draw one at a time" rather than
+ #     as some other kind of object.
+ #
+ #     Lowered afterwards, through the real canvas rather than the Scrolled
+ #     frame around it: a Frame has its own lower, the window stacking one,
+ #     which takes a window path and dies on a tag.  Without the lower these
+ #     would sit on top of the die boundary, the rows and the ports, since they
+ #     are created last. -->
+ if ( $densBin > 0 && keys %DENS ) {
+    my $binArea = $densBin * $densBin;
+    my $shown = 0;
+    foreach my $k ( keys %DENS ) {
+       my ($bx, $by) = split(/,/, $k);
+       my $frac = ( $binArea > 0 ) ? $DENS{$k} / $binArea : 0;
+       my $stip = ( $frac >= 0.55 ) ? "gray75"
+                : ( $frac >= 0.30 ) ? "gray50"
+                : ( $frac >= 0.12 ) ? "gray25" : "gray12";
+       my $x0 = $bllx + $bx * $densBin;
+       my $y0 = $blly + $by * $densBin;
+       $design_worldcanvas->createRectangle($x0, $y0, $x0+$densBin, $y0+$densBin,
+             -outline => "", -fill => "red", -stipple => $stip,
+             -tags => ['DENSITY']);
+       $shown++;
+    }
+    my $cv = $design_worldcanvas;
+    my $sub = eval { $design_worldcanvas->Subwidget('scrolled') };
+    $cv = $sub if ( defined $sub );
+    eval { $cv->lower('DENSITY') };
+    print "INFO-GUI-DEF_DISP : 002 : $shown density bin(s) drawn for the instances\n";
+    print "INFO-GUI-DEF_DISP : 003 : too small to draw individually; zoom in for the cells\n";
  }
  #$design_worldcanvas->repeat(100, sub{
  #                                     my @ids = $design_worldcanvas->find('withtag', "INSTANCE");
