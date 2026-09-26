@@ -33,17 +33,36 @@ awkward to fix there and natural here.
                         20M      161.2s      8.7GB
 
                     Linear, at about 8us and 460 bytes a cell, so a hundred
-                    million cells would be roughly 13 minutes and 44GB.  The
-                    tool is not what runs out first: electron itself holds a
-                    design at about 4.7KB an instance, ten times this, and the
-                    text round trip through the Perl side costs about 23us a
-                    cell -- three times this tool's own compute.  At 20M cells
-                    the marshalling would be 460s against 161s of legalizing.
+                    million cells would be roughly 13 minutes and 44GB.
 
-                    The honest summary: below about a million cells use the
-                    Perl one, it is simpler and the round trip is most of the
-                    cost anyway.  Above that this wins, and it keeps winning
-                    far past any design electron can currently hold.
+                    AND THAT IS NOT THE NUMBER THAT DECIDES ANYTHING.  End to
+                    end, driven from electron, this is currently SLOWER than
+                    the Perl reference at every size measured:
+
+                        cells       internal   -placer   of which compute
+                        4,233          <1s       <1s        0.0s
+                        855,424         23s       30s        4.0s
+                        3,424,000      108s      128s       16.2s
+
+                    The compute is six or seven times faster and it does not
+                    matter, because the whole design has to be written to a
+                    text file and read back first: about 112s of that 128s at
+                    3.4M cells, roughly 33us a cell to move four integers each
+                    way.  The placements are identical, so this is purely about
+                    where the time goes.
+
+                    Two things had to happen for that to be true, and both did:
+                    the Perl one lost its O(cells x rows) nearest-row scan, and
+                    its density pass went off by default.  Before either, it
+                    was 821s here.
+
+                    So the case for this tool is NOT speed today.  It is
+                    multi-row cells, which the Perl one counts and explicitly
+                    does not handle, and being a place to do quality work --
+                    a real cluster-delta cost, a connectivity term -- that is
+                    painful in Perl.  If speed is wanted, the thing to fix is
+                    the marshalling: pack/unpack instead of printf and split
+                    would cut the 112s far more than any change in here.
 
 WHAT IT DELIBERATELY DOES NOT DO
 

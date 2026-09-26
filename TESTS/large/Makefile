@@ -37,11 +37,32 @@
 #
 # THAT HAS SINCE BEEN FIXED, which is what this test was for.  It was one line
 # -- the nearest row was found by scanning every row for every cell, O(cells x
-# rows), and rows grow as the square root of cells.  A bisection instead took
-# legalize_flat from 821s to 172s on mxu_1024 and from 109s to 27s on mxu_256,
-# and the totals above from 25m47 to 16m12 and from 5m23 to 3m56.  The density
-# pass has also since been turned off by default, which makes it faster again;
-# the numbers in this table predate that and are the pessimistic ones.
+# rows), and rows grow as the square root of cells.  A bisection instead, plus
+# turning the density pass off by default:
+#
+#   legalize_flat        mxu_256   mxu_1024
+#   as measured above      109s       821s
+#   after the bisection     27s       172s
+#   density pass off        23s       108s
+#
+# so the wall times in the table above are the pessimistic ones.
+#
+# AND DO NOT REACH FOR -placer HERE.  IT IS SLOWER.
+#
+# 3RDBIN/legalize_flat is the NumPy one, and its compute genuinely is much
+# faster -- 16.2s against the Perl's ~108s on mxu_1024.  End to end it loses,
+# because the whole design has to be written to a text file and read back:
+#
+#   legalize_flat        mxu_256   mxu_1024
+#   internal (Perl)         23s       128s -> 108s
+#   -placer NumPy           30s       128s
+#     of which compute       4.0s      16.2s
+#     so marshalling        ~26s      ~112s
+#
+# Identical placements both ways at both sizes -- same average move, same worst
+# cell -- so this is purely about where the time goes, and it goes into Perl
+# writing and re-reading several million lines.  The external path only starts
+# to pay once that is not text: see the note in 3RDBIN/legalize_flat.
 #
 # WHAT THIS DIRECTORY ALREADY PAID FOR
 #
