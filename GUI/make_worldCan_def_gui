@@ -175,7 +175,11 @@ $top->title (" Electron (".$moduleName.")");
       $bllx = $guiMuDiellx*$MICRONFACTOR + 20;
       $burx = $guiMuDieurx*$MICRONFACTOR + 20;
       $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
-      my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline,"green");
+      #<!-- two pixels, and raised above everything at the end of the display.
+      #     It was one pixel created BEFORE the rows, the ports and the
+      #     instances, so every one of them painted over it -- and an outline
+      #     width is in pixels, so it never thickened on zoom either. -->
+      my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline => "green", -width => 2);
       $design_worldcanvas->itemconfigure($chip_bound, -tag =>'TOP_MOD');
       $design_worldcanvas->addtag($moduleName , "withtag", $chip_bound);
    }else {
@@ -184,7 +188,11 @@ $top->title (" Electron (".$moduleName.")");
       $bllx = $guiMuDiellx*$MICRONFACTOR + 270;
       $burx = $guiMuDieurx*$MICRONFACTOR + 270;
       $design_worldcanvas->createRectangle(0,0,540,540, -outline,"black");
-      my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline,"green");
+      #<!-- two pixels, and raised above everything at the end of the display.
+      #     It was one pixel created BEFORE the rows, the ports and the
+      #     instances, so every one of them painted over it -- and an outline
+      #     width is in pixels, so it never thickened on zoom either. -->
+      my $chip_bound = $design_worldcanvas->createRectangle($bllx,$blly,$burx,$bury, -outline => "green", -width => 2);
       $design_worldcanvas->itemconfigure($chip_bound, -tag =>'TOP_MOD');
       $design_worldcanvas->addtag($moduleName , "withtag", $chip_bound);
    }
@@ -192,11 +200,26 @@ $top->title (" Electron (".$moduleName.")");
    if (exists $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$moduleName/_self_"}}){
        my @rows = $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{"$moduleName/_self_"}}->dbFlplanGetRows;
        foreach my $tag ( @rows ) {
-               my ($x,$y) = (split(/\s+/, $tag))[2,3];
-               my $Row_llx = 20 + $x*$MulFactor;    
-               my $Row_lly = 20 + $y*$MulFactor;    
-               #$design_worldcanvas->createLine($Row_llx,$Row_lly,$burx,$Row_lly, -fill => "grey41", -tags=>"ROWS") if($blly != 20);
-               $design_worldcanvas->createLine($Row_llx,$Row_lly,$burx,$Row_lly, -fill => "grey41", -tags=>"ROWS");
+               #<!-- the stored record is the DEF row without its keyword:
+               #     name site x y orient numX numY stepX stepY -- so the right
+               #     end is x + numX*stepX.  It used to be $burx, the DIE's
+               #     right edge, for every row whatever the row actually spans.
+               #     Two consequences: a row that stops short of the die (a
+               #     macro carve out, a partial core) drew as if it did not,
+               #     and every row line terminated exactly ON the vertical die
+               #     boundary, helping to bury it. -->
+               my @rf = split(/\s+/, $tag);
+               my ($x, $y) = @rf[2,3];
+               my $Row_llx = 20 + $x*$MulFactor;
+               my $Row_lly = 20 + $y*$MulFactor;
+               my $Row_urx = $burx;
+               if ( defined $rf[5] && defined $rf[7] && $rf[5] =~ m/^\d+$/ && $rf[7] =~ m/^\d+$/ ) {
+                  $Row_urx = 20 + ($x + $rf[5]*$rf[7])*$MulFactor;
+               }
+               #<!-- grey41 (105,105,105) was brighter than the die it covered.
+               #     grey25 still separates a row from the background without
+               #     competing with the boundary. -->
+               $design_worldcanvas->createLine($Row_llx,$Row_lly,$Row_urx,$Row_lly, -fill => "grey25", -tags=>"ROWS");
        }# foreach
    }
 #####   display the ports of the top module  ###
@@ -526,6 +549,7 @@ $t1 = new Benchmark;
 my $td = timediff($t1, $t0);
 print "design display took:",timestr($td),"\n";
 #$design_worldcanvas->viewArea(@$box, -border => 0);
+&dbfFlatRaiseDie;
 $design_worldcanvas->viewAll;
 @box_org = $design_worldcanvas->getView();
 &design_ZoomIn_ZoomOut_new($design_worldcanvas,\@box_org);
@@ -607,6 +631,8 @@ for (my $i=0; $i<=$#GCellArray ; $i++) {
       }#if view area overlaps with gcell
    }
  }
+ #<!-- the instances just created are above the die; put it back on top -->
+ &dbfFlatRaiseDie;
 }#sub filterd_instance_display
 
 ################################# deleting the large instance #################################
@@ -676,6 +702,30 @@ for (my $i=0; $i<=$#GCellArray ; $i++) {
 }
     $design_worldcanvas->delete(FILTERED);
 }#sub delete_all_zoomFit
+
+############################## keep the die boundary on top ########################################
+#<!-- The die is created first, before the rows, the ports and the instances,
+#     and in a canvas later items stack above earlier ones -- so it was the
+#     second lowest thing in the view and all three painted over it.  It is the
+#     one line that should never be hidden: it is the frame of reference for
+#     everything else, and a cell outside it is the single most useful thing the
+#     flat view can show you.
+#
+#     Raised rather than created last, because where it is created is also where
+#     $bllx..$bury are computed and everything after depends on them.  Raising
+#     one item is a constant, so this is called again after every zoom, where
+#     filterd_instance_display has just added items on top of it.
+#
+#     Through the real canvas: Scrolled is a Frame, and Frame::raise is the
+#     window stacking one, which takes a window path and dies on a tag -- the
+#     same trap that broke lower on the density layer. -->
+sub dbfFlatRaiseDie {
+my $cv = $design_worldcanvas;
+return unless ( defined $cv );
+my $sub = eval { $cv->Subwidget('scrolled') };
+$cv = $sub if ( defined $sub );
+eval { $cv->raise('TOP_MOD') };
+}#sub dbfFlatRaiseDie
 
 ####################### density on when the cells are too small, off when they are not #############
 #<!-- Called from design_display's -changeView, so on every zoom and every pan.
