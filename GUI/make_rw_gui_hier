@@ -991,7 +991,10 @@ sub imgview_canvas {
 $box = [0,0,540,540];
 my $path2eq = $GLOBAL->dbfGlobalGetElectronHome;
 
-my $imgTopFrame = $tab13->Frame()->pack(-side => 'top',-fill=>'y');
+#<!-- The ImageFile entry, BrowseFile and Display buttons used to be here.
+#     They are gone with the tab's rename to Raster: it draws the design that
+#     is already loaded and there is nothing for anyone to supply.  The frame
+#     they lived in went with them; activate_RasterTab packs its own controls. -->
 
 $img_canvas  = $tab13->Scrolled(qw/Canvas -bg black -xscrollincrement 40 -yscrollincrement 40 -confine 1 -scrollbars se/, -width => 540, -height => 540, -scrollregion => $box,);
 $img_canvas->Subwidget("xscrollbar")->configure(-width=>12);
@@ -1004,52 +1007,10 @@ $img_canvas->pack(qw/-fill both -expand 1 -side left/);
 #$img_canvas->configure(-confine => 1);
 #$img_canvas->CanvasBind('<Motion>', sub {&dbfGuiShowWorldCanvasCoords($img_canvas);});
 
-$imgTopFrame->Label(-text => "ImageFile",-font=>"Times 10 italic")->pack(-side =>'left');
-my $imgFile = "select Image";
-$imgFileEntry = $imgTopFrame->Entry(-textvariable =>\$imgFile)->pack(-side =>'left', -fill=>'x', -expand=>1);
-$imgTopFrame->Button(-text=>'BrowseFile',-image=> $folderImg,-command =>sub {$imgFile = &popup_load_img_file;})->pack(-side => 'left');
-$displayButton = $imgTopFrame->Button(-text=>"Display",
-                                   -relief=>"raised", 
-                                   #-pady=>0,
-                                   -command=>sub {$img_canvas->delete("all");
-                                    &display_image($imgFile);}
-                                   )->pack(-side=>"right");
-
-
 #---------------------------------------------------------------------#
 }#sub imgview_canvas
 
-sub display_image {
-  my $imgFile = $_[0];
-  my $image = $top->Photo(-file => $imgFile);
-  my $image_item_id = $img_canvas->createImage(270, 270, -image => $image, -anchor => 'center');
 
-
-  # Example: Binding mouse wheel for zooming
-  $img_canvas->bind('<MouseWheel>', sub {
-      my ($widget, $event) = @_;
-      my $delta = $event->delta; # Get scroll direction
-
-      if ($delta > 0) {
-          # Zoom in
-          $image->zoom(2, 2); # Example: Zoom by factor of 2
-      } else {
-          # Zoom out
-          $image->subsample(2, 2); # Example: Subsample by factor of 2
-      }
-      # Update the image on the canvas (might need to re-create or reconfigure)
-      $img_canvas->itemconfigure($image_item_id, -image => $image);
-  });
-}#sub display_image
-
-sub popup_load_img_file {
- my @types = (["Image Files", ['.png', '.jpeg']],
-              ["All Files", "*"]);
- my $imgfile = $top->getOpenFile(-filetypes =>\@types,
-                                 -title=>'Select Image File',
-                                 -defaultextension => '.png'); 
- return($imgfile);          
-}#sub popup_load_img_file
 
 sub hierview_canvas {
 use Tk::WorldCanvas;
