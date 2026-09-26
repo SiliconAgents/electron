@@ -78,6 +78,48 @@
 #               instance locations in CADB, and the instance boxes
 #
 #****
+
+#=========================== orientation for a row ===========================#
+#<!-- What orientation a cell must take to sit in a row of a given orientation.
+#
+#     Standard cell rows alternate -- N, FS, N, FS -- so that a row and the one
+#     above it share a power rail.  A cell in an FS row has to be flipped in y
+#     to match, or its VDD meets the neighbour's VSS.
+#
+#     This was simply never done.  legalize_flat read dbCadbGetOrient only to
+#     transpose w and h for a 90 degree rotation, and never wrote an orientation
+#     back, so every cell came out of the placer N and stayed N.  Measured on
+#     mxu_256: 423,506 of 855,424 cells, 49.5%, sat in an FS row as N.
+#
+#     It matters more the moment a legalizer starts moving cells between rows on
+#     purpose, which is what the local density cap below does -- but it was
+#     already wrong for every cell the row window moved, and |dy| already
+#     reached two row pitches.
+#
+#     The rule is: keep whatever mirroring in x the cell already had, take the
+#     row's flip in y.  The four row-legal orientations are exactly the two
+#     bits (mirror x, flip y):
+#
+#         N = (0,0)   FN = (1,0)   FS = (0,1)   S = (1,1)
+#
+#     A 90 degree rotated cell -- E, W, FE, FW -- is not a row object at all;
+#     composing a rotation with a row flip is ambiguous and a rotated standard
+#     cell does not occur in this flow, so those are returned untouched rather
+#     than guessed at. -->
+sub dbfLegalOrientForRow {
+my ($cell, $row) = @_;
+$cell = "N" unless ( defined $cell && $cell ne "" );
+$row  = "N" unless ( defined $row  && $row  ne "" );
+return $cell if ( $cell =~ m/^F?[EW]$/ );
+my %xmir = ( "N" => 0, "FN" => 1, "FS" => 0, "S" => 1 );
+my %yflp = ( "N" => 0, "FN" => 0, "FS" => 1, "S" => 1 );
+#<!-- an orientation this does not know about is left alone -->
+return $cell unless ( exists $xmir{$cell} );
+my $ry = ( exists $yflp{$row} ) ? $yflp{$row} : 0;
+my @tab = ( [ "N", "FS" ], [ "FN", "S" ] );      #<!-- [mirror x][flip y] -->
+return $tab[ $xmir{$cell} ][ $ry ];
+}#sub dbfLegalOrientForRow
+
 sub legalize_flat {
 
 use Benchmark;
@@ -176,6 +218,7 @@ $rowH = $rowH * $dbu;
 my @rowY = ();
 my %rowX0 = ();
 my %rowX1 = ();
+my %rowOrient = ();
 my $siteX = 0;
 foreach my $tag ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetRows ) {
   my @f = split(/\s+/, $tag);
@@ -192,6 +235,11 @@ foreach my $tag ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetRows ) {
     push(@rowY, $y);
     $rowX0{$y} = $x0;
     $rowX1{$y} = $x1;
+    #<!-- field 4 is the row's orientation, and it is the whole reason a cell
+    #     cannot simply be dropped into a different row: rows alternate N and
+    #     FS so that neighbours share a power rail, and a cell left N in an FS
+    #     row has its rails upside down. -->
+    $rowOrient{$y} = ( defined $f[4] && $f[4] ne "" ) ? $f[4] : "N";
   }
   $siteX = $stepX if ( $stepX > $siteX );
 }
@@ -391,13 +439,27 @@ if ( defined $extPlacer && $extPlacer ne "" ) {
     print "Command legalize_flat took:",timestr(timediff($t1,$t0)),"\n";
     return;
   }
+  my $extReOriented = 0;
   foreach my $n ( @extLoc ) {
     my ($inst, $x, $y) = @$n;
     $CADB{$inst}->dbCadbSetLoc($x, $y);
     $CADB{$inst}->dbCadbSetStatus(PLACED);
+    #<!-- same rule as the internal path.  A y the external tool returns that is
+    #     not exactly a row's y is left alone rather than guessed at. -->
+    if ( exists $rowOrient{$y} ) {
+      my $was = $CADB{$inst}->dbCadbGetOrient;
+      my $now = &dbfLegalOrientForRow($was, $rowOrient{$y});
+      if ( ! defined $was || $was ne $now ) {
+        $CADB{$inst}->dbCadbSetOrient($now);
+        $extReOriented++;
+      }
+    }
     if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
       $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
     }
+  }
+  if ( $extReOriented > 0 ) {
+    print "INFO-ALG-LEGAL : 038 : $extReOriented cell(s) re-oriented to match their row\n";
   }
   print "INFO-ALG-LEGAL : 034 : updating instance boxes\n";
   &set_inst_box;
@@ -830,15 +892,28 @@ if ( $reportOnly ) {
   return;
 }
 
+my $reOriented = 0;
 foreach my $n ( @newLoc ) {
   my ($inst, $x, $y) = @$n;
   $CADB{$inst}->dbCadbSetLoc($x, $y);
   $CADB{$inst}->dbCadbSetStatus(PLACED);
+  #<!-- and the orientation the row it landed in requires -->
+  if ( exists $rowOrient{$y} ) {
+    my $was = $CADB{$inst}->dbCadbGetOrient;
+    my $now = &dbfLegalOrientForRow($was, $rowOrient{$y});
+    if ( ! defined $was || $was ne $now ) {
+      $CADB{$inst}->dbCadbSetOrient($now);
+      $reOriented++;
+    }
+  }
   #<!-- the placer keeps a parallel location for flops and reads it back, so it
   #     has to agree with CADB or a later placer step undoes this -->
   if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
     $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
   }
+}
+if ( $reOriented > 0 ) {
+  print "INFO-ALG-LEGAL : 037 : $reOriented cell(s) re-oriented to match their row\n";
 }
 print "INFO-ALG-LEGAL : 021 : updating instance boxes\n";
 &set_inst_box;
