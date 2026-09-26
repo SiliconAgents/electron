@@ -461,7 +461,11 @@ def main():
         incol = (xc >= rx0.min()) & (xc <= rx1.max())
         core = np.outer(inband, incol)
         empty = (acc <= 0) & core
-        base = np.array([26, 30, 52], dtype=np.uint8)      # core, lighter than the die
+        # Core tint, and DELIBERATELY only just above the ramp's own floor of
+        # (10,12,40).  It has one job -- say "this empty patch is core, not
+        # margin" -- and it was doing it at (26,30,52), loud enough that the
+        # die boundary read as the quieter of the two.  The frame has to win.
+        base = np.array([19, 22, 44], dtype=np.uint8)
         img[empty] = base
 
         # Row separators, but only once a row is tall enough on screen to see.
@@ -471,7 +475,10 @@ def main():
             edges = np.round((sry - vy0) * sy).astype(np.int64)
             edges = edges[(edges >= 0) & (edges < H)]
             if edges.size:
-                line = np.array([46, 52, 80], dtype=np.uint8)
+                # likewise dimmed: these were (46,52,80), a pale line of the
+                # same weight and nearly the same value as the die edge, so
+                # zoomed into a corner the boundary looked like one more row
+                line = np.array([32, 37, 63], dtype=np.uint8)
                 sel = np.zeros((H, W), dtype=bool)
                 sel[edges, :] = True
                 sel &= (acc <= 0) & core
@@ -487,7 +494,19 @@ def main():
     # far edges at pixel index exactly W and H, one past the last pixel, so a
     # plain "< W" test silently threw two of the four sides away.
     dx0, dy0, dx1, dy1 = (die[0]/dbu, die[1]/dbu, die[2]/dbu, die[3]/dbu)
-    edge = np.array([120, 200, 120], dtype=np.uint8)
+    # Bright, and brighter than anything the ramp can produce at the blue end,
+    # so the frame never competes with a row line for attention.
+    edge = np.array([140, 255, 150], dtype=np.uint8)
+
+    # Two pixels at the sizes the GUI asks for, more on a poster, one on a
+    # thumbnail.  A single pixel is what made this lose to the rows: same
+    # weight, and at fit it lands on the outermost pixel where the canvas
+    # border eats half of it.
+    #
+    # Measured on the LONG side, not the short one.  min(W,H) reads the aspect
+    # ratio rather than the size, and a perfectly ordinary 900x540 view of a
+    # wide die came out at one pixel because its height alone was small.
+    lw = 1 if max(W, H) < 400 else max(2, int(round(max(W, H) / 900.0)))
 
     def _px(wx):
         return int(round((wx - vx0) * sx))
@@ -501,13 +520,31 @@ def main():
     cxa, cxb = max(min(xa, xb), 0), min(max(xa, xb), W - 1)
     cya, cyb = max(min(ya, yb), 0), min(max(ya, yb), H - 1)
 
+    # Each side is thickened INWARD, towards the die's centre.  Growing it both
+    # ways would push half the line outside the viewport at fit, which is half
+    # of what is being fixed; inward, the full width is always visible and the
+    # boundary still sits exactly where the DIEAREA says it does.
+    #
+    # The start is clamped into the image BEFORE it is grown, not after.
+    # Growing first and rejecting what lands outside is what loses the width:
+    # fitted, the far sides come out at exactly W and H, one past the last
+    # pixel, so the outward half of a two pixel line would be thrown away and
+    # that side would quietly come back one pixel wide.
     if cxb >= cxa and cyb >= cya:
-        for px in (xa, xb):                      # the two vertical sides
-            if -1 <= px <= W:
-                img[cya:cyb + 1, min(max(px, 0), W - 1)] = edge
-        for py in (ya, yb):                      # the two horizontal sides
-            if -1 <= py <= H:
-                img[min(max(py, 0), H - 1), cxa:cxb + 1] = edge
+        lo, hi = min(xa, xb), max(xa, xb)
+        for start, step in ((max(lo, 0), 1), (min(hi, W - 1), -1)):
+            if -lw < (lo if step > 0 else hi) < W + lw:
+                for k in range(lw):
+                    c = start + k * step
+                    if 0 <= c < W:
+                        img[cya:cyb + 1, c] = edge
+        lo, hi = min(ya, yb), max(ya, yb)
+        for start, step in ((max(lo, 0), 1), (min(hi, H - 1), -1)):
+            if -lw < (lo if step > 0 else hi) < H + lw:
+                for k in range(lw):
+                    r = start + k * step
+                    if 0 <= r < H:
+                        img[r, cxa:cxb + 1] = edge
 
     # DEF y is up, image y is down
     img = img[::-1]
