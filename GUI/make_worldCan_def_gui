@@ -295,6 +295,8 @@ my $dieShift = ($dieIsCentre == 1) ? 270 : 20;
 #     enough to show structure, coarse enough to stay cheap. -->
 my %DENS = ();
 my $densBin = 0;
+my $densExtSum = 0;
+my $densExtN = 0;
 {
   my $cpx = $design_worldcanvas->width;
   $cpx = 540 if ( ! defined $cpx || $cpx < 50 );
@@ -362,6 +364,13 @@ for(my $i=0; $i<=$#GCellArray ; $i++) {
                          my $bx = int( ($llx - $bllx) / $densBin );
                          my $by = int( ($lly - $blly) / $densBin );
                          $DENS{"$bx,$by"} += ($urx - $llx) * ($ury - $lly);
+                         #<!-- and the extent that lost the test above, so the
+                         #     density knows at what zoom it stops being needed.
+                         #     max(w,h) because that is what the test compares. -->
+                         my $ext = ($urx - $llx);
+                         $ext = ($ury - $lly) if ( ($ury - $lly) > $ext );
+                         $densExtSum += $ext;
+                         $densExtN++;
                       }
                    }
                 }# if component status is fixed or placed
@@ -418,6 +427,42 @@ for(my $i=0; $i<=$#GCellArray ; $i++) {
     eval { $cv->lower('DENSITY') };
     print "INFO-GUI-DEF_DISP : 002 : $shown density bin(s) drawn for the instances\n";
     print "INFO-GUI-DEF_DISP : 003 : too small to draw individually; zoom in for the cells\n";
+
+    #<!-- Hide the density once the view is zoomed in far enough that the cells
+    #     themselves are being drawn.
+    #
+    #     Zoom in and filterd_instance_display starts drawing the real ones, at
+    #     which point the haze underneath stops being information and becomes
+    #     noise -- and worse, a bin is in world coordinates, so it zooms with
+    #     the view and deep in it is one large flat square sitting behind cells
+    #     that are already drawn individually.
+    #
+    #     The condition is NOT a zoom ratio.  Half the starting pixel size looks
+    #     like the obvious cut and is wrong at the top end: fitted, an mxu_1024
+    #     standard cell is a quarter of a pixel, so at 2x it is half a pixel,
+    #     still nothing is drawn, and hiding the density there puts the empty
+    #     window straight back.
+    #
+    #     So it is keyed off the cells instead.  densExtSum/densExtN is the mean
+    #     of the extent that LOST the three pixel test -- the same max(w,h) the
+    #     test compares -- so the zoom at which the typical binned cell starts
+    #     being drawn is exactly 3 * pixelSize dropping below it.  Standard
+    #     cells in one design are all much the same size, so that is a sharp
+    #     crossover in practice: they come back together, and the density goes
+    #     away in the same step.
+    #
+    #     -changeView rather than a binding, because it catches every way the
+    #     view can move -- the rubber band, i and o, fit, the arrows -- and
+    #     nothing else in this tree uses it. -->
+    if ( $densExtN > 0 ) {
+       $DENS_EXT    = $densExtSum / $densExtN;
+       $DENS_ON     = 1;
+       $DENS_HIDDEN = 0;
+       $design_worldcanvas->configure(-changeView =>
+           sub { &dbfDensityVisibility($design_worldcanvas); });
+    }
+ }else{
+    $DENS_ON = 0;
  }
  #$design_worldcanvas->repeat(100, sub{
  #                                     my @ids = $design_worldcanvas->find('withtag', "INSTANCE");
@@ -631,6 +676,41 @@ for (my $i=0; $i<=$#GCellArray ; $i++) {
 }
     $design_worldcanvas->delete(FILTERED);
 }#sub delete_all_zoomFit
+
+####################### density on when the cells are too small, off when they are not #############
+#<!-- Called from design_display's -changeView, so on every zoom and every pan.
+#
+#     Hidden and not deleted, deliberately.  Deleting would be final: the bins
+#     come out of a walk of every instance in %CADB, and nothing on the zoom-out
+#     path re-runs that walk -- delete_all_zoomFit only removes FILTERED items
+#     and does not call design_display -- so a deleted bin could not come back
+#     without the user pressing Refresh and paying the whole display again.
+#     -state hidden is reversible and costs one call on the tag.
+#
+#     That call is O(items) inside Tk, a few thousand of them, so it is guarded
+#     by $DENS_HIDDEN and made only on an actual transition.  Panning at one
+#     zoom fires this callback repeatedly and must not pay anything. -->
+sub dbfDensityVisibility {
+my $cv = shift;
+return if ( ! $DENS_ON );
+return if ( ! defined $DENS_EXT || $DENS_EXT <= 0 );
+my $pix = eval { $cv->pixelSize() };
+return if ( ! defined $pix || $pix <= 0 );
+
+#<!-- 3 * pixelSize is filterd_instance_display's own threshold.  Below the mean
+#     binned extent, the typical cell that went into a bin is now being drawn as
+#     itself, and the bin is in the way. -->
+my $want = ( (3 * $pix) < $DENS_EXT ) ? 1 : 0;
+return if ( $want == $DENS_HIDDEN );
+$DENS_HIDDEN = $want;
+
+#<!-- through the real canvas, not the Scrolled frame: same reason lower needed
+#     it, a Frame has its own idea of these method names -->
+my $c = $cv;
+my $sub = eval { $cv->Subwidget('scrolled') };
+$c = $sub if ( defined $sub );
+eval { $c->itemconfigure('DENSITY', -state => ($want ? 'hidden' : 'normal')); };
+}#sub dbfDensityVisibility
 
 ######################### checking the visibility of instance ################################
 sub isDisplayTrue {
