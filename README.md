@@ -148,6 +148,7 @@ Proton has been used on many designs in tapeout mode but requires some understan
 
 Pure Digital and Mixed Signal designs are handled well in proton. It is not geared to handle Multi Billion transistor SOCs flat. But with some ingenuity, a large design can be pushed through proton system using hierarchical implementation flow.
 
+Electron has few improvements over Proton, ability to handle large digital designs by exploiting hierarchical nature "hier_place". Some speed up improvements in GUI display with fast rendering.  
 
 
 Contact GitHub API Training Shop Blog About
