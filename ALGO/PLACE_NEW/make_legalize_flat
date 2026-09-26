@@ -43,6 +43,60 @@
 #  objective is displacement.  That is exactly why pass 1 misbehaves -- total
 #  displacement is blind to how many pins a cell has.
 #
+#  THE LOCAL DENSITY CAP, which is the thing to read before using this.
+#
+#  Pass 2 gives a cell the nearest row whose SEGMENT has room, and on a die
+#  with no macros a segment is the whole row.  So the capacity question was
+#  "is this 1496um row more than 100% full", the answer at 50% utilisation is
+#  almost always no, and the nearest row won every time however crowded it was
+#  AT THAT X.  Abacus then fixed a 300% full patch the only way it can, by
+#  sliding cells along the row.  The bill, on mxu_256 after hier_place_all:
+#
+#                       avg |dx|   p99 |dx|   worst    total horizontal
+#      --no_dbin          42.9um     351um    879um         36,716 mm
+#      the cap on         10.5um      50um    183um          9,005 mm
+#
+#  and the vertical movement that bought it went from 310mm to 473mm.  27.7
+#  METRES of horizontal movement removed for 163mm of vertical, a trade of
+#  170 to 1, and it is available because 100% of the over-full width on that
+#  design has free space within FOUR ROWS, 5.6um.  Zero overlaps either way.
+#
+#  TWO THINGS MAKE IT WORK AND BOTH ARE EASY TO GET WRONG.
+#
+#  It relieves OVERFLOW, it does not equalise density.  Equalising is a
+#  transportation problem whose answer drains the dense middle of a die into
+#  empty rows hundreds of rows away: simulated on mxu_256 it wants a mean |dy|
+#  of 686um against 2.3um for relieving only the overflow.  That is 300 times
+#  the movement for no extra legality, and aiming a cell at the CENTRE of
+#  another bin is precisely what pass 1 does, which is the best explanation
+#  anyone has for why pass 1 multiplies unrouted nets by seven.
+#
+#  And it is BOUNDED, by -dbin_rows, default 2.  Let the cap reach the whole
+#  -rows window and it becomes equalisation by the back door.  Measured on one
+#  fixed placement of nangate_flat, unrouted nets of 4489:
+#
+#      cap off  108      +/-2 rows  119      21um bins, +/-6 rows  138
+#      +/-1     173      +/-3       101      5um bins,   +/-6      480
+#
+#  NOTE WHAT THAT SECOND TABLE DOES NOT SAY.  It does not show a routing
+#  improvement.  Fine bins with no bound are clearly, reproducibly harmful --
+#  480 against 108 is far outside the noise -- but everything in the sane
+#  region lands in the same band as no cap at all, and the order is not even
+#  monotone, so on nangate_flat this is worth nothing to the router and
+#  nothing is the honest number.  Two reasons to expect that: qrouter itself
+#  is not deterministic here (108, 115 and 116 unrouted on three runs of ONE
+#  legalized DEF), and nangate_flat is 60 rows on an 85um die where only 62%
+#  of the over-full width can be absorbed vertically at all, against 100% on
+#  mxu_256.  It is the only design in the tree with a router in its flow, and
+#  it is the wrong shape for this.
+#
+#  So: the displacement win is large, measured, and reproducible; the routing
+#  effect is unmeasured on any design where the mechanism applies.  Which is
+#  why this is ON by default and pass 1 is not -- it does not move a cell that
+#  is not in an over-full bin, it never changes a cell's x, and it never sends
+#  one more than two rows -- but if unrouted nets go up on a real design,
+#  --no_dbin is the first thing to try and the numbers above are the control.
+#
 #  Pass 2, rows.  Every movable cell is assigned to a row near its own y and
 #  legalized along x by Abacus: cells are taken in x order, and a cell that
 #  would overlap its left neighbour is merged into a cluster whose position is
@@ -137,6 +191,15 @@ my ($noSnapX, $reportOnly, $debug) = (0, 0, 0);
 my $doSpread = 0;
 my ($extPlacer, $extArgs, $keepExt);
 my $spreadOrder = "large";
+#<!-- Local density cap on the row assignment.  0 means "work it out from the
+#     row span"; -1 turns it off and restores the behaviour this replaces. -->
+my $dbinUm = 0;
+#<!-- How many rows the cap may push a cell off its nearest.  The relief it is
+#     there for is one or two rows away; letting it reach the whole -rows window
+#     turns it back into density equalisation, which is exactly what it must not
+#     be -- measured, unbounded it takes nangate_flat from 116 unrouted nets to
+#     480, bounded at two it improves them. -->
+my $dbinRows = 2;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : legalize_flat -grid <bin size in um, default 10>\n";
@@ -148,6 +211,16 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                      --no_spread    the default; kept so old scripts run\n";
   print "                      --no_snap_x    leave x off the site grid\n";
   print "                      --report_only  change nothing\n";
+  print "                      -dbin <um>     column width for the local density\n";
+  print "                                     cap on the row assignment.  0, the\n";
+  print "                                     default, is 100 mean cell widths\n";
+  print "                      -dbin_rows <n> how many rows the local cap may push\n";
+  print "                                     a cell off its nearest, default 2.\n";
+  print "                                     Unbounded it becomes equalisation\n";
+  print "                      --no_dbin      no local cap: every cell takes its\n";
+  print "                                     nearest row however full that row\n";
+  print "                                     already is locally.  The behaviour\n";
+  print "                                     before the cap existed, kept for A/B\n";
   print "                      -spread_order <small|large>\n";
   print "                            which cell an over-full bin gives away.\n";
   print "                            large moves fewer cells and lowers total\n";
@@ -179,6 +252,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--no_snap_x")  { $noSnapX = 1; }
   elsif ($_[$i] eq "--report_only"){ $reportOnly = 1; }
   elsif ($_[$i] eq "-spread_order"){ $spreadOrder = $_[$i+1]; }
+  elsif ($_[$i] eq "-dbin")        { $dbinUm = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_dbin")    { $dbinUm = -1; }
+  elsif ($_[$i] eq "-dbin_rows")   { $dbinRows = $_[$i+1]; }
   elsif ($_[$i] eq "-placer")      { $extPlacer = $_[$i+1]; }
   elsif ($_[$i] eq "-args")        { $extArgs = $_[$i+1]; }
   elsif ($_[$i] eq "--keep_files") { $keepExt = 1; }
@@ -257,6 +333,7 @@ if ( $siteX <= 0 ) { $siteX = 1; $noSnapX = 1; }
 #     row object, and sliding one along a row to legalize it would do more harm
 #     than leaving it where it is. -->
 my @mov = ();          #<!-- [inst, w, h, tx, ty] in dbu, tx/ty the target -->
+my $totMovW = 0;       #<!-- their total width, for the default bin size -->
 my @obs = ();          #<!-- [llx, lly, urx, ury] -->
 my ($skipNoCell, $skipNoSize, $unplacedCnt) = (0, 0, 0);
 
@@ -300,6 +377,7 @@ foreach my $inst ( sort keys %CADB ) {
     next;
   }
   push(@mov, [$inst, $w, $h, $x, $y]);
+  $totMovW += $w;
 }
 
 my $nMov = @mov;
@@ -673,6 +751,110 @@ foreach my $y ( @rowY ) {
   $seg{$y} = \@free;
 }
 
+#--------------------- local density cap on the assignment -------------------#
+#<!-- WHY THIS EXISTS.
+#
+#     Below, a cell is given the row nearest its own y whose SEGMENT has room.
+#     A segment is a whole free run of a row, and on a die with no macros that
+#     is the entire row: 1496um on mxu_256.  So the capacity test was asking
+#     "is this 1496um row more than 100% full", and the answer is almost always
+#     no -- the design is at 50% utilisation and only 42 of 1068 rows overflow
+#     as whole rows.  The cost is abs(wx - tx) + abs(y - ty) with wx clamped
+#     only to the segment, so wx == tx, the cost collapses to pure |dy|, and
+#     the nearest row wins every time whatever the LOCAL density.
+#
+#     Measured on mxu_256 after hier_place_all: at 47um columns 22.8% of
+#     occupied bins are over capacity and 22.1% of all cell width has to leave
+#     its bin.  Abacus then does that the only way it can, by sliding cells
+#     along the row, and the bill is mean |dx| 42.9um against mean |dy| 0.36um
+#     -- 36.7 metres of horizontal movement against 0.31 of vertical, on a
+#     design where 100% of the excess has free space within FOUR ROWS, 5.6um.
+#
+#     So the fix is to make the capacity test local: bins across each row, and
+#     a cell may not take a row whose bin at that x is already full.  The
+#     search below already walks rows nearest-first, so pruning candidates this
+#     way makes it exactly "the nearest row with room here" -- which is the
+#     cheapest possible relief and needs no extra pass.
+#
+#     AND NOT DENSITY EQUALISATION, which is the trap.  Making every bin's
+#     density equal is a transportation problem whose answer drains the dense
+#     middle of the die into empty rows hundreds of rows away: simulated on
+#     mxu_256 it costs a mean |dy| of 686um, against 2.3um for relieving only
+#     the overflow.  That is 300 times the movement for no extra legality, and
+#     it is what pass 1 above does -- it aims a cell at the CENTRE of another
+#     bin -- which is the best explanation anyone has for why pass 1 multiplies
+#     unrouted nets by seven.  Nothing here moves a cell that is not in an
+#     over-full bin, and nothing here changes a cell's x.
+#
+#     Capacity is the FREE width in the bin, not the bin width, so a bin half
+#     covered by a macro counts as half a bin and cells are not driven into
+#     obstacles. -->
+my $dbin = 0;
+my %binCap = ();       #<!-- "rowIdx,binIdx" => free width in dbu -->
+my %binLoad = ();
+my $binX0 = 0;
+my $nBins = 0;
+if ( $dbinUm >= 0 ) {
+  my ($spanLo, $spanHi);
+  foreach my $y ( @rowY ) {
+    $spanLo = $rowX0{$y} if ( ! defined $spanLo || $rowX0{$y} < $spanLo );
+    $spanHi = $rowX1{$y} if ( ! defined $spanHi || $rowX1{$y} > $spanHi );
+  }
+  $binX0 = ( defined $spanLo ) ? $spanLo : 0;
+  my $span = ( defined $spanHi ) ? $spanHi - $binX0 : 0;
+  if ( $span > 0 ) {
+    if ( $dbinUm > 0 ) { $dbin = $dbinUm * $dbu; }
+    else {
+      #<!-- A HUNDRED CELLS WIDE, not a fraction of the row.
+      #
+      #     A fraction of the span was the first try and it is wrong, because
+      #     it reads the die size rather than the cell size.  span/16 is 94um
+      #     on mxu_256 -- about a hundred cells, which is the size that
+      #     measured well -- and 5.32um on the 85um die of nangate_flat, about
+      #     five cells.  At five cells this is not relieving overflow any more,
+      #     it is demanding uniform density at cell granularity.
+      #
+      #     A hundred times the mean cell width is scale free and lands on both
+      #     sizes that measured well: ~93um on mxu_256, ~21um on nangate_flat
+      #     once the span/4 clamp bites.
+      #
+      #     Clamped below so a bin is always several sites wide, and above so a
+      #     small die still gets four columns rather than one. -->
+      my $meanW = ( $nMov > 0 ) ? ( $totMovW / $nMov ) : 0;
+      $dbin = int( 100 * $meanW );
+      my $lo = 8 * $siteX;
+      my $hi = int( $span / 4 );
+      $dbin = $lo if ( $dbin < $lo );
+      $dbin = $hi if ( $hi > 0 && $dbin > $hi );
+    }
+    $dbin = $siteX if ( $dbin < $siteX );
+    $nBins = int( $span / $dbin ) + 1;
+    #<!-- free width per bin, from the segments so obstacles are counted -->
+    for ( my $r = 0 ; $r < $nRows ; $r++ ) {
+      my $y = $rowY[$r];
+      foreach my $s ( @{$seg{$y}} ) {
+        my ($a, $b) = @$s;
+        my $b0 = int( ($a - $binX0) / $dbin );
+        my $b1 = int( ($b - $binX0) / $dbin );
+        $b0 = 0 if ( $b0 < 0 );
+        $b1 = $nBins - 1 if ( $b1 > $nBins - 1 );
+        for ( my $bi = $b0 ; $bi <= $b1 ; $bi++ ) {
+          my $lo = $binX0 + $bi * $dbin;
+          my $hi = $lo + $dbin;
+          $lo = $a if ( $a > $lo );
+          $hi = $b if ( $b < $hi );
+          $binCap{"$r,$bi"} += ($hi - $lo) if ( $hi > $lo );
+        }
+      }
+    }
+    printf("INFO-ALG-LEGAL : 039 : local density cap on, %d column(s) of %.2f um, up to %d row(s) away\n",
+           $nBins, $dbin / $dbu, $dbinRows);
+  }
+}
+else {
+  print "INFO-ALG-LEGAL : 040 : --no_dbin, the row assignment ignores local density\n";
+}
+
 #<!-- Abacus on one segment.  Cells arrive in x order; a cell that will not fit
 #     after the last cluster starts a new one, otherwise it joins and the
 #     cluster slides to the weighted mean of its members' targets, merging into
@@ -743,6 +925,7 @@ foreach my $y ( @rowY ) {
 #     let it choose before the single height ones fill them -->
 my @byY = sort { $b->[2] <=> $a->[2] || $a->[3] <=> $b->[3] } @mov;
 my ($noRoom, $tooTall) = (0, 0);
+my ($movedRow, $movedRowSum, $movedRowMax) = (0, 0, 0);
 foreach my $m ( @byY ) {
   my ($inst, $w, $h, $tx, $ty) = @$m;
   #<!-- Nearest row index to the cell's y, by binary search.
@@ -775,8 +958,21 @@ foreach my $m ( @byY ) {
   my $rowsNeeded = int( ($h + $rowH - 1) / $rowH );
   if ( $rowsNeeded > 1 ) { $tooTall++; }
 
-  my ($pickKey, $pickCost);
-  for ( my $d = 0 ; $d <= $rowWin ; $d++ ) {
+  #<!-- Two attempts: the first honours the local density cap, the second does
+  #     not.  A cell whose bin is full in every row of the window has to go
+  #     somewhere, and leaving it where it started -- overlapping -- is worse
+  #     than putting it in a locally crowded row and letting Abacus slide it.
+  #     So the cap is a preference with a guaranteed fallback, never a reason
+  #     to fail.  $useCap == 0 is exactly the old behaviour, which is what
+  #     --no_dbin selects for the whole run. -->
+  my ($pickKey, $pickCost, $pickBin, $pickR);
+  foreach my $useCap ( ($dbin > 0) ? (1, 0) : (0) ) {
+  ($pickKey, $pickCost, $pickBin, $pickR) = (undef, undef, undef, undef);
+  #<!-- the capped attempt looks only $dbinRows rows out; the fallback below
+  #     uses the full -rows window, so the bound can never leave a cell
+  #     unplaced -- it only limits how far the CAP is allowed to reach. -->
+  my $win = ( $useCap ) ? ( ($dbinRows < $rowWin) ? $dbinRows : $rowWin ) : $rowWin;
+  for ( my $d = 0 ; $d <= $win ; $d++ ) {
     foreach my $r ( ($best - $d), ($best + $d) ) {
       next if ( $d > 0 && $r == $best );
       next if ( $r < 0 || $r >= $nRows );
@@ -790,10 +986,26 @@ foreach my $m ( @byY ) {
         my $wx = $tx;
         $wx = $sx0 if ( $wx < $sx0 );
         $wx = $sx1 - $w if ( $wx > $sx1 - $w );
+        #<!-- and whether the row is already full AT THAT X.  Charged to the
+        #     bin holding the cell's left edge: a cell is narrow next to a
+        #     column and splitting it across two bins buys nothing. -->
+        my $bi;
+        if ( $dbin > 0 ) {
+          $bi = int( ($wx - $binX0) / $dbin );
+          $bi = 0 if ( $bi < 0 );
+          $bi = $nBins - 1 if ( $bi > $nBins - 1 );
+          if ( $useCap ) {
+            my $cap = $binCap{"$r,$bi"};
+            next unless ( defined $cap );
+            next if ( $binLoad{"$r,$bi"} + $w > $cap );
+          }
+        }
         my $cost = abs($wx - $tx) + abs($y - $ty);
         if ( ! defined $pickCost || $cost < $pickCost ) {
           $pickCost = $cost;
           $pickKey = $k;
+          $pickBin = ( defined $bi ) ? "$r,$bi" : undef;
+          $pickR = $r;
         }
       }
     }
@@ -808,8 +1020,15 @@ foreach my $m ( @byY ) {
     #     as ANYTHING was found at d >= 1.  That capped the search at three
     #     rows whatever -rows said, so the option was very nearly a no-op --
     #     the default of 6 promised thirteen rows and searched three. -->
+    #<!-- The cost is |wx - tx| + |y - ty|, so a row d steps away costs at
+    #     least d * rowH in the y term alone; once the best found is no more
+    #     than that, nothing further out can beat it.  Still a valid bound with
+    #     the cap on, because the cap only removes candidates -- it does not
+    #     change what any surviving candidate costs. -->
     last if ( defined $pickCost && $pickCost <= ($d + 1) * $rowH );
   }
+  last if ( defined $pickKey );
+  }#foreach useCap
 
   unless ( defined $pickKey ) {
     $noRoom++;
@@ -817,6 +1036,14 @@ foreach my $m ( @byY ) {
   }
   push(@{$inSeg{$pickKey}}, [$inst, $w, $tx]);
   $segFree{$pickKey} -= $w;
+  $binLoad{$pickBin} += $w if ( defined $pickBin );
+  #<!-- how many cells the cap pushed off their nearest row, and how far -->
+  if ( defined $pickR && $pickR != $best ) {
+    $movedRow++;
+    my $off = abs($pickR - $best);
+    $movedRowMax = $off if ( $off > $movedRowMax );
+    $movedRowSum += $off;
+  }
 }
 
 if ( $noRoom > 0 ) {
@@ -883,6 +1110,10 @@ printf("INFO-ALG-LEGAL : 018 : legalized %d cell(s), average move %.3f um, worst
        ( $maxDispInst ne "" ) ? " on $maxDispInst" : "");
 if ( defined $limit && $overLimit > 0 ) {
   printf("WARN-ALG-LEGAL : 019 : %d cell(s) moved further than %g um\n", $overLimit, $maxDispUm);
+}
+if ( $movedRow > 0 ) {
+  printf("INFO-ALG-LEGAL : 041 : %d cell(s) took a row other than their nearest, %.2f rows on average, %d at most\n",
+         $movedRow, $movedRowSum / $movedRow, $movedRowMax);
 }
 
 if ( $reportOnly ) {
