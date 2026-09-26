@@ -479,19 +479,35 @@ def main():
             log(f"row pitch is {pitch_px:.1f} px, separators drawn")
 
     # The die boundary, on top: it is the one line that should never be hidden.
+    # A BOX, not four lines across the whole image.  Each side is clipped to
+    # the die's other extent, so zoomed in on one corner you get that corner
+    # and not a crosshair running off both ends of the window.
+    #
+    # Clamped rather than dropped at the ends: fitting the whole die puts its
+    # far edges at pixel index exactly W and H, one past the last pixel, so a
+    # plain "< W" test silently threw two of the four sides away.
     dx0, dy0, dx1, dy1 = (die[0]/dbu, die[1]/dbu, die[2]/dbu, die[3]/dbu)
     edge = np.array([120, 200, 120], dtype=np.uint8)
-    # Clamped, not dropped.  Fitting the whole die puts its far edges at pixel
-    # index exactly W and H, one past the last pixel, so a plain "< W" test
-    # threw away two of the four sides and the boundary looked like a corner.
-    for wx in (dx0, dx1):
-        px = int(round((wx - vx0) * sx))
-        if -1 <= px <= W:
-            img[:, min(max(px, 0), W - 1)] = edge
-    for wy in (dy0, dy1):
-        py = int(round((wy - vy0) * sy))
-        if -1 <= py <= H:
-            img[min(max(py, 0), H - 1), :] = edge
+
+    def _px(wx):
+        return int(round((wx - vx0) * sx))
+
+    def _py(wy):
+        return int(round((wy - vy0) * sy))
+
+    # the die's span in pixels, clipped to the image: the extent each side runs
+    xa, xb = _px(dx0), _px(dx1)
+    ya, yb = _py(dy0), _py(dy1)
+    cxa, cxb = max(min(xa, xb), 0), min(max(xa, xb), W - 1)
+    cya, cyb = max(min(ya, yb), 0), min(max(ya, yb), H - 1)
+
+    if cxb >= cxa and cyb >= cya:
+        for px in (xa, xb):                      # the two vertical sides
+            if -1 <= px <= W:
+                img[cya:cyb + 1, min(max(px, 0), W - 1)] = edge
+        for py in (ya, yb):                      # the two horizontal sides
+            if -1 <= py <= H:
+                img[min(max(py, 0), H - 1), cxa:cxb + 1] = edge
 
     # DEF y is up, image y is down
     img = img[::-1]
