@@ -193,11 +193,48 @@ anywhere else, because a move there retargets a cell to the centre of a
 neighbouring bin, a whole bin away, chosen on area with no idea what the cell
 drives. Turn it on when pass 2 reports cells that found no row at all.
 
-`-placer <path>` hands the whole problem to an external legalizer;
-`3RDBIN/legalize_flat` is a NumPy one that reproduces the Perl cell for cell and
-additionally reserves the rows above a multi-row cell, which the Perl one does
-not. The Perl is the reference — keep them agreeing, including the tie breaks
-(bin indices compare numerically, not as `"bx,by"` strings).
+Its pin density pass (`--pin_spread`) is **off by default** and is the one to
+reach for when the problem is routability rather than legality. It counts
+signal pins per 5um tile and pads the cells in the densest tiles, so Abacus
+opens real gaps there; it never retargets a cell, which is why it costs a
+fraction of what `--spread` costs. On nangate_flat the worst tile falls 15%
+(111 pins to 94) for 3.1% of wirelength, and on matmul_4x4 two thirds of the
+tiles over 80 pins disappear for 4.9%. It legalizes twice — the density map
+has to be measured on a legal placement, not on the placer's overlapping
+output — and falls back to the unpadded result if padding left any cell
+without a row. Both numbers above are from an independent sweep of the written
+DEF, not from the command's own report.
+
+**Use the Perl. `3RDBIN/legalize_flat` is not equivalent and nothing calls
+it.** Every committed flow calls bare `legalize_flat`, and `TESTS/large/Makefile`
+says in capitals not to reach for `-placer` because it is slower end to end —
+the compute is 6-7x faster and loses anyway to writing and re-reading several
+million lines of text.
+
+The two diverged at commit `6ffe129` and the gap has grown. The NumPy one has
+neither the local density cap nor `--pin_spread` (which refuses to run through
+`-placer` rather than silently giving the unpadded answer). Its one advertised
+advantage — reserving the rows above a multi-row cell — **does not work**: it
+subtracts the cell's width from the rows' remaining free width, which reserves
+width but not place, so Abacus packs those rows from the left as if the tall
+cell were not there. On a synthetic design of 300 single-height and 30
+double-height cells it prints "the rows above them were reserved" and produces
+20 overlaps; the Perl produces zero, because it places tall cells first and
+cuts the rows around them like macros.
+
+So do not treat the two as interchangeable and do not trust the NumPy one on a
+library that is not all single-height. If you do work on it, the Perl is the
+reference, including the tie breaks (bin indices compare numerically, not as
+`"bx,by"` strings).
+
+Comparing anything **through qrouter** needs `PERL_HASH_SEED=0` and
+`PERL_PERTURB_KEYS=0`. `write_def` walks `keys %CADB`, Perl randomises hash
+order per process, and qrouter routes in file order — five runs of one
+byte-identical legalized DEF gave 222, 200, 239, 197 and 130 unrouted nets.
+With the seed pinned the same DEF gives 121 every time. Even then the routing
+number is chaotic with respect to small placement changes: `-dbin_rows 1/3/4`
+and `--no_dbin` leave the pin density map bit-identical and move unrouted nets
+from 104 to 261, so on nangate_flat it cannot adjudicate a placement change.
 
 ## Off limits
 
