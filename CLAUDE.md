@@ -87,6 +87,42 @@ cascades.
    `grep -o "PREFIX : [0-9]*" file | sort | uniq -d`
 6. Message prefixes abbreviate the command they belong to (`WR_PS_GRPH`,
    `RD_PS_ND`, `HR_PL_PN`). Rename them with the command.
+7. Document it before pushing: its usage in `DOCS/USER_MANUAL.md`, a
+   description in the manual's command index (`python3
+   DOCS/gen_command_index.py`, then fill in the new row), and, if it changes how
+   the tool is built or how data flows, `DOCS/ARCHITECTURE.md`. See the next
+   section.
+
+## Keep the documentation current — every push
+
+`DOCS/USER_MANUAL.md` is for people who run electron; `DOCS/ARCHITECTURE.md` is
+for people who change it. Both are only worth having if they describe the tree
+as it is, so **whenever you push new code or new functionality, update them in
+the same push** — the same commit where you can, or a commit on the same branch
+before it goes out. Do not leave it for a later pass; there has never been one.
+
+What to update, by what changed:
+
+| You changed | Update |
+|---|---|
+| a command: added, removed, renamed, new or changed options, new default | manual: the section for that part of the flow (usage block and a line on what it does); rerun `python3 DOCS/gen_command_index.py` and give a new command its one-line description |
+| a flow, a script in `TESTS/`, a Makefile target | manual: the worked examples, large designs or comparison sections; architecture: the flow diagrams if the order of commands or the data moving between them changed |
+| a database class, a global hash, units, the pin stores, the dispatch or startup path | architecture: sections 4 to 6 |
+| an external engine, a `3RDBIN/` driver, the container, a file format | architecture: sections 3 and 7; manual: installation or the command that drives it |
+| a bug fixed or found that a user could hit | manual: the troubleshooting table |
+| a measured result (run time, memory, wirelength, a scaling table) | the table that quotes it, with the date it was measured |
+
+Rules that keep them honest:
+
+- Write what the code does now, checked against the code — never what a commit
+  message or an earlier version of the doc says it does.
+- `python3 DOCS/gen_command_index.py --check` must pass before you push. The
+  pre-push hook runs it and also warns when a push changes code but no document.
+- If a change really needs no documentation (an internal refactor, a comment),
+  say so in the commit message — "docs: no change needed" — so the omission is
+  a decision and not an accident.
+- Keep numbers dated and sourced. A measurement without a date and a design name
+  is not worth keeping.
 
 ## Units — the recurring bug class
 

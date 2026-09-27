@@ -39,6 +39,15 @@
 # A machine without apptainer or without the .sif cannot run the checks. This
 # refuses the push and says so rather than passing silently: a hook that
 # quietly does nothing is worse than no hook, because it is trusted.
+#
+# DOCUMENTATION (advisory, never blocks)
+#
+# CLAUDE.md asks that every push of new code or functionality update
+# DOCS/USER_MANUAL.md and DOCS/ARCHITECTURE.md in the same push.  Before the
+# build, this warns if the manual's command index is out of date with
+# commandsFile, and if the commits being pushed change code but no document.
+# It runs even when the checks below cannot, because it needs only git and
+# python3.
 
 set -uo pipefail
 
@@ -49,6 +58,41 @@ fi
 
 REPO="$(git rev-parse --show-toplevel)"
 cd "$REPO" || exit 1
+
+# git hands a pre-push hook one line per ref: <local ref> <local sha>
+# <remote ref> <remote sha>.  Read it now, before anything else can.
+PUSHED_REFS="$(cat)"
+
+docs_reminder() {
+  local zero=0000000000000000000000000000000000000000 changed="" lref lsha rref rsha range base
+  while read -r lref lsha rref rsha; do
+    [[ -z "${lsha:-}" || "$lsha" == "$zero" ]] && continue
+    if [[ "$rsha" == "$zero" ]]; then
+      # a new branch: compare against where it left the default branch
+      base="$(git merge-base "$lsha" origin/master 2>/dev/null || true)"
+      [[ -z "$base" ]] && continue
+      range="$base..$lsha"
+    else
+      range="$rsha..$lsha"
+    fi
+    changed+="$(git diff --name-only "$range" 2>/dev/null)"$'\n'
+  done <<< "$PUSHED_REFS"
+  local code docs
+  code="$(printf '%s' "$changed" | grep -vE '^$|\.md$|^DOCS/' | sort -u)"
+  docs="$(printf '%s' "$changed" | grep -E '^DOCS/.*\.md$' | sort -u)"
+  if [[ -n "$code" && -z "$docs" ]]; then
+    echo "pre-push: WARNING: this push changes code but no document in DOCS/:" >&2
+    printf '%s\n' "$code" | head -8 | sed 's/^/  /' >&2
+    echo "pre-push: update DOCS/USER_MANUAL.md and DOCS/ARCHITECTURE.md (CLAUDE.md," >&2
+    echo "pre-push: 'Keep the documentation current'), or say 'docs: no change needed'" >&2
+    echo "pre-push: in the commit message if nothing a user or maintainer sees changed." >&2
+  fi
+  if [[ -f DOCS/gen_command_index.py ]] && ! python3 DOCS/gen_command_index.py --check >/dev/null 2>&1; then
+    echo "pre-push: WARNING: the command index in DOCS/USER_MANUAL.md is out of date;" >&2
+    echo "pre-push: run  python3 DOCS/gen_command_index.py  and describe any new command." >&2
+  fi
+}
+docs_reminder
 
 SIF="$REPO/INSTALL/podman/pysparkpp.sif"
 
