@@ -1,0 +1,857 @@
+#****f* /improve_congestion
+#  improve_congestion
+# FUNCTION
+#  Wirelength driven detailed placement of a LEGAL flat placement: it moves
+#  standard cells to shorten their nets and never makes an overlap to do it.
+#
+#  It runs after legalize_flat, not instead of it.  legalize_flat moves every
+#  cell as little as possible and has no idea what a cell is connected to, so
+#  it leaves wirelength on the table wherever it had to push a cell off its
+#  target.  This takes that legal placement and makes only legal to legal
+#  moves, each one kept only if it lowers the half perimeter wirelength of the
+#  nets it touches.  Overlap stays at zero by construction, and wirelength can
+#  only go down.
+#
+#  Two moves, run in turn for -iters rounds:
+#
+#  GLOBAL SWAP.  For each cell, the region where it would minimise its own
+#  wirelength with everything else held still -- Goto's optimal region: take
+#  the bounding box of each of its nets WITHOUT the cell, and the region runs
+#  between the medians of those boxes' low and high edges, separately in x and
+#  in y.  A cell already inside it is left alone.  Otherwise the row nearest
+#  the region, and -rows either side, are searched around the target x for a
+#  cell to swap with or a gap to move into, and the candidate with the largest
+#  wirelength gain is taken.  For a cell whose nets are all two pin nets --
+#  buffer and inverter chains -- the region is exactly the median of the pins
+#  at the other ends.
+#
+#  ROW SLIDE.  Each row segment, with the order of its cells kept, is given
+#  the x positions that minimise wirelength.  Every net of a cell contributes
+#  the low and high edge of its bounding box without that cell as two
+#  breakpoints of a convex piecewise linear cost, so the best position of a
+#  run of abutting cells is the MEDIAN of their breakpoints, each shifted by
+#  its cell's offset in the run.  Cells are clustered left to right exactly as
+#  Abacus clusters them in legalize_flat, with that median standing in for the
+#  weighted mean.  The segment is recomputed on real wirelength afterwards and
+#  put back as it was if it did not improve: the breakpoints treat the cell's
+#  row neighbours as fixed, which is only an approximation when two cells of
+#  one segment share a net.
+#
+#  THE WIRELENGTH MODEL is the cell centre, not the pin: a net's length is the
+#  half perimeter of the centres of the cells on it and the locations of the
+#  ports on it.  That is the model the independent DEF checker used for every
+#  HPWL number in the legalize_flat header, so the two agree.  It also makes
+#  the row orientation irrelevant to the cost, which matters because a cell
+#  that changes rows here is flipped to match its new row.
+#
+#  WHAT IT MOVES.  A CORE cell called PLACED, one row tall, sitting on a row
+#  inside one free segment.  FIXED cells, macros, pads and cells taller than a
+#  row are obstacles, and cut the rows into segments as in legalize_flat.
+#  Nets of -fanout_limit pins or more are left out of the optimisation --
+#  clock, reset and scan enable pull every cell towards the middle and say
+#  nothing about where any one cell belongs -- but they are still counted in
+#  the wirelength this reports, so the number is comparable to the checker's.
+#
+#  WHAT IT REFUSES.  An illegal placement.  A movable cell that is off the
+#  rows, or straddles an obstacle, or overlaps a neighbour, means legalize_flat
+#  has not been run; moving cells in that placement would not keep it legal,
+#  because it was never legal.  The command says so and changes nothing.
+#
+#  THE NAME.  What this optimises is wirelength, which is a proxy for routing
+#  demand, not a measure of it.  Whether it improves congestion is a question
+#  for the router, and it is only answered by routing the result.
+#
+# SYNOPSIS
+#  improve_congestion
+#
+# INPUTS
+#
+#       options :
+#               -iters <n> : rounds of both moves, default 2
+#               -rows <n> : rows either side of the target row to search in
+#                           the global swap, default 1
+#               -window <n> : cells either side of the target x to try as a
+#                             swap or a gap, default 3
+#               -fanout_limit <n> : leave nets of this many pins or more out
+#                                   of the optimisation, default the global
+#                                   fanout limit
+#               -min_gain <pct> : stop early when a round gains less than
+#                                 this, default 0.1
+#
+#       switches :
+#               --no_swap : skip the global swap
+#               --no_slide : skip the row slide
+#               --report_only : measure and change nothing
+#
+# OUTPUTS
+#               instance locations and orientations in CADB, and the
+#               instance boxes
+#
+#****
+sub improve_congestion {
+
+use Benchmark;
+use POSIX qw(ceil floor);
+my $t0 = new Benchmark;
+
+my $tStart = time;
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $iters = 2;
+my $rowWin = 1;
+my $window = 3;
+my $fanoutLimit = 0;
+my $minGainPct = 0.1;
+my ($noSwap, $noSlide, $reportOnly) = (0, 0, 0);
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : improve_congestion -iters <rounds of both moves, default 2>\n";
+  print "                           -rows <rows either side to search, default 1>\n";
+  print "                           -window <cells either side to try, default 3>\n";
+  print "                           -fanout_limit <leave out nets this big, default\n";
+  print "                                          the global fanout limit>\n";
+  print "                           -min_gain <stop when a round gains less than\n";
+  print "                                      this percent, default 0.1>\n";
+  print "                           --no_swap      skip the global swap\n";
+  print "                           --no_slide     skip the row slide\n";
+  print "                           --report_only  measure and change nothing\n";
+  print "\n";
+  print "        Needs a legal placement: run legalize_flat first.  Every move is\n";
+  print "        legal to legal and is kept only if it shortens the nets it\n";
+  print "        touches, so overlaps stay at zero and wirelength only falls.\n";
+  print "        Wirelength is measured from cell centres and port locations.\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-iters")         { $iters = $_[$i+1]; }
+  elsif ($_[$i] eq "-rows")          { $rowWin = $_[$i+1]; }
+  elsif ($_[$i] eq "-window")        { $window = $_[$i+1]; }
+  elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
+  elsif ($_[$i] eq "-min_gain")      { $minGainPct = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_swap")      { $noSwap = 1; }
+  elsif ($_[$i] eq "--no_slide")     { $noSlide = 1; }
+  elsif ($_[$i] eq "--report_only")  { $reportOnly = 1; }
+  elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-ALG-IMP_CONG : 001 : invalid option $_[$i]\n"; }
+}
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) {
+  print "ERR-ALG-IMP_CONG : 002 : database units are not set\n";
+  return;
+}
+my $flplanID = $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"};
+unless ( defined $flplanID && exists $FLOORPLAN_ALREADY{$flplanID} ) {
+  print "ERR-ALG-IMP_CONG : 003 : module $TOP_MODULE has no floorplan\n";
+  return;
+}
+if ( $fanoutLimit <= 0 ) {
+  my $g = $GLOBAL->dbfGlobalGetFanoutLimit;
+  $fanoutLimit = ( defined $g && $g > 0 ) ? $g : 100;
+}
+
+#---------------------------- the rows -----------------------------------#
+#<!-- Read exactly as legalize_flat reads them: "name site x0 y0 orient numX
+#     numY stepX stepY" in dbu, one entry per y. -->
+my $rowH = $GLOBAL->dbGlobalGetRowHeight;
+unless ( defined $rowH && $rowH > 0 ) {
+  print "ERR-ALG-IMP_CONG : 004 : row height is not set, read a LEF with a site\n";
+  return;
+}
+$rowH = int( $rowH * $dbu + 0.5 );
+
+my @rowY = ();
+my %rowX0 = ();
+my %rowX1 = ();
+my %rowOrient = ();
+my $siteX = 0;
+foreach my $tag ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetRows ) {
+  my @f = split(/\s+/, $tag);
+  next unless ( @f >= 8 );
+  my ($x0, $y, $numX, $stepX) = ($f[2], $f[3], $f[5], $f[7]);
+  next unless ( defined $y && defined $x0 && defined $numX && defined $stepX );
+  my $x1 = $x0 + $numX * $stepX;
+  if ( exists $rowX0{$y} ) {
+    $rowX0{$y} = $x0 if ( $x0 < $rowX0{$y} );
+    $rowX1{$y} = $x1 if ( $x1 > $rowX1{$y} );
+  }
+  else {
+    push(@rowY, $y);
+    $rowX0{$y} = $x0;
+    $rowX1{$y} = $x1;
+    $rowOrient{$y} = ( defined $f[4] && $f[4] ne "" ) ? $f[4] : "N";
+  }
+  $siteX = $stepX if ( $stepX > $siteX );
+}
+@rowY = sort { $a <=> $b } @rowY;
+my $nRows = @rowY;
+unless ( $nRows > 0 ) {
+  print "ERR-ALG-IMP_CONG : 005 : $TOP_MODULE has no ROWs, run floorplan first\n";
+  return;
+}
+$siteX = 1 if ( $siteX <= 0 );
+my %rowIdx = ();
+for ( my $r = 0 ; $r < $nRows ; $r++ ) { $rowIdx{$rowY[$r]} = $r; }
+
+#------------------------------ the nodes --------------------------------#
+#<!-- Every instance and every placed port is a node with a centre, in dbu.
+#     Only some nodes are movable; the rest are fixed points on nets. -->
+my @nName = ();        #<!-- node -> instance or port name -->
+my @nX = ();           #<!-- node -> centre x -->
+my @nY = ();           #<!-- node -> centre y -->
+my %nodeOf = ();       #<!-- instance name -> node -->
+my %portNode = ();     #<!-- port name -> node -->
+
+my @cNode = ();        #<!-- movable cell -> node -->
+my @cW = ();           #<!-- movable cell -> width -->
+my @cH = ();
+my @cRow = ();         #<!-- movable cell -> row index -->
+my @cRow0 = ();        #<!-- the row it started in, to re-orient movers -->
+my %cellOf = ();       #<!-- node -> movable cell -->
+my @obs = ();
+my ($offRow, $unplacedCnt, $skipNoCell) = (0, 0, 0);
+my @offRowEx = ();
+
+foreach my $inst ( sort keys %CADB ) {
+  my $cellref = $CADB{$inst}->dbCadbGetCellref;
+  unless ( defined $cellref && exists $PLDB{$cellref} ) {
+    $skipNoCell++;
+    next;
+  }
+  my @size = $PLDB{$cellref}->dbMdbGetSize;
+  next unless ( @size >= 2 && $size[0] > 0 && $size[1] > 0 );
+  my $orient = $CADB{$inst}->dbCadbGetOrient;
+  $orient = "N" unless ( defined $orient && $orient ne "" );
+  my ($w, $h) = ( int($size[0] * $dbu + 0.5), int($size[1] * $dbu + 0.5) );
+  if ( $orient eq "E" || $orient eq "FE" || $orient eq "W" || $orient eq "FW" ) {
+    ($w, $h) = ($h, $w);
+  }
+  my $status = $CADB{$inst}->dbCadbGetStatus;
+  $status = "" unless ( defined $status );
+  if ( $status ne "PLACED" && $status ne "FIXED" ) {
+    $unplacedCnt++;
+    next;
+  }
+  my @loc = $CADB{$inst}->dbCadbGetLoc;
+  my ($x, $y) = ( (defined $loc[0]) ? $loc[0] : 0, (defined $loc[1]) ? $loc[1] : 0 );
+
+  my $n = @nName;
+  push(@nName, $inst);
+  push(@nX, $x + $w / 2);
+  push(@nY, $y + $h / 2);
+  $nodeOf{$inst} = $n;
+
+  my $class = $PLDB{$cellref}->dbMdbGetClass;
+  $class = "" unless ( defined $class );
+  if ( $status eq "FIXED" || $class !~ m/^CORE/ || $h > $rowH ) {
+    push(@obs, [$x, $y, $x + $w, $y + $h]);
+    next;
+  }
+  unless ( exists $rowIdx{$y} ) {
+    $offRow++;
+    push(@offRowEx, $inst) if ( @offRowEx < 5 );
+    next;
+  }
+  my $c = @cNode;
+  push(@cNode, $n);
+  push(@cW, $w);
+  push(@cH, $h);
+  push(@cRow, $rowIdx{$y});
+  push(@cRow0, $rowIdx{$y});
+  $cellOf{$n} = $c;
+}
+my $nCell = @cNode;
+
+if ( $offRow > 0 ) {
+  print "ERR-ALG-IMP_CONG : 006 : $offRow movable cell(s) are not on a row, e.g. ",
+        join(" ", @offRowEx), "\n";
+  print "ERR-ALG-IMP_CONG : 007 : the placement is not legal; run legalize_flat first.  Nothing was changed\n";
+  return;
+}
+unless ( $nCell > 0 ) {
+  print "WARN-ALG-IMP_CONG : 008 : no movable CORE cell, nothing to do\n";
+  return;
+}
+
+foreach my $port ( sort keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
+  my $st = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetStatus;
+  #<!-- PortDB status is a number: 3 FIXED, 2 PLACED, 1 UNPLACED.  An unplaced
+  #     port sits at the PortDB::new default of (0,0), which is not a place. -->
+  next unless ( defined $st && ($st == 2 || $st == 3) );
+  my @loc = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetLoc;
+  next unless ( @loc >= 2 && defined $loc[0] && defined $loc[1] );
+  my $n = @nName;
+  push(@nName, $port);
+  push(@nX, $loc[0]);
+  push(@nY, $loc[1]);
+  $portNode{$port} = $n;
+}
+
+#------------------------------- the nets --------------------------------#
+#<!-- A net is the set of nodes on it.  NETS_ALREADY is keyed by instance, by
+#     port name, or by "PIN" for a net tied to a port that the reader did not
+#     name; that last case is resolved through the ports' own connection. -->
+my %portsOnNet = ();
+foreach my $port ( keys %portNode ) {
+  my @conn = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetConn;
+  push(@{$portsOnNet{$conn[0]}}, $port) if ( @conn && defined $conn[0] );
+}
+
+my @netNodes = ();     #<!-- net -> [nodes] -->
+my @netOpt = ();       #<!-- net -> 1 if it takes part in the optimisation -->
+my @cNets = ();        #<!-- movable cell -> [nets], optimised ones only -->
+my ($bigNets, $pgNets) = (0, 0);
+foreach my $net ( sort keys %NETS_ALREADY ) {
+  next if ( $net eq "" || $net =~ m/\d*\'b[01]+/ );
+  if ( exists $NETS_ROUTING_ALREADY{$net} ) {
+    my $use = $NETS_ROUTING_ALREADY{$net}->dbNetGetType;
+    if ( defined $use && ($use eq "POWER" || $use eq "GROUND") ) {
+      $pgNets++;
+      next;
+    }
+  }
+  my %on = ();
+  foreach my $k ( keys %{$NETS_ALREADY{$net}} ) {
+    if    ( exists $nodeOf{$k} )   { $on{$nodeOf{$k}} = 1; }
+    elsif ( exists $portNode{$k} ) { $on{$portNode{$k}} = 1; }
+    elsif ( $k eq "PIN" && exists $portsOnNet{$net} ) {
+      $on{$portNode{$_}} = 1 foreach ( @{$portsOnNet{$net}} );
+    }
+  }
+  my @nodes = sort { $a <=> $b } keys %on;
+  next unless ( @nodes >= 2 );
+  my $id = @netNodes;
+  push(@netNodes, \@nodes);
+  my $opt = ( @nodes < $fanoutLimit ) ? 1 : 0;
+  push(@netOpt, $opt);
+  $bigNets++ unless ( $opt );
+  next unless ( $opt );
+  foreach my $n ( @nodes ) {
+    push(@{$cNets[$cellOf{$n}]}, $id) if ( exists $cellOf{$n} );
+  }
+}
+my $nNets = @netNodes;
+
+#--------------------------------- HPWL ----------------------------------#
+my $netLen = sub {
+  my $nodes = $netNodes[$_[0]];
+  my $n = $nodes->[0];
+  my ($x0, $x1, $y0, $y1) = ($nX[$n], $nX[$n], $nY[$n], $nY[$n]);
+  foreach $n ( @$nodes ) {
+    my ($x, $y) = ($nX[$n], $nY[$n]);
+    $x0 = $x if ( $x < $x0 );
+    $x1 = $x if ( $x > $x1 );
+    $y0 = $y if ( $y < $y0 );
+    $y1 = $y if ( $y > $y1 );
+  }
+  return ( ($x1 - $x0) + ($y1 - $y0) );
+};
+my $totalLen = sub {
+  my ($all, $opt) = (0, 0);
+  for ( my $e = 0 ; $e < $nNets ; $e++ ) {
+    my $l = $netLen->($e);
+    $all += $l;
+    $opt += $l if ( $netOpt[$e] );
+  }
+  return ($all, $opt);
+};
+my $lenOf = sub {      #<!-- summed over a list of net ids, each once -->
+  my %seen = ();
+  my $s = 0;
+  foreach my $e ( @_ ) {
+    next if ( $seen{$e}++ );
+    $s += $netLen->($e);
+  }
+  return ($s);
+};
+
+#------------------------------ segments ---------------------------------#
+#<!-- Free intervals per row, cut by the obstacles, as legalize_flat cuts
+#     them.  A movable cell belongs to the one segment that contains it. -->
+my @segOfRow = ();     #<!-- row -> [ [x0, x1], ... ] in x order -->
+for ( my $r = 0 ; $r < $nRows ; $r++ ) {
+  my $y = $rowY[$r];
+  my @cut = ();
+  foreach my $o ( @obs ) {
+    next if ( $o->[3] <= $y || $o->[1] >= $y + $rowH );
+    my $a = ( $o->[0] > $rowX0{$y} ) ? $o->[0] : $rowX0{$y};
+    my $b = ( $o->[2] < $rowX1{$y} ) ? $o->[2] : $rowX1{$y};
+    push(@cut, [$a, $b]) if ( $b > $a );
+  }
+  @cut = sort { $a->[0] <=> $b->[0] } @cut;
+  my @free = ();
+  my $x = $rowX0{$y};
+  foreach my $c ( @cut ) {
+    push(@free, [$x, $c->[0]]) if ( $c->[0] > $x );
+    $x = $c->[1] if ( $c->[1] > $x );
+  }
+  push(@free, [$x, $rowX1{$y}]) if ( $rowX1{$y} > $x );
+  $segOfRow[$r] = \@free;
+}
+
+my @segLo = ();        #<!-- segment -> x0 -->
+my @segHi = ();
+my @segRow = ();
+my @segCells = ();     #<!-- segment -> [cells] in x order -->
+my @segIdOfRow = ();   #<!-- row -> [segments] in x order -->
+for ( my $r = 0 ; $r < $nRows ; $r++ ) {
+  foreach my $s ( @{$segOfRow[$r]} ) {
+    my $id = @segLo;
+    push(@segLo, $s->[0]);
+    push(@segHi, $s->[1]);
+    push(@segRow, $r);
+    push(@segCells, []);
+    push(@{$segIdOfRow[$r]}, $id);
+  }
+}
+
+my $cellX = sub { my $c = $_[0]; return ( $nX[$cNode[$c]] - $cW[$c] / 2 ); };
+
+my @cSeg = ();
+my ($noSeg, $overlapCnt) = (0, 0);
+my @badEx = ();
+for ( my $c = 0 ; $c < $nCell ; $c++ ) {
+  my $x = $cellX->($c);
+  my $found;
+  foreach my $s ( @{$segIdOfRow[$cRow[$c]]} ) {
+    if ( $x >= $segLo[$s] && $x + $cW[$c] <= $segHi[$s] ) { $found = $s; last; }
+  }
+  unless ( defined $found ) {
+    $noSeg++;
+    push(@badEx, $nName[$cNode[$c]]) if ( @badEx < 5 );
+    next;
+  }
+  $cSeg[$c] = $found;
+  push(@{$segCells[$found]}, $c);
+}
+for ( my $s = 0 ; $s < @segLo ; $s++ ) {
+  my @sorted = sort { $cellX->($a) <=> $cellX->($b) || $a <=> $b } @{$segCells[$s]};
+  $segCells[$s] = \@sorted;
+  for ( my $k = 1 ; $k < @sorted ; $k++ ) {
+    if ( $cellX->($sorted[$k-1]) + $cW[$sorted[$k-1]] > $cellX->($sorted[$k]) ) {
+      $overlapCnt++;
+      push(@badEx, $nName[$cNode[$sorted[$k]]]) if ( @badEx < 5 );
+    }
+  }
+}
+if ( $noSeg > 0 || $overlapCnt > 0 ) {
+  print "ERR-ALG-IMP_CONG : 009 : the placement is not legal: $noSeg cell(s) outside every free segment,\n";
+  print "ERR-ALG-IMP_CONG : 010 : $overlapCnt overlapping neighbour pair(s), e.g. ", join(" ", @badEx), "\n";
+  print "ERR-ALG-IMP_CONG : 011 : run legalize_flat first.  Nothing was changed\n";
+  return;
+}
+
+print "INFO-ALG-IMP_CONG : 012 : $nCell movable cell(s) in ", scalar(@segLo), " segment(s), ",
+      scalar(@obs), " obstacle(s), $nNets net(s)\n";
+print "INFO-ALG-IMP_CONG : 013 : $bigNets net(s) of $fanoutLimit pins or more are counted but not optimised\n"
+  if ( $bigNets > 0 );
+print "INFO-ALG-IMP_CONG : 014 : $unplacedCnt instance(s) have no location and were ignored\n"
+  if ( $unplacedCnt > 0 );
+
+printf("INFO-ALG-IMP_CONG : 023 : database read into the model in %ds\n", time - $tStart);
+my ($startAll, $startOpt) = $totalLen->();
+printf("INFO-ALG-IMP_CONG : 015 : HPWL %.1f um over all nets, %.1f um over the optimised ones\n",
+       $startAll / $dbu, $startOpt / $dbu);
+
+#------------------------------- helpers ---------------------------------#
+#<!-- Put a cell of width w into the free interval [lo, hi] as near as it can
+#     get to wanting its left edge at want, on the site grid of row r.  Returns
+#     undef when it does not fit on the grid at all. -->
+my $fitIn = sub {
+  my ($lo, $hi, $w, $want, $r) = @_;
+  return undef if ( $hi - $lo < $w );
+  my $x0 = $rowX0{$rowY[$r]};
+  my $x = $want;
+  $x = $lo if ( $x < $lo );
+  $x = $hi - $w if ( $x > $hi - $w );
+  $x = $x0 + floor( ($x - $x0) / $siteX + 0.5 ) * $siteX;
+  $x = $x0 + ceil( ($lo - $x0) / $siteX ) * $siteX if ( $x < $lo );
+  $x = $x0 + floor( ($hi - $w - $x0) / $siteX ) * $siteX if ( $x + $w > $hi );
+  return undef if ( $x < $lo || $x + $w > $hi );
+  return ($x);
+};
+
+#<!-- Where a cell may go in its own segment with its neighbours held: from
+#     the right edge of the one before to the left edge of the one after. -->
+my $freeAround = sub {
+  my ($s, $k) = @_;            #<!-- segment, index in it -->
+  my $cells = $segCells[$s];
+  my $lo = ( $k > 0 ) ? $cellX->($cells->[$k-1]) + $cW[$cells->[$k-1]] : $segLo[$s];
+  my $hi = ( $k < $#$cells ) ? $cellX->($cells->[$k+1]) : $segHi[$s];
+  return ($lo, $hi);
+};
+
+#<!-- Index of a cell in its segment's list, by bisection on x. -->
+my $indexOf = sub {
+  my ($c) = @_;
+  my $cells = $segCells[$cSeg[$c]];
+  my $x = $cellX->($c);
+  my ($lo, $hi) = (0, $#$cells);
+  while ( $lo <= $hi ) {
+    my $m = int( ($lo + $hi) / 2 );
+    my $mx = $cellX->($cells->[$m]);
+    if    ( $mx < $x ) { $lo = $m + 1; }
+    elsif ( $mx > $x ) { $hi = $m - 1; }
+    else { return $m if ( $cells->[$m] == $c ); last; }
+  }
+  for ( my $k = 0 ; $k < @$cells ; $k++ ) { return $k if ( $cells->[$k] == $c ); }
+  return (-1);
+};
+
+#<!-- First index in segment s whose cell ends after x. -->
+my $firstAfter = sub {
+  my ($s, $x) = @_;
+  my $cells = $segCells[$s];
+  my ($lo, $hi) = (0, scalar(@$cells));
+  while ( $lo < $hi ) {
+    my $m = int( ($lo + $hi) / 2 );
+    if ( $cellX->($cells->[$m]) + $cW[$cells->[$m]] <= $x ) { $lo = $m + 1; }
+    else { $hi = $m; }
+  }
+  return ($lo);
+};
+
+my $place = sub {      #<!-- move a cell's centre to left edge x in row r -->
+  my ($c, $x, $r) = @_;
+  my $n = $cNode[$c];
+  $nX[$n] = $x + $cW[$c] / 2;
+  $nY[$n] = $rowY[$r] + $cH[$c] / 2;
+};
+
+#<!-- Goto's optimal region for one cell, on its optimised nets: the bounding
+#     box of each net without the cell contributes its low and high edge, and
+#     the region lies between the two middle values, per axis. -->
+my $optRegion = sub {
+  my ($c) = @_;
+  my $self = $cNode[$c];
+  my (@xs, @ys);
+  foreach my $e ( @{$cNets[$c] || []} ) {
+    my ($x0, $x1, $y0, $y1);
+    foreach my $n ( @{$netNodes[$e]} ) {
+      next if ( $n == $self );
+      my ($x, $y) = ($nX[$n], $nY[$n]);
+      if ( ! defined $x0 ) { ($x0, $x1, $y0, $y1) = ($x, $x, $y, $y); next; }
+      $x0 = $x if ( $x < $x0 );
+      $x1 = $x if ( $x > $x1 );
+      $y0 = $y if ( $y < $y0 );
+      $y1 = $y if ( $y > $y1 );
+    }
+    next unless ( defined $x0 );
+    push(@xs, $x0, $x1);
+    push(@ys, $y0, $y1);
+  }
+  return () unless ( @xs );
+  @xs = sort { $a <=> $b } @xs;
+  @ys = sort { $a <=> $b } @ys;
+  my $m = @xs / 2;
+  return ( $xs[$m-1], $xs[$m], $ys[$m-1], $ys[$m] );
+};
+
+#=============================== global swap ==============================#
+my $globalSwap = sub {
+  my ($moves, $swaps, $gain) = (0, 0, 0);
+  for ( my $c = 0 ; $c < $nCell ; $c++ ) {
+    next unless ( $cNets[$c] && @{$cNets[$c]} );
+    my @reg = $optRegion->($c);
+    next unless ( @reg );
+    my ($rx0, $rx1, $ry0, $ry1) = @reg;
+    my $n = $cNode[$c];
+    my ($cx, $cy) = ($nX[$n], $nY[$n]);
+    #<!-- already where it wants to be, to within a row and a site -->
+    next if ( $cx >= $rx0 - $siteX && $cx <= $rx1 + $siteX &&
+              $cy >= $ry0 - $rowH  && $cy <= $ry1 + $rowH );
+
+    #<!-- the point of the region nearest where the cell is now -->
+    my $tx = ( $cx < $rx0 ) ? $rx0 : ( $cx > $rx1 ) ? $rx1 : $cx;
+    my $ty = ( $cy < $ry0 ) ? $ry0 : ( $cy > $ry1 ) ? $ry1 : $cy;
+    my $tr = floor( ($ty - $cH[$c] / 2 - $rowY[0]) / $rowH + 0.5 );
+    $tr = 0 if ( $tr < 0 );
+    $tr = $nRows - 1 if ( $tr > $nRows - 1 );
+
+    my $sA = $cSeg[$c];
+    my $kA = $indexOf->($c);
+    my ($aLo, $aHi) = $freeAround->($sA, $kA);
+    my $rA = $cRow[$c];
+    my $xA = $cellX->($c);
+    my $before = $lenOf->(@{$cNets[$c]});
+
+    my @best = ();     #<!-- [gain, kind, ...] -->
+    for ( my $r = $tr - $rowWin ; $r <= $tr + $rowWin ; $r++ ) {
+      next if ( $r < 0 || $r >= $nRows );
+      foreach my $sB ( @{$segIdOfRow[$r]} ) {
+        next if ( $tx < $segLo[$sB] - $cW[$c] || $tx > $segHi[$sB] + $cW[$c] );
+        my $cells = $segCells[$sB];
+        my $k0 = $firstAfter->($sB, $tx);
+        my $kLo = $k0 - $window;
+        my $kHi = $k0 + $window;
+        $kLo = 0 if ( $kLo < 0 );
+        $kHi = $#$cells if ( $kHi > $#$cells );
+
+        #<!-- gaps: between index k-1 and k, for k from kLo to kHi+1 -->
+        for ( my $k = $kLo ; $k <= $kHi + 1 ; $k++ ) {
+          next if ( $k > @$cells );
+          my $left  = ( $k > 0 )      ? $cells->[$k-1] : undef;
+          my $right = ( $k < @$cells ) ? $cells->[$k]   : undef;
+          #<!-- a gap next to the cell itself is the row slide's business -->
+          next if ( (defined $left && $left == $c) || (defined $right && $right == $c) );
+          my $lo = ( defined $left )  ? $cellX->($left) + $cW[$left] : $segLo[$sB];
+          my $hi = ( defined $right ) ? $cellX->($right)             : $segHi[$sB];
+          my $x = $fitIn->($lo, $hi, $cW[$c], $tx - $cW[$c] / 2, $r);
+          next unless ( defined $x );
+          $place->($c, $x, $r);
+          my $g = $before - $lenOf->(@{$cNets[$c]});
+          $place->($c, $xA, $rA);
+          @best = ($g, "gap", $sB, $x, $r) if ( $g > 0 && ( ! @best || $g > $best[0] ) );
+        }
+
+        #<!-- swaps with the cells around the target -->
+        for ( my $k = $kLo ; $k <= $kHi ; $k++ ) {
+          my $d = $cells->[$k];
+          next if ( $d == $c );
+          #<!-- neighbours in one segment share a free interval, so the two
+          #     moves below would not be independent -->
+          next if ( $sB == $sA && abs($k - $kA) < 2 );
+          my ($bLo, $bHi) = $freeAround->($sB, $k);
+          my $xD = $cellX->($d);
+          #<!-- each takes the other's place, centred where the other was -->
+          my $xc = $fitIn->($bLo, $bHi, $cW[$c], $xD + $cW[$d] / 2 - $cW[$c] / 2, $r);
+          next unless ( defined $xc );
+          my $xd = $fitIn->($aLo, $aHi, $cW[$d], $xA + $cW[$c] / 2 - $cW[$d] / 2, $rA);
+          next unless ( defined $xd );
+          my @nets = ( @{$cNets[$c]}, @{$cNets[$d] || []} );
+          my $old = $lenOf->(@nets);
+          $place->($c, $xc, $r);
+          $place->($d, $xd, $rA);
+          my $g = $old - $lenOf->(@nets);
+          $place->($c, $xA, $rA);
+          $place->($d, $xD, $r);
+          @best = ($g, "swap", $sB, $xc, $r, $d, $xd) if ( $g > 0 && ( ! @best || $g > $best[0] ) );
+        }
+      }
+    }
+    next unless ( @best );
+
+    #<!-- apply: take the cell out of its segment, put it where it won -->
+    my ($g, $kind, $sB, $x, $r) = @best[0..4];
+    splice(@{$segCells[$sA]}, $kA, 1);
+    if ( $kind eq "swap" ) {
+      my ($d, $xd) = @best[5, 6];
+      my $kD = $indexOf->($d);
+      splice(@{$segCells[$sB]}, $kD, 1);
+      $place->($d, $xd, $rA);
+      $cRow[$d] = $rA;
+      $cSeg[$d] = $sA;
+      my $at = $firstAfter->($sA, $xd);
+      splice(@{$segCells[$sA]}, $at, 0, $d);
+      $swaps++;
+    }
+    else {
+      $moves++;
+    }
+    $place->($c, $x, $r);
+    $cRow[$c] = $r;
+    $cSeg[$c] = $sB;
+    my $at = $firstAfter->($sB, $x);
+    splice(@{$segCells[$sB]}, $at, 0, $c);
+    $gain += $g;
+  }
+  return ($moves, $swaps, $gain);
+};
+
+#================================ row slide ===============================#
+#<!-- The breakpoints of one cell for its left edge: the low and high edge of
+#     each net's bounding box without it, shifted by half its width.  A cell
+#     with no optimised net wants to stay where it is, so it contributes its
+#     own position twice and moves only when pushed. -->
+my $breaks = sub {
+  my ($c) = @_;
+  my $self = $cNode[$c];
+  my $half = $cW[$c] / 2;
+  my @b = ();
+  foreach my $e ( @{$cNets[$c] || []} ) {
+    my ($x0, $x1);
+    foreach my $n ( @{$netNodes[$e]} ) {
+      next if ( $n == $self );
+      my $x = $nX[$n];
+      if ( ! defined $x0 ) { ($x0, $x1) = ($x, $x); next; }
+      $x0 = $x if ( $x < $x0 );
+      $x1 = $x if ( $x > $x1 );
+    }
+    push(@b, $x0 - $half, $x1 - $half) if ( defined $x0 );
+  }
+  unless ( @b ) { my $x = $nX[$self] - $half; @b = ($x, $x); }
+  return (@b);
+};
+my $median = sub {
+  my @v = sort { $a <=> $b } @_;
+  my $m = @v / 2;
+  return ( ($v[$m-1] + $v[$m]) / 2 ) if ( @v % 2 == 0 );
+  return ( $v[int($m)] );
+};
+
+my $rowSlide = sub {
+  my ($segsImproved, $gain) = (0, 0);
+  for ( my $s = 0 ; $s < @segLo ; $s++ ) {
+    my $cells = $segCells[$s];
+    next unless ( @$cells );
+    my ($lo, $hi) = ($segLo[$s], $segHi[$s]);
+    my $r = $segRow[$s];
+
+    #<!-- Abacus clustering with an L1 cost: a cluster sits at the median of
+    #     its members' breakpoints, each less its offset in the cluster -->
+    my @cl = ();       #<!-- [x, width, [breakpoints], first, count] -->
+    for ( my $k = 0 ; $k < @$cells ; $k++ ) {
+      my $c = $cells->[$k];
+      my @b = $breaks->($c);
+      push(@cl, [ 0, $cW[$c], \@b, $k, 1 ]);
+      while ( 1 ) {
+        my $q = $cl[-1];
+        $q->[0] = $median->(@{$q->[2]});
+        $q->[0] = $lo if ( $q->[0] < $lo );
+        $q->[0] = $hi - $q->[1] if ( $q->[0] > $hi - $q->[1] );
+        last if ( @cl < 2 );
+        my $p = $cl[-2];
+        last if ( $p->[0] + $p->[1] <= $q->[0] );
+        #<!-- merge q into p: q's members sit p's width further right -->
+        push(@{$p->[2]}, map { $_ - $p->[1] } @{$q->[2]});
+        $p->[1] += $q->[1];
+        $p->[4] += $q->[4];
+        pop(@cl);
+      }
+    }
+    my @want = ();
+    foreach my $q ( @cl ) {
+      my $x = $q->[0];
+      for ( my $i = 0 ; $i < $q->[4] ; $i++ ) {
+        my $c = $cells->[$q->[3] + $i];
+        push(@want, $x);
+        $x += $cW[$c];
+      }
+    }
+
+    #<!-- onto the site grid: forward so nothing overlaps its left neighbour,
+    #     back so nothing runs off the right end -->
+    my $x0 = $rowX0{$rowY[$r]};
+    my @newX = ();
+    my $end = $lo;
+    for ( my $k = 0 ; $k < @$cells ; $k++ ) {
+      my $x = $x0 + floor( ($want[$k] - $x0) / $siteX + 0.5 ) * $siteX;
+      $x = $x0 + ceil( ($end - $x0) / $siteX ) * $siteX if ( $x < $end );
+      push(@newX, $x);
+      $end = $x + $cW[$cells->[$k]];
+    }
+    my $lim = $hi;
+    for ( my $k = $#$cells ; $k >= 0 ; $k-- ) {
+      my $w = $cW[$cells->[$k]];
+      $newX[$k] = $x0 + floor( ($lim - $w - $x0) / $siteX ) * $siteX if ( $newX[$k] + $w > $lim );
+      $lim = $newX[$k];
+    }
+    my $legal = ( $newX[0] >= $lo ) ? 1 : 0;
+    my $changed = 0;
+    my @oldX = map { $cellX->($_) } @$cells;
+    for ( my $k = 0 ; $k < @$cells ; $k++ ) {
+      $changed = 1 if ( $newX[$k] != $oldX[$k] );
+      $legal = 0 if ( $k > 0 && $newX[$k-1] + $cW[$cells->[$k-1]] > $newX[$k] );
+    }
+    next unless ( $legal && $changed );
+
+    my @nets = map { @{$cNets[$_] || []} } @$cells;
+    my $old = $lenOf->(@nets);
+    $place->($cells->[$_], $newX[$_], $r) for ( 0 .. $#$cells );
+    my $g = $old - $lenOf->(@nets);
+    if ( $g > 0 ) {
+      $segsImproved++;
+      $gain += $g;
+    }
+    else {
+      $place->($cells->[$_], $oldX[$_], $r) for ( 0 .. $#$cells );
+    }
+  }
+  return ($segsImproved, $gain);
+};
+
+#================================== run ===================================#
+my $prevOpt = $startOpt;
+for ( my $it = 1 ; $it <= $iters ; $it++ ) {
+  unless ( $noSwap ) {
+    my $ts = time;
+    my ($m, $sw, $g) = $globalSwap->();
+    printf("INFO-ALG-IMP_CONG : 016 : round %d global swap: %d move(s) into a gap, %d swap(s), %.1f um shorter, %ds\n",
+           $it, $m, $sw, $g / $dbu, time - $ts);
+  }
+  unless ( $noSlide ) {
+    my $ts = time;
+    my ($ns, $g) = $rowSlide->();
+    printf("INFO-ALG-IMP_CONG : 017 : round %d row slide: %d segment(s) improved, %.1f um shorter, %ds\n",
+           $it, $ns, $g / $dbu, time - $ts);
+  }
+  my ($all, $opt) = $totalLen->();
+  my $pct = ( $prevOpt > 0 ) ? 100 * ($prevOpt - $opt) / $prevOpt : 0;
+  printf("INFO-ALG-IMP_CONG : 018 : round %d HPWL %.1f um over all nets (%.2f%% this round)\n",
+         $it, $all / $dbu, $pct);
+  $prevOpt = $opt;
+  last if ( $pct < $minGainPct );
+}
+
+my ($endAll, $endOpt) = $totalLen->();
+printf("INFO-ALG-IMP_CONG : 019 : HPWL %.1f um -> %.1f um over all nets, %.2f%% shorter\n",
+       $startAll / $dbu, $endAll / $dbu,
+       ( $startAll > 0 ) ? 100 * ($startAll - $endAll) / $startAll : 0);
+
+#<!-- Legality is the whole promise, so check it again rather than trust the
+#     bookkeeping: every segment in order and apart, every cell inside its
+#     segment. -->
+my $bad = 0;
+for ( my $s = 0 ; $s < @segLo ; $s++ ) {
+  my $cells = $segCells[$s];
+  for ( my $k = 0 ; $k < @$cells ; $k++ ) {
+    my $c = $cells->[$k];
+    my $x = $cellX->($c);
+    $bad++ if ( $x < $segLo[$s] || $x + $cW[$c] > $segHi[$s] || $cSeg[$c] != $s );
+    $bad++ if ( $k > 0 && $cellX->($cells->[$k-1]) + $cW[$cells->[$k-1]] > $x );
+  }
+}
+if ( $bad > 0 ) {
+  print "ERR-ALG-IMP_CONG : 020 : $bad legality violation(s) in the result, which is a bug; nothing was changed\n";
+  return;
+}
+
+if ( $reportOnly ) {
+  print "INFO-ALG-IMP_CONG : 021 : --report_only given, nothing was changed\n";
+  my $t1 = new Benchmark;
+  print "Command improve_congestion took:",timestr(timediff($t1,$t0)),"\n";
+  return;
+}
+
+my ($moved, $reOriented) = (0, 0);
+for ( my $c = 0 ; $c < $nCell ; $c++ ) {
+  my $inst = $nName[$cNode[$c]];
+  my $x = $cellX->($c);
+  my $y = $rowY[$cRow[$c]];
+  my @was = $CADB{$inst}->dbCadbGetLoc;
+  next if ( $was[0] == $x && $was[1] == $y );
+  $CADB{$inst}->dbCadbSetLoc($x, $y);
+  $moved++;
+  if ( $cRow[$c] != $cRow0[$c] ) {
+    #<!-- a new row may need the other flip: dbfLegalOrientForRow is
+    #     legalize_flat's, and keeps the cell's mirroring in x -->
+    my $o = $CADB{$inst}->dbCadbGetOrient;
+    my $now = &dbfLegalOrientForRow($o, $rowOrient{$y});
+    if ( ! defined $o || $o ne $now ) {
+      $CADB{$inst}->dbCadbSetOrient($now);
+      $reOriented++;
+    }
+  }
+  #<!-- as in legalize_flat: the placer keeps a parallel location for flops -->
+  if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
+    $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
+  }
+}
+print "INFO-ALG-IMP_CONG : 022 : $moved cell(s) moved, $reOriented re-oriented to match a new row\n";
+&set_inst_box if ( $moved > 0 );
+
+my $t1 = new Benchmark;
+print "Command improve_congestion took:",timestr(timediff($t1,$t0)),"\n";
+
+}# sub improve_congestion
+
+1;

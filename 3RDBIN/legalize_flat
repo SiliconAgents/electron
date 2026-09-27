@@ -16,11 +16,34 @@ short, it is readable, and on a small single-height-cell design it is the thing
 to check against.  This exists because two of its remaining limitations are
 awkward to fix there and natural here.
 
-  multi-row cells   The Perl one counts cells taller than a row and says out
-                    loud that it does not reserve the rows above them, so a
-                    double-height cell overlaps whatever is in the row above.
-                    Nangate is entirely single-height so nothing in TESTS
-                    catches it.  This one reserves the rows.
+  multi-row cells   THIS CLAIM WAS WRONG AND THE CODE STILL IS.  What follows
+                    is what it used to say:
+
+                      "The Perl one counts cells taller than a row and says
+                       out loud that it does not reserve the rows above them,
+                       so a double-height cell overlaps whatever is in the row
+                       above.  Nangate is entirely single-height so nothing in
+                       TESTS catches it.  This one reserves the rows."
+
+                    It does not reserve the rows.  Look at what it actually
+                    does, at the end of the assignment loop in legalize(): it
+                    subtracts the cell's width from seg[4], the REMAINING FREE
+                    WIDTH of a covering segment in each row above.  That
+                    reserves width, not place.  Those rows never learn where
+                    the tall cell is, they are never given it as a member, and
+                    abacus() packs them from the left exactly as if it were not
+                    there -- so cells land on top of it anyway.
+
+                    Measured, on a synthetic design of 300 single-height and 30
+                    double-height cells driven through electron: this tool
+                    prints "the rows above them were reserved" and the written
+                    DEF has 20 overlaps by an independent integer sweep.
+
+                    The Perl one now handles this properly and gets zero on the
+                    same design: it places tall cells FIRST and then cuts them
+                    out of every row they span, the same way a macro is cut
+                    out, so abacus cannot slide anything through one.  Porting
+                    that here is the fix; decrementing a width is not.
 
   speed at size     The dominant cost is per-cell work over millions of cells,
                     which is what NumPy is for.  Measured on synthetic designs
@@ -56,13 +79,25 @@ awkward to fix there and natural here.
                     its density pass went off by default.  Before either, it
                     was 821s here.
 
-                    So the case for this tool is NOT speed today.  It is
-                    multi-row cells, which the Perl one counts and explicitly
-                    does not handle, and being a place to do quality work --
-                    a real cluster-delta cost, a connectivity term -- that is
-                    painful in Perl.  If speed is wanted, the thing to fix is
-                    the marshalling: pack/unpack instead of printf and split
-                    would cut the 112s far more than any change in here.
+                    So the case for this tool is NOT speed today, and as of the
+                    multi-row note above it is not correctness either -- the
+                    Perl one now does that properly and this one does not do it
+                    at all.  What is left is that it is a place to do quality
+                    work -- a real cluster-delta cost, a connectivity term --
+                    that is painful in Perl, and that case is weaker than it
+                    looks: the pin density pass the Perl one grew, --pin_spread,
+                    turned out to be a one-field change there.
+
+                    BEFORE USING THIS, read the legalize_flat section of
+                    CLAUDE.md.  It is behind the Perl by the local density cap
+                    (-dbin, commit 6ffe129) and by --pin_spread, which refuses
+                    to run through -placer rather than quietly returning an
+                    unpadded placement.  Nothing committed in the tree calls
+                    -placer, and TESTS/large/Makefile says in capitals not to.
+
+                    If speed is wanted, the thing to fix is the marshalling:
+                    pack/unpack instead of printf and split would cut the 112s
+                    far more than any change in here.
 
 WHAT IT DELIBERATELY DOES NOT DO
 

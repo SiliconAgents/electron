@@ -152,8 +152,9 @@ matmul_hier:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../matmul_hier.tcl
 
-# Same run left at the prompt, so the result can be looked at: "gui" for the
-# window, "legalize_flat" for the legalisation this one skips.  --nogui is what
+# Same run plus improve_congestion, left at the prompt so the result can be
+# looked at: "gui" for the window.  Writes matmul_4x4.recurse_interactive.def,
+# .legal_interactive.def and .improved_interactive.def.  --nogui is what
 # keeps the prompt; see the header of ../nangate_recurse_interactive.tcl for
 # why that reads backwards.
 matmul_hier-interactive:

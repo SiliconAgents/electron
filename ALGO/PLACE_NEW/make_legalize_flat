@@ -43,6 +43,194 @@
 #  objective is displacement.  That is exactly why pass 1 misbehaves -- total
 #  displacement is blind to how many pins a cell has.
 #
+#  THE LOCAL DENSITY CAP, which is the thing to read before using this.
+#
+#  Pass 2 gives a cell the nearest row whose SEGMENT has room, and on a die
+#  with no macros a segment is the whole row.  So the capacity question was
+#  "is this 1496um row more than 100% full", the answer at 50% utilisation is
+#  almost always no, and the nearest row won every time however crowded it was
+#  AT THAT X.  Abacus then fixed a 300% full patch the only way it can, by
+#  sliding cells along the row.
+#
+#  Every test in the tree that legalizes, average and worst move in um, each
+#  pair from ONE placement legalized both ways:
+#
+#      test              cells    --no_dbin        cap on        avg    worst
+#      ---------------  -------  -------------  -------------  -----  -------
+#      nangate_flat       4,233   12.9 /  49.4   12.4 /  44.7  1.04x   1.11x
+#      nangate_recurse    4,233   11.0 /  72.0    4.2 /  25.3  2.63x   2.85x
+#      matmul_4x4       204,816   46.9 / 453.7   15.1 / 274.8  3.10x   1.65x
+#      mxu_tile64       213,568   28.5 / 477.1   10.9 /  80.3  2.62x   5.94x
+#      mxu_256          855,424   43.3 / 879.0   11.1 / 183.5  3.91x   4.79x
+#
+#  Two and a half to four times less average movement on every design placed
+#  hierarchically, and up to six times less on the worst cell.  nangate_flat is
+#  the exception and the reason is in its numbers, not in the cap: see below.
+#
+#  On mxu_256, measured on the written DEFs rather than from the summary above,
+#  the horizontal total falls from 36,716mm to 9,005mm while the vertical rises
+#  from 310mm to 473mm.  27.7 METRES of horizontal movement removed for 163mm
+#  of vertical, a trade of 170 to 1, and it is there to be had because 100% of
+#  the over-full width on that design has free space within FOUR ROWS, 5.6um.
+#
+#  Legality is unaffected, and that is checked independently rather than taken
+#  from the tool: an integer-DBU overlap sweep over the written DEF says zero
+#  overlaps on every design above, with or without the cap, and zero cells
+#  whose orientation disagrees with their row.
+#
+#  TWO THINGS MAKE IT WORK AND BOTH ARE EASY TO GET WRONG.
+#
+#  It relieves OVERFLOW, it does not equalise density.  Equalising is a
+#  transportation problem whose answer drains the dense middle of a die into
+#  empty rows hundreds of rows away: simulated on mxu_256 it wants a mean |dy|
+#  of 686um against 2.3um for relieving only the overflow.  That is 300 times
+#  the movement for no extra legality, and aiming a cell at the CENTRE of
+#  another bin is precisely what pass 1 does, which is the best explanation
+#  anyone has for why pass 1 multiplies unrouted nets by seven.
+#
+#  And it is BOUNDED, by -dbin_rows, default 2.  Let the cap reach the whole
+#  -rows window and it becomes equalisation by the back door.  Measured on one
+#  fixed placement of nangate_flat, unrouted nets of 4489:
+#
+#      cap off  108      +/-2 rows  119      21um bins, +/-6 rows  138
+#      +/-1     173      +/-3       101      5um bins,   +/-6      480
+#
+#  NOTE WHAT THAT SECOND TABLE DOES NOT SAY.  It does not show a routing
+#  improvement.  Fine bins with no bound are clearly, reproducibly harmful --
+#  480 against 108 is far outside the noise -- but everything in the sane
+#  region lands in the same band as no cap at all, and the order is not even
+#  monotone, so on nangate_flat this is worth nothing to the router and
+#  nothing is the honest number.  Two reasons to expect that: qrouter itself
+#  is not deterministic here (108, 115 and 116 unrouted on three runs of ONE
+#  legalized DEF), and nangate_flat is 60 rows on an 85um die where only 62%
+#  of the over-full width can be absorbed vertically at all, against 100% on
+#  mxu_256.  It is the only design in the tree with a router in its flow, and
+#  it is the wrong shape for this -- which is also why it is the one row of
+#  the table above that shows nothing.  Its 1.04x is not a small win, it is
+#  noise: place_flat_design is not deterministic either, so that row is the
+#  only one whose two halves do not come from the same placement.
+#
+#  So: the displacement win is large, measured, and reproducible; the routing
+#  effect is unmeasured on any design where the mechanism applies.  Which is
+#  why this is ON by default and pass 1 is not -- it does not move a cell that
+#  is not in an over-full bin, it never changes a cell's x, and it never sends
+#  one more than two rows -- but if unrouted nets go up on a real design,
+#  --no_dbin is the first thing to try and the numbers above are the control.
+#
+#  PASS 1B, PIN DENSITY RELIEF BY PADDING -- also OFF by default, also new.
+#
+#  Everything above is about CELL AREA: a bin holds more cell area than it has
+#  room for.  What a router runs out of first is not area, it is PINS -- a 5um
+#  square holding forty pins needs forty escapes out of it whatever the cells
+#  in it are worth in area, and a tile packed with small many-pinned cells is
+#  denser in pins than a tile holding one wide buffer of the same area.
+#
+#  So this counts SIGNAL PINS per tile, not area, and relieves the tiles over a
+#  target by PADDING: a cell in an over-full tile is handed to pass 2 with a
+#  wider footprint than it really has.  Abacus then opens the gap itself, and
+#  that is the whole trick -- padding changes nothing but the width the row
+#  assignment and the Abacus clustering see, so the cell still lands at the
+#  minimum total squared displacement for its row, and the slack shows up as
+#  real whitespace in exactly the tiles that asked for it.
+#
+#  WHY PADDING AND NOT A MOVE.  The two mechanisms above both relieve density
+#  by retargeting a cell somewhere else -- pass 1 to the centre of another bin,
+#  which costs seven times the unrouted nets, and the local cap to a nearby
+#  row, which is bounded and does not.  Padding retargets nothing.  The cell
+#  keeps its x target and its y target; only its width changes, and Abacus
+#  spends that width the cheapest way it can.  A cell that is alone in its tile
+#  does not move at all even if the tile is over target, because there is
+#  nothing for its padding to push against.
+#
+#  THE TARGET is a percentile of the occupied tiles, not a constant, because
+#  there is no absolute number of pins per 5um that is right for every library
+#  and every utilisation.  -pin_pctl 95, the default, means "relieve the
+#  densest twentieth of the tiles and leave the rest alone" -- which is the
+#  same rule the local cap follows and for the same reason: relieve the
+#  overflow, do not equalise.  -pin_target names an absolute count instead.
+#
+#  THE PADDING IS BOUNDED, by -pin_max, the most a cell may be inflated,
+#  default 2.0 -- a cell never takes more than twice its own width.  A tile at
+#  four times the target would otherwise ask for a four times wider cell, which
+#  is density equalisation wearing a different hat.  It did not bind anywhere
+#  on nangate_flat: -pin_max 3.0 gives a byte identical placement, because the
+#  amount asked for is under one site long before it reaches the cap, and a
+#  site is the quantum.
+#
+#  The amount is w * (pins_in_tile / target - 1), which is the inflation that
+#  would take the tile to the target if the tile's cells were all padded and
+#  pins rode on cells uniformly.  Neither is exactly true, so this converges
+#  towards the target rather than onto it.
+#
+#  WHAT IT MEASURES, on nangate_flat.  One placement, legalized every way, pin
+#  density counted independently from the written DEF over 5um tiles using the
+#  real LEF pin shapes -- not from the numbers this command prints:
+#
+#      -pin_pctl    worst tile     p99     tiles>80    HPWL      avg move
+#      ----------  ------------  -------  ----------  --------  ----------
+#      off (base)       111        106        56       30013um    12.46um
+#      99               111        106        56       30013um    12.46um
+#      98               103         96        53       30291um    13.32um
+#      95                94         92        48       30952um    13.99um
+#      90                94         93        39       31702um    15.13um
+#      85                94         89        30       32366um    15.93um
+#      80                94         88        20       32920um    16.78um
+#
+#  So the worst tile comes down 15% for 3.1% of wirelength at the default, and
+#  the tail keeps thinning as the percentile drops while the worst tile stops
+#  improving -- 94 is where one site of padding runs out.  99 is a no-op by
+#  construction: the target lands on the maximum, so no tile is over it.
+#
+#  It holds at scale.  matmul_4x4, 204,816 instances, one placement legalized
+#  both ways, same independent check, defaults:
+#
+#                       worst   p99   >70   >80      HPWL       avg move
+#      off (base)        114     77   573    58    6,464,149um   15.15um
+#      --pin_spread      107     72   223    19    6,778,049um   17.22um
+#
+#  The tail is where it pays: two thirds of the tiles over 80 pins are gone,
+#  and 61% of those over 70, for 4.9% of wirelength.  Zero overlaps both ways.
+#
+#  NOTE WHAT GOES UP.  Tiles over 40 pins rise, 7,878 to 8,054, and occupied
+#  tiles rise with them.  That is not a regression, it is the mechanism: the
+#  pins pushed out of the worst tiles land in their neighbours, and the point
+#  is to flatten the peak, not the distribution.  A pass that lowered the
+#  middle of the histogram too would be equalising density, which is the trap
+#  described above pass 1.
+#
+#  It costs one extra run of pass 2 and nothing else: 19.9s to 23.3s on
+#  matmul_4x4 end to end, +17%, most of which is the DEF either side.
+#
+#  AND THE ROUTING NUMBER SAYS NOTHING, which has to be stated because this is
+#  the one design in the tree with a router in its flow and the temptation to
+#  read it is strong.  Unrouted nets of 4489, same placement throughout:
+#
+#      base 121    -dbin_rows 1  111    -dbin_rows 3  104
+#                  -dbin_rows 4  261    --no_dbin     168
+#
+#  Those four knobs do not change the pin density map AT ALL -- worst tile 111,
+#  p99 106, p90 90, identical for every one of them -- and they move unrouted
+#  nets from 104 to 261.  Every --pin_spread result above falls inside that
+#  band.  qrouter on this design is chaotic with respect to small placement
+#  changes, so it can neither confirm nor refute this pass, and averaging would
+#  need an ensemble of placements rather than more runs of one.
+#
+#  It is not qrouter being random, though, and that matters for anyone
+#  measuring here: write_def walks "keys %CADB" and Perl randomises hash order
+#  per process, so the DEF's record order changes every run and qrouter routes
+#  in file order.  Five runs of ONE byte-identical legalized DEF gave 222, 200,
+#  239, 197 and 130.  With PERL_HASH_SEED=0 and PERL_PERTURB_KEYS=0 the same
+#  DEF gives 121 four times out of four.  Pin that seed before comparing
+#  anything through the router.
+#
+#  LEGALITY IS NEVER TRADED FOR DENSITY.  Padding is width the rows have to
+#  find, and at an aggressive percentile they cannot: at -pin_pctl 70, 39 cells
+#  found no row, kept the overlapping location the placer gave them, and an
+#  integer sweep over the DEF reported 449 overlaps.  So the padded run is
+#  compared against the unpadded one and thrown away if it placed fewer cells;
+#  see the check after the second pass.  Every row in the table above is zero
+#  overlaps, checked that way.
+#
 #  Pass 2, rows.  Every movable cell is assigned to a row near its own y and
 #  legalized along x by Abacus: cells are taken in x order, and a cell that
 #  would overlap its left neighbour is merged into a cluster whose position is
@@ -51,6 +239,24 @@
 #  displacement for a given row assignment, which is the closest thing to "moved
 #  as little as possible" that is cheap to compute.  Rows are tried nearest
 #  first within a window, and the assignment with the lowest cost wins.
+#
+#  CELLS TALLER THAN ONE ROW are placed before pass 2 and then treated as
+#  obstacles, so the rows they occupy are cut around them exactly as they are
+#  cut around a macro.  Abacus cannot slide a cell through a macro and it
+#  cannot slide one through a tall cell either, which is the whole point: the
+#  overlap becomes impossible rather than unlikely.
+#
+#  This used to be a known hole -- the command counted them and said out loud
+#  that the rows above were not reserved.  Nangate is 135 macros all 1.4um
+#  tall, so nothing in TESTS caught it.  Checked now on a synthetic design of
+#  300 single height and 30 double height cells: zero overlaps by an
+#  independent integer sweep over the written DEF.
+#
+#  Reserving the rows' free WIDTH instead, which is what 3RDBIN/legalize_flat
+#  does, does not work -- it reserves width, not place, and the rows above pack
+#  from the left as if the tall cell were not there.  The same synthetic design
+#  through -placer: 20 overlaps, while it prints "the rows above them were
+#  reserved".
 #
 #  FIXED instances never move.  Nor does anything that is not a CORE cell: a
 #  macro is not a row object and legalizing one by sliding it along a row would
@@ -68,9 +274,17 @@
 #               -max_disp <um> : report cells moved further than this
 #               -iters <n> : pass 1 iteration cap, default 20
 #
+#               -pin_grid <um> : tile for the pin density map, default 5
+#               -pin_pctl <n> : percentile of occupied tiles to relieve
+#                               above, default 95
+#               -pin_target <n> : an absolute pins-per-tile target instead
+#               -pin_max <r> : most a cell may be inflated, default 2.0
+#
 #       switches :
 #               --spread : run pass 1; it is off by default, see above
 #               --no_spread : the default, kept so old scripts still run
+#               --pin_spread : run pass 1b, the pin density padding; off by
+#                              default, see above
 #               --no_snap_x : leave x off the site grid
 #               --report_only : say what it would do and change nothing
 #
@@ -78,6 +292,48 @@
 #               instance locations in CADB, and the instance boxes
 #
 #****
+
+#=========================== orientation for a row ===========================#
+#<!-- What orientation a cell must take to sit in a row of a given orientation.
+#
+#     Standard cell rows alternate -- N, FS, N, FS -- so that a row and the one
+#     above it share a power rail.  A cell in an FS row has to be flipped in y
+#     to match, or its VDD meets the neighbour's VSS.
+#
+#     This was simply never done.  legalize_flat read dbCadbGetOrient only to
+#     transpose w and h for a 90 degree rotation, and never wrote an orientation
+#     back, so every cell came out of the placer N and stayed N.  Measured on
+#     mxu_256: 423,506 of 855,424 cells, 49.5%, sat in an FS row as N.
+#
+#     It matters more the moment a legalizer starts moving cells between rows on
+#     purpose, which is what the local density cap below does -- but it was
+#     already wrong for every cell the row window moved, and |dy| already
+#     reached two row pitches.
+#
+#     The rule is: keep whatever mirroring in x the cell already had, take the
+#     row's flip in y.  The four row-legal orientations are exactly the two
+#     bits (mirror x, flip y):
+#
+#         N = (0,0)   FN = (1,0)   FS = (0,1)   S = (1,1)
+#
+#     A 90 degree rotated cell -- E, W, FE, FW -- is not a row object at all;
+#     composing a rotation with a row flip is ambiguous and a rotated standard
+#     cell does not occur in this flow, so those are returned untouched rather
+#     than guessed at. -->
+sub dbfLegalOrientForRow {
+my ($cell, $row) = @_;
+$cell = "N" unless ( defined $cell && $cell ne "" );
+$row  = "N" unless ( defined $row  && $row  ne "" );
+return $cell if ( $cell =~ m/^F?[EW]$/ );
+my %xmir = ( "N" => 0, "FN" => 1, "FS" => 0, "S" => 1 );
+my %yflp = ( "N" => 0, "FN" => 0, "FS" => 1, "S" => 1 );
+#<!-- an orientation this does not know about is left alone -->
+return $cell unless ( exists $xmir{$cell} );
+my $ry = ( exists $yflp{$row} ) ? $yflp{$row} : 0;
+my @tab = ( [ "N", "FS" ], [ "FN", "S" ] );      #<!-- [mirror x][flip y] -->
+return $tab[ $xmir{$cell} ][ $ry ];
+}#sub dbfLegalOrientForRow
+
 sub legalize_flat {
 
 use Benchmark;
@@ -95,6 +351,24 @@ my ($noSnapX, $reportOnly, $debug) = (0, 0, 0);
 my $doSpread = 0;
 my ($extPlacer, $extArgs, $keepExt);
 my $spreadOrder = "large";
+#<!-- Local density cap on the row assignment.  0 means "work it out from the
+#     row span"; -1 turns it off and restores the behaviour this replaces. -->
+my $dbinUm = 0;
+#<!-- How many rows the cap may push a cell off its nearest.  The relief it is
+#     there for is one or two rows away; letting it reach the whole -rows window
+#     turns it back into density equalisation, which is exactly what it must not
+#     be -- measured, unbounded it takes nangate_flat from 116 unrouted nets to
+#     480, bounded at two it improves them. -->
+my $dbinRows = 2;
+#<!-- Pass 1b, pin density relief by padding.  OFF by default for the same
+#     reason pass 1 is: it is new, and nothing about it is measured yet. -->
+my $doPinPad = 0;
+my $pinGridUm = 5;
+#<!-- 95, not 90: see the table at the head of the file.  90 buys a better
+#     spread of the distribution and costs nearly twice the wirelength. -->
+my $pinPctl = 95;
+my $pinMaxRatio = 2.0;
+my $pinTarget = 0;      #<!-- 0 means "derive it from -pin_pctl" -->
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : legalize_flat -grid <bin size in um, default 10>\n";
@@ -106,6 +380,31 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                      --no_spread    the default; kept so old scripts run\n";
   print "                      --no_snap_x    leave x off the site grid\n";
   print "                      --report_only  change nothing\n";
+  print "                      -dbin <um>     column width for the local density\n";
+  print "                                     cap on the row assignment.  0, the\n";
+  print "                                     default, is 100 mean cell widths\n";
+  print "                      -dbin_rows <n> how many rows the local cap may push\n";
+  print "                                     a cell off its nearest, default 2.\n";
+  print "                                     Unbounded it becomes equalisation\n";
+  print "                      --no_dbin      no local cap: every cell takes its\n";
+  print "                                     nearest row however full that row\n";
+  print "                                     already is locally.  The behaviour\n";
+  print "                                     before the cap existed, kept for A/B\n";
+  print "                      --pin_spread   relieve PIN density by padding the\n";
+  print "                                     cells in the densest tiles, so that\n";
+  print "                                     Abacus opens real gaps there.  Off by\n";
+  print "                                     default.  Worst 5um tile -15% for 3.1%\n";
+  print "                                     of wirelength on nangate_flat; see the\n";
+  print "                                     table at the head of the file, and note\n";
+  print "                                     what it says about the router\n";
+  print "                      -pin_grid <um> tile for the pin density map, default 5\n";
+  print "                      -pin_pctl <n>  relieve tiles above this percentile of\n";
+  print "                                     the occupied ones, default 95.  Lower\n";
+  print "                                     thins the tail further and costs more\n";
+  print "                                     wirelength; 99 is a no-op\n";
+  print "                      -pin_target <n> an absolute pins-per-tile target,\n";
+  print "                                     instead of the percentile\n";
+  print "                      -pin_max <r>   most a cell may be inflated, default 2.0\n";
   print "                      -spread_order <small|large>\n";
   print "                            which cell an over-full bin gives away.\n";
   print "                            large moves fewer cells and lowers total\n";
@@ -137,6 +436,15 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--no_snap_x")  { $noSnapX = 1; }
   elsif ($_[$i] eq "--report_only"){ $reportOnly = 1; }
   elsif ($_[$i] eq "-spread_order"){ $spreadOrder = $_[$i+1]; }
+  elsif ($_[$i] eq "-dbin")        { $dbinUm = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_dbin")    { $dbinUm = -1; }
+  elsif ($_[$i] eq "-dbin_rows")   { $dbinRows = $_[$i+1]; }
+  elsif ($_[$i] eq "--pin_spread")   { $doPinPad = 1; }
+  elsif ($_[$i] eq "--no_pin_spread"){ $doPinPad = 0; }
+  elsif ($_[$i] eq "-pin_grid")    { $pinGridUm = $_[$i+1]; }
+  elsif ($_[$i] eq "-pin_pctl")    { $pinPctl = $_[$i+1]; }
+  elsif ($_[$i] eq "-pin_target")  { $pinTarget = $_[$i+1]; }
+  elsif ($_[$i] eq "-pin_max")     { $pinMaxRatio = $_[$i+1]; }
   elsif ($_[$i] eq "-placer")      { $extPlacer = $_[$i+1]; }
   elsif ($_[$i] eq "-args")        { $extArgs = $_[$i+1]; }
   elsif ($_[$i] eq "--keep_files") { $keepExt = 1; }
@@ -176,6 +484,7 @@ $rowH = $rowH * $dbu;
 my @rowY = ();
 my %rowX0 = ();
 my %rowX1 = ();
+my %rowOrient = ();
 my $siteX = 0;
 foreach my $tag ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetRows ) {
   my @f = split(/\s+/, $tag);
@@ -192,6 +501,11 @@ foreach my $tag ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetRows ) {
     push(@rowY, $y);
     $rowX0{$y} = $x0;
     $rowX1{$y} = $x1;
+    #<!-- field 4 is the row's orientation, and it is the whole reason a cell
+    #     cannot simply be dropped into a different row: rows alternate N and
+    #     FS so that neighbours share a power rail, and a cell left N in an FS
+    #     row has its rails upside down. -->
+    $rowOrient{$y} = ( defined $f[4] && $f[4] ne "" ) ? $f[4] : "N";
   }
   $siteX = $stepX if ( $stepX > $siteX );
 }
@@ -208,9 +522,15 @@ if ( $siteX <= 0 ) { $siteX = 1; $noSnapX = 1; }
 #     anything that is not CORE -- a macro, a pad -- is an obstacle: it is not a
 #     row object, and sliding one along a row to legalize it would do more harm
 #     than leaving it where it is. -->
-my @mov = ();          #<!-- [inst, w, h, tx, ty] in dbu, tx/ty the target -->
+my @mov = ();          #<!-- [inst, w, h, tx, ty, pins, padded w] in dbu -->
+my $totMovW = 0;       #<!-- their total width, for the default bin size -->
 my @obs = ();          #<!-- [llx, lly, urx, ury] -->
 my ($skipNoCell, $skipNoSize, $unplacedCnt) = (0, 0, 0);
+#<!-- Signal pins per master, counted once per master rather than once per
+#     instance: a design has millions of instances and a few hundred masters.
+#     POWER and GROUND pins do not count -- they are strapped from above and
+#     are not what a router escapes out of a tile. -->
+my %pinsOf = ();
 
 foreach my $inst ( sort keys %CADB ) {
   my $cellref = $CADB{$inst}->dbCadbGetCellref;
@@ -251,7 +571,19 @@ foreach my $inst ( sort keys %CADB ) {
     push(@obs, [$x, $y, $x + $w, $y + $h]);
     next;
   }
-  push(@mov, [$inst, $w, $h, $x, $y]);
+  unless ( exists $pinsOf{$cellref} ) {
+    my $np = 0;
+    foreach my $p ( $PLDB{$cellref}->dbMdbGetPins ) {
+      next if ( $PLDB{$cellref}->dbMdbGetPinIsPower($p) );
+      next if ( $PLDB{$cellref}->dbMdbGetPinIsGround($p) );
+      $np++;
+    }
+    $pinsOf{$cellref} = $np;
+  }
+  #<!-- the padded width starts as the real one, so everything downstream is
+  #     unchanged until pass 1b widens it -->
+  push(@mov, [$inst, $w, $h, $x, $y, $pinsOf{$cellref}, $w]);
+  $totMovW += $w;
 }
 
 my $nMov = @mov;
@@ -293,10 +625,23 @@ foreach my $m ( @mov ) {
 #     The format is deliberately its own rather than the flat placer nodefile:
 #     a legalizer needs rows, sites and obstacles, and needs no nets at all, so
 #     sharing the placer's format would mean writing a netlist nobody reads.
-#     Everything in it is integer DBU. -->
+#     Everything in it is integer DBU.
+#
+#     The CELL record carries a trailing signal pin count, added for pass 1b.
+#     It sits after the name so that a reader written against the old six
+#     field record is unaffected; nothing on the far side reads it yet. -->
 if ( defined $extPlacer && $extPlacer ne "" ) {
   unless ( -e $extPlacer ) {
     print "ERR-ALG-LEGAL : 022 : no legalizer at $extPlacer\n";
+    return;
+  }
+  #<!-- The pin count goes out in the CELL record below, but no external
+  #     legalizer in this tree does anything with it yet.  Running the two
+  #     together would quietly give the unpadded answer and call it padded,
+  #     which is worse than refusing. -->
+  if ( $doPinPad ) {
+    print "ERR-ALG-LEGAL : 042 : --pin_spread is not implemented in the external\n";
+    print "ERR-ALG-LEGAL : 043 : legalizer path; drop -placer or drop --pin_spread\n";
     return;
   }
   my $inFile  = "$TOP_MODULE.legal.in";
@@ -323,7 +668,11 @@ if ( defined $extPlacer && $extPlacer ne "" ) {
   for ( my $i = 0 ; $i < @mov ; $i++ ) {
     my $m = $mov[$i];
     push(@byIdx, $m->[0]);
-    print LGL_IN "CELL $i $m->[1] $m->[2] $m->[3] $m->[4] $m->[0]\n";
+    #<!-- the signal pin count goes AFTER the name, not before it, so that a
+    #     reader written against the old six-field record still takes field 6
+    #     as the name and ignores what follows.  An instance name has no
+    #     whitespace in it, so the trailing field is unambiguous. -->
+    print LGL_IN "CELL $i $m->[1] $m->[2] $m->[3] $m->[4] $m->[0] $m->[5]\n";
   }
   close(LGL_IN);
   print "INFO-ALG-LEGAL : 024 : wrote $inFile, " . scalar(@mov) . " cell(s)\n";
@@ -391,13 +740,27 @@ if ( defined $extPlacer && $extPlacer ne "" ) {
     print "Command legalize_flat took:",timestr(timediff($t1,$t0)),"\n";
     return;
   }
+  my $extReOriented = 0;
   foreach my $n ( @extLoc ) {
     my ($inst, $x, $y) = @$n;
     $CADB{$inst}->dbCadbSetLoc($x, $y);
     $CADB{$inst}->dbCadbSetStatus(PLACED);
+    #<!-- same rule as the internal path.  A y the external tool returns that is
+    #     not exactly a row's y is left alone rather than guessed at. -->
+    if ( exists $rowOrient{$y} ) {
+      my $was = $CADB{$inst}->dbCadbGetOrient;
+      my $now = &dbfLegalOrientForRow($was, $rowOrient{$y});
+      if ( ! defined $was || $was ne $now ) {
+        $CADB{$inst}->dbCadbSetOrient($now);
+        $extReOriented++;
+      }
+    }
     if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
       $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
     }
+  }
+  if ( $extReOriented > 0 ) {
+    print "INFO-ALG-LEGAL : 038 : $extReOriented cell(s) re-oriented to match their row\n";
   }
   print "INFO-ALG-LEGAL : 034 : updating instance boxes\n";
   &set_inst_box;
@@ -587,6 +950,73 @@ if ( $doSpread ) {
         " over ${gridUm}um bins\n";
 }
 
+#============ pin density relief by padding: the map and the maths ==========#
+#<!-- See the head of the file for what this is and why it pads rather than
+#     moves.  The pass itself is not here -- it cannot be, because it needs a
+#     legal placement to measure and pass 2 is what produces one.  What is here
+#     is the grid, the two measurements taken on it, and the per-instance size
+#     and pin count they need; the padding is worked out between the two runs
+#     of pass 2, below.
+#
+#     Everything it does is to $m->[6], the width pass 2 sees.  The cell's real
+#     width, $m->[1], is untouched, so a padded cell is written at the left
+#     edge of the slot it was given and the slack falls to its right. -->
+my $pinTile = 0;                 #<!-- tile size in dbu, 0 when the pass is off -->
+my ($pinNX, $pinNY, $pinT) = (0, 0, 0);
+my %pinN = ();
+my %cellW = ();
+my %cellH = ();
+
+#<!-- pins per tile for a set of cells, given as [x, y, w, h, pins].  Used
+#     twice: on the targets before the pass, and on the legalized locations
+#     afterwards, so the report measures the same thing both times. -->
+my $pinHist = sub {
+  my ($cells) = @_;
+  my %h = ();
+  foreach my $c ( @$cells ) {
+    next unless ( $c->[4] > 0 );
+    my $bx = int( ($c->[0] + $c->[2]/2 - $die[0]) / $pinTile );
+    my $by = int( ($c->[1] + $c->[3]/2 - $die[1]) / $pinTile );
+    $bx = 0 if ( $bx < 0 ); $bx = $pinNX - 1 if ( $bx >= $pinNX );
+    $by = 0 if ( $by < 0 ); $by = $pinNY - 1 if ( $by >= $pinNY );
+    $h{"$bx,$by"} += $c->[4];
+  }
+  return \%h;
+};
+
+#<!-- max, the percentile, and how many tiles are over the target -->
+my $pinStats = sub {
+  my ($h, $target) = @_;
+  my @v = sort { $a <=> $b } values %$h;
+  return (0, 0, 0, 0) unless ( @v );
+  my $k = int( $pinPctl / 100 * $#v );
+  $k = 0 if ( $k < 0 );
+  $k = $#v if ( $k > $#v );
+  my $over = 0;
+  if ( $target > 0 ) {
+    foreach my $v ( @v ) { $over++ if ( $v > $target ); }
+  }
+  return ($v[-1], $v[$k], scalar(@v), $over);
+};
+
+#<!-- The padded width per instance, empty until the provisional legalization
+#     below has run and the map has been measured on it. -->
+my %padOf = ();
+
+if ( $doPinPad ) {
+  $pinTile = int( $pinGridUm * $dbu );
+  if ( $pinTile < 1 ) { $pinTile = 1; }
+  $pinNX = int( ($die[2] - $die[0]) / $pinTile ) + 1;
+  $pinNY = int( ($die[3] - $die[1]) / $pinTile ) + 1;
+  #<!-- size and pin count by instance, so the map can be rebuilt from a list
+  #     of locations alone -->
+  foreach my $m ( @mov ) {
+    $pinN{$m->[0]} = $m->[5];
+    $cellW{$m->[0]} = $m->[1];
+    $cellH{$m->[0]} = $m->[2];
+  }
+}
+
 #====================== pass 2: rows and Abacus ============================#
 #<!-- Free intervals per row.  An obstacle covering part of a row's y band cuts
 #     it in two, and each piece is legalized on its own: a cell cannot slide
@@ -609,6 +1039,276 @@ foreach my $y ( @rowY ) {
   }
   push(@free, [$x, $rowX1{$y}]) if ( $rowX1{$y} > $x );
   $seg{$y} = \@free;
+}
+
+#------------------------- cells taller than one row ------------------------#
+#<!-- WHY THESE ARE PLACED FIRST, AND SEPARATELY.
+#
+#     Abacus legalizes one row at a time.  A cell spanning two rows is not a
+#     member of one row's problem, it is a member of both, and there is no way
+#     to express that to a per-row solver -- so this used to count them, say
+#     out loud that the rows above were not reserved, and leave them to overlap
+#     whatever was up there.  Nangate is 135 macros all 1.4um tall, so nothing
+#     in TESTS ever caught it; a real library will.
+#
+#     NOTE WHAT DOES NOT WORK, because it is what 3RDBIN/legalize_flat does and
+#     it is the obvious idea: subtracting the cell's width from the remaining
+#     FREE WIDTH of the rows above.  That reserves width, not place.  The rows
+#     above never learn where the tall cell is, Abacus packs them from the left
+#     as usual, and the cells land on top of it anyway.  Measured on a
+#     synthetic case -- one double height cell, twenty single height ones in
+#     the row above -- the NumPy legalizer prints "the rows above them were
+#     reserved" and produces two real overlaps.
+#
+#     What works is to turn the tall cell into an OBSTACLE.  The rows it spans
+#     are already cut into free intervals around macros, and a placed tall cell
+#     is exactly a small macro: cut the intervals around it too, and every row
+#     it spans is then a row with a hole in it that Abacus cannot slide through
+#     -- the same mechanism, no special case in the solver, and the overlap is
+#     impossible rather than unlikely.
+#
+#     So they are placed here, greedily, tallest first: nearest row whose whole
+#     span is free at some x near the one the placer wanted, and each one cuts
+#     the rows it takes before the next is placed.  Greedy is defensible
+#     because they are rare -- a few percent of a real netlist -- and because
+#     the alternative, solving their placement jointly with everything else, is
+#     a different algorithm.
+#
+#     They are never padded by --pin_spread.  Padding buys its gap from Abacus
+#     and these cells do not go through Abacus. -->
+my %rowIdxOf = ();
+for ( my $r = 0 ; $r < $nRows ; $r++ ) { $rowIdxOf{$rowY[$r]} = $r; }
+
+#<!-- the widest x near $tx at which rows $r .. $r+$need-1 are ALL free for
+#     $w, or undef if there is no such x -->
+my $multiFit = sub {
+  my ($r, $need, $w, $tx) = @_;
+  my @cur = map { [ @$_ ] } @{$seg{$rowY[$r]}};
+  for ( my $k = 1 ; $k < $need ; $k++ ) {
+    my $nxt = $seg{$rowY[$r+$k]};
+    my @out = ();
+    my ($i, $j) = (0, 0);
+    #<!-- both lists are sorted and disjoint, so one walk intersects them -->
+    while ( $i < @cur && $j < @$nxt ) {
+      my $a0 = ( $cur[$i][0] > $nxt->[$j][0] ) ? $cur[$i][0] : $nxt->[$j][0];
+      my $a1 = ( $cur[$i][1] < $nxt->[$j][1] ) ? $cur[$i][1] : $nxt->[$j][1];
+      push(@out, [$a0, $a1]) if ( $a1 > $a0 );
+      if ( $cur[$i][1] < $nxt->[$j][1] ) { $i++; } else { $j++; }
+    }
+    @cur = @out;
+    last unless ( @cur );
+  }
+  my ($bestX, $bestCost);
+  foreach my $iv ( @cur ) {
+    next if ( $iv->[1] - $iv->[0] < $w );
+    my $x = $tx;
+    $x = $iv->[0] if ( $x < $iv->[0] );
+    $x = $iv->[1] - $w if ( $x > $iv->[1] - $w );
+    #<!-- on the site grid, measured from the ROW's origin rather than from the
+    #     interval's: the interval starts wherever a macro happens to end, and
+    #     snapping to that would put the cell between sites -->
+    unless ( $noSnapX ) {
+      my $x0 = $rowX0{$rowY[$r]};
+      my $n = int( ($x - $x0) / $siteX + 0.5 );
+      $x = $x0 + $n * $siteX;
+      $x = $iv->[0] + ( ( $iv->[0] - $x0 ) % $siteX ? $siteX - ( ( $iv->[0] - $x0 ) % $siteX ) : 0 )
+        if ( $x < $iv->[0] );
+      while ( $x + $w > $iv->[1] ) { $x -= $siteX; }
+      next if ( $x < $iv->[0] );
+    }
+    my $c = abs($x - $tx);
+    if ( ! defined $bestCost || $c < $bestCost ) { $bestCost = $c; $bestX = $x; }
+  }
+  return $bestX;
+};
+
+my @multiLoc = ();     #<!-- [inst, x, y] for the cells placed here -->
+my @single = ();       #<!-- everything pass 2 will handle -->
+my %isMulti = ();
+my ($tooTall, $multiNoRoom) = (0, 0);
+{
+  my @multi = ();
+  foreach my $m ( @mov ) {
+    my $need = int( ($m->[2] + $rowH - 1) / $rowH );
+    if ( $need > 1 ) { push(@multi, [$m, $need]); $isMulti{$m->[0]} = 1; }
+    else             { push(@single, $m); }
+  }
+  $tooTall = @multi;
+  #<!-- tallest first, then by target and name so two runs agree -->
+  @multi = sort { $b->[1] <=> $a->[1]
+                  || $a->[0][3] <=> $b->[0][3]
+                  || $a->[0][0] cmp $b->[0][0] } @multi;
+
+  foreach my $mm ( @multi ) {
+    my ($m, $need) = @$mm;
+    my ($inst, $w, $tx, $ty) = ($m->[0], $m->[1], $m->[3], $m->[4]);
+
+    my $best;
+    {
+      my ($lo, $hi) = (0, $nRows - 1);
+      while ( $lo < $hi ) {
+        my $mid = int( ($lo + $hi) / 2 );
+        if ( $rowY[$mid] < $ty ) { $lo = $mid + 1; }
+        else                     { $hi = $mid; }
+      }
+      $best = $lo;
+      if ( $lo > 0 && abs($rowY[$lo-1] - $ty) <= abs($rowY[$lo] - $ty) ) { $best = $lo - 1; }
+    }
+
+    my ($pickR, $pickX, $pickCost);
+    for ( my $d = 0 ; $d <= $rowWin ; $d++ ) {
+      foreach my $r ( ($best - $d), ($best + $d) ) {
+        next if ( $d > 0 && $r == $best );
+        next if ( $r < 0 || $r + $need > $nRows );
+        #<!-- the span has to be contiguous at the row pitch.  A DEF may carry
+        #     several ROW records with gaps between them, and a cell cannot
+        #     bridge a gap. -->
+        my $ok = 1;
+        for ( my $k = 1 ; $k < $need ; $k++ ) {
+          if ( $rowY[$r+$k] != $rowY[$r] + $k * $rowH ) { $ok = 0; last; }
+        }
+        next unless ( $ok );
+        my $x = $multiFit->($r, $need, $w, $tx);
+        next unless ( defined $x );
+        my $cost = abs($x - $tx) + abs($rowY[$r] - $ty);
+        if ( ! defined $pickCost || $cost < $pickCost ) {
+          $pickCost = $cost; $pickR = $r; $pickX = $x;
+        }
+      }
+      last if ( defined $pickCost && $pickCost <= ($d + 1) * $rowH );
+    }
+
+    unless ( defined $pickR ) {
+      #<!-- same contract as WARN 013: it keeps the location it came in with -->
+      $multiNoRoom++;
+      next;
+    }
+
+    #<!-- and now it is an obstacle: cut it out of every row it spans -->
+    for ( my $k = 0 ; $k < $need ; $k++ ) {
+      my $y = $rowY[$pickR + $k];
+      my @new = ();
+      foreach my $iv ( @{$seg{$y}} ) {
+        if ( $iv->[1] <= $pickX || $iv->[0] >= $pickX + $w ) { push(@new, [ @$iv ]); next; }
+        push(@new, [ $iv->[0], $pickX ]) if ( $pickX > $iv->[0] );
+        push(@new, [ $pickX + $w, $iv->[1] ]) if ( $iv->[1] > $pickX + $w );
+      }
+      $seg{$y} = \@new;
+    }
+    push(@multiLoc, [$inst, $pickX, $rowY[$pickR]]);
+  }
+}
+if ( $tooTall > 0 ) {
+  printf("INFO-ALG-LEGAL : 015 : %d cell(s) span more than one row; %d placed first, with the rows they take cut out of the rows below them\n",
+         $tooTall, scalar(@multiLoc));
+}
+if ( $multiNoRoom > 0 ) {
+  print "WARN-ALG-LEGAL : 016 : $multiNoRoom multi-row cell(s) found no span of free rows and keep\n";
+  print "WARN-ALG-LEGAL : 051 : their current location, which may overlap.  Raise -rows\n";
+}
+
+#--------------------- local density cap on the assignment -------------------#
+#<!-- WHY THIS EXISTS.
+#
+#     Below, a cell is given the row nearest its own y whose SEGMENT has room.
+#     A segment is a whole free run of a row, and on a die with no macros that
+#     is the entire row: 1496um on mxu_256.  So the capacity test was asking
+#     "is this 1496um row more than 100% full", and the answer is almost always
+#     no -- the design is at 50% utilisation and only 42 of 1068 rows overflow
+#     as whole rows.  The cost is abs(wx - tx) + abs(y - ty) with wx clamped
+#     only to the segment, so wx == tx, the cost collapses to pure |dy|, and
+#     the nearest row wins every time whatever the LOCAL density.
+#
+#     Measured on mxu_256 after hier_place_all: at 47um columns 22.8% of
+#     occupied bins are over capacity and 22.1% of all cell width has to leave
+#     its bin.  Abacus then does that the only way it can, by sliding cells
+#     along the row, and the bill is mean |dx| 42.9um against mean |dy| 0.36um
+#     -- 36.7 metres of horizontal movement against 0.31 of vertical, on a
+#     design where 100% of the excess has free space within FOUR ROWS, 5.6um.
+#
+#     So the fix is to make the capacity test local: bins across each row, and
+#     a cell may not take a row whose bin at that x is already full.  The
+#     search below already walks rows nearest-first, so pruning candidates this
+#     way makes it exactly "the nearest row with room here" -- which is the
+#     cheapest possible relief and needs no extra pass.
+#
+#     AND NOT DENSITY EQUALISATION, which is the trap.  Making every bin's
+#     density equal is a transportation problem whose answer drains the dense
+#     middle of the die into empty rows hundreds of rows away: simulated on
+#     mxu_256 it costs a mean |dy| of 686um, against 2.3um for relieving only
+#     the overflow.  That is 300 times the movement for no extra legality, and
+#     it is what pass 1 above does -- it aims a cell at the CENTRE of another
+#     bin -- which is the best explanation anyone has for why pass 1 multiplies
+#     unrouted nets by seven.  Nothing here moves a cell that is not in an
+#     over-full bin, and nothing here changes a cell's x.
+#
+#     Capacity is the FREE width in the bin, not the bin width, so a bin half
+#     covered by a macro counts as half a bin and cells are not driven into
+#     obstacles. -->
+my $dbin = 0;
+my %binCap = ();       #<!-- "rowIdx,binIdx" => free width in dbu -->
+my %binLoad = ();
+my $binX0 = 0;
+my $nBins = 0;
+if ( $dbinUm >= 0 ) {
+  my ($spanLo, $spanHi);
+  foreach my $y ( @rowY ) {
+    $spanLo = $rowX0{$y} if ( ! defined $spanLo || $rowX0{$y} < $spanLo );
+    $spanHi = $rowX1{$y} if ( ! defined $spanHi || $rowX1{$y} > $spanHi );
+  }
+  $binX0 = ( defined $spanLo ) ? $spanLo : 0;
+  my $span = ( defined $spanHi ) ? $spanHi - $binX0 : 0;
+  if ( $span > 0 ) {
+    if ( $dbinUm > 0 ) { $dbin = $dbinUm * $dbu; }
+    else {
+      #<!-- A HUNDRED CELLS WIDE, not a fraction of the row.
+      #
+      #     A fraction of the span was the first try and it is wrong, because
+      #     it reads the die size rather than the cell size.  span/16 is 94um
+      #     on mxu_256 -- about a hundred cells, which is the size that
+      #     measured well -- and 5.32um on the 85um die of nangate_flat, about
+      #     five cells.  At five cells this is not relieving overflow any more,
+      #     it is demanding uniform density at cell granularity.
+      #
+      #     A hundred times the mean cell width is scale free and lands on both
+      #     sizes that measured well: ~93um on mxu_256, ~21um on nangate_flat
+      #     once the span/4 clamp bites.
+      #
+      #     Clamped below so a bin is always several sites wide, and above so a
+      #     small die still gets four columns rather than one. -->
+      my $meanW = ( $nMov > 0 ) ? ( $totMovW / $nMov ) : 0;
+      $dbin = int( 100 * $meanW );
+      my $lo = 8 * $siteX;
+      my $hi = int( $span / 4 );
+      $dbin = $lo if ( $dbin < $lo );
+      $dbin = $hi if ( $hi > 0 && $dbin > $hi );
+    }
+    $dbin = $siteX if ( $dbin < $siteX );
+    $nBins = int( $span / $dbin ) + 1;
+    #<!-- free width per bin, from the segments so obstacles are counted -->
+    for ( my $r = 0 ; $r < $nRows ; $r++ ) {
+      my $y = $rowY[$r];
+      foreach my $s ( @{$seg{$y}} ) {
+        my ($a, $b) = @$s;
+        my $b0 = int( ($a - $binX0) / $dbin );
+        my $b1 = int( ($b - $binX0) / $dbin );
+        $b0 = 0 if ( $b0 < 0 );
+        $b1 = $nBins - 1 if ( $b1 > $nBins - 1 );
+        for ( my $bi = $b0 ; $bi <= $b1 ; $bi++ ) {
+          my $lo = $binX0 + $bi * $dbin;
+          my $hi = $lo + $dbin;
+          $lo = $a if ( $a > $lo );
+          $hi = $b if ( $b < $hi );
+          $binCap{"$r,$bi"} += ($hi - $lo) if ( $hi > $lo );
+        }
+      }
+    }
+    printf("INFO-ALG-LEGAL : 039 : local density cap on, %d column(s) of %.2f um, up to %d row(s) away\n",
+           $nBins, $dbin / $dbu, $dbinRows);
+  }
+}
+else {
+  print "INFO-ALG-LEGAL : 040 : --no_dbin, the row assignment ignores local density\n";
 }
 
 #<!-- Abacus on one segment.  Cells arrive in x order; a cell that will not fit
@@ -670,19 +1370,74 @@ my $abacus = sub {
 #     is a window of -rows either side of the cell's own row. -->
 my %inSeg = ();        #<!-- "y,segIdx" => [ [inst,w,tx], ... ] -->
 my %segFree = ();      #<!-- "y,segIdx" => remaining width -->
-foreach my $y ( @rowY ) {
-  for ( my $s = 0 ; $s < @{$seg{$y}} ; $s++ ) {
-    $segFree{"$y,$s"} = $seg{$y}[$s][1] - $seg{$y}[$s][0];
-    $inSeg{"$y,$s"} = [];
-  }
-}
 
 #<!-- tallest first: a double height cell has fewer rows that will take it, so
 #     let it choose before the single height ones fill them -->
-my @byY = sort { $b->[2] <=> $a->[2] || $a->[3] <=> $b->[3] } @mov;
-my ($noRoom, $tooTall) = (0, 0);
+#<!-- @single, not @mov: anything taller than a row was placed above and is an
+#     obstacle now, not a candidate. -->
+my @byY = sort { $b->[2] <=> $a->[2] || $a->[3] <=> $b->[3] } @single;
+my $noRoom = 0;
+my ($movedRow, $movedRowSum, $movedRowMax) = (0, 0, 0);
+my ($placed, $sumDisp, $maxDisp, $maxDispInst) = (0, 0, 0, "");
+my $overLimit = 0;
+my $limit = ( defined $maxDispUm ) ? $maxDispUm * $dbu : undef;
+my @newLoc = ();
+
+#<!-- THE WHOLE OF PASS 2, PACKAGED SO IT CAN BE RUN TWICE.
+#
+#     --pin_spread needs the pin density map of a LEGAL placement, and the only
+#     way to get one is to legalize.  Measuring it on the placer's own output
+#     does not work: that placement still overlaps, cells sit piled on top of
+#     one another, and on nangate_flat the average cell moves 12.5um of an 85um
+#     die climbing out of those piles.  The dense tiles there are the piles,
+#     not the hotspots the router will meet.  Measured that way the padding did
+#     relieve the map it was shown -- worst tile 111 pins to 102 -- and spent
+#     10.5% of the wirelength doing it, which is not a trade worth making.
+#
+#     So pass 2 runs once to find out where the cells really go, the map is
+#     built from that, the padding is worked out, and pass 2 runs again with
+#     the padded widths.  Everything the pass mutates is reset in here rather
+#     than at its declaration, so the second run starts where the first did.
+#
+#     The second run costs what the first did.  That is the whole price of the
+#     option and it is only paid when the option is on. -->
+my $rowsAndAbacus = sub {
+  %inSeg = ();
+  %segFree = ();
+  %binLoad = ();
+  foreach my $y ( @rowY ) {
+    for ( my $s = 0 ; $s < @{$seg{$y}} ; $s++ ) {
+      $segFree{"$y,$s"} = $seg{$y}[$s][1] - $seg{$y}[$s][0];
+      $inSeg{"$y,$s"} = [];
+    }
+  }
+  $noRoom = 0;
+  ($movedRow, $movedRowSum, $movedRowMax) = (0, 0, 0);
+  ($placed, $sumDisp, $maxDisp, $maxDispInst) = (0, 0, 0, "");
+  $overLimit = 0;
+  @newLoc = ();
+
+  #<!-- the multi-row cells are already placed and do not move between the two
+  #     runs, but they are part of the answer and part of the displacement, so
+  #     every run starts by counting them in -->
+  foreach my $n ( @multiLoc ) {
+    push(@newLoc, [ @$n ]);
+    my $disp = abs($n->[1] - $origX{$n->[0]}) + abs($n->[2] - $origY{$n->[0]});
+    $sumDisp += $disp;
+    if ( $disp > $maxDisp ) { $maxDisp = $disp; $maxDispInst = $n->[0]; }
+    $overLimit++ if ( defined $limit && $disp > $limit );
+    $placed++;
+  }
+
 foreach my $m ( @byY ) {
-  my ($inst, $w, $h, $tx, $ty) = @$m;
+  #<!-- $w is the width everything below reserves, assigns and clusters on,
+  #     and with --pin_spread that is the PADDED width: the cell asks the row
+  #     for more space than it occupies and Abacus turns the difference into a
+  #     gap.  The real width is never needed here -- the cell is written at the
+  #     left edge of the slot it was given, so it cannot overlap whatever the
+  #     padding kept away. -->
+  my ($inst, $h, $tx, $ty) = ($m->[0], $m->[2], $m->[3], $m->[4]);
+  my $w = $m->[6];
   #<!-- Nearest row index to the cell's y, by binary search.
   #
   #     This used to scan every row for every cell, which is O(cells x rows)
@@ -710,11 +1465,21 @@ foreach my $m ( @byY ) {
       $best = $lo - 1;
     }
   }
-  my $rowsNeeded = int( ($h + $rowH - 1) / $rowH );
-  if ( $rowsNeeded > 1 ) { $tooTall++; }
-
-  my ($pickKey, $pickCost);
-  for ( my $d = 0 ; $d <= $rowWin ; $d++ ) {
+  #<!-- Two attempts: the first honours the local density cap, the second does
+  #     not.  A cell whose bin is full in every row of the window has to go
+  #     somewhere, and leaving it where it started -- overlapping -- is worse
+  #     than putting it in a locally crowded row and letting Abacus slide it.
+  #     So the cap is a preference with a guaranteed fallback, never a reason
+  #     to fail.  $useCap == 0 is exactly the old behaviour, which is what
+  #     --no_dbin selects for the whole run. -->
+  my ($pickKey, $pickCost, $pickBin, $pickR);
+  foreach my $useCap ( ($dbin > 0) ? (1, 0) : (0) ) {
+  ($pickKey, $pickCost, $pickBin, $pickR) = (undef, undef, undef, undef);
+  #<!-- the capped attempt looks only $dbinRows rows out; the fallback below
+  #     uses the full -rows window, so the bound can never leave a cell
+  #     unplaced -- it only limits how far the CAP is allowed to reach. -->
+  my $win = ( $useCap ) ? ( ($dbinRows < $rowWin) ? $dbinRows : $rowWin ) : $rowWin;
+  for ( my $d = 0 ; $d <= $win ; $d++ ) {
     foreach my $r ( ($best - $d), ($best + $d) ) {
       next if ( $d > 0 && $r == $best );
       next if ( $r < 0 || $r >= $nRows );
@@ -728,10 +1493,26 @@ foreach my $m ( @byY ) {
         my $wx = $tx;
         $wx = $sx0 if ( $wx < $sx0 );
         $wx = $sx1 - $w if ( $wx > $sx1 - $w );
+        #<!-- and whether the row is already full AT THAT X.  Charged to the
+        #     bin holding the cell's left edge: a cell is narrow next to a
+        #     column and splitting it across two bins buys nothing. -->
+        my $bi;
+        if ( $dbin > 0 ) {
+          $bi = int( ($wx - $binX0) / $dbin );
+          $bi = 0 if ( $bi < 0 );
+          $bi = $nBins - 1 if ( $bi > $nBins - 1 );
+          if ( $useCap ) {
+            my $cap = $binCap{"$r,$bi"};
+            next unless ( defined $cap );
+            next if ( $binLoad{"$r,$bi"} + $w > $cap );
+          }
+        }
         my $cost = abs($wx - $tx) + abs($y - $ty);
         if ( ! defined $pickCost || $cost < $pickCost ) {
           $pickCost = $cost;
           $pickKey = $k;
+          $pickBin = ( defined $bi ) ? "$r,$bi" : undef;
+          $pickR = $r;
         }
       }
     }
@@ -746,8 +1527,15 @@ foreach my $m ( @byY ) {
     #     as ANYTHING was found at d >= 1.  That capped the search at three
     #     rows whatever -rows said, so the option was very nearly a no-op --
     #     the default of 6 promised thirteen rows and searched three. -->
+    #<!-- The cost is |wx - tx| + |y - ty|, so a row d steps away costs at
+    #     least d * rowH in the y term alone; once the best found is no more
+    #     than that, nothing further out can beat it.  Still a valid bound with
+    #     the cap on, because the cap only removes candidates -- it does not
+    #     change what any surviving candidate costs. -->
     last if ( defined $pickCost && $pickCost <= ($d + 1) * $rowH );
   }
+  last if ( defined $pickKey );
+  }#foreach useCap
 
   unless ( defined $pickKey ) {
     $noRoom++;
@@ -755,24 +1543,17 @@ foreach my $m ( @byY ) {
   }
   push(@{$inSeg{$pickKey}}, [$inst, $w, $tx]);
   $segFree{$pickKey} -= $w;
-}
-
-if ( $noRoom > 0 ) {
-  print "WARN-ALG-LEGAL : 013 : $noRoom cell(s) found no row with room within $rowWin row(s)\n";
-  print "WARN-ALG-LEGAL : 014 : they keep their current location.  Raise -rows, try --spread,\n";
-  print "WARN-ALG-LEGAL : 035 : or the design does not fit\n";
-}
-if ( $tooTall > 0 ) {
-  print "INFO-ALG-LEGAL : 015 : $tooTall cell(s) are taller than one row; they are placed on\n";
-  print "INFO-ALG-LEGAL : 016 : their own row and the rows above are not reserved\n";
+  $binLoad{$pickBin} += $w if ( defined $pickBin );
+  #<!-- how many cells the cap pushed off their nearest row, and how far -->
+  if ( defined $pickR && $pickR != $best ) {
+    $movedRow++;
+    my $off = abs($pickR - $best);
+    $movedRowMax = $off if ( $off > $movedRowMax );
+    $movedRowSum += $off;
+  }
 }
 
 #--------------------------- solve and write back --------------------------#
-my ($placed, $sumDisp, $maxDisp, $maxDispInst) = (0, 0, 0, "");
-my $overLimit = 0;
-my $limit = ( defined $maxDispUm ) ? $maxDispUm * $dbu : undef;
-my @newLoc = ();
-
 foreach my $y ( @rowY ) {
   for ( my $s = 0 ; $s < @{$seg{$y}} ; $s++ ) {
     my $k = "$y,$s";
@@ -814,13 +1595,162 @@ foreach my $y ( @rowY ) {
     }
   }
 }
+};#sub rowsAndAbacus
 
+#<!-- Run it.  Without --pin_spread that is the whole of pass 2 and the only
+#     call; with it, the first call is the provisional legalization the pin
+#     density map is measured on and its locations are thrown away. -->
+$rowsAndAbacus->();
+
+if ( $doPinPad ) {
+  #<!-- Keep the provisional answer.  It is a complete, legal placement, and if
+  #     the padded run turns out to be a worse one it is what we fall back to --
+  #     see the check after the second run. -->
+  my @provLoc = map { [ @$_ ] } @newLoc;
+  my $provNoRoom = $noRoom;
+  my $provPlaced = $placed;
+  my $provSum = $sumDisp;
+  my $provMax = $maxDisp;
+  my $provMaxInst = $maxDispInst;
+  my $provOver = $overLimit;
+  my ($provRow, $provRowSum, $provRowMax) = ($movedRow, $movedRowSum, $movedRowMax);
+
+  my @prov = map { [ $_->[1], $_->[2], $cellW{$_->[0]}, $cellH{$_->[0]}, $pinN{$_->[0]} ] } @newLoc;
+  my $map = $pinHist->(\@prov);
+
+  #<!-- the target: an absolute count if one was given, otherwise the
+  #     percentile of the OCCUPIED tiles.  Empty tiles are not in the map and
+  #     must not be, or the percentile of a half empty die is zero and every
+  #     occupied tile is over target. -->
+  $pinT = int($pinTarget);
+  if ( $pinT <= 0 ) {
+    my (undef, $pctlV, undef, undef) = $pinStats->($map, 0);
+    $pinT = $pctlV;
+  }
+  $pinT = 1 if ( $pinT < 1 );
+
+  my ($bMax, $bPctl, $bOcc, $bOver) = $pinStats->($map, $pinT);
+  printf("INFO-ALG-LEGAL : 044 : pin density: %d occupied tile(s) of %.2f um, worst %d pin(s), p%d %d, target %d, %d over\n",
+         $bOcc, $pinTile / $dbu, $bMax, $pinPctl, $bPctl, $pinT, $bOver);
+
+  my ($nPad, $padSum, $padWorst) = (0, 0, 0);
+  foreach my $n ( @newLoc ) {
+    my $inst = $n->[0];
+    next unless ( $pinN{$inst} > 0 );
+    #<!-- a multi-row cell counts towards the map -- its pins are as real as
+    #     anyone's -- but cannot be padded: padding buys its gap from Abacus,
+    #     and these were placed as obstacles before Abacus ran -->
+    next if ( $isMulti{$inst} );
+    my $bx = int( ($n->[1] + $cellW{$inst}/2 - $die[0]) / $pinTile );
+    my $by = int( ($n->[2] + $cellH{$inst}/2 - $die[1]) / $pinTile );
+    $bx = 0 if ( $bx < 0 ); $bx = $pinNX - 1 if ( $bx >= $pinNX );
+    $by = 0 if ( $by < 0 ); $by = $pinNY - 1 if ( $by >= $pinNY );
+    my $p = $map->{"$bx,$by"};
+    next unless ( defined $p && $p > $pinT );
+
+    #<!-- the inflation that would take this tile to the target -->
+    my $w = $cellW{$inst};
+    my $pad = int( $w * ( $p / $pinT - 1 ) + 0.5 );
+    my $cap = int( ($pinMaxRatio - 1) * $w );
+    $pad = $cap if ( $pad > $cap );
+    next if ( $pad <= 0 );
+    #<!-- whole sites, or the site snapping at the end of the pass rounds the
+    #     gap away again on the narrow cells that most need it -->
+    unless ( $noSnapX ) {
+      $pad = int( ($pad + $siteX - 1) / $siteX ) * $siteX;
+    }
+    $padOf{$inst} = $w + $pad;
+    $nPad++;
+    $padSum += $pad;
+    $padWorst = $pad if ( $pad > $padWorst );
+  }
+  printf("INFO-ALG-LEGAL : 045 : padded %d of %d cell(s), average %.3f um, worst %.3f um\n",
+         $nPad, scalar(@mov), ($nPad > 0) ? ($padSum / $nPad) / $dbu : 0, $padWorst / $dbu);
+
+  #<!-- Padding is width the rows have to find.  If it asks for more than they
+  #     hold, the second pass cannot place everything and will say so; saying
+  #     it here too is cheaper to act on than a WARN 013 at the far end. -->
+  my $needW = 0;
+  my $haveW = 0;
+  foreach my $m ( @mov ) {
+    $needW += ( exists $padOf{$m->[0]} ) ? $padOf{$m->[0]} : $m->[1];
+  }
+  foreach my $y ( @rowY ) { $haveW += $rowX1{$y} - $rowX0{$y}; }
+  if ( $haveW > 0 && $needW > $haveW ) {
+    printf("WARN-ALG-LEGAL : 046 : padded width is %.1f%% of the row width; lower -pin_max or raise -pin_pctl\n",
+           100 * $needW / $haveW);
+  }
+
+  #<!-- and legalize again, this time with the padding in the widths -->
+  foreach my $m ( @mov ) {
+    $m->[6] = ( exists $padOf{$m->[0]} ) ? $padOf{$m->[0]} : $m->[1];
+  }
+  $rowsAndAbacus->();
+
+  #<!-- PADDING MUST NOT COST LEGALITY, and left to itself it can.
+  #
+  #     Padding is width the rows have to find, and a row that cannot find it
+  #     leaves cells unplaced -- and an unplaced cell keeps the location the
+  #     placer gave it, which is the overlapping one this command exists to
+  #     remove.  Measured on nangate_flat at -pin_pctl 70: 2183 cells padded,
+  #     39 of them found no row inside the window, and an independent integer
+  #     sweep over the written DEF then reported 449 overlaps where every other
+  #     setting reports zero.
+  #
+  #     The global width check above does not catch it, and cannot: the design
+  #     still fits by total width, it is the rows around the hotspots that
+  #     overflow.  So the test is the direct one -- did padding leave more
+  #     cells homeless than not padding did -- and the answer is the pass's own
+  #     provisional placement, which is legal by construction.
+  #
+  #     Falling back whole rather than per cell is deliberate.  The cells that
+  #     failed are not independent of the ones that succeeded; they lost the
+  #     rows they wanted to padded neighbours, so keeping the padded placement
+  #     and rescuing the stragglers would mean placing them into a layout that
+  #     has no room for them. -->
+  if ( $noRoom > $provNoRoom ) {
+    printf("WARN-ALG-LEGAL : 048 : padding left %d cell(s) with no row against %d without it;\n",
+           $noRoom, $provNoRoom);
+    print "WARN-ALG-LEGAL : 049 : keeping the unpadded placement.  Raise -pin_pctl, lower -pin_max,\n";
+    print "WARN-ALG-LEGAL : 050 : or raise -rows so the padded cells have somewhere to go\n";
+    @newLoc = @provLoc;
+    $noRoom = $provNoRoom;
+    $placed = $provPlaced;
+    $sumDisp = $provSum;
+    $maxDisp = $provMax;
+    $maxDispInst = $provMaxInst;
+    $overLimit = $provOver;
+    ($movedRow, $movedRowSum, $movedRowMax) = ($provRow, $provRowSum, $provRowMax);
+    $doPinPad = 0;          #<!-- so the "after" report below is not a lie -->
+  }
+}
+
+if ( $noRoom > 0 ) {
+  print "WARN-ALG-LEGAL : 013 : $noRoom cell(s) found no row with room within $rowWin row(s)\n";
+  print "WARN-ALG-LEGAL : 014 : they keep their current location.  Raise -rows, try --spread,\n";
+  print "WARN-ALG-LEGAL : 035 : or the design does not fit\n";
+}
 my $avg = ( $placed > 0 ) ? $sumDisp / $placed : 0;
 printf("INFO-ALG-LEGAL : 018 : legalized %d cell(s), average move %.3f um, worst %.3f um%s\n",
        $placed, $avg / $dbu, $maxDisp / $dbu,
        ( $maxDispInst ne "" ) ? " on $maxDispInst" : "");
 if ( defined $limit && $overLimit > 0 ) {
   printf("WARN-ALG-LEGAL : 019 : %d cell(s) moved further than %g um\n", $overLimit, $maxDispUm);
+}
+if ( $movedRow > 0 ) {
+  printf("INFO-ALG-LEGAL : 041 : %d cell(s) took a row other than their nearest, %.2f rows on average, %d at most\n",
+         $movedRow, $movedRowSum / $movedRow, $movedRowMax);
+}
+
+#<!-- What the padding actually bought, measured on the legalized locations
+#     rather than on the intent.  The target is held at the one pass 1b
+#     derived, so the two numbers are comparable; recomputing the percentile
+#     here would move the goalposts with the result. -->
+if ( $doPinPad ) {
+  my @after = map { [ $_->[1], $_->[2], $cellW{$_->[0]}, $cellH{$_->[0]}, $pinN{$_->[0]} ] } @newLoc;
+  my ($aMax, $aPctl, $aOcc, $aOver) = $pinStats->($pinHist->(\@after), $pinT);
+  printf("INFO-ALG-LEGAL : 047 : pin density after: %d occupied tile(s), worst %d pin(s), p%d %d, %d over target %d\n",
+         $aOcc, $aMax, $pinPctl, $aPctl, $aOver, $pinT);
 }
 
 if ( $reportOnly ) {
@@ -830,15 +1760,28 @@ if ( $reportOnly ) {
   return;
 }
 
+my $reOriented = 0;
 foreach my $n ( @newLoc ) {
   my ($inst, $x, $y) = @$n;
   $CADB{$inst}->dbCadbSetLoc($x, $y);
   $CADB{$inst}->dbCadbSetStatus(PLACED);
+  #<!-- and the orientation the row it landed in requires -->
+  if ( exists $rowOrient{$y} ) {
+    my $was = $CADB{$inst}->dbCadbGetOrient;
+    my $now = &dbfLegalOrientForRow($was, $rowOrient{$y});
+    if ( ! defined $was || $was ne $now ) {
+      $CADB{$inst}->dbCadbSetOrient($now);
+      $reOriented++;
+    }
+  }
   #<!-- the placer keeps a parallel location for flops and reads it back, so it
   #     has to agree with CADB or a later placer step undoes this -->
   if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
     $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
   }
+}
+if ( $reOriented > 0 ) {
+  print "INFO-ALG-LEGAL : 037 : $reOriented cell(s) re-oriented to match their row\n";
 }
 print "INFO-ALG-LEGAL : 021 : updating instance boxes\n";
 &set_inst_box;
