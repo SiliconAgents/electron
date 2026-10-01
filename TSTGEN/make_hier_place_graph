@@ -581,7 +581,16 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-layer")         { $layer = $_[$i+1]; }
   elsif ($_[$i] eq "-origin")        { $origin = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
-  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
+  #<!-- Commas for spaces, exactly as -kinds does above and for the same
+  #     reason: the command parser splits on whitespace and keeps the quotes,
+  #     so -args "--frames f --frame-every 20" arrives as the single token
+  #     "--frames and the rest is lost.  That made -args unusable for any
+  #     option with a value -- it silently passed a fragment and the placer
+  #     never saw the switch.  --frames,f,--frame-every,20 works from a flow
+  #     file, and a single-token -args still works as it always did. -->
+  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1];
+                                       $extra =~ s/["']//g;
+                                       $extra =~ s/\s*,\s*/ /g; }
   elsif ($_[$i] eq "-batch")         { $batch = $_[$i+1]; }
   elsif ($_[$i] eq "--report_only")  { $reportOnly = 1; }
   elsif ($_[$i] eq "--write_only")   { $writeOnly = 1; }
@@ -3353,7 +3362,16 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-placer")        { $placer = $_[$i+1]; }
   elsif ($_[$i] eq "-batch")         { $batch = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
-  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
+  #<!-- Commas for spaces, exactly as -kinds does above and for the same
+  #     reason: the command parser splits on whitespace and keeps the quotes,
+  #     so -args "--frames f --frame-every 20" arrives as the single token
+  #     "--frames and the rest is lost.  That made -args unusable for any
+  #     option with a value -- it silently passed a fragment and the placer
+  #     never saw the switch.  --frames,f,--frame-every,20 works from a flow
+  #     file, and a single-token -args still works as it always did. -->
+  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1];
+                                       $extra =~ s/["']//g;
+                                       $extra =~ s/\s*,\s*/ /g; }
   elsif ($_[$i] eq "--no_blockage")  { $noBlockage = 1; }
   elsif ($_[$i] eq "--write_only")   { $writeOnly = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
