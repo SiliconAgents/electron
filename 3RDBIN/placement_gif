@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""Assemble an animated GIF of a design placing itself.
+
+    placement_gif --dir <frame dir> --log <run log> --out <file.gif> --lef <tech.lef>
+
+Takes the frames an electron run leaves behind and makes one animation of
+them.  Up to three acts, and it uses whichever are present:
+
+    <dir>/a*.png        hier_place --frames        the PyQt engine placing the
+    <dir>/b*.png        hier_place_cells --frames  top's blocks, then its cells
+    <dir>/h*.hiercells  hier_place_all -snapshot   the hierarchy walk
+    <dir>/z*.def        write_def                  the flat database
+
+Same shape as the other tools in here: text and files in, a file out, nothing
+shared with electron.  It can be run on a directory of frames from any run.
+
+WHY THE ACTS LOOK DIFFERENT AND WHY THAT IS LEFT ALONE
+
+Act 1 is Qt rendering its own widget -- named blocks, fly lines weighted by
+connectivity, ports coloured by direction, blocks turning to hatched blockage
+while the cells pack around them.  Acts 2 and 3 are def_raster drawing a
+density map of a quarter of a million cells.  They are different pictures of
+different things and trying to make them match would mean throwing away what
+each is good at.  What IS forced to match is the die extent, so the chip does
+not move or change shape between frames.
+
+THE FILE SIZE, which is the whole engineering problem here
+
+A GIF frame is a palette image, and consecutive frames only compress well when
+they share large unchanged areas.  Two things fight that:
+
+  the dissolve frames   Blending two dense rasters produces an image that is
+                        neither, with noise everywhere.  Sixty of them at the
+                        full palette cost more than the hundred Qt frames in
+                        front of them, and put a 7.6MB file at 11.8MB.  They
+                        get --xfade-colours instead, because nobody reads
+                        detail out of a frame shown for 55ms.
+
+  act 1's sampling      hier_place is usually grabbed every 4 steps, which is
+                        finer than the eye needs.  --act1-stride drops every
+                        Nth, and costs nothing because the frames are already
+                        on disk: no re-run, no placement change.
+
+Measured on matmul_4x4, 204,816 instances, 13 modules: 117 frames, 700x740,
+7.6MB, 25s, at the defaults below.
+"""
+
+import argparse
+import glob
+import os
+import re
+import subprocess
+import sys
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    sys.exit("placement_gif: needs PIL. Run it in the container: "
+             "apptainer exec INSTALL/podman/pysparkpp.sif python3 ...")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+RASTER = os.path.join(HERE, "def_raster")
+
+_FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+          "/usr/share/fonts/dejavu/DejaVuSans.ttf")
+
+
+def font(sz):
+    for p in _FONTS:
+        if os.path.exists(p):
+            return ImageFont.truetype(p, sz)
+    return ImageFont.load_default()
+
+
+def die_um(path):
+    """The die extent of a cell dump, in microns."""
+    dbu = 1000
+    for line in open(path, errors="replace"):
+        if line.startswith("UNITS "):
+            dbu = int(line.split()[1])
+        elif line.startswith("DIE "):
+            v = [int(x) for x in line.split()[1:5]]
+            return (v[0] / dbu, v[1] / dbu, v[2] / dbu, v[3] / dbu)
+    return None
+
+
+def walk_order(logpath):
+    """[(module, depth)] in the order hier_place_all placed them."""
+    out = []
+    pat = re.compile(r"HR_PL_ALL : 013 : \[(\d+)/(\d+)\] (\S+?),.*at depth (\d+)")
+    if not logpath or not os.path.exists(logpath):
+        return out
+    for line in open(logpath, errors="replace"):
+        m = pat.search(line)
+        if m:
+            out.append((m.group(3), int(m.group(4))))
+    return out
+
+
+class Builder:
+    def __init__(self, args):
+        self.a = args
+        self.frames, self.durs, self.cols = [], [], []
+
+    def compose(self, img, title):
+        """Letterbox onto the common canvas and caption it.
+
+        Letterboxed, not resized to fill: the Qt canvas and the die rasters
+        have different aspect ratios, and stretching either would make the chip
+        change shape at an act boundary, which reads as a glitch.
+        """
+        a = self.a
+        im = img.convert("RGB")
+        s = min(a.width / im.width, a.width / im.height)
+        im = im.resize((max(1, int(im.width * s)), max(1, int(im.height * s))),
+                       Image.LANCZOS)
+        out = Image.new("RGB", (a.width, a.width + a.bar), (24, 24, 26))
+        out.paste(im, ((a.width - im.width) // 2, (a.width - im.height) // 2))
+        if title:
+            d = ImageDraw.Draw(out)
+            d.text((14, a.width + 11), title, font=font(17), fill=(255, 170, 0))
+        return out
+
+    def add(self, img, title, dur, colours=None):
+        self.frames.append(self.compose(img, title))
+        self.durs.append(dur)
+        self.cols.append(colours or self.a.colours)
+
+    def render(self, src, dst, is_cells, bbox):
+        cmd = [RASTER, src, dst, "--width", str(self.a.width), "--quiet"]
+        if bbox:
+            cmd += ["--bbox"] + [f"{v:.4f}" for v in bbox]
+        cmd += ["--cells"] if is_cells else sum((["--lef", l] for l in self.a.lef), [])
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(dst):
+            print(f"  render failed {src}: {r.stdout}{r.stderr}", file=sys.stderr)
+            return False
+        return True
+
+
+def main():
+    ap = argparse.ArgumentParser(description="animate an electron placement run")
+    ap.add_argument("--dir", required=True, help="directory holding the frames")
+    ap.add_argument("--out", help="output GIF (default <dir>/placement.gif)")
+    ap.add_argument("--log", help="the run log, for the module names in act 2")
+    ap.add_argument("--lef", action="append", default=[],
+                    help="LEF for the DEF frames of act 3; repeat for more")
+    ap.add_argument("--width", type=int, default=700, help="picture size in pixels")
+    ap.add_argument("--bar", type=int, default=40, help="caption strip height")
+    ap.add_argument("--colours", type=int, default=192, help="palette of a key frame")
+    ap.add_argument("--xfade", type=int, default=3,
+                    help="dissolve frames between consecutive modules, 0 to cut")
+    ap.add_argument("--xfade-colours", type=int, default=48,
+                    help="palette of a dissolve frame; these compress badly and "
+                         "are on screen for a few tens of ms")
+    ap.add_argument("--act1-stride", type=int, default=3,
+                    help="use every Nth hier_place grab")
+    ap.add_argument("--act1-ms", type=int, default=70, help="ms per act 1 frame")
+    ap.add_argument("--module-ms", type=int, default=520, help="ms per module")
+    ap.add_argument("--stage-ms", type=int, default=2000, help="ms per flat stage")
+    args = ap.parse_args()
+
+    out = args.out or os.path.join(args.dir, "placement.gif")
+    b = Builder(args)
+
+    # ---- act 1: the PyQt placer, already PNGs that Qt wrote ------------- #
+    for pfx, title in (("a", "placing blocks and ports"),
+                       ("b", "placing standard cells")):
+        fs = sorted(glob.glob(os.path.join(args.dir, f"{pfx}*.png")))
+        fs = fs[::max(1, args.act1_stride)]
+        for i, f in enumerate(fs):
+            b.add(Image.open(f), title, args.act1_ms if i else 700)
+        if fs:
+            b.durs[-1] = 1400
+
+    # ---- act 2: the hierarchy walk ------------------------------------- #
+    order = walk_order(args.log)
+    cells = sorted(glob.glob(os.path.join(args.dir, "*.hiercells")))
+    bbox = die_um(cells[0]) if cells else None
+
+    walk = []
+    for i, src in enumerate(cells):
+        png = src[:-len(".hiercells")] + ".png"
+        if not b.render(src, png, True, bbox):
+            continue
+        mod = order[i][0] if i < len(order) else ""
+        walk.append(b.compose(Image.open(png), f"placing {mod}" if mod else ""))
+
+    # One frame per module is a slideshow beside act 1.  Dissolve instead: the
+    # new level fades in over the old, which reads as the hierarchy filling
+    # rather than as a cut.  The caption changes on the key frame, so a module
+    # is named the moment it is fully drawn.
+    for i, f in enumerate(walk):
+        b.frames.append(f)
+        b.durs.append(args.module_ms)
+        b.cols.append(args.colours)
+        if i + 1 < len(walk):
+            for k in range(1, args.xfade + 1):
+                t = k / (args.xfade + 1)
+                b.frames.append(Image.blend(f, walk[i + 1], t))
+                b.durs.append(55)
+                b.cols.append(args.xfade_colours)
+    if walk:
+        b.durs[-1] = 1400
+
+    # ---- act 3: the flat database -------------------------------------- #
+    # z1/z2/z3 by convention; anything else matching z*.def is captioned with
+    # its own stem rather than skipped.
+    titles = {"z1_flat": "flattened",
+              "z2_legal": "legalized",
+              "z3_improved": "wirelength improved"}
+    for src in sorted(glob.glob(os.path.join(args.dir, "z*.def"))):
+        stem = os.path.basename(src)[:-len(".def")]
+        png = src[:-len(".def")] + ".png"
+        if not args.lef:
+            print("placement_gif: act 3 needs --lef; skipping the DEF frames",
+                  file=sys.stderr)
+            break
+        if not b.render(src, png, False, bbox):
+            continue
+        b.add(Image.open(png), titles.get(stem, stem), args.stage_ms)
+
+    if not b.frames:
+        print(f"placement_gif: no frames in {args.dir}", file=sys.stderr)
+        return 2
+    b.durs[-1] = 3200
+
+    # Identical consecutive frames carry nothing -- the placer converges well
+    # before its step budget runs out -- so fold their time into the frame that
+    # survives.  PIL's optimize drops them anyway, silently, which misaligns
+    # the duration list and lands the holds on the wrong frames.
+    f2, d2, c2 = [], [], []
+    for f, d, c in zip(b.frames, b.durs, b.cols):
+        if f2 and f.tobytes() == f2[-1].tobytes():
+            d2[-1] += d
+            continue
+        f2.append(f)
+        d2.append(d)
+        c2.append(c)
+    print(f"placement_gif: {len(b.frames)} composed, {len(f2)} distinct")
+
+    pal = [f.convert("P", palette=Image.ADAPTIVE, colors=c) for f, c in zip(f2, c2)]
+    pal[0].save(out, save_all=True, append_images=pal[1:], duration=d2,
+                loop=0, optimize=True)
+    print(f"placement_gif: {out}: {len(f2)} frames, {os.path.getsize(out)/1e6:.2f} MB, "
+          f"{f2[0].size[0]}x{f2[0].size[1]}, {sum(d2)/1000:.1f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

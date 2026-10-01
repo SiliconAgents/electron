@@ -55,6 +55,12 @@ puts a miniconda `python3` without scipy ahead of the container's.
 
 ## Recipe
 
+### 0. One design, all three acts
+
+Run every act on the SAME design. Splicing a PyQt act from one design onto a
+hierarchy walk from another gives an animation of a chip that does not exist,
+and the join is not obvious to anyone watching it.
+
 ### 1. Pick the design and check for a netlist you can reuse
 
 `TESTS/large/workarea/synth/` may already hold synthesis output. Re-running
@@ -85,22 +91,21 @@ set_floorplan_parameters -ASPECT_RATIO 1 -UTILIZATION 50
 set_floorplan
 edit_module --top
 # act one: the PyQt engine on the top module, blocks then standard cells
-hier_place       -module matmul_4x4 -kinds INST,PORT -batch 400 \
-                 -args --frames,gif/a,--frame-every,20
-hier_place_cells -module matmul_4x4 -batch 400 \
-                 -args --frames,gif/b,--frame-every,20
-commit_module -module matmul_4x4 --physical_only
-# act two: the rest of the hierarchy, with the top kept as placed
-hier_place_all -batch 300 -cells_batch 300 --skip_placed -snapshot gif/h
-write_def -output gif/z1_flat.def --overwrite
+hier_place       -module matmul_4x4 -kinds INST,PORT -batch 400 -args --frames,gif3/a,--frame-every,4,--frames-view
+hier_place_cells -module matmul_4x4 -batch 400 -args --frames,gif3/b,--frame-every,4,--frames-view
+# act two: the rest of the hierarchy, --skip_placed so the top keeps act one
+hier_place_all -batch 300 -cells_batch 300 --skip_placed -snapshot gif3/h
+write_def -output gif3/z1_flat.def --overwrite
 legalize_flat
-write_def -output gif/z2_legal.def --overwrite
+write_def -output gif3/z2_legal.def --overwrite
 improve_congestion
-write_def -output gif/z3_improved.def --overwrite
+write_def -output gif3/z3_improved.def --overwrite
 exit
 ```
 
-`-snapshot <prefix>` writes `<prefix>NNN.hiercells` after each module.
+`--frames-view` grabs the placer's canvas without its controls, which is what
+the animation wants. `-snapshot <prefix>` writes `<prefix>NNN.hiercells` after
+each module.
 `-snapshot_args --blocks` additionally keeps a placed module's own outline over
 its contents, if block boundaries should stay visible all the way down.
 
@@ -116,34 +121,51 @@ apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/h
 This takes about eight minutes on matmul_4x4. Run it in the background and
 report progress from the log rather than blocking silently.
 
-### 3. Render and assemble
+### 3. Assemble
 
-The `gif/a*.png` and `gif/b*.png` frames are already PNGs — Qt wrote them, and
-nothing re-renders them. They are 1400x900 with the control panel beside the
-canvas; the die frames are square. Letterbox both onto one canvas in the
-assembler so the animation does not jump, or crop the Qt frames to the canvas
-with `--frames-view` if the controls are not wanted.
-
-`3RDBIN/def_raster` renders the other two kinds of frame — `--cells` for `.hiercells`,
-`--lef <tech.lef>` for a DEF. About 1.2s a frame at 204k cells.
-
-Force every frame onto the SAME `--bbox`, taken from the first hier frame's
-`DIE` line, or the animation jumps when it switches to the DEFs.
-
-PIL is in the container (no ffmpeg, no ImageMagick, and none needed):
-
-```python
-ims = [Image.open(f).convert("P", palette=Image.ADAPTIVE, colors=128) for f in frames]
-ims[0].save(out, save_all=True, append_images=ims[1:], duration=durs, loop=0, optimize=True)
-```
-
-Caption each frame — module name, depth, box count for the walk; the command
-name for the flat stages — and hold the flat frames two to three times longer
-than the walk frames. Parse the walk order out of the log:
+`3RDBIN/placement_gif` does the whole assembly. Do NOT write your own — it
+already handles the parts that are easy to get wrong, and its defaults are the
+measured ones.
 
 ```
-INFO-TST-HR_PL_ALL : 013 : [7/13] adder12, ... at depth 4
+apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/home/$USER \
+  INSTALL/podman/pysparkpp.sif \
+  python3 3RDBIN/placement_gif \
+    --dir <workarea>/gif3 \
+    --log <the run log> \
+    --lef TESTS/library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef \
+    --out <workarea>/gif3/placement.gif
 ```
+
+It picks up whichever acts are present in `--dir`, forces every frame onto one
+die extent, letterboxes rather than stretches, dissolves between modules,
+captions each act, and folds the time of duplicate frames into the frame that
+survives. `--log` is only for the module names in act 2; without it those
+frames are uncaptioned.
+
+Knobs, in the order worth reaching for:
+
+| flag | default | effect |
+|---|---|---|
+| `--act1-stride` | 3 | use every Nth Qt grab. The cheapest size cut; act 1 is already the smoothest part |
+| `--xfade` | 3 | dissolve frames per module gap; 0 cuts instead |
+| `--width` | 700 | picture size |
+| `--colours` | 192 | palette of a key frame |
+| `--xfade-colours` | 48 | palette of a dissolve frame |
+
+Measured at the defaults on matmul_4x4 (204,816 instances, 13 modules):
+**117 frames, 700x740, 7.6MB, 25s.**
+
+### On file size, so you can hit a target rather than guess
+
+A GIF only compresses where consecutive frames share unchanged area, and a
+dissolve between two dense rasters shares almost nothing. Sixty full-palette
+dissolve frames cost more than the hundred Qt frames in front of them, and took
+a 7.6MB file to 11.8MB on their own. That is why dissolves get their own small
+palette.
+
+To get smaller, in order of least damage: raise `--act1-stride` (free, the
+frames are already on disk, no re-run), lower `--xfade`, then `--width`.
 
 ### 4. Report
 
