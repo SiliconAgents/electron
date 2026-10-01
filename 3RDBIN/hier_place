@@ -2637,7 +2637,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  hier_place.py tt_fpu_gtile.pseudo.nodefile tt_fpu_gtile.pseudo.txt
+  hier_place.py one large design.pseudo.nodefile one large design.pseudo.txt
   hier_place.py design.nodefile design.txt --kinds INST PORT
   hier_place.py design.nodefile design.txt --kinds INST PORT \\
       --port-edge 'i_cg_*:W' --port-edge '*_col_id*:N'

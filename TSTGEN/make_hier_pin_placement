@@ -537,7 +537,7 @@ unless ( @die >= 4 && defined $die[3] && $die[2] > $die[0] && $die[3] > $die[1] 
 #<!-- The slice of the routing stack asked for, split by preferred direction.
 #
 #     The direction comes from the tech and is not inferred from the position:
-#     the odd-is-vertical convention does not hold everywhere -- in this samsung
+#     the odd-is-vertical convention does not hold everywhere -- in this a foundry
 #     stack M1 is HORIZONTAL and M2 VERTICAL, the other way round -- and the
 #     names are not all Mn either (M1 M2 M3 F4 F5 D6 ...).  Parity is only the
 #     fallback for a layer the tech does not describe. -->

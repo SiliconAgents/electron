@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Measure a hier_place result: overlap, die usage, edge margins, wirelength.
+
+    hier_place_qa <placed.nodefile> [--edges <graph.txt>] [--label NAME]
+
+hier_place's own metrics panel reports overlap and weighted wirelength while it
+runs.  This is the independent check, the same way an integer sweep over a DEF
+is the independent check on legalize_flat: a different implementation reading
+the file that was actually written, so a claim about an improvement rests on
+something other than the thing being improved.
+
+WHAT IT REPORTS AND WHY EACH ONE
+
+  overlap          Area and pair count.  THE number for block placement: a
+                   hierarchical block that overlaps another is not a placement,
+                   it is a promise to fix something later.
+  die usage        Block area over die area, and the placement's bounding box
+                   over die area.  The two differ in a way that matters: area
+                   says how full the die is, bbox says whether the blocks are
+                   using its shape.  Blocks heaped in the middle of a die they
+                   nearly span show a high bbox and a low area.
+  edge margins     Per side, and how many blocks sit flush.  A block hard
+                   against the die edge leaves nowhere for a seal ring, a power
+                   ring or the pins of anything beyond it.
+  HPWL             Centre to centre over the edge file, so an improvement in
+                   the three above can be weighed against what it cost.  Every
+                   one of them trades wirelength and none of them is free.
+
+COORDINATES.  The nodefile's <x> <y> is the LOWER LEFT CORNER, which the file
+says in its own header and which is worth reading before trusting any number
+out of it: read as a centre, a correct placement reports blocks hanging off two
+sides of the die.
+"""
+
+import argparse
+import math
+import sys
+
+
+def read_nodes(path):
+    die = None
+    dbu = 1000
+    blocks = []        # (name, x, y, w, h)   x,y = lower left
+    ports = []
+    index = {}
+    for line in open(path, errors="replace"):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        f = s.split()
+        if f[0] == "DIEAREA" and len(f) >= 5:
+            die = [float(v) for v in f[1:5]]
+            continue
+        if f[0] == "DBU" and len(f) >= 2:
+            dbu = float(f[1])
+            continue
+        if not f[0].isdigit() or len(f) < 6:
+            continue
+        idx, name, kind = int(f[0]), f[1], f[2].upper()
+        w, h = float(f[3]), float(f[4])
+        if f[5].upper() not in ("PLACED", "FIXED") or len(f) < 8:
+            continue
+        x, y = float(f[6]), float(f[7])
+        rec = (name, x, y, w, h)
+        index[idx] = (x + w / 2.0, y + h / 2.0)
+        (ports if kind == "PORT" else blocks).append(rec)
+    return die, dbu, blocks, ports, index
+
+
+def read_edges(path):
+    """The graph file: pairs of node indices, one edge per line."""
+    out = []
+    for line in open(path, errors="replace"):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        f = s.split()
+        if len(f) >= 2 and f[0].lstrip("-").isdigit() and f[1].lstrip("-").isdigit():
+            out.append((int(f[0]), int(f[1])))
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("nodefile")
+    ap.add_argument("--edges", help="graph file, for the wirelength figure")
+    ap.add_argument("--label", default="", help="name this run in the output")
+    ap.add_argument("--quiet", action="store_true", help="one line, for sweeps")
+    args = ap.parse_args()
+
+    die, dbu, blocks, ports, index = read_nodes(args.nodefile)
+    if die is None:
+        print("hier_place_qa: the nodefile has no DIEAREA", file=sys.stderr)
+        return 2
+    dw, dh = die[2] - die[0], die[3] - die[1]
+    dare = dw * dh
+    if not blocks:
+        print("hier_place_qa: no placed blocks", file=sys.stderr)
+        return 2
+
+    area = sum(w * h for _, _, _, w, h in blocks)
+
+    # overlap: every pair, which is fine for the tens of blocks a top level has
+    ov, pairs, worst, worst_pair = 0.0, 0, 0.0, ("", "")
+    for i in range(len(blocks)):
+        ni, xi, yi, wi, hi = blocks[i]
+        for j in range(i + 1, len(blocks)):
+            nj, xj, yj, wj, hj = blocks[j]
+            ox = min(xi + wi, xj + wj) - max(xi, xj)
+            oy = min(yi + hi, yj + hj) - max(yi, yj)
+            if ox > 1e-9 and oy > 1e-9:
+                a = ox * oy
+                ov += a
+                pairs += 1
+                if a > worst:
+                    worst, worst_pair = a, (ni, nj)
+
+    L = min(x for _, x, _, _, _ in blocks)
+    R = max(x + w for _, x, _, w, _ in blocks)
+    B = min(y for _, _, y, _, _ in blocks)
+    T = max(y + h for _, _, y, _, h in blocks)
+    margins = (L - die[0], die[2] - R, B - die[1], die[3] - T)
+    flush = sum(1 for _, x, y, w, h in blocks
+                if min(x - die[0], die[2] - (x + w),
+                       y - die[1], die[3] - (y + h)) < 0.01)
+
+    hpwl = None
+    if args.edges:
+        try:
+            e = read_edges(args.edges)
+            hpwl = sum(math.hypot(index[b][0] - index[a][0], index[b][1] - index[a][1])
+                       for a, b in e if a in index and b in index)
+        except OSError as err:
+            print(f"hier_place_qa: {err}", file=sys.stderr)
+
+    if args.quiet:
+        print(f"{args.label or args.nodefile}\t"
+              f"ov={100*ov/area:.2f}%\tpairs={pairs}\t"
+              f"area={100*area/dare:.1f}%\tbbox={100*(R-L)*(T-B)/dare:.1f}%\t"
+              f"flush={flush}\t"
+              f"minmargin={min(margins):.2f}\t"
+              f"hpwl={hpwl:,.0f}" if hpwl is not None else
+              f"{args.label or args.nodefile}\tov={100*ov/area:.2f}%\tpairs={pairs}\t"
+              f"area={100*area/dare:.1f}%\tflush={flush}")
+        return 0
+
+    head = f"  {args.label}" if args.label else ""
+    print(f"hier_place_qa{head}: {args.nodefile}")
+    print(f"  die          : {dw:.2f} x {dh:.2f} um")
+    print(f"  blocks       : {len(blocks)}  ({len(ports)} port(s))")
+    print(f"  overlap      : {ov:,.1f} um2 = {100*ov/area:.2f}% of block area, "
+          f"{pairs} pair(s)")
+    if pairs:
+        print(f"                 worst {worst:,.1f} um2 between "
+              f"{worst_pair[0]} and {worst_pair[1]}")
+    print(f"  die usage    : block area {100*area/dare:.1f}%, "
+          f"bounding box {100*(R-L)*(T-B)/dare:.1f}%")
+    print(f"  edge margin  : L {margins[0]:.2f}  R {margins[1]:.2f}  "
+          f"B {margins[2]:.2f}  T {margins[3]:.2f} um")
+    print(f"                 {flush} of {len(blocks)} block(s) flush to the die edge")
+    if hpwl is not None:
+        print(f"  HPWL         : {hpwl:,.1f} um (centre to centre over the edge file)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

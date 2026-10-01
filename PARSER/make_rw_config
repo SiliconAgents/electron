@@ -119,7 +119,7 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
 #<!-- Liberty paths, remembered but NOT read.
 #
 #     "std-cell-libs" lists every corner of every VT flavour -- 3336 files for
-#     slvt on this samsung config, 2937 for elvt on the tsmc one, and the
+#     slvt on this a foundry config, 2937 for elvt on the tsmc one, and the
 #     uncompressed ones run to 2GB each.  Reading them here would be absurd and
 #     nothing in this tool wants all of them at once.  What the list is for is
 #     picking one: synthesis takes a single liberty for dfflibmap and abc.
