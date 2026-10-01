@@ -1,0 +1,278 @@
+#****f* /write_hier_cells
+#  write_hier_cells
+# FUNCTION
+#  Dump the HIERARCHICAL placement as a flat list of boxes in top level
+#  coordinates, in the cell-dump format 3RDBIN/def_raster reads.
+#
+#  WHAT IT IS FOR
+#
+#  There was no way to look at the whole chip while hier_place_all was walking
+#  it.  The flat database does not exist yet -- hier2flat runs once, at the end
+#  -- so write_def shows nothing, and 3RDBIN/def_raster reads a DEF.  The GUI's
+#  own dump, dbfRasterDumpCells, walks %CADB, which is the same flat database
+#  and is just as empty.  The Hier-View shows one module at a time.
+#
+#  So this walks the PSEUDO hierarchy instead, from the top down, accumulating
+#  each instance's offset into its parent, and writes every box it reaches in
+#  absolute top level coordinates.  Point def_raster at the result and you get
+#  a picture of the whole die at whatever stage the walk has reached.
+#
+#  WHAT A FRAME LOOKS LIKE, AND WHY THAT IS THE USEFUL PART
+#
+#  Two records come out.  A leaf is a CELL; a hierarchical instance the walk
+#  has not reached yet is a BLOCK, and def_raster paints those in the
+#  Hier-View's own colour rather than on the density ramp -- a module with
+#  nothing placed in it yet is not a full one.
+#
+#  An instance whose cellref is a module that has been placed is RECURSED into:
+#  its children are emitted instead of it.  An instance whose module has not
+#  been placed yet -- or is a leaf cell -- is emitted as its own box.
+#
+#  So a module that has not been reached yet is one solid rectangle, and the
+#  moment hier_place_all places it that rectangle dissolves into its contents.
+#  Run this after every module and the frames show the die filling in level by
+#  level, which is exactly what the walk does and is otherwise invisible.
+#
+#  CALL IT DURING THE WALK, NOT AFTER IT.  This is the trap.
+#
+#  hier_place_all ends by reopening the design top, because edit_module leaves
+#  $TOP_MODULE on the last module the walk touched and write_def means
+#  $TOP_MODULE by "the design".  But dbfTstgenEditModule DELETES the pseudo
+#  model of the module it opens AND of every hierarchical child of it -- so
+#  that closing reopen throws away every child model the walk just built.
+#
+#  The result is that this command, run after hier_place_all returns, sees only
+#  the top level.  Measured on matmul_4x4: the last frame taken DURING the walk
+#  holds 204,816 boxes, and the same dump taken immediately after the command
+#  returns holds 1,072 -- the top's sixteen blocks and nothing inside them.
+#  Nothing is wrong with the placement; the models it would have been read from
+#  are gone, and hier2flat has already moved the real answer into the flat
+#  database, where write_def and 3RDBIN/def_raster can see it.
+#
+#  So: -snapshot for frames of the walk, a DEF for anything after it.
+#
+#  WHICH TOP, AND WHY IT IS AN OPTION
+#
+#  $TOP_MODULE is NOT the design here.  edit_module moves it to whatever it
+#  opened, so during a walk it is the module being placed, and a dump rooted
+#  there would be of that module rather than of the chip.  The default root is
+#  $GLOBAL->dbfGlobalGetTOP, which edit_module leaves alone; -module overrides
+#  it.
+#
+#  UNITS.  The pseudo database is in MICRONS -- dbfTstgenLoadVNOMFlplan divides
+#  by the dbu on the way in -- and the dump format is integer DBU, so
+#  everything is multiplied back on the way out.  A box is a coordinate LIST
+#  and not necessarily a rectangle: a rectilinear instance holds a polygon, so
+#  dbfTstgenBboxFromCoords is what turns it into an extent.  Reading bbox[2]
+#  and bbox[3] as the upper right corner is the bug that gave a polygon a
+#  height of zero in dbfTstgenDownHierFlplan.
+#
+# SYNOPSIS
+#  write_hier_cells -out <file>
+#
+# INPUTS
+#
+#       options :
+#               -out <file> : the cell dump to write, default
+#                             <top>.hiercells
+#               -module <M> : root the walk at M instead of at the design top
+#               -depth <n> : stop recursing below this depth, so a deep
+#                            hierarchy can be shown at block level
+#
+#       switches :
+#               --blocks : emit a placed module's own box AS WELL AS its
+#                          contents, so block boundaries stay visible
+#
+# OUTPUTS
+#               a cell dump for 3RDBIN/def_raster
+#
+#****
+
+#<!-- One instance, placed absolutely.  Recurses when the instance is a module
+#     that has contents of its own.  Returns how many boxes it emitted.
+#
+#     Depth-first, and it cannot loop: a VNOM could in principle describe a
+#     cycle, so %onPath holds the modules between here and the root and a
+#     cellref already on it is emitted as a box rather than followed. -->
+sub dbfHierCellsWalk {
+my ($fh, $module, $ox, $oy, $dbu, $depth, $maxDepth, $onPath, $withBlocks, $stats) = @_;
+
+return 0 unless ( exists $PSEUDO_VINST_ALREADY{$module} );
+my $out = 0;
+
+foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+  my $vi = $PSEUDO_VINST_ALREADY{$module}{$inst};
+  next unless ( defined $vi );
+
+  my $status = $vi->dbPimDBGetInstStatus;
+  $status = "" unless ( defined $status );
+  #<!-- an instance nothing has placed has nowhere to be drawn -->
+  unless ( $status eq "PLACED" || $status eq "FIXED" ) {
+    $stats->{unplaced}++;
+    next;
+  }
+
+  my @raw = $vi->dbPimDBGetInstRelBbox;
+  my @bbox = &dbfTstgenBboxFromCoords(@raw);
+  next unless ( @bbox >= 4 && defined $bbox[3] );
+  my ($x, $y) = ($bbox[0] + $ox, $bbox[1] + $oy);
+  my ($w, $h) = ($bbox[2] - $bbox[0], $bbox[3] - $bbox[1]);
+
+  #<!-- a box with no extent is one the walk has not sized yet; drawing it as a
+  #     zero pixel sliver says less than leaving it out -->
+  if ( $w <= 0 || $h <= 0 ) {
+    my @guiBox = &return_pseudo_vinst_size($module, $inst);
+    if ( @guiBox >= 4 && defined $guiBox[3] ) {
+      my $gw = $guiBox[2] - $guiBox[0];
+      my $gh = $guiBox[3] - $guiBox[1];
+      $w = $gw if ( $gw > 0 );
+      $h = $gh if ( $gh > 0 );
+    }
+  }
+  if ( $w <= 0 || $h <= 0 ) { $stats->{nosize}++; next; }
+
+  my $cellref = $vi->dbPimDBGetInstCellref;
+  $cellref = "" unless ( defined $cellref );
+
+  #<!-- Recurse only into a module that actually HAS placed contents.  A module
+  #     the walk has not reached yet exists in PSEUDO_MODULE_ALREADY with an
+  #     empty vinst table, and recursing into it would emit nothing at all --
+  #     the block would vanish from the frame instead of standing as a box. -->
+  my $canDescend = ( $cellref ne ""
+                     && exists $PSEUDO_VINST_ALREADY{$cellref}
+                     && keys %{$PSEUDO_VINST_ALREADY{$cellref}}
+                     && ! exists $onPath->{$cellref}
+                     && ( $maxDepth <= 0 || $depth < $maxDepth ) );
+
+  if ( $canDescend ) {
+    $onPath->{$cellref} = 1;
+    my $n = &dbfHierCellsWalk($fh, $cellref, $x, $y, $dbu, $depth + 1,
+                              $maxDepth, $onPath, $withBlocks, $stats);
+    delete $onPath->{$cellref};
+    if ( $n > 0 ) {
+      $out += $n;
+      #<!-- the block's own outline on top of its contents, when asked for -->
+      if ( $withBlocks ) {
+        printf $fh "CELL %d %d %d %d\n",
+               $x * $dbu, $y * $dbu, $w * $dbu, $h * $dbu;
+        $out++;
+        $stats->{blocks}++;
+      }
+      next;
+    }
+    #<!-- it descended and found nothing drawable: fall through and draw the
+    #     block itself, which is better than a hole -->
+  }
+
+  #<!-- BLOCK, not CELL, for a hierarchical instance the walk has not reached.
+  #
+  #     The two are drawn differently and they mean different things.  A CELL
+  #     is a real leaf with a real footprint; a BLOCK is a module standing in
+  #     for contents that do not exist yet, and drawing it on the same density
+  #     ramp says the area is 100% full when nothing has been placed in it at
+  #     all.  def_raster paints a BLOCK in the Hier-View's own colour instead.
+  #
+  #     The test is whether the cellref names a module, not whether it has a
+  #     pseudo model: a module the walk has not opened yet has no model, which
+  #     is exactly the case this is for. -->
+  my $isBlock = ( $cellref ne ""
+                  && ( exists $PSEUDO_MODULE_ALREADY{$cellref}
+                       || exists $MODULE_ALREADY{$cellref} ) );
+  printf $fh "%s %d %d %d %d\n", ( $isBlock ? "BLOCK" : "CELL" ),
+         $x * $dbu, $y * $dbu, $w * $dbu, $h * $dbu;
+  $out++;
+  if ( $isBlock ) { $stats->{unexpanded}++; }
+  else            { $stats->{leaves}++; }
+}
+
+return $out;
+}#sub dbfHierCellsWalk
+
+
+sub write_hier_cells {
+
+my $noOfArguments = @_;
+my $outFile;
+my $root;
+my $maxDepth = 0;
+my $withBlocks = 0;
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : write_hier_cells -out <file, default <top>.hiercells>\n";
+  print "                         -module <root the walk here, default the design top>\n";
+  print "                         -depth <stop recursing below this level>\n";
+  print "                         --blocks  keep a placed module's own outline\n";
+  print "\n";
+  print "        Writes the hierarchical placement as absolute boxes in the format\n";
+  print "        3RDBIN/def_raster reads with --cells, so the whole die can be\n";
+  print "        looked at while hier_place_all is still walking it -- the flat\n";
+  print "        database does not exist until hier2flat runs.\n";
+  return;
+}
+for ( my $i = 0 ; $i < $noOfArguments ; $i++ ) {
+  if    ( $_[$i] eq "-out" )     { $outFile = $_[$i+1]; }
+  elsif ( $_[$i] eq "-module" )  { $root = $_[$i+1]; }
+  elsif ( $_[$i] eq "-depth" )   { $maxDepth = $_[$i+1]; }
+  elsif ( $_[$i] eq "--blocks" ) { $withBlocks = 1; }
+  elsif ( $_[$i] =~ m/^-+\w/ )   { print "WARN-TST-WR_HR_CL : 001 : invalid option $_[$i]\n"; }
+}
+
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+unless ( defined $dbu && $dbu > 0 ) {
+  print "ERR-TST-WR_HR_CL : 002 : database units are not set\n";
+  return;
+}
+
+#<!-- the design, not $TOP_MODULE: see the header -->
+unless ( defined $root && $root ne "" ) {
+  $root = $GLOBAL->dbfGlobalGetTOP;
+}
+unless ( defined $root && $root ne "" ) {
+  print "ERR-TST-WR_HR_CL : 003 : no top module; give -module\n";
+  return;
+}
+unless ( exists $PSEUDO_MODULE_ALREADY{$root} ) {
+  print "ERR-TST-WR_HR_CL : 004 : $root has no pseudo model; run edit_module first\n";
+  return;
+}
+
+$outFile = "$root.hiercells" unless ( defined $outFile && $outFile ne "" );
+
+#<!-- dbaTstgenGetSize is in microns already, unlike the flat floorplan -->
+my @size = $PSEUDO_MODULE_ALREADY{$root}->dbaTstgenGetSize;
+unless ( @size >= 4 && defined $size[3] && $size[2] > $size[0] && $size[3] > $size[1] ) {
+  print "ERR-TST-WR_HR_CL : 005 : $root has no size; place and commit it first\n";
+  return;
+}
+
+unless ( open(WHC, ">$outFile") ) {
+  print "ERR-TST-WR_HR_CL : 006 : cannot write $outFile : $!\n";
+  return;
+}
+printf WHC "# hierarchical placement of %s as absolute boxes, written by electron\n", $root;
+printf WHC "# the format 3RDBIN/def_raster reads with --cells; integers in dbu\n";
+printf WHC "UNITS %d\n", $dbu;
+printf WHC "DIE %d %d %d %d\n",
+       $size[0] * $dbu, $size[1] * $dbu, $size[2] * $dbu, $size[3] * $dbu;
+
+my %stats = ( leaves => 0, blocks => 0, unexpanded => 0, unplaced => 0, nosize => 0 );
+my %onPath = ( $root => 1 );
+my $n = &dbfHierCellsWalk(\*WHC, $root, 0, 0, $dbu, 0, $maxDepth,
+                          \%onPath, $withBlocks, \%stats);
+close(WHC);
+
+printf("INFO-TST-WR_HR_CL : 007 : wrote %s, %d box(es) from %s (%d leaf, %d unexpanded block)\n",
+       $outFile, $n, $root, $stats{leaves}, $stats{unexpanded});
+if ( $stats{blocks} > 0 ) {
+  print "INFO-TST-WR_HR_CL : 008 : $stats{blocks} of them are block outlines (--blocks)\n";
+}
+if ( $stats{unplaced} > 0 ) {
+  print "INFO-TST-WR_HR_CL : 009 : $stats{unplaced} instance(s) are not placed yet and were skipped\n";
+}
+if ( $stats{nosize} > 0 ) {
+  print "INFO-TST-WR_HR_CL : 010 : $stats{nosize} instance(s) have no size and were skipped\n";
+}
+
+}#sub write_hier_cells
+
+1;

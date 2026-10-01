@@ -2736,6 +2736,18 @@ Controls:
                         help="place headlessly: run N physics steps, write the nodefile "
                              "given by --save and exit without opening a window. Needs "
                              "PyQt5 but no display; the platform is forced to offscreen.")
+    parser.add_argument("--frames", metavar="PREFIX",
+                        help="with --batch, grab this window to <PREFIX>NNN.png "
+                             "every --frame-every steps, so the run can be made "
+                             "into an animation. Frame 000 is the initial "
+                             "scatter, before any step. Needs no display: the "
+                             "offscreen platform renders the widget into a "
+                             "pixmap through its ordinary paintEvent.")
+    parser.add_argument("--frame-every", type=int, default=10, metavar="N",
+                        help="steps between --frames grabs (default 10)")
+    parser.add_argument("--frames-view", action="store_true",
+                        help="grab only the placement canvas, without the "
+                             "controls and the metrics panel beside it")
     parser.add_argument("--save", metavar="FILE",
                         help="where --batch writes the placed nodefile (default: the "
                              "input nodefile with .placed.nodefile in place of .nodefile)")
@@ -2887,11 +2899,53 @@ Controls:
         # Start button sets; in batch there is no button to press.
         window.view.animation_running = True
         print(f"Batch: {args.batch} step(s), writing {out}")
+
+        # --frames: PNGs of THIS window, every --frame-every steps.
+        #
+        # Qt renders the widget into a pixmap itself, so the frames carry what
+        # the placer actually draws -- fly lines, bundled buses, port edges and
+        # colours, the metrics panel -- rather than a second implementation of
+        # the same picture somewhere else.  QWidget.grab() paints through the
+        # ordinary paintEvent, so it needs no display and no window manager;
+        # --batch has already forced QT_QPA_PLATFORM=offscreen above.
+        #
+        # From INSIDE the one run.  The obvious alternative -- --batch 10, then
+        # 20, then 40 -- re-runs the physics from the seed every time and costs
+        # O(sum of N) to reach states this run already passes through.
+        #
+        # Frame 000 is grabbed before the first step, so the animation opens on
+        # the scatter the seed produced and the first move is visible.
+        frame_n = 0
+
+        def _grab():
+            nonlocal frame_n
+            # The metrics panel is driven by a QTimer every 500ms, and in batch
+            # there is no event loop for it to fire in -- so without this the
+            # weighted wirelength and overlap readouts are blank in every
+            # frame, which is most of what makes the animation worth watching.
+            window.update_metrics()
+            target = window.view if args.frames_view else window
+            target.grab().save(f"{args.frames}{frame_n:03d}.png")
+            frame_n += 1
+
+        if args.frames:
+            os.makedirs(os.path.dirname(args.frames) or ".", exist_ok=True)
+            # show() lays the widgets out and gives them their real geometry.
+            # Offscreen, it maps nothing: there is no display to map onto.  A
+            # grab without it comes back at the default size with an unlaid-out
+            # panel.
+            window.show()
+            app.processEvents()
+            _grab()
         for i in range(args.batch):
             window.view.step()
+            if args.frames and (i + 1) % args.frame_every == 0:
+                _grab()
         window.view.animation_running = False
         window.view.save_nodefile(out)
         print(f"Batch: wrote {out}")
+        if args.frames:
+            print(f"Batch: wrote {frame_n} frame(s) as {args.frames}NNN.png")
         return 0
 
     window.show()
