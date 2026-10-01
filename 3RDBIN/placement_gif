@@ -8,7 +8,7 @@ them.  Up to three acts, and it uses whichever are present:
 
     <dir>/a*.png        hier_place --frames        the PyQt engine placing the
     <dir>/b*.png        hier_place_cells --frames  top's blocks, then its cells
-    <dir>/h*.hiercells  hier_place_all -snapshot   the hierarchy walk
+    <dir>/*.hiercells   hier_place_all -snapshot   the hierarchy walk
     <dir>/z*.def        write_def                  the flat database
 
 Same shape as the other tools in here: text and files in, a file out, nothing
@@ -174,9 +174,21 @@ def main():
             b.durs[-1] = 1400
 
     # ---- act 2: the hierarchy walk ------------------------------------- #
-    order = walk_order(args.log)
+    order = walk_order(args.log)   # needed before the globs, for the check below
+    # ANY *.hiercells in the directory, not just the -snapshot prefix, so a run
+    # that used a different prefix still works.  The cost of that is below.
     cells = sorted(glob.glob(os.path.join(args.dir, "*.hiercells")))
     bbox = die_um(cells[0]) if cells else None
+
+    # Captions are POSITIONAL -- the Nth dump is the Nth module in the log --
+    # so one stray .hiercells in the directory shifts every name after it and
+    # nothing else goes wrong.  Silently mislabelling the modules is worse than
+    # saying so, and the fix is a directory holding one run's frames.
+    if order and len(cells) != len(order):
+        print(f"placement_gif: WARNING: {len(cells)} .hiercells file(s) in "
+              f"{args.dir} but the log names {len(order)} module(s). Act 2 "
+              f"captions are matched by position, so they will be wrong. "
+              f"Use a directory holding one run's frames.", file=sys.stderr)
 
     walk = []
     for i, src in enumerate(cells):

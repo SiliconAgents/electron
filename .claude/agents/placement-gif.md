@@ -67,13 +67,25 @@ and the join is not obvious to anyone watching it.
 yosys adds minutes and changes nothing about the placement being animated, so
 `read_verilog` the existing `*_filter.vg` when it is there.
 
-Designs, with the frame count each gives (one frame per module):
+| design | workarea | netlist | config path | act 2 frames | whole run | GIF at defaults |
+|---|---|---|---|---|---|---|
+| `vedic_16x16` | `TESTS/workarea` | `vedic_filter.vg` | `../../CONFIG/library.config` | 11 | **under 60s** | 89 frames, 2.55MB, 24s |
+| `matmul_4x4` | `TESTS/large/workarea` | `synth/matmul_4x4_filter.vg` | `../../../CONFIG/library.config` | 13 | ~8 min | 117 frames, 7.6MB, 25s |
+| `mxu_256` | `TESTS/large/workarea` | `synth/mxu_256_filter.vg` | `../../../CONFIG/library.config` | 9 levels | long | not measured |
 
-| design | instances | modules | note |
-|---|---|---|---|
-| `vedic_16x16` (`TESTS/workarea`) | 4,233 | 11 | fast, good for trying changes |
-| `matmul_4x4` (`TESTS/large/workarea`) | 204,816 | 13 | the default choice |
-| `mxu_256` | 855,424 | 9 levels | long; every snapshot is large |
+**The config path depth differs per design** — `TESTS/workarea` is two levels
+down, `TESTS/large/workarea` is three. Copying the template below without
+changing it is the most likely way to fail at the first command.
+
+**"act 2 frames" is not the GIF length.** It is one dump per module. Act 1
+contributes ~200 Qt grabs before the default `--act1-stride 3` thins them, and
+dominates the total — see the last column for what actually comes out.
+
+**For vedic use `TESTS/workarea/vedic_filter.vg`**, the one the repo's own
+vedic flows read, not `synth/vedic_16x16_filter.vg`. Both exist and they are
+different netlists: the `synth/` one was made from the RTL and is sequential
+(it has a `clk`), the top-level one is the checked-in combinational version.
+Either animates, but only the top-level one matches the other vedic tests.
 
 ### 2. Write the tcl
 
@@ -127,6 +139,11 @@ report progress from the log rather than blocking silently.
 already handles the parts that are easy to get wrong, and its defaults are the
 measured ones.
 
+Run this **from the repo root**, not from the workarea you were just in:
+`--lef` below is repo-root relative while `--dir` and `--out` are absolute. Get
+that wrong and acts 1 and 2 still build — only act 3 fails, which reads as a
+LEF problem rather than a directory one.
+
 ```
 apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/home/$USER \
   INSTALL/podman/pysparkpp.sif \
@@ -136,6 +153,12 @@ apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/h
     --lef TESTS/library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef \
     --out <workarea>/gif3/placement.gif
 ```
+
+**Give each run its own `--dir`.** The tool takes any `*.hiercells` in there,
+not just the `-snapshot` prefix, and act 2's captions are matched by POSITION —
+the Nth dump is the Nth module in the log. One stray dump from an earlier run
+shifts every module name after it. It warns when the counts disagree, but a
+clean directory is the fix.
 
 It picks up whichever acts are present in `--dir`, forces every frame onto one
 die extent, letterboxes rather than stretches, dissolves between modules,
