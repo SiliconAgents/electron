@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Turn LEF macros into Verilog blackbox stubs, so a synthesiser knows the cells.
+
+    lef_blackbox -o cells.v <tech.lef> [<more.lef> ...]
+    lef_blackbox -o cells.v --config <library.config> --foundry a foundry \
+                 --node the node --layer 16
+
+WHAT IT IS FOR
+
+A netlist that instantiates standard cells directly -- clock gates, library
+flops, tie cells, the a library-cell wrapper* wrappers -- gives yosys module names it has
+never heard of, and `hierarchy -check` stops.  The usual answers are a liberty
+or the vendor's Verilog models, and on the PDK neither is available for every
+group: the plain NLDM liberties cover only one group and another group (306 of 3,336 slvt
+files), the rest ship CCS+LVF models that are 2GB uncompressed and that yosys
+cannot parse, and the MODEL directory has no Verilog for some cells at all.
+
+The LEF has all of them.  It is the one file that describes every cell in the
+library, and for a blackbox the only thing needed is the port list and the
+directions -- which is exactly what a LEF PIN carries.
+
+WHAT IT WRITES
+
+    (* blackbox *) (* keep *)
+    module <CELL> (CK, E, ECK, SE, VDD, VSS);
+      input  CK;
+      ...
+    endmodule
+
+`blackbox` tells yosys the module has no implementation to look inside; `keep`
+stops it being optimised away when its outputs look unused.
+
+POWER AND GROUND PINS ARE KEPT, as inout.  The RTL here connects only signal
+pins -- a clock-gate wrapper names .CK .E .SE .ECK and no supplies -- and an
+unconnected port is legal, so keeping them costs nothing and means a netlist
+that DOES connect them still elaborates.  Dropping them would be the choice
+that breaks one of the two styles.
+
+WHAT IT DELIBERATELY DOES NOT DO
+
+No timing, no function, no area.  A blackbox is for structure: it lets the
+hierarchy resolve so the design can be elaborated, floorplanned and placed.
+Mapping generic logic ONTO these cells is abc's job and needs a liberty; this
+is not a substitute for one.
+"""
+
+import argparse
+import gzip
+import json
+import os
+import re
+import sys
+
+
+def open_maybe_gz(path):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", errors="replace")
+    return open(path, errors="replace")
+
+
+def read_lef(path):
+    """[(macro, [(pin, direction)])] from one LEF.
+
+    Hand rolled and line oriented: a LEF is large, the nesting that matters is
+    shallow (MACRO > PIN > PORT), and the only tokens of interest are MACRO,
+    PIN, DIRECTION, USE and the END that closes each.
+    """
+    macros = []
+    macro = None
+    pins = []
+    pin = None
+    direction = None
+    use = None
+    for line in open_maybe_gz(path):
+        t = line.split("#", 1)[0].split()
+        if not t:
+            continue
+        k = t[0]
+        if k == "MACRO" and len(t) > 1:
+            macro, pins = t[1], []
+        elif macro and k == "PIN" and len(t) > 1:
+            pin, direction, use = t[1], "INPUT", "SIGNAL"
+        elif pin and k == "DIRECTION" and len(t) > 1:
+            direction = t[1].rstrip(";").upper()
+        elif pin and k == "USE" and len(t) > 1:
+            use = t[1].rstrip(";").upper()
+        elif k == "END" and len(t) > 1 and pin and t[1] == pin:
+            # a supply is INOUT whatever the LEF says its direction is
+            if use in ("POWER", "GROUND"):
+                direction = "INOUT"
+            pins.append((pin, direction))
+            pin = None
+        elif k == "END" and len(t) > 1 and macro and t[1] == macro:
+            macros.append((macro, pins))
+            macro, pins = None, []
+    return macros
+
+
+def paths_from_config(cfg, foundry, node, layer):
+    """Every LEF the library config lists for one foundry/node/layer."""
+    with open(cfg) as fh:
+        c = json.load(fh)
+    if foundry not in c:
+        sys.exit(f"lef_blackbox: no foundry {foundry!r} in {cfg}; "
+                 f"have {', '.join(c)}")
+    nodes = [n for n in c[foundry]["node"] if n["type"] == node]
+    if not nodes:
+        sys.exit(f"lef_blackbox: no node {node!r} for {foundry}")
+    entries = [f for f in nodes[0]["files"] if str(f.get("layer")) == str(layer)]
+    if not entries:
+        sys.exit(f"lef_blackbox: no layer {layer!r} for {foundry}/{node}")
+    out = []
+    for key, val in entries[0].items():
+        if not key.endswith(("lefs", "slefs")):
+            continue
+        if isinstance(val, dict):
+            for group in val.values():
+                out += group if isinstance(group, list) else [group]
+        elif isinstance(val, list):
+            out += val
+        elif isinstance(val, str):
+            out.append(val)
+    return [p for p in out if re.search(r"\.s?lef(\.gz)?$", p)]
+
+
+DIRWORD = {"INPUT": "input ", "OUTPUT": "output", "INOUT": "inout "}
+
+_BIT = re.compile(r"^(.*?)\[(\d+)\]$")
+
+
+def collapse_bus(pins):
+    """LEF lists a bussed pin one bit at a time -- DS[0], DS[1] -- and those are
+    not legal Verilog port identifiers. Fold them back into one vector.
+
+    Order is preserved by first appearance so the port list still reads like the
+    LEF, and a pin that is simply named with brackets but has one bit comes out
+    as a scalar rather than a one-bit vector.
+    """
+    order = []
+    bits = {}
+    scalars = {}
+    for name, direction in pins:
+        m = _BIT.match(name)
+        if m:
+            base, idx = m.group(1), int(m.group(2))
+            if base not in bits:
+                bits[base] = []
+                order.append(base)
+            bits[base].append((idx, direction))
+        else:
+            if name not in scalars:
+                scalars[name] = direction
+                order.append(name)
+    out = []
+    for name in order:
+        if name in bits:
+            idxs = [i for i, _ in bits[name]]
+            d = bits[name][0][1]
+            lo, hi = min(idxs), max(idxs)
+            out.append((name, d, (hi, lo) if hi != lo else None))
+        else:
+            out.append((name, scalars[name], None))
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description="LEF macros to Verilog blackboxes")
+    ap.add_argument("lefs", nargs="*", help="LEF files to read")
+    ap.add_argument("-o", "--out", required=True, help="Verilog file to write")
+    ap.add_argument("--config", help="an electron library.config to take LEFs from")
+    ap.add_argument("--foundry", default="a foundry")
+    ap.add_argument("--node", default="the node")
+    ap.add_argument("--layer", default="16")
+    ap.add_argument("--only", metavar="FILE",
+                    help="a file of cell names, one per line: write only these "
+                         "(and report any that no LEF defines)")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    lefs = list(args.lefs)
+    if args.config:
+        lefs += paths_from_config(args.config, args.foundry, args.node, args.layer)
+    if not lefs:
+        sys.exit("lef_blackbox: give LEF files, or --config")
+
+    wanted = None
+    if args.only:
+        wanted = {l.strip() for l in open(args.only) if l.strip()}
+
+    seen = {}
+    read = 0
+    for p in lefs:
+        if not os.path.isfile(p):
+            print(f"lef_blackbox: skipping missing {p}", file=sys.stderr)
+            continue
+        read += 1
+        for name, pins in read_lef(p):
+            if name not in seen:          # first definition wins
+                seen[name] = pins
+
+    emit = {k: v for k, v in seen.items() if wanted is None or k in wanted}
+
+    with open(args.out, "w") as fh:
+        fh.write("// Blackbox stubs generated by 3RDBIN/lef_blackbox.\n")
+        fh.write("// Structure only: no timing, no function. The port list and\n")
+        fh.write("// directions come from each LEF MACRO's PIN records.\n")
+        fh.write(f"// {len(emit)} cell(s) from {read} LEF file(s).\n\n")
+        for name in sorted(emit):
+            pins = collapse_bus(emit[name])
+            if not pins:
+                continue
+            fh.write("(* blackbox *) (* keep *)\n")
+            fh.write(f"module {name} ({', '.join(p for p, _, _ in pins)});\n")
+            for p, d, rng in pins:
+                width = f"[{rng[0]}:{rng[1]}] " if rng else ""
+                fh.write(f"  {DIRWORD.get(d, 'inout ')} {width}{p};\n")
+            fh.write("endmodule\n\n")
+
+    if not args.quiet:
+        print(f"lef_blackbox: {len(emit)} cell(s) from {read} LEF file(s) -> {args.out}")
+        if wanted is not None:
+            missing = sorted(wanted - set(emit))
+            print(f"lef_blackbox: {len(wanted) - len(missing)} of {len(wanted)} "
+                  f"requested cell(s) found")
+            for m in missing:
+                print(f"  no LEF defines {m}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

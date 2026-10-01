@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""Strip a CCS/LVF liberty down to the NLDM a synthesiser can actually read.
+
+    liberty_slim -o out.lib in.lib.gz [in2.lib.gz ...]
+
+WHY
+
+a foundry's liberties ship as CCS + LVF models: 2.0 GB uncompressed for one
+corner of one cell group.  yosys cannot read them, and the reason is narrow --
+
+    input_ccb(<CELL>:a0) {
+
+a group whose NAME contains a colon, which the liberty tokeniser does not
+accept.  The only plain .lib.gz files in the library are filler cells, so there
+is no NLDM alternative to fall back on.
+
+None of that data is of any use to synthesis.  Current-source receiver models
+and variation tables are for signoff timing; mapping logic needs the function,
+the area and the NLDM delay tables.  So this drops the groups that carry it and
+keeps the rest, which both fixes the parse and takes two gigabytes to tens of
+megabytes.
+
+HOW
+
+Streamed and brace matched -- never loaded whole, because these files do not
+fit comfortably in memory and there is no reason to hold one.  A dropped group
+is skipped from its opening brace to its matching close, with string literals
+and comments honoured so a brace inside either does not confuse the count.
+
+WHAT IT DOES NOT DO
+
+It does not rewrite timing, areas or functions, and it does not merge corners.
+What comes out is the same library with the signoff-only data removed; if a
+tool read the original it will read this and get the same answers for
+everything that is left.
+"""
+
+import argparse
+import gzip
+import os
+import re
+import sys
+
+# Groups that carry only signoff data. Matched on the group keyword, so
+# input_ccb(...:a0) goes regardless of what its name contains.
+# Matched as PREFIXES, not exact names: the families are large and the
+# members vary by cell -- receiver_capacitance_fall, receiver_capacitance2_rise,
+# active_input_ccb, ccsn_first_stage. Enumerating them exactly is how the first
+# version of this missed four and failed on the next file.
+DROP = (
+    r"\w*_ccb",                       # input_ccb, active_output_ccb, ...
+    r"ccsn_\w+",                      # ccsn_first_stage, ccsn_last_stage
+    r"receiver_capacitance\w*",
+    r"ocv_\w+",                       # the LVF sigma tables
+    r"normalized_driver_waveform",
+    r"lu_table_template_ocv",
+)
+_DROP_RE = re.compile(r"^\s*(?:" + "|".join(DROP) + r")\s*\(")
+
+
+def open_maybe_gz(path, mode="rt"):
+    if path.endswith(".gz"):
+        return gzip.open(path, mode, errors="replace")
+    return open(path, mode, errors="replace")
+
+
+def slim(fin, fout, stats):
+    """Copy fin to fout, skipping the DROP groups by brace matching."""
+    depth = 0           # brace depth inside a group being dropped
+    dropping = False    # inside a dropped GROUP, counting braces
+    in_stmt = False     # inside a dropped multi-line ATTRIBUTE, to its ";"
+    for line in fin:
+        if in_stmt:
+            # an attribute can wrap: receiver_capacitance(... "0.0, 10.0,
+            #                                                  90.0, 100.0");
+            # dropping only its first line leaves the rest orphaned, which is a
+            # syntax error two thousand lines earlier than the real cause.
+            if ";" in re.sub(r'"[^"]*"', '""', line):
+                in_stmt = False
+            continue
+        if not dropping:
+            if _DROP_RE.match(line):
+                stats["dropped"] += 1
+                # Two forms carry this data and both have to go. A GROUP opens a
+                # brace and runs over many lines; an ATTRIBUTE is one line
+                # ending in a semicolon -- active_input_ccb(CELL__nci:a0); --
+                # and brace counting would swallow the rest of the file.
+                bare = re.sub(r'"[^"]*"', '""', line)
+                brace = bare.find("{")
+                semi = bare.find(";")
+                if brace == -1 or (semi != -1 and semi < brace):
+                    # attribute form; consume to its terminating semicolon
+                    in_stmt = semi == -1
+                    continue
+                dropping = True
+                depth = 0
+            else:
+                fout.write(line)
+                stats["kept"] += 1
+                continue
+        # counting, with strings and comments ignored so a brace in either
+        # cannot unbalance the depth
+        s = re.sub(r"/\*.*?\*/", "", line)
+        s = re.sub(r'"[^"]*"', '""', s)
+        depth += s.count("{") - s.count("}")
+        if depth <= 0:
+            dropping = False
+
+
+def main():
+    ap = argparse.ArgumentParser(description="CCS/LVF liberty to NLDM")
+    ap.add_argument("libs", nargs="+", help="liberty files, .gz accepted")
+    ap.add_argument("-o", "--out", required=True,
+                    help="output liberty; .gz to compress")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    stats = {"kept": 0, "dropped": 0}
+    opener = gzip.open if args.out.endswith(".gz") else open
+    with opener(args.out, "wt") as fout:
+        for p in args.libs:
+            if not os.path.isfile(p):
+                print(f"liberty_slim: no {p}", file=sys.stderr)
+                return 2
+            with open_maybe_gz(p) as fin:
+                slim(fin, fout, stats)
+
+    if not args.quiet:
+        insz = sum(os.path.getsize(p) for p in args.libs)
+        outsz = os.path.getsize(args.out)
+        print(f"liberty_slim: {stats['kept']:,} line(s) kept, "
+              f"{stats['dropped']:,} group(s) dropped")
+        print(f"liberty_slim: {args.out}  "
+              f"{insz/1e6:.1f} MB in -> {outsz/1e6:.1f} MB out")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
