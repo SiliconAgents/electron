@@ -162,12 +162,19 @@ def read_cells(path, log):
 
     Widths and heights arrive already turned for orientation, because the
     caller knows the orientation and we would only have to be told it anyway.
+
+    BLOCK is the other record, written by write_hier_cells for a hierarchical
+    instance whose module has not been placed yet.  It is kept apart from the
+    cells and drawn differently: a block is a module standing in for contents
+    that do not exist, and putting it on the density ramp would paint it as
+    100% full when nothing has been placed inside it at all.
     """
     dbu = 1000
     die = None
     rowh = 0
     rows = []                       # (y, x0, x1)
     xs, ys, ws, hs = [], [], [], []
+    bxs, bys, bws, bhs = [], [], [], []
     t0 = time.time()
     with open(path, errors="replace") as fh:
         for line in fh:
@@ -177,6 +184,11 @@ def read_cells(path, log):
                 if len(f) >= 5:
                     xs.append(int(f[1])); ys.append(int(f[2]))
                     ws.append(int(f[3])); hs.append(int(f[4]))
+            elif c == "B":
+                f = line.split()
+                if f[0] == "BLOCK" and len(f) >= 5:
+                    bxs.append(int(f[1])); bys.append(int(f[2]))
+                    bws.append(int(f[3])); bhs.append(int(f[4]))
             elif c == "R":
                 f = line.split()
                 if f[0] == "ROWH" and len(f) >= 2:
@@ -191,8 +203,9 @@ def read_cells(path, log):
                 f = line.split()
                 if len(f) >= 5:
                     die = tuple(int(v) for v in f[1:5])
-    log(f"{len(xs)} cell(s) and {len(rows)} row(s) read in {time.time()-t0:.1f}s")
-    return dbu, die, xs, ys, ws, hs, rowh, rows
+    log(f"{len(xs)} cell(s), {len(bxs)} block(s) and {len(rows)} row(s) "
+        f"read in {time.time()-t0:.1f}s")
+    return dbu, die, xs, ys, ws, hs, rowh, rows, (bxs, bys, bws, bhs)
 
 
 # --------------------------------------------------------------------------- #
@@ -265,11 +278,11 @@ def main():
 
     t_all = time.time()
     if args.cells:
-        dbu, die, xs, ys, ws, hs, rowh, rows = read_cells(args.deffile, log)
+        dbu, die, xs, ys, ws, hs, rowh, rows, blk = read_cells(args.deffile, log)
         if die is None:
             print("def_raster: the cell dump has no DIE", file=sys.stderr)
             return 2
-        if not xs:
+        if not xs and not blk[0]:
             print("def_raster: the cell dump has no cells", file=sys.stderr)
             return 2
         t0 = time.time()
@@ -286,6 +299,7 @@ def main():
         size, cls = read_lef(args.lef, log)
         if size is None:
             return 2
+        blk = ([], [], [], [])
         dbu, die, cells, xs, ys, ors, rowh, rows = read_def(args.deffile, log)
         if die is None:
             print("def_raster: the DEF has no DIEAREA", file=sys.stderr)
@@ -431,6 +445,58 @@ def main():
         if occupied.size:
             log(f"utilisation: mean {occupied.mean()*100:.1f}% over occupied pixels, "
                 f"peak {util.max()*100:.1f}%")
+
+    # ------------------------------------------------------------------ #
+    #  Unexpanded hierarchical blocks, in the Hier-View's own colour.
+    #
+    #  A BLOCK is a module whose contents have not been placed yet.  It has no
+    #  density to show, and putting it on the ramp paints it solid red -- the
+    #  "completely full" end of the scale, for a module holding nothing at all.
+    #  That is not a cosmetic complaint: in a frame of the hierarchy walk the
+    #  eye reads red as congestion, and the one thing those blocks are not is
+    #  congested.
+    #
+    #  So they get a flat fill instead, in the greenish yellow 3RDBIN/hier_place
+    #  paints the same objects with (its TYPE_RGB table) and at the alpha 190 it
+    #  fills shapes with, over whatever is underneath.  A frame then reads the
+    #  way the GUI does: placed logic on the density ramp, not-yet-placed
+    #  modules as translucent blocks.
+    # ------------------------------------------------------------------ #
+    if blk[0]:
+        BLOCK_RGB = np.array([200, 200, 120], dtype=np.float64)
+        BLOCK_ALPHA = 190 / 255.0
+        bx = np.array(blk[0], dtype=np.float64) / dbu
+        by = np.array(blk[1], dtype=np.float64) / dbu
+        bw = np.array(blk[2], dtype=np.float64) / dbu
+        bh = np.array(blk[3], dtype=np.float64) / dbu
+        keepb = (bx + bw > vx0) & (bx < vx1) & (by + bh > vy0) & (by < vy1)
+        bx, by, bw, bh = bx[keepb], by[keepb], bw[keepb], bh[keepb]
+        if bx.size:
+            bex = vx0 + np.arange(W + 1) / sx
+            bey = vy0 + np.arange(H + 1) / sy
+            cov = np.zeros((H, W), dtype=np.float64)
+            bp0 = np.clip(np.floor((bx - vx0) * sx).astype(np.int64), 0, W - 1)
+            bp1 = np.clip(np.ceil((bx + bw - vx0) * sx).astype(np.int64), 0, W)
+            bq0 = np.clip(np.floor((by - vy0) * sy).astype(np.int64), 0, H - 1)
+            bq1 = np.clip(np.ceil((by + bh - vy0) * sy).astype(np.int64), 0, H)
+            # A loop per block is right here and would be wrong for cells:
+            # there are tens of these, not millions, and each covers many
+            # pixels rather than a fraction of one.
+            for i in range(bx.size):
+                a0, a1, c0, c1 = bp0[i], bp1[i], bq0[i], bq1[i]
+                ox = (np.minimum(bx[i] + bw[i], bex[a0 + 1:a1 + 1])
+                      - np.maximum(bx[i], bex[a0:a1])).clip(0)
+                oy = (np.minimum(by[i] + bh[i], bey[c0 + 1:c1 + 1])
+                      - np.maximum(by[i], bey[c0:c1])).clip(0)
+                cov[c0:c1, a0:a1] += np.outer(oy, ox)
+            # area covered -> fraction of a pixel, so a block edge that cuts a
+            # pixel in half is half as opaque and the outline stays smooth
+            cov *= sx * sy
+            np.clip(cov, 0.0, 1.0, out=cov)
+            alpha = (cov * BLOCK_ALPHA)[..., None]
+            img = (img.astype(np.float64) * (1 - alpha)
+                   + BLOCK_RGB * alpha).astype(np.uint8)
+            log(f"{bx.size} unexpanded block(s) filled")
 
     # ------------------------------------------------------------------ #
     #  The core and the die, so the picture has a frame of reference.

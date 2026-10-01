@@ -235,6 +235,12 @@ my $placer;
 my $fanoutLimit = 0;
 my $extra = "";
 my ($noCells, $noFlatten, $skipPlaced, $reportOnly, $keepFiles) = (0, 0, 0, 0, 0);
+#<!-- -snapshot writes the whole chip, as the walk has it so far, after every
+#     module.  There is otherwise no way to watch this command work: the flat
+#     database it would be seen in does not exist until hier2flat at the end. -->
+my $snapPrefix;
+my $snapArgs = "";
+my $snapCnt = 0;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : hier_place_all -module <top module>    default: the current top\n";
@@ -243,6 +249,10 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                       -depth <levels>         0 is the top only, unset is the whole tree\n";
   print "                       -util <percent>         for a module with no parent box to inherit\n";
   print "                       -placer <path>          defaults to ELECTRON_HOME/3RDBIN/hier_place\n";
+  print "                       -snapshot <prefix>      write <prefix>NNN.hiercells after every\n";
+  print "                                               module: the whole chip as the walk has it\n";
+  print "                                               so far, for 3RDBIN/def_raster --cells\n";
+  print "                       -snapshot_args <opts>   passed to write_hier_cells, e.g. --blocks\n";
   print "                       -fanout_limit <n>       high fan out threshold for the graphs\n";
   print "                       -args <extra>           passed straight to hier_place\n";
   print "                       --skip_placed           keep an existing placement, fill in the cells\n";
@@ -278,6 +288,8 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--no_flatten")   { $noFlatten = 1; }
   elsif ($_[$i] eq "--report_only")  { $reportOnly = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
+  elsif ($_[$i] eq "-snapshot")      { $snapPrefix = $_[$i+1]; }
+  elsif ($_[$i] eq "-snapshot_args") { $snapArgs = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_ALL : 001 : invalid option $_[$i]\n"; }
 }
 
@@ -423,6 +435,22 @@ foreach my $rec ( @order ) {
   #     database, which is a lot of risk for no placement. -->
   &commitModule("-module", $mod, "--physical_only");
   $doneCnt++;
+
+  #<!-- A frame, after the commit rather than before it: the commit is what
+  #     puts this module's instance box into its parent's floorplan, and until
+  #     it has run the module is not yet part of the picture the walk is
+  #     building.
+  #
+  #     Rooted at $top and not at $TOP_MODULE, which edit_module has just moved
+  #     to $mod -- write_hier_cells defaults to dbfGlobalGetTOP for the same
+  #     reason, but say it here too rather than depend on it. -->
+  if ( defined $snapPrefix && $snapPrefix ne "" ) {
+    $snapCnt++;
+    my $f = sprintf("%s%03d.hiercells", $snapPrefix, $snapCnt);
+    my @snapOpts = ("-out", $f, "-module", $top);
+    push(@snapOpts, split(/\s+/, $snapArgs)) if ( $snapArgs ne "" );
+    &write_hier_cells(@snapOpts);
+  }
 }
 
 #--------------------------------------------------------------------------
