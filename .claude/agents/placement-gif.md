@@ -55,6 +55,32 @@ puts a miniconda `python3` without scipy ahead of the container's.
 
 ## Recipe
 
+### 0a. Tuned run — when asked for "the best placement", not just "a gif"
+
+The defaults are not the best arrangement hier_place can reach. A sweep found
+zero block overlap and no block on the die edge at `settle=400 margin=10`,
+against a default of 4.07% overlap and 7 of 16 blocks flush — for 18.5% more
+wirelength. The `hier-place-tuning` agent and `3RDBIN/hier_place_sweep` do that
+search; its output drops into the flow below as `-args`, comma separated:
+
+```tcl
+hier_place       -module M -kinds INST,PORT -batch 400 -args --settle,400,--margin,10,--frames,gif3/a,--frame-every,4,--frames-view
+hier_place_all   -batch 300 -cells_batch 300 --skip_placed -args --settle,400,--margin,10 -snapshot gif3/h
+```
+
+Three things that matter when you do:
+
+- **Do not carry a winning seed into `hier_place_all`.** A seed is chosen for
+  one module's geometry and `-args` reaches every module in the walk.
+- **`hier_place_cells` gets no `-args`** — settle and margin apply to the
+  blocks, not the standard cells around them.
+- **Say what it cost.** Report the wirelength against the untuned run; the
+  trade is the user's to make.
+
+Tuning needs the graph files, which `hier_place` deletes unless `--keep`, and
+`elaborate` dominates the time — so on a design you will animate anyway, do the
+`--keep` run first and sweep against what it leaves behind.
+
 ### 0. One design, all three acts
 
 Run every act on the SAME design. Splicing a PyQt act from one design onto a

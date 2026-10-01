@@ -102,26 +102,61 @@ front and say what each row costs.
 **Quote the baseline.** Defaults on matmul_4x4's top: overlap 4.07% (23 pairs),
 block area 71.2%, bbox 99.1%, 7 of 16 blocks flush, HPWL 920,788.
 
-## The thing most worth checking, and the honest answer if it fails
+## What a real sweep found, so you start from it rather than rediscover it
 
-On matmul_4x4 the sixteen top blocks are **one module** — `vedic_dot4`,
-149.326 um square (the nodefile says so in its `CELL=` field). Four across is
-597.31 um on a 707.93 um die, so they **tile exactly with 22.12 um of gap all
-round**. Zero overlap is geometrically free there.
+32 configurations (8 seeds x settle 0/400 x margin 0/10) on matmul_4x4's top,
+in **8.5 seconds**. Baseline is 4.07% overlap, 7 of 16 blocks flush, HPWL
+920,788.
 
-So when a sweep finishes, answer this before anything else: *did any
-configuration find it?*
+**Zero overlap is reachable.** 3 of the 32 got there:
 
-If none did, say so plainly — that is a result, and a more useful one than the
-least-bad row. It means the limit is the force balance and not the parameters,
-and the fix is a floorplan legalizer (constraint-graph compaction) or an
-array-aware placement using `CELL=`, which makes "these sixteen are one module,
-tile them" expressible for the first time. Do not respond to that by sweeping
-wider.
+| flush | bbox | HPWL | vs base | configuration |
+|---|---|---|---|---|
+| **0** | 94.4% | 1,091,369 | +18.5% | `seed=5 settle=400 margin=10` |
+| **0** | 94.4% | 1,094,246 | +18.8% | `seed=13 settle=400 margin=10` |
+| 12 | 100.0% | 1,104,124 | +19.9% | `seed=17 settle=400 margin=0` |
 
-Check the same thing on any design: are the blocks one repeated module, and do
-they tile the die? `hier_place_qa` gives the block area percentage; the
-nodefile gives the sizes and the `CELL=` names.
+What each axis did:
+
+| | mean overlap | mean flush | reached zero |
+|---|---|---|---|
+| `settle=0` | 5.79% | 3.9 | **0 of 16** |
+| `settle=400` | 2.52% | 5.9 | **3 of 16** |
+| `margin=0` | 3.93% | 9.9 | 1 of 16 |
+| `margin=10` | 4.38% | **0.0** | 2 of 16 |
+
+- **`settle` is necessary and not sufficient** — nothing without it came near zero.
+- **`margin=10` removes edge-flush entirely**, every run, 9.9 blocks to 0.0.
+- **The seed decides the rest.** The same `settle=400 margin=10` gives 0.00% at
+  seeds 5 and 13 and 2.46% at 11 and 17. No setting works regardless of seed,
+  so multi-start is the method, not a tuning detail.
+
+Start a sweep from `settle=400 margin=10` across 8+ seeds. An earlier draft of
+this file predicted a force balance could not reach zero overlap; the sweep
+refuted it, which is the reason to run one rather than reason about it.
+
+## Handing the winner to the flow
+
+`hier_place_all` passes `-args` through to each module's `hier_place`, so a
+winning configuration goes straight into a real run — comma separated, because
+of the quoting trap:
+
+```tcl
+hier_place_all -batch 300 -cells_batch 300 -args --settle,400,--margin,10
+```
+
+Verified: `Settle: 400 step(s), separation only` appears for every module.
+
+Three things to say when you hand one over:
+
+- **Do not carry the winning seed into the walk.** It was chosen for the top
+  module's geometry. `-args` applies to every module, and a seed that suits one
+  will not suit the rest. Carry `settle` and `margin`; leave the seed alone.
+- **`hier_place_cells` does not get `-args`.** `hier_place_all` builds its cell
+  arguments separately and passes no `-args`, so settle and margin apply to the
+  blocks and not to the standard cells around them.
+- **Quote the wirelength cost.** Zero overlap cost 18.5% here. It is a real
+  trade and the user makes it, not you.
 
 ## What not to do
 
