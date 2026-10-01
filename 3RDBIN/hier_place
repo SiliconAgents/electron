@@ -21,7 +21,7 @@ Nodefile format (written by electron):
     DIEAREA 0 0 503.845 503.845
     ROWHEIGHT 0.2
     NODES 9518
-    <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<type>
+    <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<type> [CELL=<module>]
 
 <x> <y> is the LOWER LEFT corner, as electron and DEF give it. It is read and written
 that way so a placed nodefile goes straight back into the flow; the conversion to and
@@ -129,10 +129,15 @@ class Node:
     """A placeable object. Width and height are microns."""
 
     def __init__(self, index: int, name: str, kind: str, width: float, height: float,
-                 status: str, ntype: str, x: float = 0.0, y: float = 0.0):
+                 status: str, ntype: str, x: float = 0.0, y: float = 0.0,
+                 cellref: str = ""):
         self.index = index
         self.name = name
         self.kind = kind          # INST or PORT
+        # The module this instance is OF. "" when the nodefile predates the
+        # field. Every instance sharing a cellref shares one floorplan, so they
+        # must share one shape -- see enforce_shared_shapes().
+        self.cellref = cellref
         self.width = width
         self.height = height
         # The size the file declared, kept apart from `width`/`height` because a port is
@@ -243,16 +248,23 @@ def parse_nodefile(path: str) -> Tuple[Dict[int, Node], Dict[str, float]]:
                 header["declared_nodes"] = float(parts[1])
                 continue
 
-            # <node> <name> kind <w> <h> <status> [<x> <y>] TYPE=<type>
+            # <node> <name> kind <w> <h> <status> [<x> <y>] TYPE=<type> [CELL=<module>]
             if len(parts) < 6 or not parts[0].isdigit():
                 print(f"  skipping unparsed line {lineno}: {line[:70]}")
                 continue
 
             ntype = "und"
+            cellref = ""
             fields = []
             for tok in parts:
                 if tok.upper().startswith("TYPE="):
                     ntype = tok.split("=", 1)[1]
+                elif tok.upper().startswith("CELL="):
+                    # The module this instance is OF, which is not the same
+                    # question as what the instance is called. Absent in a
+                    # nodefile written before the field existed, so everything
+                    # that uses it treats "" as "not told".
+                    cellref = tok.split("=", 1)[1]
                 else:
                     fields.append(tok)
 
@@ -270,7 +282,8 @@ def parse_nodefile(path: str) -> Tuple[Dict[int, Node], Dict[str, float]]:
             else:
                 x, y = 0.0, 0.0
 
-            nodes[index] = Node(index, name, kind, width, height, status, ntype, x, y)
+            nodes[index] = Node(index, name, kind, width, height, status, ntype, x, y,
+                                cellref)
 
     return nodes, header
 
@@ -675,6 +688,24 @@ class PlaceWidget(QWidget):
         die_w = self.die[2] - self.die[0]
         die_h = self.die[3] - self.die[1]
         placed_area = sum(n.area for n in self.nodes.values())
+        # One shape per module, before anything is placed. The nodefile can
+        # arrive with instances of one module disagreeing, because each size
+        # comes from that instance's own box in the parent floorplan and nothing
+        # upstream reconciles them.
+        self.enforce_shared_shapes()
+        cells = defaultdict(int)
+        for n in self.nodes.values():
+            if not n.edge and n.cellref:
+                cells[n.cellref] += 1
+        repeated = {c: k for c, k in cells.items() if k > 1}
+        if repeated:
+            shown = ", ".join(f"{c} x{k}" for c, k in
+                              sorted(repeated.items(), key=lambda kv: -kv[1])[:6])
+            print(f"  modules with more than one instance: {shown}")
+        elif not cells:
+            print("  no CELL= in this nodefile: instances of one module cannot be "
+                  "told apart, and shapes are not held together")
+
         util = 100.0 * placed_area / (die_w * die_h) if die_w * die_h > 0 else 0.0
         print(f"Die {die_w:.3f} x {die_h:.3f} um, block area {placed_area:.0f} um2, "
               f"utilisation {util:.1f}%")
@@ -736,6 +767,13 @@ class PlaceWidget(QWidget):
         self.port_update_interval = max(1, port_update)
         self._since_port_update = 0
         self.fix_on_drop = True
+        # Set by the settle phase; see step(). Off during normal relaxation.
+        self.settle_mode = False
+        self.settle_position_based = False
+        # Keep-out from the die edge, for blocks only. Ports are edge nodes and
+        # belong ON the boundary, so project_to_edge runs after the clamp and is
+        # left alone by this.
+        self.block_margin = 0.0
         # Off by default. It is only useful when the blocks leave channels between them:
         # on a tiled floorplan the die edge is fully shadowed, there is nowhere to snap
         # to, and it costs twice the pin-placement time for no change. It is also the
@@ -1061,18 +1099,32 @@ class PlaceWidget(QWidget):
                         seen_spread.add(key)
                         self._spread(a, b)
 
-        # Only block-to-block springs act; pin connectivity arrives as an aggregated
-        # pull instead, so a block with many pins on one edge drifts that way without
-        # thousands of individual springs fighting each other
-        for e in self.block_edges:
-            self._attract(e)
-        self._apply_port_pull(blocks)
+        # SETTLE MODE: every attractive term is off, leaving separation and the
+        # clamp.  That is the whole point of it.
+        #
+        # Overlap in this placer is not slow convergence, it is a stable
+        # equilibrium: _separate pushes by the overlap, the springs and the
+        # centre pull pull back, and the two cancel at a non-zero overlap that
+        # more steps cannot touch.  Measured on vedic_16x16, 400, 1500 and 6000
+        # steps all end at exactly 242.5 um2.
+        #
+        # Remove what pulls back and separation alone is monotone -- it can only
+        # reduce overlap -- so it converges, and starting from a relaxed
+        # placement it has very little left to move.
+        if not self.settle_mode:
+            # Only block-to-block springs act; pin connectivity arrives as an
+            # aggregated pull instead, so a block with many pins on one edge
+            # drifts that way without thousands of individual springs fighting
+            # each other
+            for e in self.block_edges:
+                self._attract(e)
+            self._apply_port_pull(blocks)
 
-        cx = (self.die[0] + self.die[2]) / 2
-        cy = (self.die[1] + self.die[3]) / 2
-        for n in blocks:
-            n.dx += (cx - n.x) * self.center_strength
-            n.dy += (cy - n.y) * self.center_strength
+            cx = (self.die[0] + self.die[2]) / 2
+            cy = (self.die[1] + self.die[3]) / 2
+            for n in blocks:
+                n.dx += (cx - n.x) * self.center_strength
+                n.dy += (cy - n.y) * self.center_strength
 
         for n in blocks:
             self._integrate(n)
@@ -1684,14 +1736,39 @@ class PlaceWidget(QWidget):
 
     def _integrate(self, n: Node):
         if n.movable:
-            n.vx = (n.vx + n.dx) * self.damping
-            n.vy = (n.vy + n.dy) * self.damping
-            n.x += n.vx
-            n.y += n.vy
-            # Keep the block inside the die rather than letting it drift off canvas
+            if self.settle_mode and self.settle_position_based:
+                # Position based, with no momentum carried between steps.
+                #
+                # Velocity is wrong for settling and expensively so.  With every
+                # attractive force off there is nothing to pull a moving block
+                # back, so it keeps whatever speed the separation gave it and
+                # coasts into the die edge, where the clamp stops it.  Measured
+                # on matmul_4x4: momentum settling cost 15% of the wirelength and
+                # left 12 of 16 blocks flush to the edge against 7 before it.
+                # Applying the correction straight to the position converges on
+                # the same overlap without the travel.
+                n.x += n.dx
+                n.y += n.dy
+                n.vx = n.vy = 0.0
+            else:
+                n.vx = (n.vx + n.dx) * self.damping
+                n.vy = (n.vy + n.dy) * self.damping
+                n.x += n.vx
+                n.y += n.vy
+            # Keep the block inside the die rather than letting it drift off canvas,
+            # inset by block_margin so a block does not sit hard against the edge --
+            # there is a seal ring, a power ring and the die's own pins out there.
+            #
+            # Clamped to a margin the die can actually give: half of the slack in
+            # each axis, so a block as wide as the die keeps a legal position
+            # instead of being pinned to an empty interval.
             x1, y1, x2, y2 = self.die
-            n.x = min(max(n.x, x1 + n.width / 2), max(x1 + n.width / 2, x2 - n.width / 2))
-            n.y = min(max(n.y, y1 + n.height / 2), max(y1 + n.height / 2, y2 - n.height / 2))
+            mx = min(self.block_margin, max(0.0, (x2 - x1 - n.width) / 2))
+            my = min(self.block_margin, max(0.0, (y2 - y1 - n.height) / 2))
+            lo_x, hi_x = x1 + mx + n.width / 2, x2 - mx - n.width / 2
+            lo_y, hi_y = y1 + my + n.height / 2, y2 - my - n.height / 2
+            n.x = min(max(n.x, lo_x), max(lo_x, hi_x))
+            n.y = min(max(n.y, lo_y), max(lo_y, hi_y))
             if n.edge:
                 # Applied after the clamp so the edge constraint always wins. The
                 # velocity normal to the edge is dropped, otherwise it accumulates
@@ -1841,6 +1918,67 @@ class PlaceWidget(QWidget):
         node.width, node.height = new_w, new_h
         node.x = anchor_x - new_w / 2 if west else anchor_x + new_w / 2
         node.y = anchor_y - new_h / 2 if south else anchor_y + new_h / 2
+
+        # Every other instance of the same module takes the same shape.
+        self.apply_shape_to_siblings(node)
+
+    def siblings_of(self, node: Node) -> List[Node]:
+        """The other instances of node's module. Empty when the nodefile did not
+        say which module it is -- "" is not told, not a group."""
+        if not node.cellref:
+            return []
+        return [n for n in self.nodes.values()
+                if n is not node and n.cellref == node.cellref and not n.edge]
+
+    def apply_shape_to_siblings(self, node: Node) -> int:
+        """Give every instance of node's module node's shape, about its centre.
+
+        A module has ONE floorplan: hier_place_all warns when a module is
+        instantiated more than once precisely because the contents are shared
+        and sized from a single instance box. So two instances that differ in
+        shape are not two options, they are a placement no downstream step can
+        honour -- whichever box the size is taken from, the others get the same
+        contents, and a smaller one has those contents hanging outside it.
+
+        Reshaping about the CENTRE rather than a corner because the sibling is
+        not the block under the cursor: its position is already the placer's
+        answer and should move as little as the new shape allows.
+        """
+        changed = 0
+        for n in self.siblings_of(node):
+            if abs(n.width - node.width) < 1e-9 and abs(n.height - node.height) < 1e-9:
+                continue
+            n.width, n.height = node.width, node.height
+            changed += 1
+        return changed
+
+    def enforce_shared_shapes(self) -> int:
+        """Make every module's instances agree on one shape, before placing.
+
+        The nodefile can arrive with them already disagreeing -- the sizes come
+        from each instance's own box in the parent floorplan, and nothing
+        upstream reconciles them. The largest area wins: shrinking an instance
+        to match a smaller sibling would put the module's contents outside its
+        box, which is the one outcome that is certainly wrong.
+        """
+        groups: Dict[str, List[Node]] = {}
+        for n in self.nodes.values():
+            if n.edge or not n.cellref:
+                continue
+            groups.setdefault(n.cellref, []).append(n)
+        fixed = 0
+        for cell, members in groups.items():
+            if len(members) < 2:
+                continue
+            ref = max(members, key=lambda n: n.width * n.height)
+            for n in members:
+                if abs(n.width - ref.width) > 1e-6 or abs(n.height - ref.height) > 1e-6:
+                    n.width, n.height = ref.width, ref.height
+                    fixed += 1
+            if fixed:
+                print(f"  {cell}: {len(members)} instances held to one shape, "
+                      f"{ref.width:.3f} x {ref.height:.3f} um")
+        return fixed
 
     def find_node_at(self, sx: int, sy: int) -> Optional[Node]:
         wx, wy = self.screen_to_world(sx, sy)
@@ -2230,7 +2368,8 @@ class PlaceWidget(QWidget):
             fh.write(f"# source: {self.nodefile_path}\n")
             fh.write("# all coordinates and dimensions are in microns\n")
             fh.write("# <x> <y> is the lower left corner of the node, as read in\n")
-            fh.write("# <node> <name> INST|PORT <width> <height> <status> <x> <y> TYPE=<node type>\n")
+            fh.write("# <node> <name> INST|PORT <width> <height> <status> <x> <y> "
+                     "TYPE=<node type> [CELL=<module>]\n")
             if "dbu" in self.header:
                 fh.write(f"DBU {int(self.header['dbu'])}\n")
             fh.write(f"DIEAREA {self.die[0]:g} {self.die[1]:g} {self.die[2]:g} {self.die[3]:g}\n")
@@ -2261,7 +2400,9 @@ class PlaceWidget(QWidget):
                 # accumulates the loss.
                 fh.write(f"{n.index} {n.name} {n.kind} {w:.6f} {h:.6f} "
                          f"{status} {n.x - w / 2.0:.4f} {n.y - h / 2.0:.4f} "
-                         f"TYPE={n.ntype}\n")
+                         f"TYPE={n.ntype}"
+                         + (f" CELL={n.cellref}" if n.cellref else "")
+                         + "\n")
         print(f"Wrote {path}")
 
 
@@ -2736,6 +2877,25 @@ Controls:
                         help="place headlessly: run N physics steps, write the nodefile "
                              "given by --save and exit without opening a window. Needs "
                              "PyQt5 but no display; the platform is forced to offscreen.")
+    parser.add_argument("--center", type=float, default=None, metavar="F",
+                        help="pull toward the die centre (default 0.004). It is "
+                             "what crowds blocks into the middle; 0 lets them use "
+                             "the die, at some wirelength.")
+    parser.add_argument("--settle-strength", type=float, default=None, metavar="F",
+                        help="fraction of an overlap removed per settle step "
+                             "(default: the relaxation value, 1.0)")
+    parser.add_argument("--settle-position", action="store_true",
+                        help="settle without momentum (position based)")
+    parser.add_argument("--settle", type=int, default=0, metavar="N",
+                        help="after --batch, run N steps with every attractive "
+                             "force off, leaving only overlap separation and the "
+                             "die clamp. Overlap here is a stable equilibrium "
+                             "rather than slow convergence, so more --batch steps "
+                             "never remove it; this does, and moves blocks very "
+                             "little because it starts from a relaxed placement.")
+    parser.add_argument("--margin", type=float, default=0.0, metavar="UM",
+                        help="keep blocks this far from the die edge. Ports are "
+                             "unaffected: they belong on the boundary.")
     parser.add_argument("--frames", metavar="PREFIX",
                         help="with --batch, grab this window to <PREFIX>NNN.png "
                              "every --frame-every steps, so the run can be made "
@@ -2878,6 +3038,10 @@ Controls:
                         port_edge_rules, args.port_size, args.port_weight,
                         args.layers, args.port_update, args.bus_gap)
     window.view.fix_on_drop = not args.no_fix_on_drop
+    window.view.block_margin = max(0.0, args.margin)
+    window.view.settle_position_based = args.settle_position
+    if args.center is not None:
+        window.view.center_strength = args.center
     window.view.blocks_are_blockage = args.blockage
     window.view.allow_reshape = not args.no_reshape
     window.view.group_buses = not args.no_bundle
@@ -2941,6 +3105,19 @@ Controls:
             window.view.step()
             if args.frames and (i + 1) % args.frame_every == 0:
                 _grab()
+        # The settle phase, after relaxation and before the save: separation
+        # only, so it can take the overlap the force balance left behind.
+        if args.settle > 0:
+            window.view.settle_mode = True
+            if args.settle_strength is not None:
+                window.view.overlap_strength = args.settle_strength
+            print(f"Settle: {args.settle} step(s), separation only")
+            for i in range(args.settle):
+                window.view.step()
+                if args.frames and (i + 1) % args.frame_every == 0:
+                    _grab()
+            window.view.settle_mode = False
+
         window.view.animation_running = False
         window.view.save_nodefile(out)
         print(f"Batch: wrote {out}")

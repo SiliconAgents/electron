@@ -1391,6 +1391,24 @@ foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   }
   my $nodeType = &dbfFlatNodeType($cellref);
   $line .= " TYPE=$nodeType";
+  #<!-- CELL= names the MODULE this instance is of, which the placer could not
+  #     work out for itself and which it needs for two things.
+  #
+  #     A module has ONE floorplan -- hier_place_all says so out loud when a
+  #     module is instantiated more than once -- so every instance of it must
+  #     end up the same shape.  Without the cellref the placer sees unrelated
+  #     rectangles that happen to share a size, and reshaping them is free to
+  #     make them differ, which no downstream step can honour.
+  #
+  #     And the regular case is the common one: all sixteen top blocks of
+  #     matmul_4x4 are one module, 149.326 um square.  Knowing that is what
+  #     makes it possible to tile them on a pitch rather than relax sixteen
+  #     independent boxes into one another.
+  #
+  #     Last on the line, after TYPE=, so a reader written against the old
+  #     record takes the fields it knows and ignores the rest.  A module name
+  #     has no whitespace in it. -->
+  $line .= " CELL=$cellref" if ( defined $cellref && $cellref ne "" );
   $typeCnt{$nodeType}++;
   push(@nodeLines, $line);
   $nodeCnt++;
@@ -1408,7 +1426,9 @@ unless ( open(WRITE_PSEUDO_NODE, ">$nodeFile") ) {
 }
 print WRITE_PSEUDO_NODE "# hierarchical placement nodes for $module, written by electron\n";
 print WRITE_PSEUDO_NODE "# all coordinates and dimensions are in microns\n";
-print WRITE_PSEUDO_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<node type>\n";
+print WRITE_PSEUDO_NODE "# <node> <name> INST|PORT <width> <height> <status> [<x> <y>] TYPE=<node type> [CELL=<module>]\n";
+print WRITE_PSEUDO_NODE "# CELL is the module an instance is of: every instance of one module\n";
+print WRITE_PSEUDO_NODE "#   shares a floorplan, so they must share a shape\n";
 print WRITE_PSEUDO_NODE "# a status of FIXED means the placer must not move the node\n";
 print WRITE_PSEUDO_NODE "# node type is one of combi seq mem block phys port, or und when nothing\n";
 print WRITE_PSEUDO_NODE "#   described the cell -- read a liberty or a cell function map to fill it in\n";
