@@ -2877,6 +2877,16 @@ Controls:
                         help="place headlessly: run N physics steps, write the nodefile "
                              "given by --save and exit without opening a window. Needs "
                              "PyQt5 but no display; the platform is forced to offscreen.")
+    parser.add_argument("--spring", type=float, default=None, metavar="F",
+                        help="net attraction between blocks (default 0.02)")
+    parser.add_argument("--overlap", type=float, default=None, metavar="F",
+                        help="fraction of an overlap removed per step (default 1.0)")
+    parser.add_argument("--block-spread", type=float, default=None, metavar="F",
+                        help="push between blocks that are close but not "
+                             "overlapping (default 0.02). Not --spread, which is "
+                             "the pin spread.")
+    parser.add_argument("--damping", type=float, default=None, metavar="F",
+                        help="velocity retained between steps (default 0.85)")
     parser.add_argument("--center", type=float, default=None, metavar="F",
                         help="pull toward the die centre (default 0.004). It is "
                              "what crowds blocks into the middle; 0 lets them use "
@@ -3042,6 +3052,14 @@ Controls:
     window.view.settle_position_based = args.settle_position
     if args.center is not None:
         window.view.center_strength = args.center
+    if args.spring is not None:
+        window.view.spring_strength = args.spring
+    if args.overlap is not None:
+        window.view.overlap_strength = args.overlap
+    if args.block_spread is not None:
+        window.view.spread_strength = args.block_spread
+    if args.damping is not None:
+        window.view.damping = args.damping
     window.view.blocks_are_blockage = args.blockage
     window.view.allow_reshape = not args.no_reshape
     window.view.group_buses = not args.no_bundle

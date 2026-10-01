@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Sweep hier_place's control parameters and report what actually helped.
+
+    hier_place_sweep --nodefile M.pseudo.nodefile --edges M.pseudo.txt \
+                     --axis seed=1,2,3,4 --axis settle=0,400 --jobs 8
+
+Runs every combination of the axes, measures each result with hier_place_qa,
+and prints the Pareto front.  Writes a TSV of every run so a later question can
+be answered without re-running anything.
+
+WHY A SWEEP IS WORTH ANYTHING HERE, AND WHY IT IS CHEAP
+
+hier_place is DETERMINISTIC for a given seed -- the same arguments twice give a
+byte identical nodefile -- so one run per configuration is the whole cost.  That
+is the opposite of the routing experiments on this flow, where a byte identical
+DEF gave 222, 200, 239, 197 and 130 unrouted nets and nothing under five runs
+meant anything.
+
+And the seed matters more than most of the knobs.  On matmul_4x4's top, four
+seeds with everything else fixed:
+
+    seed 1   overlap 4.07%   hpwl 920,788
+    seed 2   overlap 4.42%   hpwl 904,533
+    seed 3   overlap 10.29%  hpwl 862,927
+    seed 7   overlap 10.29%  hpwl 847,057
+
+A 2.5x spread in overlap and 8% in wirelength, and the two trade: the best
+wirelength is the worst overlap.  Multi-start is therefore an axis in its own
+right and not a control for noise -- there is no noise.
+
+WHY A PARETO FRONT AND NOT A SCORE
+
+Because of that trade.  Any single number would be this tool choosing a
+weighting on the user's behalf and hiding the choice.  The front is every
+configuration that nothing else beats on BOTH overlap and wirelength; pick off
+it knowing what each costs.
+
+Overlap is reported as a constraint rather than an objective, because a block
+placement with overlap in it is not a placement.  --max-overlap marks the runs
+that met a bar, and the front is reported again restricted to those.
+
+A NOTE ON WHAT THE ANSWER MIGHT BE
+
+On matmul_4x4 the sixteen top blocks are one module, 149.326 um square, on a
+707.93 um die: four across is 597.31 um, so they tile exactly with 22.12 um of
+gap all round.  Zero overlap is geometrically free on that design.  If no
+configuration in a wide sweep finds it, the honest conclusion is not that the
+sweep was too small -- it is that a force balance cannot get there, and the
+answer is a floorplan legalizer or an array-aware placement using the CELL=
+field.  Say that rather than reporting the least bad row.
+"""
+
+import argparse
+import concurrent.futures as cf
+import itertools
+import json
+import os
+import shlex
+import subprocess
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PLACER = os.path.join(HERE, "hier_place")
+QA = os.path.join(HERE, "hier_place_qa")
+
+# Axis name -> the hier_place flag it drives. Anything not here is passed as
+# --<name>, so a new flag needs no change in this file.
+FLAG_ALIAS = {
+    "spread_pins": "spread",
+    "block_spread": "block-spread",
+    "settle_strength": "settle-strength",
+    "aspect": "aspect-limit",
+    "port_weight": "port-weight",
+    "port_size": "port-size",
+    "port_update": "port-update",
+    "fanout": "port-fanout-limit",
+}
+
+# Axes whose presence alone is the setting, with no value
+BOOLEAN = {"no-reshape", "no-bundle", "blockage", "no-fix-on-drop",
+           "settle-position", "no-snap-x"}
+
+
+def flag_for(name):
+    return FLAG_ALIAS.get(name, name.replace("_", "-"))
+
+
+def build_args(combo):
+    """A hier_place argument list for one point in the sweep."""
+    out = []
+    for name, value in combo:
+        flag = flag_for(name)
+        if flag in BOOLEAN:
+            if str(value).lower() in ("1", "true", "yes", "on"):
+                out.append(f"--{flag}")
+        else:
+            out += [f"--{flag}", str(value)]
+    return out
+
+
+def label_for(combo):
+    return " ".join(f"{n}={v}" for n, v in combo) or "defaults"
+
+
+def run_one(job):
+    nodefile, edges, base, combo, outdir, idx = job
+    save = os.path.join(outdir, f"run{idx:04d}.nodefile")
+    cmd = [PLACER, nodefile, edges] + base + build_args(combo) + ["--save", save]
+    label = label_for(combo)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except subprocess.TimeoutExpired:
+        return {"label": label, "error": "timeout", "args": " ".join(cmd)}
+    if p.returncode != 0 or not os.path.exists(save):
+        tail = (p.stderr or p.stdout or "").strip().splitlines()
+        return {"label": label, "error": tail[-1] if tail else f"rc={p.returncode}",
+                "args": " ".join(cmd)}
+    q = subprocess.run([QA, save, "--edges", edges, "--json"],
+                       capture_output=True, text=True)
+    if q.returncode != 0:
+        return {"label": label, "error": "qa failed", "args": " ".join(cmd)}
+    rec = json.loads(q.stdout)
+    rec["label"] = label
+    rec["combo"] = dict(combo)
+    rec["save"] = save
+    return rec
+
+
+def pareto(rows, keys=("overlap_pct", "hpwl")):
+    """Rows nothing else beats on every key (lower is better), ties kept."""
+    front = []
+    for r in rows:
+        if any(r.get(k) is None for k in keys):
+            continue
+        dominated = False
+        for o in rows:
+            if o is r or any(o.get(k) is None for k in keys):
+                continue
+            if all(o[k] <= r[k] for k in keys) and any(o[k] < r[k] for k in keys):
+                dominated = True
+                break
+        if not dominated:
+            front.append(r)
+    return sorted(front, key=lambda r: r["overlap_pct"])
+
+
+def main():
+    ap = argparse.ArgumentParser(description="sweep hier_place control parameters")
+    ap.add_argument("--nodefile", required=True)
+    ap.add_argument("--edges", required=True)
+    ap.add_argument("--axis", action="append", default=[], metavar="NAME=V1,V2",
+                    help="a parameter and the values to try; repeat for more. "
+                         "NAME is a hier_place long option without the dashes "
+                         "(seed, settle, margin, spring, overlap, center, "
+                         "damping, block_spread, aspect, ...)")
+    ap.add_argument("--base", default="--kinds INST PORT --batch 400",
+                    help="arguments common to every run")
+    ap.add_argument("--out", default="sweep.tsv", help="where to write every run")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep each run's nodefile (default: a temp dir that is "
+                         "removed, except the ones on the front)")
+    ap.add_argument("--jobs", type=int, default=4,
+                    help="runs in parallel; each is one process")
+    ap.add_argument("--max-overlap", type=float, default=0.5, metavar="PCT",
+                    help="the bar a result must clear to count as overlap free "
+                         "enough (default 0.5%%)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="list the configurations and stop")
+    args = ap.parse_args()
+
+    axes = []
+    for spec in args.axis:
+        if "=" not in spec:
+            sys.exit(f"hier_place_sweep: --axis wants NAME=V1,V2, got {spec!r}")
+        name, values = spec.split("=", 1)
+        axes.append([(name.strip(), v.strip()) for v in values.split(",")])
+    combos = [tuple(c) for c in itertools.product(*axes)] if axes else [()]
+
+    print(f"hier_place_sweep: {len(combos)} configuration(s), "
+          f"{args.jobs} at a time")
+    if args.dry_run:
+        for c in combos:
+            print("  " + label_for(c))
+        return 0
+
+    base = shlex.split(args.base)
+    outdir = tempfile.mkdtemp(prefix="hpsweep_") if not args.keep else "hpsweep_runs"
+    os.makedirs(outdir, exist_ok=True)
+
+    jobs = [(args.nodefile, args.edges, base, c, outdir, i)
+            for i, c in enumerate(combos)]
+    rows, failed = [], []
+    with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+        for n, rec in enumerate(ex.map(run_one, jobs), 1):
+            if "error" in rec:
+                failed.append(rec)
+                print(f"  [{n}/{len(jobs)}] {rec['label']}: FAILED {rec['error']}")
+            else:
+                rows.append(rec)
+                print(f"  [{n}/{len(jobs)}] {rec['label']}: "
+                      f"overlap {rec['overlap_pct']:.2f}% "
+                      f"({rec['overlap_pairs']} pairs), "
+                      f"hpwl {rec['hpwl']:,.0f}, flush {rec['flush']}")
+
+    if not rows:
+        print("hier_place_sweep: every run failed", file=sys.stderr)
+        return 2
+
+    cols = ["label", "overlap_pct", "overlap_pairs", "overlap_um2",
+            "block_area_pct", "bbox_pct", "flush", "margin_min", "hpwl", "save"]
+    with open(args.out, "w") as fh:
+        fh.write("\t".join(cols) + "\n")
+        for r in sorted(rows, key=lambda r: (r["overlap_pct"], r["hpwl"] or 0)):
+            fh.write("\t".join(str(r.get(c, "")) for c in cols) + "\n")
+    print(f"\n{len(rows)} run(s) written to {args.out}"
+          + (f", {len(failed)} failed" if failed else ""))
+
+    base_hpwl = min((r["hpwl"] for r in rows if r["hpwl"]), default=None)
+
+    def show(front, title):
+        print(f"\n{title}")
+        print(f"  {'overlap':>8} {'pairs':>6} {'flush':>6} {'bbox':>7} "
+              f"{'HPWL':>12}   configuration")
+        for r in front:
+            print(f"  {r['overlap_pct']:>7.2f}% {r['overlap_pairs']:>6} "
+                  f"{r['flush']:>6} {r['bbox_pct']:>6.1f}% "
+                  f"{r['hpwl']:>12,.0f}   {r['label']}")
+
+    show(pareto(rows), "PARETO FRONT  (nothing beats these on both overlap and HPWL)")
+
+    ok = [r for r in rows if r["overlap_pct"] <= args.max_overlap]
+    if ok:
+        show(pareto(ok), f"WITHIN {args.max_overlap}% OVERLAP, best wirelength first")
+    else:
+        best = min(rows, key=lambda r: r["overlap_pct"])
+        print(f"\nNo configuration reached {args.max_overlap}% overlap. "
+              f"The best was {best['overlap_pct']:.2f}% ({best['label']}).")
+        print("  Worth reading that as a result rather than a reason to sweep "
+              "wider: if the blocks tile the die and nothing here finds it, the\n"
+              "  limit is the force balance, not the parameters.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
