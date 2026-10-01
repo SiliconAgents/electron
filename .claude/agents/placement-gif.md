@@ -1,6 +1,6 @@
 ---
 name: placement-gif
-description: Makes an animated GIF of a design placing itself — the hierarchical walk filling the die level by level, then the flat view after hier2flat, legalize_flat and improve_congestion. Use it for "create a gif of hierarchical placement", "animate the placement", "show me the placement steps", or to re-render frames that already exist with different colours, size or speed. Runs the flow headlessly; no GUI and no X server involved.
+description: Makes an animated GIF of a design placing itself — the PyQt engine placing the top's blocks and standard cells in its own window, then the hierarchical walk filling the die level by level, then the flat view after hier2flat, legalize_flat and improve_congestion. Use it for "create a gif of hierarchical placement", "animate the placement", "show me the placement steps", or to re-render frames that already exist with different colours, size or speed. Runs the flow headlessly; no GUI and no X server involved.
 tools: Bash, Read, Write, Glob, Grep
 model: sonnet
 ---
@@ -11,7 +11,18 @@ source tree unless asked.
 
 ## What the GIF shows
 
-Two halves, one renderer, so it reads as one piece.
+Three acts.
+
+**The PyQt placer, on the top module.** `hier_place --frames` grabs the
+placer's own window every N physics steps: blocks with their names, fly lines
+weighted by connectivity, ports coloured by direction and moving to the edge
+each was assigned, and a live metrics panel with weighted wirelength and block
+overlap. Then `hier_place_cells` does the standard cells, same engine and same
+window, with the blocks now hatched blockage.
+
+These are real Qt renders, not a re-drawing of the same data — the whole point
+is that it is the engine's own view. `--batch` forces
+`QT_QPA_PLATFORM=offscreen`, so no display is involved.
 
 **The hierarchical walk.** `hier_place_all` places one module at a time, top
 down. Each frame is the WHOLE die as the walk has it so far: a module not yet
@@ -60,6 +71,11 @@ Designs, with the frame count each gives (one frame per module):
 
 ### 2. Write the tcl
 
+`-args` takes COMMA separated options, not a quoted string. electron's command
+parser splits on whitespace and keeps quotes, so `-args "--frames f --frame-every 20"`
+arrives as the single token `"--frames` and the rest is silently dropped — the
+placer writes no frames and says nothing. Use `--frames,f,--frame-every,20`.
+
 ```tcl
 read_config_file -config ../../../CONFIG/library.config -foundary nangate -technode 45nm -layer 6
 read_verilog -v synth/matmul_4x4_filter.vg
@@ -68,7 +84,14 @@ elaborate
 set_floorplan_parameters -ASPECT_RATIO 1 -UTILIZATION 50
 set_floorplan
 edit_module --top
-hier_place_all -batch 300 -cells_batch 300 -snapshot gif/h
+# act one: the PyQt engine on the top module, blocks then standard cells
+hier_place       -module matmul_4x4 -kinds INST,PORT -batch 400 \
+                 -args --frames,gif/a,--frame-every,20
+hier_place_cells -module matmul_4x4 -batch 400 \
+                 -args --frames,gif/b,--frame-every,20
+commit_module -module matmul_4x4 --physical_only
+# act two: the rest of the hierarchy, with the top kept as placed
+hier_place_all -batch 300 -cells_batch 300 --skip_placed -snapshot gif/h
 write_def -output gif/z1_flat.def --overwrite
 legalize_flat
 write_def -output gif/z2_legal.def --overwrite
@@ -95,7 +118,13 @@ report progress from the log rather than blocking silently.
 
 ### 3. Render and assemble
 
-`3RDBIN/def_raster` renders both kinds of frame — `--cells` for `.hiercells`,
+The `gif/a*.png` and `gif/b*.png` frames are already PNGs — Qt wrote them, and
+nothing re-renders them. They are 1400x900 with the control panel beside the
+canvas; the die frames are square. Letterbox both onto one canvas in the
+assembler so the animation does not jump, or crop the Qt frames to the canvas
+with `--frames-view` if the controls are not wanted.
+
+`3RDBIN/def_raster` renders the other two kinds of frame — `--cells` for `.hiercells`,
 `--lef <tech.lef>` for a DEF. About 1.2s a frame at 204k cells.
 
 Force every frame onto the SAME `--bbox`, taken from the first hier frame's
@@ -146,9 +175,15 @@ anything.
 
 ## What not to do
 
-Do not screenshot the GUI. There is no Xvfb, `import`, `convert` or `ffmpeg` in
-the container, and the host `DISPLAY` is the user's live desktop. The raster
-path is headless, deterministic and needs none of it.
+Do not screenshot the GUI with an external tool. There is no Xvfb, `import`,
+`convert` or `ffmpeg` in the container, and the host `DISPLAY` is the user's
+live desktop. `hier_place --frames` has Qt render itself into a pixmap, which
+needs none of that.
+
+Do not re-draw the placer's view yourself. Rasterising its nodefile through
+def_raster was tried and rejected: it loses the fly lines, the bus bundling,
+the port direction colours, the names and the metrics, which is everything that
+makes those frames worth looking at.
 
 Do not report a frame count or a timing you did not observe. Read it out of the
 log.
