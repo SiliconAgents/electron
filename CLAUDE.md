@@ -240,9 +240,10 @@ from 104 to 261, so on nangate_flat it cannot adjudicate a placement change.
 
 Other synthesisers flatten the hierarchy and then `hier_place` has nothing to
 work with, so the front end here is yosys-slang with `--keep-hierarchy`. That
-emits **one module per INSTANCE**: one large design is 119,351 modules, and a
-single yosys run does not finish — it optimises the same full adder 35,968
-times. They are **111 distinct structures** in a hierarchy ten levels deep.
+emits **one module per INSTANCE**. One large design came out as 119,351
+modules, and a single yosys run does not finish — it optimises the same
+one-cell wrapper 35,968 times. They were **111 distinct structures** in a
+hierarchy ten levels deep.
 
 ```
 3RDBIN/rtlil_bottom_up design.il --tree              # the 111, and what holds what
@@ -256,7 +257,7 @@ only — so the result is a **hierarchical** netlist. Flattening would hand the
 placer back the one enormous module it cannot help with.
 
 `3RDBIN/lef_blackbox` makes the standard-cell stubs from LEF, and
-`3RDBIN/liberty_slim` turns the PDK's 2 GB CCS/LVF liberty into an NLDM one yosys
+`3RDBIN/liberty_slim` turns a 2 GB CCS/LVF liberty into an NLDM one yosys
 can parse. `3RDBIN/yosys_dedup` is the same fingerprint used the other way —
 merging the copies inside one process, for when the design must stay in one.
 
@@ -270,9 +271,9 @@ without a measurement on the design at hand.
 
 **A module boundary is a wall abc cannot optimise across**, and it is only
 worth paying where it buys a placeable block. `--flatten-below 2000` keeps 20
-of the 111 and gets 2,441,344 cells in 258s. Flattening `a datapath lane`'s subtree
-into it saves 21.6%; doing the same to `a destination block` saves 1.6%, which is
-inside the noise — deep stacks of tiny modules are where the walls cost
+of the 111 and gets 2,441,344 cells in 258s. Flattening a datapath lane's
+subtree into it saves 21.6%; doing the same to a wide, shallow block saves
+1.6%, inside the noise — deep stacks of tiny modules are where the walls cost
 something. Repeat runs of one flattened module vary by ~0.4%, so nothing under
 1% is a result.
 
@@ -281,7 +282,7 @@ The vendor yosys (`/tools_vendor/tt/siliconpilot/*/bin/yosys`) execs through
 "unable to determine share/ directory"**. `YOSYS_DATDIR` is not honoured and
 running `libexec/yosys` directly segfaults. The fix is a shim directory holding
 a copy of the loader with a `share` symlink beside it, plus a `yosys-abc`
-forwarder — see `a scratch directory/yosysrt/`.
+forwarder, with the loader's sibling `share` resolving to the real one.
 
 Reading `stat` output needs care: its row labels sit in the same column as
 cell-type rows, so summing every row that parses reports three times the real

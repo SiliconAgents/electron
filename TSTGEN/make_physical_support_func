@@ -285,7 +285,8 @@ else {
   # \Q..\E, because $parent and $child are INSTANCE NAMES and are being used
   # here to strip a literal prefix, not as patterns. A verilog escaped
   # identifier puts regex metacharacters straight into them -- yosys writes
-  # \gen_fp_cols[6].a tile, where "\g" is a backreference escape and
+  # \gen_cols[6].sub_block for a generate block, where "\g" is a
+  # backreference escape and
   # the whole match dies with "Unterminated \g... pattern", taking
   # hier_place_all with it. [6] and . are the quieter half of the same bug:
   # they would match the wrong thing rather than die.

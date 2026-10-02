@@ -6,19 +6,19 @@
 
 WHY
 
-yosys-slang's --keep-hierarchy emits one module PER INSTANCE.  On one large design
-that is 119,351 modules -- and 111 distinct structures, in a hierarchy only ten
-levels deep:
+yosys-slang's --keep-hierarchy emits one module PER INSTANCE.  On one large
+design that is 119,351 modules -- and 111 distinct structures, in a hierarchy
+only ten levels deep:
 
     level  classes   module copies
-        0       70          64,644    a one-cell wrapper module, a carry-lookahead block, ...
-        1       10          50,969    a small adder module (35,968 copies), a clock gater
+        0       70          64,644    the one-cell wrappers, small adders
+        1       10          50,969    one of them 35,968 copies
         2       14           3,160
         ...
-        9        1               1    the_top_wrapper
+        9        1               1    the top
 
-Every yosys pass iterates all 119,351, which is what makes a flat run of this
-design stall: 35,968 copies of a five-wire full adder are optimised thirty-five
+Every yosys pass iterates all 119,351, which is what makes a flat run of such a
+design stall: 35,968 copies of a five-wire module are optimised thirty-five
 thousand times.  Synthesising each DISTINCT module once, deepest-first, is 111
 runs instead, and each one is small.
 
@@ -38,8 +38,9 @@ EXTRACTION
 
 --extract writes one representative per class as a standalone RTLIL file,
 renamed to a canonical name: the base name, or <base>__v<N> when one base name
-covers several genuinely different modules.  a pipeline register is 5,298 copies of
-22 distinct widths, so it becomes a pipeline register__v0 .. __v21.
+covers several genuinely different modules.  One parameterised pipeline
+register was 5,298 copies of 22 distinct widths, so it becomes
+<name>__v0 .. __v21.
 
 Child instantiations are rewritten to their own canonical names, so a module
 extracted at level N instantiates exactly the names the level N-1 run produced
@@ -201,7 +202,7 @@ def contents(cls, name2fp, bbox):
 def print_tree(cls, level, canon, kids, leaves, roots, full=False, fh=sys.stdout):
     """The class DAG as a tree, each distinct module expanded exactly once.
 
-    It is a DAG and not a tree -- a small adder module has 35,968 parents -- so expanding it
+    It is a DAG and not a tree -- one module had 35,968 parents -- so expanding it
     literally would print the same subtree thousands of times. A class is
     expanded under its first parent and marked (above) everywhere after, which
     keeps the whole design on one screen and still shows every edge.
@@ -241,8 +242,8 @@ def print_tree(cls, level, canon, kids, leaves, roots, full=False, fh=sys.stdout
 
         # The variants of one module mostly share their children, so listing
         # the already-shown ones again buries what is actually new about the
-        # variant: a datapath lane__v1 differs from __v0 in nothing but a width, and
-        # spells that out over twenty-five identical (above) lines. Show the
+        # variant: a lane's __v1 differs from its __v0 in nothing but a width,
+        # and spells that out over twenty-five identical (above) lines. Show the
         # children not seen yet in full, and count the rest.
         if not full:
             old = [kv for kv in ch if kv[0] in expanded]

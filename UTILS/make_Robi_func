@@ -541,12 +541,13 @@ foreach my $cell ( sort keys %PLDB ) {
     next;
   }
 
-  #<!-- A map can name several kinds of buffer.  The the PDK map for instance has
-  #     BUF and BUF_H as ordinary combinational buffers, and BUF_EP, BUF_AON and
-  #     BUF_PBK for the power domain ones, which carry always-on or pmk rails and
-  #     are the wrong thing to drop onto an ordinary assign.  Prefer a plain
-  #     buffer; fall back to a domain specific one only if that is all there is.
-  #     Clock buffers do not arise here: the the PDK map calls them CLK_BUF. -->
+  #<!-- A map can name several kinds of buffer.  One foundry map for instance
+  #     has BUF and BUF_H as ordinary combinational buffers, and BUF_EP, BUF_AON
+  #     and BUF_PBK for the power domain ones, which carry always-on or
+  #     secondary rails and are the wrong thing to drop onto an ordinary assign.
+  #     Prefer a plain buffer; fall back to a domain specific one only if that
+  #     is all there is.  Clock buffers do not arise here: that map calls them
+  #     CLK_BUF. -->
   my $rank = 0;
   if    ( $known && $func =~ /^buf(_h)?$/i ) { $rank = 3; }
   elsif ( $known && $func =~ /^buf/i )       { $rank = 2; }

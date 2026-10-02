@@ -7,9 +7,9 @@
 
 WHY NOT ONE YOSYS RUN
 
-yosys-slang's --keep-hierarchy emits one module per INSTANCE. one large design is
-119,351 of them and 111 distinct structures; a flat run optimises the same
-full adder 35,968 times and does not finish. Synthesising each distinct module
+yosys-slang's --keep-hierarchy emits one module per INSTANCE. One large design
+was 119,351 of them and 111 distinct structures; a flat run optimises the same
+one-cell wrapper 35,968 times and does not finish. Synthesising each distinct module
 once is 111 small runs, each of which does.
 
 HOW THE LEVELS COMPOSE
@@ -48,13 +48,13 @@ import time
 # WHY THE SCRIPT IS THIS SHORT, AND WHY abc HAS NO -fast
 #
 # `abc -fast` was measured against full abc on the seven modules that carry
-# most of one large design, and it is not a speed/quality trade here -- it is pure
-# loss:
+# most of one large design, and it is not a speed/quality trade here -- it is
+# pure loss:
 #
-#     a parity checker__v0   11,080 -> 281     -97%
-#     a multiplier front                     597 -> 307     -49%
-#     a rounding block             2,103 -> 1,133   -46%
-#     a wide mux tree  43,555 -> 32,607  -25%
+#     a parity checker     11,080 -> 281     -97%
+#     a multiplier front      597 -> 307     -49%
+#     a rounding block      2,103 -> 1,133   -46%
+#     a wide mux tree      43,555 -> 32,607  -25%
 #
 # for 15.9s against 15.5s, because abc is under 1% of a run. The run is
 # dominated by reading the 961 MB liberty and the 14,491 blackboxes, and that
@@ -122,12 +122,12 @@ def choose_boundaries(design, threshold, top):
 
     Size is the criterion because it is also the placement criterion: a block
     a floorplanner can do something with is a block big enough to have a shape.
-    a small adder module is one cell -- it was never a useful boundary, and keeping it costs
-    real area, because a boundary is a wall abc cannot optimise across.
+    A one-cell wrapper was never a useful boundary, and keeping it costs real
+    area, because a boundary is a wall abc cannot optimise across.
 
-    Measured on one large design: flattening a datapath lane's subtree into it takes it
-    from 16,016 cells to 12,552, a 21.6% saving. The same experiment on
-    a destination block gained 1.6%, which is inside the run-to-run noise -- deep
+    Measured on one large design: flattening a datapath lane's subtree into it
+    takes it from 16,016 cells to 12,552, a 21.6% saving. The same experiment
+    on a wide, shallow block gained 1.6%, inside the run-to-run noise -- deep
     stacks of small modules are where the walls cost something, wide blocks
     with few children are not.
     """
@@ -224,7 +224,7 @@ def main():
                          "a floorplanner can use (try 2000)")
     ap.add_argument("--abc-fast", action="store_true",
                     help="map with `abc -fast`. DO NOT, unless you are timing "
-                         "something: on one large design it costs 44%% of the cell "
+                         "something: on a large design it cost 44%% of the cell "
                          "count and saves nothing (see the note on SCRIPT)")
     ap.add_argument("--verify", action="store_true",
                     help="reload every netlist afterwards and let yosys walk "

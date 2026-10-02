@@ -5,10 +5,11 @@
 
 WHY
 
-a foundry's liberties ship as CCS + LVF models: 2.0 GB uncompressed for one
-corner of one cell group.  yosys cannot read them, and the reason is narrow --
+A modern foundry PDK ships its liberties as CCS + LVF models: 2.0 GB
+uncompressed for one corner of one cell group.  yosys cannot read them, and
+the reason is narrow --
 
-    input_ccb(<CELL>:a0) {
+    input_ccb(<CELL>__nci_1_2_LFR_LRF:a0) {
 
 a group whose NAME contains a colon, which the liberty tokeniser does not
 accept.  The only plain .lib.gz files in the library are filler cells, so there
