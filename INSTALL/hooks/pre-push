@@ -97,8 +97,14 @@ say "perl -c over every required fragment (advisory)"
 make check-syntax 2>&1 | grep -E "checked|MISSING" | sed 's/^/  /' >&2
 
 if [[ "${ELECTRON_PREPUSH_TESTS:-0}" == "1" ]]; then
-  say "running TESTS/nangate_all"
-  if ! out="$(make -C TESTS nangate_all 2>&1)"; then
+  # IN THE CONTAINER, like every other check here. TESTS/Makefile launches no
+  # apptainer of its own -- it says so at the top, "start the container first"
+  # -- so running it from the host finds no Tk and dies at electron line 94
+  # before a single test starts. This path could never have passed.
+  say "running TESTS/nangate_all (in the container)"
+  if ! out="$(apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd \
+                --bind /home/$USER:/home/$USER "$SIF" \
+                bash -c "cd '$REPO/TESTS' && PATH=/usr/bin:\$PATH make nangate_all" 2>&1)"; then
     echo "$out" | grep -E "ERR-|ERROR|no such command" | head -20 | sed 's/^/  /' >&2
     fail "a test failed"
   fi
