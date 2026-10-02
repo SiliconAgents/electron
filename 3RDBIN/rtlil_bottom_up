@@ -72,7 +72,8 @@ class Module:
     __slots__ = ("name", "fp", "kids", "start", "end")
 
     def __init__(self, name, fp, kids, start, end):
-        self.name, self.fp, self.kids = name, fp, kids
+        self.name, self.fp = name, fp
+        self.kids = kids                        # child type -> how many instances
         self.start, self.end = start, end       # byte offsets of the module text
 
 
@@ -81,7 +82,7 @@ def scan(path):
     bbox = set()
     mods = []
     name = None
-    body, kids, pend = [], set(), []
+    body, kids, pend = [], collections.Counter(), []
     canon = None
     depth = 0
     start = 0
@@ -107,7 +108,7 @@ def scan(path):
                     continue
                 if not attrs:
                     start = pos
-                name, body, kids, depth = nm, [], set(), 0
+                name, body, kids, depth = nm, [], collections.Counter(), 0
                 canon = _yd.Canon()
                 continue
             if name is None:
@@ -115,12 +116,12 @@ def scan(path):
                 continue
             if s == "end" and depth == 0:
                 fp = hashlib.sha1("\n".join(body).encode()).hexdigest()
-                mods.append(Module(name, fp, frozenset(kids), start, fh.tell()))
+                mods.append(Module(name, fp, kids, start, fh.tell()))
                 name = None
                 continue
             p = s.split()
             if p and p[0] == "cell" and len(p) >= 2:
-                kids.add(p[1])
+                kids[p[1]] += 1
             if s.startswith(("cell ", "process ", "switch ", "case ", "sync ")):
                 depth += 1
             elif s == "end":
@@ -174,6 +175,92 @@ def classify(mods, bbox):
     return cls, level, canon, name2fp
 
 
+def contents(cls, name2fp, bbox):
+    """Per class: child class -> instances, and how many leaf cells it holds.
+
+    Several child TYPES collapse to one child CLASS -- that is the whole point
+    of the fingerprint -- so the counts are summed, not listed. A leaf is a
+    standard cell or one of yosys's own $-cells; they are counted separately
+    because at this stage "still generic" is the interesting number.
+    """
+    kids, leaves = {}, {}
+    for fp, members in cls.items():
+        k = collections.Counter()
+        std = generic = 0
+        for t, n in members[0].kids.items():
+            if t in name2fp and t not in bbox:
+                k[name2fp[t]] += n
+            elif t.startswith("$"):
+                generic += n
+            else:
+                std += n
+        kids[fp], leaves[fp] = k, (std, generic)
+    return kids, leaves
+
+
+def print_tree(cls, level, canon, kids, leaves, roots, full=False, fh=sys.stdout):
+    """The class DAG as a tree, each distinct module expanded exactly once.
+
+    It is a DAG and not a tree -- a small adder module has 35,968 parents -- so expanding it
+    literally would print the same subtree thousands of times. A class is
+    expanded under its first parent and marked (above) everywhere after, which
+    keeps the whole design on one screen and still shows every edge.
+    """
+    size = {fp: len(v) for fp, v in cls.items()}
+    expanded = set()
+
+    def width(fp, indent=0):
+        w = indent + len(canon[fp])
+        if fp not in expanded:
+            expanded.add(fp)
+            for c in kids[fp]:
+                w = max(w, width(c, indent + 3))
+        return w
+    col = max((width(r) for r in roots), default=40) + 2
+    expanded.clear()
+
+    fh.write(f"{'module':<{col}} {'inst':>6} {'copies':>9} {'lvl':>4}"
+             f" {'cells':>8} {'generic':>8}\n")
+    fh.write("-" * (col + 39) + "\n")
+
+    def walk(fp, pre, last, n_inst, depth):
+        mark = "" if fp not in expanded else "  (above)"
+        # the prefix is driven by depth, not by whether `pre` is empty: a root
+        # has no prefix, and testing for that instead flattened every
+        # descendant to column zero as well
+        label = canon[fp] if depth == 0 else pre + ("`- " if last else "|- ") + canon[fp]
+        std, gen = leaves[fp]
+        inst = f"x{n_inst:,}" if n_inst else "-"
+        fh.write(f"{label:<{col}} {inst:>6} {size[fp]:>9,} {level[fp]:>4} "
+                 f"{std:>8,} {gen:>8,}{mark}\n")
+        if fp in expanded:
+            return
+        expanded.add(fp)
+        ch = sorted(kids[fp].items(), key=lambda kv: (-kv[1], canon[kv[0]]))
+        nxt = pre if depth == 0 else pre + ("   " if last else "|  ")
+
+        # The variants of one module mostly share their children, so listing
+        # the already-shown ones again buries what is actually new about the
+        # variant: a datapath lane__v1 differs from __v0 in nothing but a width, and
+        # spells that out over twenty-five identical (above) lines. Show the
+        # children not seen yet in full, and count the rest.
+        if not full:
+            old = [kv for kv in ch if kv[0] in expanded]
+            if len(old) > 3:
+                ch = [kv for kv in ch if kv[0] not in expanded]
+                n_old, inst_old = len(old), sum(n for _, n in old)
+                for c, n in ch:
+                    walk(c, nxt, False, n, depth + 1)
+                label = f"{nxt}`- + {n_old} module(s) already shown above"
+                fh.write(f"{label:<{col}} {'x' + format(inst_old, ','):>6}\n")
+                return
+        for i, (c, n) in enumerate(ch):
+            walk(c, nxt, i == len(ch) - 1, n, depth + 1)
+
+    for r in roots:
+        walk(r, "", True, 0, 0)
+
+
 def extract(path, cls, level, canon, name2fp, bbox, want, outdir):
     """Write one representative per class at `want` as a standalone RTLIL file."""
     os.makedirs(outdir, exist_ok=True)
@@ -210,6 +297,11 @@ def main():
     ap = argparse.ArgumentParser(description="distinct modules in an RTLIL dump, by depth")
     ap.add_argument("rtlil")
     ap.add_argument("--list", action="store_true", help="print the level table")
+    ap.add_argument("--tree", action="store_true",
+                    help="print the hierarchy of distinct modules")
+    ap.add_argument("--full", action="store_true",
+                    help="with --tree, list every edge instead of counting the "
+                         "children already shown elsewhere")
     ap.add_argument("--level", type=int, help="the level to extract")
     ap.add_argument("--extract", metavar="DIR", help="write one file per class there")
     ap.add_argument("--manifest", default="MODULES.tsv",
@@ -220,6 +312,18 @@ def main():
     cls, level, canon, name2fp = classify(mods, bbox)
     print(f"rtlil_bottom_up: {len(mods):,} module(s), {len(bbox):,} blackbox(es)"
           f" -> {len(cls):,} distinct structure(s)")
+
+    if args.tree:
+        kids, leaves = contents(cls, name2fp, bbox)
+        # a root is a class nothing instantiates
+        child_of = {c for k in kids.values() for c in k}
+        roots = [fp for fp in cls if fp not in child_of]
+        roots.sort(key=lambda fp: -level[fp])
+        print()
+        print_tree(cls, level, canon, kids, leaves, roots, full=args.full)
+        print(f"\n{len(cls)} distinct module(s), {len(mods):,} instance(s) of them."
+              f"  inst = instances in the parent; copies = across the design.")
+        return 0
 
     if args.list or args.extract is None:
         by = collections.defaultdict(list)
