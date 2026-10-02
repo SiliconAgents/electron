@@ -24,6 +24,12 @@ placers die; no yosys, qrouter or spark-shell, so nothing that shells out runs.
 A "syntax OK" from the host proves very little, and a failure there usually
 means nothing at all.
 
+The image's yosys is **0.64 with the slang plugin** (OSS CAD Suite 2026-05-05,
+installed in `INSTALL/pysparkppContainerFile`), not the 0.9 that apt put in the
+parent image. A `.sif` built before that change still has 0.9: no `read_slang`,
+and `synthesize` maps about 2% more cells. `yosys -V` inside the image says
+which one you have.
+
 ```
 make check              # both checks below, in the container
 make check-load         # the one that matters: loads all three tools for real
@@ -277,12 +283,22 @@ subtree into it saves 21.6%; doing the same to a wide, shallow block saves
 something. Repeat runs of one flattened module vary by ~0.4%, so nothing under
 1% is a result.
 
-The vendor yosys (`/tools_vendor/tt/siliconpilot/*/bin/yosys`) execs through
-`ld-linux`, so `/proc/self/exe` is not the binary and **`techmap` dies with
-"unable to determine share/ directory"**. `YOSYS_DATDIR` is not honoured and
-running `libexec/yosys` directly segfaults. The fix is a shim directory holding
-a copy of the loader with a `share` symlink beside it, plus a `yosys-abc`
-forwarder, with the loader's sibling `share` resolving to the real one.
+**Run this in the container like everything else.** The image carries the same
+yosys 0.64 build and the slang plugin, and `techmap` works there:
+
+```
+yosys -m /opt/oss-cad-suite/share/yosys/plugins/slang.so -p 'read_slang ...'
+```
+
+The vendor copy on the host (`/tools_vendor/.../bin/yosys`) is the same version
+but execs through `ld-linux`, so `/proc/self/exe` is not the binary and
+**`techmap` dies with "unable to determine share/ directory"**. `YOSYS_DATDIR`
+is not honoured and running `libexec/yosys` directly segfaults; the workaround
+is a shim directory holding a copy of the loader with a sibling `share`
+symlink, plus a `yosys-abc` forwarder. Worth knowing, not worth using -- it
+exists because the flow was first built against an image that still had 0.9,
+and an older `.sif` will send you back to it. `yosys -V` inside the image says
+which one you have.
 
 Reading `stat` output needs care: its row labels sit in the same column as
 cell-type rows, so summing every row that parses reports three times the real
