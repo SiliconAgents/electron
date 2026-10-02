@@ -69,7 +69,9 @@ SCRIPT = """
 read_verilog -lib {blackbox}
 {children}
 read_rtlil {src}
+{absorb}
 hierarchy -check -top {top}
+{flatten}
 proc
 opt -fast
 memory_map
@@ -82,6 +84,75 @@ clean -purge
 stat -top {top}
 write_verilog -noattr {dest}
 """
+
+
+def read_design(levels_dir):
+    """canonical -> (level, copies, cells, {child: instances}) from DESIGN.tsv."""
+    out = {}
+    with open(os.path.join(levels_dir, "DESIGN.tsv")) as fh:
+        for line in fh:
+            if line.startswith("#") or not line.strip():
+                continue
+            name, lvl, copies, cells, kids = line.rstrip("\n").split("\t")
+            ch = {}
+            if kids != "-":
+                for part in kids.split(","):
+                    k, n = part.rsplit(":", 1)
+                    ch[k] = int(n)
+            out[name] = (int(lvl), int(copies), int(cells), ch)
+    return out
+
+
+def subtree_cells(design, name, memo=None, stack=frozenset()):
+    """Pre-synthesis cells in a module and everything under it."""
+    memo = {} if memo is None else memo
+    if name in memo:
+        return memo[name]
+    if name in stack or name not in design:
+        return 0
+    _, _, cells, kids = design[name]
+    v = cells + sum(n * subtree_cells(design, c, memo, stack | {name})
+                    for c, n in kids.items())
+    memo[name] = v
+    return v
+
+
+def choose_boundaries(design, threshold, top):
+    """The modules that stay hierarchy boundaries; the rest get flattened in.
+
+    Size is the criterion because it is also the placement criterion: a block
+    a floorplanner can do something with is a block big enough to have a shape.
+    a small adder module is one cell -- it was never a useful boundary, and keeping it costs
+    real area, because a boundary is a wall abc cannot optimise across.
+
+    Measured on one large design: flattening a datapath lane's subtree into it takes it
+    from 16,016 cells to 12,552, a 21.6% saving. The same experiment on
+    a destination block gained 1.6%, which is inside the run-to-run noise -- deep
+    stacks of small modules are where the walls cost something, wide blocks
+    with few children are not.
+    """
+    memo = {}
+    keep = {m for m in design if subtree_cells(design, m, memo) >= threshold}
+    keep.add(top)
+    return keep, memo
+
+
+def plan_flatten(design, boundaries, name):
+    """(descendants to absorb, boundary children to read as blackboxes).
+
+    Walks down from `name` and stops at the first boundary on each path: what
+    is above the stop line gets flattened in, what is on it stays an instance.
+    """
+    absorb, bchild = set(), set()
+    stack = list(design[name][3])
+    while stack:
+        c = stack.pop()
+        if c in boundaries:
+            bchild.add(c)
+        elif c not in absorb:
+            absorb.add(c)
+            stack += list(design[c][3])
+    return absorb, bchild
 
 
 def modules_of(level_dir, manifest="MODULES.tsv"):
@@ -103,11 +174,16 @@ _CELLS = re.compile(r"^\s+(\d+)\s+cells\s*$", re.M)
 
 
 def run_one(job):
-    name, copies, level_dir, args, children = job
-    src = os.path.join(level_dir, name + ".il")
+    name, copies, src, args, children, absorb = job
     dest = os.path.join(args.out, name + ".v")
     log = os.path.join(args.out, name + ".log")
+    # `flatten` leaves the absorbed modules DEFINED but no longer instantiated,
+    # and write_verilog would then emit each of them into every netlist that
+    # absorbed it -- the same module defined in a dozen files. The second
+    # `hierarchy -top` drops what nothing references any more.
+    flatten = f"flatten\nhierarchy -top {name}" if absorb else ""
     script = SCRIPT.format(blackbox=args.blackbox, children=children, src=src,
+                           absorb=absorb, flatten=flatten,
                            top=name, liberty=args.liberty, dest=dest,
                            abc="-fast " if args.abc_fast else "")
     t = time.time()
@@ -140,6 +216,12 @@ def main():
     ap.add_argument("--yosys", default="yosys")
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--manifest", default="MODULES.tsv")
+    ap.add_argument("--flatten-below", type=int, metavar="CELLS", default=0,
+                    help="keep as a hierarchy boundary only a module whose "
+                         "subtree is at least this many cells; flatten the "
+                         "rest into their parents. Fewer, better-optimised "
+                         "modules and a netlist whose boundaries are the ones "
+                         "a floorplanner can use (try 2000)")
     ap.add_argument("--abc-fast", action="store_true",
                     help="map with `abc -fast`. DO NOT, unless you are timing "
                          "something: on one large design it costs 44%% of the cell "
@@ -160,14 +242,47 @@ def main():
         sys.exit(f"yosys_bottom_up: no lvl<N>/ under {args.levels}")
     os.makedirs(args.out, exist_ok=True)
 
+    # canonical name -> its extracted RTLIL, wherever its level put it
+    il = {}
+    for _, d in levels:
+        for f in os.listdir(d):
+            if f.endswith(".il"):
+                il[f[:-3]] = os.path.join(d, f)
+
+    design = boundaries = None
+    if args.flatten_below:
+        design = read_design(args.levels)
+        top_name = max(design, key=lambda m: design[m][0])
+        boundaries, memo = choose_boundaries(design, args.flatten_below, top_name)
+        # Named by their own cell count, NOT their subtree size: the top's
+        # subtree is the whole design, and reporting that as the size of a
+        # boundary suggests a run that is not about to happen.
+        big = sorted(((design[m][2], m) for m in boundaries), reverse=True)
+        print(f"yosys_bottom_up: --flatten-below {args.flatten_below:,} keeps "
+              f"{len(boundaries)} of {len(design)} module(s) as boundaries; "
+              f"the rest are absorbed by their parents")
+        print(f"yosys_bottom_up: boundaries are "
+              f"{', '.join(m for _, m in big[:4])} ...")
+
     done = []                      # netlists written so far, read as blackboxes
     failed_any = False
     grand = time.time()
     for L, d in levels:
         mods = modules_of(d, args.manifest)
+        if boundaries is not None:
+            mods = [(n, c) for n, c in mods if n in boundaries]
+            if not mods:
+                continue
         # every netlist from a lower level, interfaces only
         children = "\n".join(f"read_verilog -lib {p}" for p in done)
-        jobs = [(n, c, d, args, children) for n, c in mods]
+        jobs = []
+        for n, c in mods:
+            absorb = ""
+            if boundaries is not None:
+                take, _ = plan_flatten(design, boundaries, n)
+                absorb = "\n".join(f"read_rtlil {il[m]}" for m in sorted(take)
+                                   if m in il)
+            jobs.append((n, c, il[n], args, children, absorb))
         t = time.time()
         rows = []
         with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:

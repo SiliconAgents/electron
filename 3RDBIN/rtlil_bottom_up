@@ -346,7 +346,21 @@ def main():
             dirs = [os.path.join(args.extract, f"lvl{L}") for L in wants]
         else:
             wants, dirs = [int(args.level)], [args.extract]
-        print()
+        # The whole DAG in one file, so a consumer can choose where to put
+        # hierarchy boundaries without re-reading the dump. The cell count is
+        # the PRE-synthesis one -- generic cells and standard cells together --
+        # which is the only size available before anything is mapped.
+        kids, _ = contents(cls, name2fp, bbox)
+        design = os.path.join(args.extract, "DESIGN.tsv")
+        os.makedirs(args.extract, exist_ok=True)
+        with open(design, "w") as fh:
+            fh.write("# canonical\tlevel\tcopies\tcells\tchildren(name:count,...)\n")
+            for fp, members in sorted(cls.items(), key=lambda kv: level[kv[0]]):
+                ch = ",".join(f"{canon[c]}:{n}" for c, n in
+                              sorted(kids[fp].items(), key=lambda kv: canon[kv[0]]))
+                fh.write(f"{canon[fp]}\t{level[fp]}\t{len(members)}\t"
+                         f"{sum(members[0].kids.values())}\t{ch or '-'}\n")
+        print(f"\nrtlil_bottom_up: {design}")
         for L, d in zip(wants, dirs):
             w = extract(args.rtlil, cls, level, canon, name2fp, bbox, L, d)
             man = os.path.join(d, args.manifest)
