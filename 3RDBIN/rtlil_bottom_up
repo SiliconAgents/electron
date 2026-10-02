@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Group a uniquified RTLIL dump into distinct modules and rank them by depth.
+
+    rtlil_bottom_up design.il --list
+    rtlil_bottom_up design.il --level 0 --extract lvl0/
+
+WHY
+
+yosys-slang's --keep-hierarchy emits one module PER INSTANCE.  On one large design
+that is 119,351 modules -- and 111 distinct structures, in a hierarchy only ten
+levels deep:
+
+    level  classes   module copies
+        0       70          64,644    a one-cell wrapper module, a carry-lookahead block, ...
+        1       10          50,969    a small adder module (35,968 copies), a clock gater
+        2       14           3,160
+        ...
+        9        1               1    the_top_wrapper
+
+Every yosys pass iterates all 119,351, which is what makes a flat run of this
+design stall: 35,968 copies of a five-wire full adder are optimised thirty-five
+thousand times.  Synthesising each DISTINCT module once, deepest-first, is 111
+runs instead, and each one is small.
+
+This tool finds those classes.  `3RDBIN/yosys_dedup` solves the neighbouring
+problem -- merging the copies inside one yosys process -- and the two share the
+fingerprint, which lives there.
+
+LEVELS
+
+A class's level is one more than its deepest child class; a class with no
+module children is level 0.  Blackboxes (the standard cells) are not children
+for this purpose, and neither are yosys's own cells -- $mux, $add, $dff. Both
+exclusions matter: counting $mux as a child puts all but two classes above
+level 0 and the ranking collapses.
+
+EXTRACTION
+
+--extract writes one representative per class as a standalone RTLIL file,
+renamed to a canonical name: the base name, or <base>__v<N> when one base name
+covers several genuinely different modules.  a pipeline register is 5,298 copies of
+22 distinct widths, so it becomes a pipeline register__v0 .. __v21.
+
+Child instantiations are rewritten to their own canonical names, so a module
+extracted at level N instantiates exactly the names the level N-1 run produced
+and the results compose without a rename step.
+
+The canonical name is also what makes extraction safe. Naming the files after
+the uniquified module name does not work: those names run past 200 characters
+and truncating them to something a filesystem likes made 100 modules collide
+into 56 files, so 44 were silently synthesised from another module's RTLIL.
+"""
+
+import argparse
+import collections
+import hashlib
+import os
+import re
+import sys
+from importlib.machinery import SourceFileLoader
+
+# The fingerprint is yosys_dedup's; keeping one copy means the two tools cannot
+# disagree about what "the same module" means.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_yd = SourceFileLoader("yosys_dedup", os.path.join(_HERE, "yosys_dedup")).load_module()
+
+_MODULE_LINE = re.compile(r"^(\s*module\s+)(\S+)(.*)$")
+_CELL_LINE = re.compile(r"^(\s*cell\s+)(\S+)(\s+.*)$")
+
+
+class Module:
+    __slots__ = ("name", "fp", "kids", "start", "end")
+
+    def __init__(self, name, fp, kids, start, end):
+        self.name, self.fp, self.kids = name, fp, kids
+        self.start, self.end = start, end       # byte offsets of the module text
+
+
+def scan(path):
+    """(modules, blackbox names). One pass, holding one module's body."""
+    bbox = set()
+    mods = []
+    name = None
+    body, kids, pend = [], set(), []
+    canon = None
+    depth = 0
+    start = 0
+    with open(path, errors="replace") as fh:
+        while True:
+            pos = fh.tell()
+            line = fh.readline()
+            if not line:
+                break
+            s = line.strip()
+            if name is None and s.startswith("attribute "):
+                if not pend:
+                    start = pos            # the module's text begins at its attributes
+                pend.append(s)
+                continue
+            if s.startswith("module "):
+                attrs, pend = pend, []
+                nm = s.split()[1]
+                if any(a.startswith(("attribute \\blackbox", "attribute \\whitebox"))
+                       for a in attrs):
+                    bbox.add(nm)
+                    name = None
+                    continue
+                if not attrs:
+                    start = pos
+                name, body, kids, depth = nm, [], set(), 0
+                canon = _yd.Canon()
+                continue
+            if name is None:
+                pend = []
+                continue
+            if s == "end" and depth == 0:
+                fp = hashlib.sha1("\n".join(body).encode()).hexdigest()
+                mods.append(Module(name, fp, frozenset(kids), start, fh.tell()))
+                name = None
+                continue
+            p = s.split()
+            if p and p[0] == "cell" and len(p) >= 2:
+                kids.add(p[1])
+            if s.startswith(("cell ", "process ", "switch ", "case ", "sync ")):
+                depth += 1
+            elif s == "end":
+                depth -= 1
+            n = _yd.normalise(line, canon)
+            if n:
+                body.append(n)
+    return mods, bbox
+
+
+def classify(mods, bbox):
+    """fingerprint -> {members, level, canonical name}, and name -> fingerprint."""
+    name2fp = {m.name: m.fp for m in mods}
+    cls = collections.OrderedDict()
+    for m in mods:
+        cls.setdefault(m.fp, []).append(m)
+
+    # A child counts only if it is a module in this file and not a blackbox.
+    # Anything else -- a standard cell, or one of yosys's own $mux/$add/$dff --
+    # is a leaf.
+    kids = {fp: {name2fp[k] for k in v[0].kids if k not in bbox and k in name2fp}
+            for fp, v in cls.items()}
+
+    level = {}
+    sys.setrecursionlimit(100000)
+
+    def depth_of(fp, stack=frozenset()):
+        if fp in level:
+            return level[fp]
+        if fp in stack:                   # a real hierarchy is a DAG; be safe
+            return 0
+        c = kids[fp]
+        level[fp] = 0 if not c else 1 + max(depth_of(x, stack | {fp}) for x in c)
+        return level[fp]
+
+    for fp in cls:
+        depth_of(fp)
+
+    # canonical names: <base>, or <base>__v<N> when a base covers several classes
+    per_base = collections.Counter()
+    for fp, v in cls.items():
+        per_base[v[0].name.split("$")[0]] += 1
+    seen = collections.Counter()
+    canon = {}
+    for fp, v in cls.items():
+        base = v[0].name.split("$")[0]
+        i = seen[base]
+        seen[base] += 1
+        plain = base.lstrip("\\")
+        canon[fp] = plain if per_base[base] == 1 else f"{plain}__v{i}"
+    return cls, level, canon, name2fp
+
+
+def extract(path, cls, level, canon, name2fp, bbox, want, outdir):
+    """Write one representative per class at `want` as a standalone RTLIL file."""
+    os.makedirs(outdir, exist_ok=True)
+    written = []
+    with open(path, errors="replace") as fh:
+        for fp, members in cls.items():
+            if level[fp] != want:
+                continue
+            rep = members[0]
+            fh.seek(rep.start)
+            text = fh.read(rep.end - rep.start)
+            out = []
+            for line in text.splitlines(True):
+                m = _MODULE_LINE.match(line)
+                if m and m.group(2) == rep.name:
+                    out.append(f"{m.group(1)}\\{canon[fp]}{m.group(3)}\n")
+                    continue
+                m = _CELL_LINE.match(line)
+                if m:
+                    t = m.group(2)
+                    # a child module instantiation becomes its canonical name;
+                    # a blackbox or a yosys built-in is left exactly as it is
+                    if t in name2fp and t not in bbox:
+                        line = f"{m.group(1)}\\{canon[name2fp[t]]}{m.group(3)}\n"
+                out.append(line)
+            dest = os.path.join(outdir, canon[fp] + ".il")
+            with open(dest, "w") as g:
+                g.writelines(out)
+            written.append((canon[fp], len(members), rep.name, dest))
+    return written
+
+
+def main():
+    ap = argparse.ArgumentParser(description="distinct modules in an RTLIL dump, by depth")
+    ap.add_argument("rtlil")
+    ap.add_argument("--list", action="store_true", help="print the level table")
+    ap.add_argument("--level", type=int, help="the level to extract")
+    ap.add_argument("--extract", metavar="DIR", help="write one file per class there")
+    ap.add_argument("--manifest", default="MODULES.tsv",
+                    help="name of the tsv written into DIR (default MODULES.tsv)")
+    args = ap.parse_args()
+
+    mods, bbox = scan(args.rtlil)
+    cls, level, canon, name2fp = classify(mods, bbox)
+    print(f"rtlil_bottom_up: {len(mods):,} module(s), {len(bbox):,} blackbox(es)"
+          f" -> {len(cls):,} distinct structure(s)")
+
+    if args.list or args.extract is None:
+        by = collections.defaultdict(list)
+        for fp, v in cls.items():
+            by[level[fp]].append((len(v), canon[fp]))
+        print(f"\n{'level':>5} {'classes':>8} {'copies':>12}   largest")
+        for L in sorted(by):
+            rows = sorted(by[L], reverse=True)
+            ex = ", ".join(f"{n:,}x {b}" for n, b in rows[:3])
+            print(f"{L:>5} {len(rows):>8} {sum(n for n, _ in rows):>12,}   {ex}")
+
+    if args.extract is not None:
+        if args.level is None:
+            sys.exit("rtlil_bottom_up: --extract needs --level")
+        w = extract(args.rtlil, cls, level, canon, name2fp, bbox,
+                    args.level, args.extract)
+        man = os.path.join(args.extract, args.manifest)
+        with open(man, "w") as fh:
+            fh.write("# canonical\tcopies\trepresentative\n")
+            for name, n, rep, _ in sorted(w, key=lambda r: -r[1]):
+                fh.write(f"{name}\t{n}\t{rep}\n")
+        total = sum(os.path.getsize(d) for _, _, _, d in w)
+        print(f"\nrtlil_bottom_up: level {args.level}: {len(w)} class(es), "
+              f"{sum(n for _, n, _, _ in w):,} copies, {total/1e6:.1f} MB -> "
+              f"{args.extract}")
+        print(f"rtlil_bottom_up: manifest {man}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

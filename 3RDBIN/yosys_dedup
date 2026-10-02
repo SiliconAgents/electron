@@ -7,19 +7,25 @@
 WHY THIS EXISTS
 
 yosys-slang's --keep-hierarchy emits one module PER INSTANCE, named
-<base>$<full.instance.path>.  On one large design that is 119,350 modules -- and
-94 distinct structures.  a one-cell wrapper module alone exists as 35,968 separate
+<base>$<full.instance.path>.  On one large design that is 119,351 modules -- and
+111 distinct structures.  a one-cell wrapper module alone exists as 35,968 separate
 modules that are all the same five-wire, one-cell module sitting in different
 places.
 
-Every yosys pass then iterates over all 119,350.  That is not a design that is
+Every yosys pass then iterates over all 119,351.  That is not a design that is
 too large; it is one module copied out thirty-five thousand times, and the
 passes cannot tell.  Merging them first is what makes the rest tractable, and
 unlike flattening it keeps every level of hierarchy a floorplanner might want.
 
+`3RDBIN/rtlil_bottom_up` is the other way to spend the same fingerprint: it
+ranks the classes by hierarchy depth and extracts them, so each distinct module
+can be synthesised ONCE in its own process, deepest level first.  Use that when
+one yosys process is the thing that will not finish; use this when the design
+has to stay in one.
+
 HOW A MODULE IS FINGERPRINTED
 
-The body, with two normalisations, hashed.
+The body, with three normalisations, hashed.
 
   the module's own name is dropped -- it is what differs by construction;
 
@@ -29,6 +35,15 @@ The body, with two normalisations, hashed.
   differ in that string alone.  Without the normalisation they fingerprint
   apart and the tool reports that nothing can be merged -- which is exactly
   what a first attempt at this concluded.
+
+  the serial numbers yosys puts in the names it invents are renumbered by
+  order of first appearance.  See Canon: without it the count comes out 6,522
+  instead of 111.
+
+Each of the three was, on its own, the difference between "nothing can be
+merged" and the real answer, and each had to be found by diffing two bodies
+that were supposed to be identical.  That is the way to debug a result here --
+not by widening the comparison until the number looks plausible.
 
 Everything else is compared verbatim, PORTS INCLUDED.  chtype rewrites a cell's
 type without checking that the new type's ports match, so the fingerprint has
@@ -59,20 +74,70 @@ import hashlib
 import re
 import sys
 
-_TYPE_SUFFIX = re.compile(r"\$[^\s\\]*")
+# \base$instance.path -> \base. Anchored on the leading backslash, because a
+# type that starts with "$" is one of yosys's OWN cells -- $mux, $add, $dff --
+# where the "$" is the type itself and nothing may be stripped. An earlier
+# version matched any "$...", so "$mux" normalised to the empty string and
+# every built-in cell in the design fingerprinted alike: a module full of
+# adders compared equal to one full of multiplexers.
+_USER_TYPE = re.compile(r"^(\\[^\s$]*)\$\S*$")
+
+# The counter in an auto-generated name: $procmux$157836,
+# $auto$rtlil.cc:2493:MuxGate$157842, and -- the case that matters -- the
+# derived wires $procmux$157836_CMP and $procmux$157835_Y.
+#
+# The digits are NOT at the end of the token, so anchoring on a word boundary
+# after them matches nothing: "9_C" has no boundary in it, both are word
+# characters. That one character is why a first fix here changed the count by
+# zero. \S* is greedy and cannot cross whitespace, so it runs to the LAST "$"
+# in the token and the digits that follow it; any suffix is left alone, which
+# keeps _CMP and _Y distinguishable.
+_AUTO_ID = re.compile(r"(\$\S*\$)(\d+)")
 
 
-def normalise(line):
+def strip_type(tok):
+    m = _USER_TYPE.match(tok)
+    return m.group(1) if m else tok
+
+
+class Canon:
+    """Renumber a module's auto-generated names by order of first appearance.
+
+    yosys names the objects it invents from ONE counter shared by the whole
+    design, so the 35,968th copy of a module holds $procmux$157836 where the
+    first holds $procmux$12. The copies are identical in every way that matters
+    and differ in every one of those numbers.
+
+    Not normalising them is why a first pass at this reported 6,522 distinct
+    structures where there are 184: the count came out 35x too high, and the
+    dedup it generated would have merged almost nothing. The number is a
+    serial, not information -- what identifies the object is WHERE IT FIRST
+    APPEARS in the module, which is what this substitutes.
+    """
+
+    def __init__(self):
+        self.seen = {}
+
+    def __call__(self, tok):
+        def repl(m):
+            key = m.group(0)
+            if key not in self.seen:
+                self.seen[key] = len(self.seen)
+            return f"{m.group(1)}n{self.seen[key]}"
+        return _AUTO_ID.sub(repl, tok)
+
+
+def normalise(line, canon):
     """One body line, made comparable between copies of the same module."""
     s = line.strip()
-    # a cell's type carries the child's uniquified name; the path is not part
-    # of what the module IS
-    if s.startswith("cell "):
-        parts = s.split()
-        if len(parts) >= 2:
-            parts[1] = _TYPE_SUFFIX.sub("", parts[1])
-        return " ".join(parts)
-    return s
+    if not s:
+        return ""
+    parts = s.split()
+    # "cell <type> <name>": the type carries the child's uniquified name, and
+    # the path is not part of what the module IS.
+    if parts[0] == "cell" and len(parts) >= 2:
+        parts[1] = strip_type(parts[1])
+    return canon(" ".join(parts))
 
 
 def modules(path):
@@ -86,6 +151,7 @@ def modules(path):
     """
     name = None
     body = []
+    canon = Canon()
     pending_attrs = []
     depth = 0           # nesting inside the module, carried not recomputed
     with open(path, errors="replace") as fh:
@@ -103,6 +169,7 @@ def modules(path):
                 name = s.split()[1]
                 body = []
                 depth = 0
+                canon = Canon()          # counters restart with each module
                 continue
             if name is None:
                 pending_attrs = []
@@ -119,7 +186,7 @@ def modules(path):
                 depth += 1
             elif s == "end":
                 depth -= 1
-            n = normalise(line)
+            n = normalise(line, canon)
             if n:
                 body.append(n)
 
