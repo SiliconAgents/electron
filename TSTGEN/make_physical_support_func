@@ -282,11 +282,18 @@ if ( exists $FLOORPLAN_LOOKUP{$flplan} ) {
 else {
   my ($parent, $cellref, $child, $inst);
   ($parent = $flplan) =~ s(/.*$)();       # $parent is the word before 1st slash
-  ($inst = $flplan ) =~ s(^$parent/*)();  # $inst gets whatever after 1st slash
+  # \Q..\E, because $parent and $child are INSTANCE NAMES and are being used
+  # here to strip a literal prefix, not as patterns. A verilog escaped
+  # identifier puts regex metacharacters straight into them -- yosys writes
+  # \gen_fp_cols[6].a tile, where "\g" is a backreference escape and
+  # the whole match dies with "Unterminated \g... pattern", taking
+  # hier_place_all with it. [6] and . are the quieter half of the same bug:
+  # they would match the wrong thing rather than die.
+  ($inst = $flplan ) =~ s(^\Q$parent\E/*)();  # $inst gets whatever after 1st slash
 
   while ( $inst ne "" && $inst ne "_self_" ) {
     ($child = $inst) =~ s(/.*$)();   # $child is the word before 1st slash
-    $inst =~ s(^$child/*)();         # $inst gets whatever after 1st slash
+    $inst =~ s(^\Q$child\E/*)();     # $inst gets whatever after 1st slash
     if ( $inst eq "" ) {
       $inst = "_self_"
     }

@@ -2854,7 +2854,11 @@ if($inst_found == 1 ) {
      #Setting location of leaf instances in FLAT data base
      my $full_hier_inst_name = $curr_floor_plan."/".$instance;
      my $global_top_module = $GLOBAL->dbfGlobalGetTOP();
-     $full_hier_inst_name =~ s/^$global_top_module\///;
+     # \Q..\E: a literal prefix strip, not a pattern. This one fails QUIETLY --
+     # a metacharacter in the top module's name leaves the prefix in place, the
+     # %CADB lookup below misses, and the leaf instance keeps no location at
+     # all. No error, just cells that were never placed.
+     $full_hier_inst_name =~ s/^\Q$global_top_module\E\///;
      if ( exists $CADB{$full_hier_inst_name} ) {
        $CADB{$full_hier_inst_name}->dbCadbSetLoc($x+$absolute_llx,$y+$absolute_lly);
        $CADB{$full_hier_inst_name}->dbCadbSetStatus(PLACED);
