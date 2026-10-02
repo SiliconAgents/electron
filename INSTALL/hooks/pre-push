@@ -55,6 +55,24 @@ SIF="$REPO/INSTALL/podman/pysparkpp.sif"
 say()  { echo "pre-push: $*" >&2; }
 fail() { echo "pre-push: $*" >&2; echo "pre-push: push refused. --no-verify overrides." >&2; exit 1; }
 
+# Names first, because it is the only check here whose failure cannot be
+# repaired by a later commit. pre-commit and commit-msg already gate each
+# commit as it is made, but they only ever saw the commits made in THIS clone
+# with hooks enabled -- a branch that arrived by any other route has never been
+# looked at. And a name that reached a blob is in the history whether or not
+# the file still holds it, which is exactly the state this repository was in
+# when the check was written.
+CHECK="$REPO/INSTALL/hooks/name-check"
+if [[ -x "$CHECK" ]]; then
+  range="origin/master..HEAD"
+  git rev-parse --verify -q origin/master >/dev/null || range=""
+  if [[ -n "$range" ]]; then
+    say "checking for design and library names in $range"
+    "$CHECK" --range "$range" --messages "$range" --quiet \
+      || fail "a design or library name would be published"
+  fi
+fi
+
 command -v apptainer >/dev/null 2>&1 || \
   fail "apptainer is not on PATH, so the checks cannot run"
 [[ -f "$SIF" ]] || \

@@ -1,0 +1,26 @@
+#!/bin/bash
+# commit-msg -- the same name check, on the message.
+#
+# Separate from pre-commit because a message does not exist when that one runs.
+# Git hands this hook the file holding the message as $1.
+#
+# A message leaks as readily as a comment and is harder to fix afterwards: the
+# content can be corrected in the next commit, the message needs history
+# rewritten. That asymmetry is why this blocks rather than warns.
+#
+#     ELECTRON_SKIP_NAMECHECK=1 git commit
+#     git commit --no-verify
+
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)" || exit 1
+CHECK="$REPO/INSTALL/hooks/name-check"
+
+[[ -x "$CHECK" ]] || exit 0
+[[ -f "${1:-}" ]] || exit 0
+
+if ! "$CHECK" --quiet "$1"; then
+  echo "commit-msg: commit refused -- the message names something it may not." >&2
+  exit 1
+fi
+exit 0

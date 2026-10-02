@@ -33,11 +33,12 @@ behaviour and not yours to rewrite; leave it. The rule is about what you ADD.
 
 The point is never to lose the engineering. A measurement is what makes these
 commits worth reading, so keep every number and every mechanism and drop only
-the identifier:
+the identifier.
 
-Do not write the table of real names out here either — a lookup table of what
-is forbidden is itself the leak, and this file is in the same repo. Describe
-the kind of thing instead:
+Do not write the real names out here either — a lookup table of what is
+forbidden is itself the leak, and this file is in the same repo. The first
+draft of this agent had one, and the diff check caught it. Describe the kind of
+thing instead:
 
 | instead of | write |
 |---|---|
@@ -56,17 +57,27 @@ name would have been allowed.
 
 ### Check before you commit, every time
 
-Run this over the staged diff AND the message you are about to use:
+There is a checker; use it rather than inventing a grep:
 
 ```
-git diff --cached | grep -nEi '<the design names in play>|<foundry>|<node>|<cell suffixes>'
+INSTALL/hooks/name-check --staged          # what the commit will record
+INSTALL/hooks/name-check --all             # every tracked file
+INSTALL/hooks/name-check --range origin/master..HEAD --messages origin/master..HEAD
 ```
 
-Build the pattern from what the session actually touched — you know which
-design and which PDK this work was done against; grep for those, not for a
-fixed list. Also check the obvious carriers: new test names, example command
-lines in `--help` epilogs, file paths in docstrings, and sample output pasted
-into a comment.
+It runs automatically from `pre-commit`, `commit-msg` and `pre-push` when the
+clone has `git config core.hooksPath INSTALL/hooks`, so a commit you make will
+be checked whether or not you remember. Run it yourself anyway before writing
+the message — it is faster to fix a docstring than to argue with a hook.
+
+Its structural rules know PDK cell-name and process-node shapes. The actual
+design and library names live in `.git/name-denylist`, outside version control
+because a list of them would itself be the leak; if the session is working on a
+design that is not in there, add it.
+
+Also check the carriers a diff-grep misses: new test names, example command
+lines in `--help` epilogs, file paths in docstrings, and sample tool output
+pasted into a comment.
 
 **If the diff itself carries a name, say so and stop.** Do not commit it and
 mention it afterwards. Fix the file, then commit.

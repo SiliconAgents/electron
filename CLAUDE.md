@@ -292,6 +292,48 @@ rows into the last module's submodule list and the counts explode. Expanding a
 hierarchy must be **memoised**; summing over paths is exponential in a wide DAG
 and produced a 170-digit answer here.
 
+## Names that may not be in this repo
+
+AGPL-3.0 and public, and the work gets done against customer designs on foundry
+PDKs under NDA. **No design name and no library name goes in** — not in a
+commit message, not in a comment, not in a docstring, not in a `--help` epilog.
+
+Allowed: designs under `TESTS/`, because they are this repo's own testcases and
+naming them is the point; `nangate`; and `CONFIG/library.config`'s foundry
+keys, which are functional data rather than prose.
+
+Write what the thing IS. "a 119,351-module design" is *more* informative than
+the name was — it says the thing that made the tool necessary — so prefer that
+framing even where a name would have been allowed.
+
+`INSTALL/hooks/name-check` enforces it, and three hooks call it:
+
+| hook | what it sees |
+|---|---|
+| `pre-commit` | the staged content |
+| `commit-msg` | the message |
+| `pre-push` | **every blob and message in `origin/master..HEAD`** |
+
+The push one matters most: a name that was added in one commit and swept out in
+a later one is still in the history and still fetched by anyone who clones. An
+earlier draft of the checker listed the files a range touched and read them
+from the working tree, which sees the final state and reports clean on exactly
+that situation.
+
+Run it by hand with `INSTALL/hooks/name-check --all`, or
+`--range origin/master..HEAD`.
+
+**The checker holds no names.** A list of what it hunts for would be the most
+quotable file here, so the real ones live outside version control, in
+`.git/name-denylist` (or `$ELECTRON_NAME_DENYLIST`) — one regex per line. Add
+the design and library in play when a new one starts; without it the structural
+rules still catch PDK cell names and process nodes, which is the leak that
+actually happened. `ELECTRON_SKIP_NAMECHECK=1` is for fixing the checker, not
+for getting a name past it.
+
+`.claude/agents/commit.md` writes the commit and applies the same rule, with the
+substitutions to reach for. The agent explains; the hooks enforce.
+
 ## Off limits
 
 `/proj_pd/user_dev/rsrivastava/pyspark_cad` is read-only: shared repo, and

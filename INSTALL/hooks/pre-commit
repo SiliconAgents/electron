@@ -1,0 +1,37 @@
+#!/bin/bash
+# pre-commit -- keep customer design names and foundry library names out of a
+# public repository.
+#
+# Active already if the clone has been set up as CLAUDE.md says:
+#
+#     git config core.hooksPath INSTALL/hooks
+#
+# WHY A HOOK AND NOT JUST THE AGENT
+#
+# .claude/agents/commit.md says the same thing and says it better, but an agent
+# is advice: it applies when something remembers to ask for it. This fires on
+# every commit, from any tool, with nothing to remember. The two are not
+# alternatives -- the agent explains what to write instead, this one is the
+# thing that actually stops a leak.
+#
+# It checks the STAGED CONTENT, which is the only version that matters at this
+# point, and it is fast because it reads only the files being committed.
+#
+# The commit message is checked by the commit-msg hook next to this one,
+# because a message does not exist yet when this runs.
+#
+#     ELECTRON_SKIP_NAMECHECK=1 git commit     for fixing the checker itself
+#     git commit --no-verify                   git's own way past every hook
+
+set -uo pipefail
+
+REPO="$(git rev-parse --show-toplevel)" || exit 1
+CHECK="$REPO/INSTALL/hooks/name-check"
+
+[[ -x "$CHECK" ]] || exit 0      # nothing to enforce with; do not block
+
+if ! "$CHECK" --staged --quiet; then
+  echo "pre-commit: commit refused." >&2
+  exit 1
+fi
+exit 0
