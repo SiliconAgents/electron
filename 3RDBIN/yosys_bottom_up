@@ -39,6 +39,7 @@ stops on every one of them.
 
 import argparse
 import concurrent.futures as cf
+import gzip
 import os
 import re
 import subprocess
@@ -352,14 +353,50 @@ def verify(args, netlists, top):
     total, cells = leaf_cells(tail, ours)
     print(f"\nyosys_bottom_up: verified in {time.time() - t:.1f}s -- "
           f"{top} is {total:,} standard cell(s) of {len(cells)} type(s)")
-    seq = {k: v for k, v in cells.items()
-           if any(s in k.upper() for s in ("DFF", "LAT", "ICG", "SDF"))}
+    seq = {k: v for k, v in cells.items() if k in sequential_cells(args.liberty)}
     if seq:
         top4 = sorted(seq.items(), key=lambda kv: -kv[1])[:4]
         named = ", ".join("{:,} {}".format(v, k.split("_N_")[0]) for k, v in top4)
         print(f"yosys_bottom_up: {sum(seq.values()):,} sequential ({named})")
     print(f"yosys_bottom_up: {log}")
     return 0
+
+
+_CELL_OPEN = re.compile(r"^\s*cell\s*\(\s*([^)\s]+)\s*\)")
+_FF_OPEN = re.compile(r"^\s*(?:ff|ff_bank|latch|latch_bank)\s*\(")
+
+
+def sequential_cells(liberty, _cache={}):
+    """Cell names the LIBERTY says hold state -- an ff or latch group.
+
+    Not a guess from the name. A first version tested for "DFF", "LAT", "ICG"
+    or "SDF" as substrings, which is one PDK's naming convention dressed up as
+    a rule: on a library whose flops are EDFQ.../DFQT.../DFRPQ... it matched
+    only the synchronizers and reported 1,094 sequential cells in a design that
+    has 406,000. The number was wrong by a factor of 370 and nothing else in
+    the run disagreed with it.
+
+    Note the group keyword may be written with or without a space before its
+    paren; both forms appear in vendor liberties.
+    """
+    if liberty in _cache:
+        return _cache[liberty]
+    seq, cur = set(), None
+    opener = gzip.open if liberty.endswith(".gz") else open
+    try:
+        with opener(liberty, "rt", errors="replace") as fh:
+            for line in fh:
+                m = _CELL_OPEN.match(line)
+                if m:
+                    cur = m.group(1)
+                    continue
+                if cur and _FF_OPEN.match(line):
+                    seq.add(cur)
+                    cur = None
+    except OSError:
+        pass
+    _cache[liberty] = seq
+    return seq
 
 
 _STAT_CELL = re.compile(r"^\s+(\d+)\s+([A-Za-z][A-Za-z0-9_]*)\s*$", re.M)
