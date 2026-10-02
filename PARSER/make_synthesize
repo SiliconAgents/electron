@@ -318,8 +318,16 @@ my $inStat = 0;
 #     wanted; taking every section double counts, and the module list at the
 #     head of the hierarchy section looks exactly like a cell tally, so the
 #     counting starts at "Number of cells" and stops at the blank line after
-#     it. -->
+#     it.
+#
+#     That is yosys 0.9's layout.  0.64 turned it round: the count comes first
+#     and the label last, "60  117.572 cells", then one "count area TYPE" row
+#     per cell type, then a "submodules" row followed by the instance list.
+#     The submodule rows look exactly like cell rows, so the list stops at the
+#     "submodules" row, not at the blank line.  Both layouts are read, so the
+#     same command works on either image. -->
 my $inCellList = 0;
+my $newLayout  = 0;
 while ( my $line = <SYNTH_LOG> ) {
   chomp($line);
   push(@errors, $line) if ( $line =~ /^ERROR:/ );
@@ -341,11 +349,24 @@ while ( my $line = <SYNTH_LOG> ) {
   if ( $line =~ /Number of cells:\s+(\d+)/ ) {
     $numCells = $1;
     $inCellList = 1;
+    $newLayout = 0;
+    next;
+  }
+  if ( $line =~ /^\s*(\d+)\s+(?:\S+\s+)?cells\s*$/ ) {
+    $numCells = $1;
+    $inCellList = 1;
+    $newLayout = 1;
     next;
   }
   if ( $line =~ /Chip area for(?: top)? module.*:\s+(\S+)/ ) { $area = $1; }
   if ( $inCellList == 1 ) {
-    if ( $line =~ /^\s+(\S+)\s+(\d+)\s*$/ ) { $cellCount{$1} = $2; }
+    if ( $newLayout == 1 ) {
+      if ( $line =~ /^\s*(\d+)\s+(?:\S+\s+)?(\S+)\s*$/ && $2 ne "submodules" ) {
+        $cellCount{$2} = $1;
+      }
+      else { $inCellList = 0; }
+    }
+    elsif ( $line =~ /^\s+(\S+)\s+(\d+)\s*$/ ) { $cellCount{$1} = $2; }
     else { $inCellList = 0; }
   }
 }

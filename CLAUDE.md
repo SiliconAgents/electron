@@ -24,6 +24,12 @@ placers die; no yosys, qrouter or spark-shell, so nothing that shells out runs.
 A "syntax OK" from the host proves very little, and a failure there usually
 means nothing at all.
 
+The image's yosys is **0.64 with the slang plugin** (OSS CAD Suite 2026-05-05,
+installed in `INSTALL/pysparkppContainerFile`), not the 0.9 that apt put in the
+parent image. A `.sif` built before that change still has 0.9: no `read_slang`,
+and `synthesize` maps about 2% more cells. `yosys -V` inside the image says
+which one you have.
+
 ```
 make check              # both checks below, in the container
 make check-load         # the one that matters: loads all three tools for real
