@@ -1,6 +1,7 @@
 # Layered on pysparkplusbuild rather than rebuilt from ubuntu:22.04, so this
-# image inherits perl-tk, the CPAN set, cudd, OpenSTA, yosys and the python
-# stack without redoing any of it.  Build the parent first:
+# image inherits perl-tk, the CPAN set, cudd, OpenSTA and the python stack
+# without redoing any of it, and replaces the parent's yosys 0.9 with 0.64
+# (see the end of this file).  Build the parent first:
 #
 #     make artemis       (in INSTALL/podman)
 #
@@ -45,5 +46,42 @@ RUN test -x /usr/local/bin/qrouter && \
     test -x /usr/local/share/qrouter/qrouternullg && \
     test -f /usr/local/share/qrouter/qrouter.tcl && \
     echo "qrouter installed"
+
+# yosys 0.64 with the yosys-slang plugin, from the OSS CAD Suite release that
+# SiliconPilot 0.18.4 bundles (its bin/.oss-cad-version says 2026-05-05).
+# Same build, same answers: `yosys -V` prints 0.64+181, git 8427bd3a3, in both.
+#
+# It replaces the yosys 0.9 that ubuntu:22.04 apt put in the base image. 0.9
+# has no read_slang, so a SystemVerilog design cannot keep its hierarchy
+# through synthesis, and 0.9's stat prints "Number of cells:" where 0.64
+# prints "<n> cells" -- make_synthesize reads both.
+#
+# /usr/bin/yosys is a WRAPPER, not a symlink. The suite's bin/yosys finds its
+# own lib/ and libexec/ from where it sits ("dirname $BASH_SOURCE/.."), so a
+# symlink in /usr/bin makes it look in /usr/lib and fail. And the suite's bin/
+# is NOT put on PATH: it carries its own python3, which would shadow the one
+# with scipy and kill the placers.
+#
+# Pinned by date and by checksum, so a rebuild cannot pick up a different yosys.
+ARG OSS_CAD_DATE=2026-05-05
+ARG OSS_CAD_SHA256=7bb8bbd580b171b87435ea614d32bfc27a29aa6202e11934eaeeff4f323da02a
+RUN apt-get remove -y yosys && \
+    apt-get update && \
+    apt-get install -y curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    curl -sSL -o /tmp/oss-cad-suite.tgz \
+      https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_DATE}/oss-cad-suite-linux-x64-$(echo ${OSS_CAD_DATE} | tr -d -).tgz && \
+    echo "${OSS_CAD_SHA256}  /tmp/oss-cad-suite.tgz" | sha256sum -c - && \
+    tar xzf /tmp/oss-cad-suite.tgz -C /opt && \
+    rm /tmp/oss-cad-suite.tgz && \
+    for t in yosys yosys-abc yosys-config yosys-filterlib yosys-smtbmc; do \
+      printf '#!/bin/sh\nexec /opt/oss-cad-suite/bin/%s "$@"\n' "$t" > /usr/bin/$t && \
+      chmod 755 /usr/bin/$t ; \
+    done
+
+# Fails the build here if the wrapper, the version or the slang plugin is wrong.
+RUN yosys -V | grep -q "^Yosys 0\.64" && \
+    yosys -q -p "plugin -i slang; help read_slang" > /dev/null && \
+    echo "yosys 0.64 with slang installed"
 
 ENV LANG=C.UTF-8
