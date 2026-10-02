@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+"""Synthesise a design one hierarchy level at a time, deepest first.
+
+    rtlil_bottom_up design.il --level all --extract lvl/
+    yosys_bottom_up --levels lvl/ --liberty slim.lib --blackbox cells.v \
+                    --out netlists/ --jobs 10
+
+WHY NOT ONE YOSYS RUN
+
+yosys-slang's --keep-hierarchy emits one module per INSTANCE. one large design is
+119,351 of them and 111 distinct structures; a flat run optimises the same
+full adder 35,968 times and does not finish. Synthesising each distinct module
+once is 111 small runs, each of which does.
+
+HOW THE LEVELS COMPOSE
+
+Level 0 is the modules that instantiate no other module. Each level after it
+reads the netlists already produced as BLACKBOXES -- interfaces only -- so the
+module being synthesised sees its children's ports and nothing else, and the
+netlist it writes still instantiates them by name.
+
+That is the point of doing it this way rather than flattening: what comes out
+is a hierarchical netlist, which is what a hierarchical floorplanner wants.
+Flattening would make each run bigger than the last and give the placer back
+the one enormous module it cannot help with.
+
+Children are read with `read_verilog -lib`, which keeps the interface and drops
+the body, so a level never re-reads the logic underneath it however deep the
+design goes. The cost per level is the level's own cells.
+
+WHAT IT ASSUMES
+
+That rtlil_bottom_up wrote the levels, because it renames each class to a
+canonical name AND rewrites its children's instantiations to theirs. Without
+that rewrite a module extracted at level N instantiates names from the
+uniquified dump that no level N-1 netlist defines, and `hierarchy -check`
+stops on every one of them.
+"""
+
+import argparse
+import concurrent.futures as cf
+import os
+import re
+import subprocess
+import sys
+import time
+
+SCRIPT = """
+read_verilog -lib {blackbox}
+{children}
+read_rtlil {src}
+hierarchy -check -top {top}
+proc
+opt -fast
+memory_map
+techmap
+opt -fast
+dfflibmap -liberty {liberty}
+abc -fast -liberty {liberty}
+setundef -zero
+clean -purge
+stat -top {top}
+write_verilog -noattr {dest}
+"""
+
+
+def modules_of(level_dir, manifest="MODULES.tsv"):
+    """[(canonical, copies)] for one level, biggest first."""
+    out = []
+    path = os.path.join(level_dir, manifest)
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith("#") or not line.strip():
+                continue
+            name, copies, _ = line.rstrip("\n").split("\t")
+            out.append((name, int(copies)))
+    # by RTLIL size, so the long pole of a level starts at t=0 and not last
+    out.sort(key=lambda r: -os.path.getsize(os.path.join(level_dir, r[0] + ".il")))
+    return out
+
+
+_CELLS = re.compile(r"^\s+(\d+)\s+cells\s*$", re.M)
+
+
+def run_one(job):
+    name, copies, level_dir, args, children = job
+    src = os.path.join(level_dir, name + ".il")
+    dest = os.path.join(args.out, name + ".v")
+    log = os.path.join(args.out, name + ".log")
+    script = SCRIPT.format(blackbox=args.blackbox, children=children, src=src,
+                           top=name, liberty=args.liberty, dest=dest)
+    t = time.time()
+    p = subprocess.run([args.yosys, "-p", script], capture_output=True, text=True)
+    with open(log, "w") as fh:
+        fh.write(p.stdout)
+        fh.write(p.stderr)
+    cells = 0
+    if p.returncode == 0:
+        tail = p.stdout.split("Printing statistics.")[-1]
+        m = _CELLS.search(tail)
+        cells = int(m.group(1)) if m else 0
+    err = ""
+    if p.returncode != 0:
+        for line in (p.stdout + p.stderr).splitlines():
+            if line.startswith("ERROR"):
+                err = line
+        err = err or f"rc={p.returncode}"
+    return {"name": name, "copies": copies, "cells": cells, "rc": p.returncode,
+            "err": err, "secs": time.time() - t, "log": log, "dest": dest}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="synthesise bottom up, level by level")
+    ap.add_argument("--levels", required=True,
+                    help="the directory rtlil_bottom_up --level all wrote")
+    ap.add_argument("--liberty", required=True)
+    ap.add_argument("--blackbox", required=True, help="standard cell stubs (lef_blackbox)")
+    ap.add_argument("--out", required=True, help="where the netlists go")
+    ap.add_argument("--yosys", default="yosys")
+    ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--manifest", default="MODULES.tsv")
+    ap.add_argument("--verify", action="store_true",
+                    help="reload every netlist afterwards and let yosys walk "
+                         "the hierarchy for the real cell count")
+    ap.add_argument("--keep-going", action="store_true",
+                    help="carry on past a level with failures (the next level "
+                         "will fail too, but it reports every break at once)")
+    args = ap.parse_args()
+
+    levels = sorted(
+        (int(d[3:]), os.path.join(args.levels, d))
+        for d in os.listdir(args.levels)
+        if d.startswith("lvl") and d[3:].isdigit())
+    if not levels:
+        sys.exit(f"yosys_bottom_up: no lvl<N>/ under {args.levels}")
+    os.makedirs(args.out, exist_ok=True)
+
+    done = []                      # netlists written so far, read as blackboxes
+    failed_any = False
+    grand = time.time()
+    for L, d in levels:
+        mods = modules_of(d, args.manifest)
+        # every netlist from a lower level, interfaces only
+        children = "\n".join(f"read_verilog -lib {p}" for p in done)
+        jobs = [(n, c, d, args, children) for n, c in mods]
+        t = time.time()
+        rows = []
+        with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            for r in ex.map(run_one, jobs):
+                rows.append(r)
+                if r["rc"] != 0:
+                    print(f"  FAILED {r['name']}: {r['err']}")
+                    print(f"         see {r['log']}")
+        bad = [r for r in rows if r["rc"] != 0]
+        cells = sum(r["cells"] for r in rows)
+        weighted = sum(r["cells"] * r["copies"] for r in rows)
+        # `weighted` multiplies each module's cells by how many copies the
+        # ORIGINAL dump held, so it is an upper bound: opt and clean -purge
+        # drop instances a parent turns out not to use. On one large design it
+        # comes out 7% over what reloading the netlists actually counts, which
+        # is what --verify is for.
+        print(f"level {L:>2}: {len(rows):>3} module(s), {len(bad)} failed, "
+              f"{cells:>9,} cells ({weighted:>12,} x pre-synth copies), "
+              f"{time.time() - t:>6.1f}s")
+        if bad:
+            failed_any = True
+            if not args.keep_going:
+                print("\nyosys_bottom_up: stopping -- the next level reads these "
+                      "as blackboxes and would fail on every one.")
+                return 1
+        done += [r["dest"] for r in rows if r["rc"] == 0]
+
+    print(f"\nyosys_bottom_up: {len(done)} netlist(s) in {args.out}, "
+          f"{time.time() - grand:.1f}s total")
+    if failed_any:
+        return 1
+    top = os.path.basename(done[-1])[:-2] if done else "?"
+    print(f"yosys_bottom_up: top is {top}; the design is the whole directory, "
+          f"one file per distinct module.")
+    if args.verify:
+        return verify(args, done, top)
+    return 0
+
+
+def verify(args, netlists, top):
+    """Read every netlist back and let yosys count the hierarchy.
+
+    Worth the ninety seconds: the per-level totals above are arithmetic over
+    the instance counts of the dump, and this is the design that was actually
+    written. It also proves the netlists COMPOSE -- that every child a parent
+    instantiates is defined with the ports the parent expects -- which nothing
+    in the per-module runs can check, because each one saw its children as
+    blackboxes.
+    """
+    script = [f"read_verilog -lib {args.blackbox}"]
+    script += [f"read_verilog {p}" for p in netlists]
+    script += [f"hierarchy -check -top {top}", f"stat -top {top}"]
+    log = os.path.join(args.out, "verify.log")
+    t = time.time()
+    p = subprocess.run([args.yosys, "-p", "\n".join(script)],
+                       capture_output=True, text=True)
+    with open(log, "w") as fh:
+        fh.write(p.stdout)
+        fh.write(p.stderr)
+    if p.returncode != 0:
+        err = [l for l in (p.stdout + p.stderr).splitlines() if l.startswith("ERROR")]
+        print(f"yosys_bottom_up: VERIFY FAILED -- {err[-1] if err else p.returncode}")
+        print(f"yosys_bottom_up: see {log}")
+        return 1
+    tail = p.stdout.split("=== design hierarchy ===")[-1]
+    ours = {os.path.basename(n)[:-2] for n in netlists}
+    total, cells = leaf_cells(tail, ours)
+    print(f"\nyosys_bottom_up: verified in {time.time() - t:.1f}s -- "
+          f"{top} is {total:,} standard cell(s) of {len(cells)} type(s)")
+    seq = {k: v for k, v in cells.items()
+           if any(s in k.upper() for s in ("DFF", "LAT", "ICG", "SDF"))}
+    if seq:
+        top4 = sorted(seq.items(), key=lambda kv: -kv[1])[:4]
+        named = ", ".join("{:,} {}".format(v, k.split("_N_")[0]) for k, v in top4)
+        print(f"yosys_bottom_up: {sum(seq.values()):,} sequential ({named})")
+    print(f"yosys_bottom_up: {log}")
+    return 0
+
+
+_STAT_CELL = re.compile(r"^\s+(\d+)\s+([A-Za-z][A-Za-z0-9_]*)\s*$", re.M)
+
+# stat's own row labels. They are formatted exactly like a cell-type row --
+# "  4718269 cells" sits in the same column as "   476029   NAND2_D1..." -- so
+# summing every row that parses gives three times the real number, with "cells"
+# and "wires" as the two largest "cell types" in the design.
+_STAT_WORDS = {"cells", "wires", "ports", "submodules", "processes",
+               "memories", "bits", "public"}
+
+
+def leaf_cells(text, ours):
+    """(total, {cell type: count}) from a `stat -top` design-hierarchy section.
+
+    The total is stat's own "N cells" line rather than a sum of the type rows:
+    the two differ slightly, and the one yosys printed is the one to quote.
+
+    The same section lists this run's own modules, indented, so anything we
+    wrote a netlist for is skipped by name -- not by guessing at the library's
+    naming convention, which would not survive the next PDK.
+    """
+    import collections
+    out = collections.Counter()
+    total = 0
+    for n, name in _STAT_CELL.findall(text):
+        if name == "cells":
+            total = max(total, int(n))
+        if name in _STAT_WORDS or name in ours:
+            continue
+        out[name] += int(n)
+    return (total or sum(out.values())), out
+
+
+if __name__ == "__main__":
+    sys.exit(main())

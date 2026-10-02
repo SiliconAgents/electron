@@ -302,7 +302,10 @@ def main():
     ap.add_argument("--full", action="store_true",
                     help="with --tree, list every edge instead of counting the "
                          "children already shown elsewhere")
-    ap.add_argument("--level", type=int, help="the level to extract")
+    ap.add_argument("--level", default=None,
+                    help="the level to extract, or 'all' for every level into "
+                         "DIR/lvl<N>/ -- one scan of the dump instead of one "
+                         "per level")
     ap.add_argument("--extract", metavar="DIR", help="write one file per class there")
     ap.add_argument("--manifest", default="MODULES.tsv",
                     help="name of the tsv written into DIR (default MODULES.tsv)")
@@ -338,18 +341,23 @@ def main():
     if args.extract is not None:
         if args.level is None:
             sys.exit("rtlil_bottom_up: --extract needs --level")
-        w = extract(args.rtlil, cls, level, canon, name2fp, bbox,
-                    args.level, args.extract)
-        man = os.path.join(args.extract, args.manifest)
-        with open(man, "w") as fh:
-            fh.write("# canonical\tcopies\trepresentative\n")
-            for name, n, rep, _ in sorted(w, key=lambda r: -r[1]):
-                fh.write(f"{name}\t{n}\t{rep}\n")
-        total = sum(os.path.getsize(d) for _, _, _, d in w)
-        print(f"\nrtlil_bottom_up: level {args.level}: {len(w)} class(es), "
-              f"{sum(n for _, n, _, _ in w):,} copies, {total/1e6:.1f} MB -> "
-              f"{args.extract}")
-        print(f"rtlil_bottom_up: manifest {man}")
+        if args.level == "all":
+            wants = sorted(set(level.values()))
+            dirs = [os.path.join(args.extract, f"lvl{L}") for L in wants]
+        else:
+            wants, dirs = [int(args.level)], [args.extract]
+        print()
+        for L, d in zip(wants, dirs):
+            w = extract(args.rtlil, cls, level, canon, name2fp, bbox, L, d)
+            man = os.path.join(d, args.manifest)
+            with open(man, "w") as fh:
+                fh.write("# canonical\tcopies\trepresentative\n")
+                for name, n, rep, _ in sorted(w, key=lambda r: -r[1]):
+                    fh.write(f"{name}\t{n}\t{rep}\n")
+            total = sum(os.path.getsize(p) for _, _, _, p in w)
+            print(f"rtlil_bottom_up: level {L}: {len(w):>3} class(es), "
+                  f"{sum(n for _, n, _, _ in w):>7,} copies, "
+                  f"{total/1e6:>6.1f} MB -> {d}")
     return 0
 
 
