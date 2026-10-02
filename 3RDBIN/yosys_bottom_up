@@ -45,6 +45,26 @@ import subprocess
 import sys
 import time
 
+# WHY THE SCRIPT IS THIS SHORT, AND WHY abc HAS NO -fast
+#
+# `abc -fast` was measured against full abc on the seven modules that carry
+# most of one large design, and it is not a speed/quality trade here -- it is pure
+# loss:
+#
+#     a parity checker__v0   11,080 -> 281     -97%
+#     a multiplier front                     597 -> 307     -49%
+#     a rounding block             2,103 -> 1,133   -46%
+#     a wide mux tree  43,555 -> 32,607  -25%
+#
+# for 15.9s against 15.5s, because abc is under 1% of a run. The run is
+# dominated by reading the 961 MB liberty and the 14,491 blackboxes, and that
+# cost is the same either way.
+#
+# The passes a full `synth` would add -- wreduce, peepopt, alumacc, share,
+# opt -full -- were measured on the same seven modules and are a WASH once abc
+# is doing its job: between -5% and +6%, averaging nothing, for twice the
+# runtime. They were in a draft of this script and came out again. Add one back
+# only with a measurement that says it earns its place on the design at hand.
 SCRIPT = """
 read_verilog -lib {blackbox}
 {children}
@@ -56,7 +76,7 @@ memory_map
 techmap
 opt -fast
 dfflibmap -liberty {liberty}
-abc -fast -liberty {liberty}
+abc {abc}-liberty {liberty}
 setundef -zero
 clean -purge
 stat -top {top}
@@ -88,7 +108,8 @@ def run_one(job):
     dest = os.path.join(args.out, name + ".v")
     log = os.path.join(args.out, name + ".log")
     script = SCRIPT.format(blackbox=args.blackbox, children=children, src=src,
-                           top=name, liberty=args.liberty, dest=dest)
+                           top=name, liberty=args.liberty, dest=dest,
+                           abc="-fast " if args.abc_fast else "")
     t = time.time()
     p = subprocess.run([args.yosys, "-p", script], capture_output=True, text=True)
     with open(log, "w") as fh:
@@ -119,6 +140,10 @@ def main():
     ap.add_argument("--yosys", default="yosys")
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--manifest", default="MODULES.tsv")
+    ap.add_argument("--abc-fast", action="store_true",
+                    help="map with `abc -fast`. DO NOT, unless you are timing "
+                         "something: on one large design it costs 44%% of the cell "
+                         "count and saves nothing (see the note on SCRIPT)")
     ap.add_argument("--verify", action="store_true",
                     help="reload every netlist afterwards and let yosys walk "
                          "the hierarchy for the real cell count")
