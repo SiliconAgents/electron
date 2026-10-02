@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Find yosys modules that are the same module, and write the script that merges them.
+
+    yosys_dedup design.il -o dedup.ys
+    yosys -p 'read_rtlil design.il; script dedup.ys; hierarchy -top TOP'
+
+WHY THIS EXISTS
+
+yosys-slang's --keep-hierarchy emits one module PER INSTANCE, named
+<base>$<full.instance.path>.  On one large design that is 119,350 modules -- and
+94 distinct structures.  a one-cell wrapper module alone exists as 35,968 separate
+modules that are all the same five-wire, one-cell module sitting in different
+places.
+
+Every yosys pass then iterates over all 119,350.  That is not a design that is
+too large; it is one module copied out thirty-five thousand times, and the
+passes cannot tell.  Merging them first is what makes the rest tractable, and
+unlike flattening it keeps every level of hierarchy a floorplanner might want.
+
+HOW A MODULE IS FINGERPRINTED
+
+The body, with two normalisations, hashed.
+
+  the module's own name is dropped -- it is what differs by construction;
+
+  a child's type loses its $<path> suffix.  This is the one that decides
+  whether the tool works at all: a small adder module instantiates
+  a one-cell wrapper module$<its own path>, so two otherwise identical a small adder module copies
+  differ in that string alone.  Without the normalisation they fingerprint
+  apart and the tool reports that nothing can be merged -- which is exactly
+  what a first attempt at this concluded.
+
+Everything else is compared verbatim, PORTS INCLUDED.  chtype rewrites a cell's
+type without checking that the new type's ports match, so the fingerprint has
+to carry them or a merge can silently connect the wrong things.
+
+Internal net names are compared as they are, not normalised: copies of one
+source module have identical internals, so a difference there is a real
+difference.
+
+WHAT IT WRITES
+
+One `chtype` per equivalence class, not one per module -- yosys selections take
+a wildcard on the cell type, so a class whose members all share a base name
+collapses to
+
+    chtype -set <rep> t:a one-cell wrapper module$*
+
+and a class that does not gets its members listed.  Then `hierarchy` prunes the
+modules nothing references any more.
+
+STREAMING.  An RTLIL dump of a design this size is gigabytes; nothing here
+holds more than one module at a time.
+"""
+
+import argparse
+import collections
+import hashlib
+import re
+import sys
+
+_TYPE_SUFFIX = re.compile(r"\$[^\s\\]*")
+
+
+def normalise(line):
+    """One body line, made comparable between copies of the same module."""
+    s = line.strip()
+    # a cell's type carries the child's uniquified name; the path is not part
+    # of what the module IS
+    if s.startswith("cell "):
+        parts = s.split()
+        if len(parts) >= 2:
+            parts[1] = _TYPE_SUFFIX.sub("", parts[1])
+        return " ".join(parts)
+    return s
+
+
+def modules(path):
+    """Yield (name, fingerprint) for each module in an RTLIL file."""
+    name = None
+    body = []
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            s = line.strip()
+            if s.startswith("module "):
+                name = s.split()[1]
+                body = []
+                continue
+            if name is None:
+                continue
+            if s == "end" and not body_is_open(body):
+                h = hashlib.sha1("\n".join(body).encode()).hexdigest()
+                yield name, h
+                name, body = None, []
+                continue
+            n = normalise(line)
+            if n:
+                body.append(n)
+
+
+def body_is_open(body):
+    """True while inside a cell/process/case block, whose 'end' is not the
+    module's. Counted rather than parsed: every opener in RTLIL that needs an
+    end is one of these keywords at the start of a line."""
+    depth = 0
+    for b in body:
+        if b.startswith(("cell ", "process ", "switch ", "case ", "sync ")):
+            depth += 1
+        elif b == "end":
+            depth -= 1
+    return depth > 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="merge identical yosys modules")
+    ap.add_argument("rtlil", help="an RTLIL dump (yosys write_rtlil)")
+    ap.add_argument("-o", "--out", required=True, help="yosys script to write")
+    ap.add_argument("--top", help="emit a final 'hierarchy -top TOP' to prune")
+    ap.add_argument("--min-copies", type=int, default=2,
+                    help="ignore classes smaller than this (default 2)")
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    classes = collections.defaultdict(list)
+    total = 0
+    for name, h in modules(args.rtlil):
+        total += 1
+        classes[h].append(name)
+
+    merged = 0
+    lines = []
+    for h, members in sorted(classes.items(), key=lambda kv: -len(kv[1])):
+        if len(members) < args.min_copies:
+            continue
+        rep = min(members)                      # deterministic representative
+        others = [m for m in members if m != rep]
+        if not others:
+            continue
+        merged += len(others)
+
+        bases = {m.split("$")[0] for m in members}
+        if len(bases) == 1 and len(members) > 8:
+            # every member shares a base name, so one wildcard covers the class.
+            # Still exclude the representative: chtype on it is a no-op but
+            # listing it keeps the intent readable.
+            base = bases.pop()
+            lines.append(f"# {len(members)} copies of {base.lstrip(chr(92))}")
+            lines.append(f"chtype -set {rep} t:{base}$*")
+        else:
+            lines.append(f"# {len(members)} copies, {len(bases)} base name(s)")
+            for m in others:
+                lines.append(f"chtype -set {rep} t:{m}")
+
+    with open(args.out, "w") as fh:
+        fh.write("# Generated by 3RDBIN/yosys_dedup.\n")
+        fh.write(f"# {total:,} module(s) -> {len(classes):,} distinct structure(s);\n")
+        fh.write(f"# {merged:,} module(s) become references to a representative.\n\n")
+        fh.write("\n".join(lines) + "\n")
+        if args.top:
+            fh.write("\n# drop the modules nothing references any more\n")
+            fh.write(f"hierarchy -top {args.top}\n")
+
+    if not args.quiet:
+        print(f"yosys_dedup: {total:,} module(s) -> {len(classes):,} distinct structure(s)")
+        print(f"yosys_dedup: {merged:,} merged away, {args.out} has "
+              f"{len([l for l in lines if l.startswith('chtype')]):,} chtype command(s)")
+        big = sorted(classes.values(), key=len, reverse=True)[:5]
+        for m in big:
+            if len(m) > 1:
+                print(f"    {len(m):7,} x {m[0].split('$')[0].lstrip(chr(92))}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
