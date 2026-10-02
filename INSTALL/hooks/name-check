@@ -48,9 +48,14 @@ import sys
 #   CONFIG/       library.config's foundry keys are data, not prose
 #   lib64/, GUI/*.pdf, INSTALL/podman/*.sif   vendored or binary
 #   this file     it describes the shapes it hunts for
+# NOTE: this file is NOT exempt. An earlier version exempted itself on the
+# grounds that it describes the shapes it hunts for -- and two real PDK codes
+# then sat in a comment here for exactly as long as that exemption did,
+# invisible to the only tool that would have found them. The shapes are written
+# as regex source (C\d+L\d{2,}), which the literal rules do not match, so there
+# was never anything to exempt.
 ALLOW_PATHS = (
-    "TESTS/", "CONFIG/", "lib64/", "INSTALL/hooks/name-check",
-    ".claude/agents/commit.md",
+    "TESTS/", "CONFIG/", "lib64/",
 )
 ALLOW_SUFFIX = (".pdf", ".sif", ".png", ".gif", ".jpg", ".so", ".tar", ".gz")
 
