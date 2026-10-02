@@ -236,6 +236,61 @@ number is chaotic with respect to small placement changes: `-dbin_rows 1/3/4`
 and `--no_dbin` leave the pin density map bit-identical and move unrouted nets
 from 104 to 261, so on nangate_flat it cannot adjudicate a placement change.
 
+## Synthesis with yosys, for designs electron's hier_place can use
+
+Other synthesisers flatten the hierarchy and then `hier_place` has nothing to
+work with, so the front end here is yosys-slang with `--keep-hierarchy`. That
+emits **one module per INSTANCE**: one large design is 119,351 modules, and a
+single yosys run does not finish — it optimises the same full adder 35,968
+times. They are **111 distinct structures** in a hierarchy ten levels deep.
+
+```
+3RDBIN/rtlil_bottom_up design.il --tree              # the 111, and what holds what
+3RDBIN/rtlil_bottom_up design.il --level all --extract lvl/
+3RDBIN/yosys_bottom_up --levels lvl/ --liberty slim.lib --blackbox cells.v \
+    --out netlists/ --jobs 10 --flatten-below 2000 --verify
+```
+
+Each level reads the levels below it with `read_verilog -lib` — interfaces
+only — so the result is a **hierarchical** netlist. Flattening would hand the
+placer back the one enormous module it cannot help with.
+
+`3RDBIN/lef_blackbox` makes the standard-cell stubs from LEF, and
+`3RDBIN/liberty_slim` turns the PDK's 2 GB CCS/LVF liberty into an NLDM one yosys
+can parse. `3RDBIN/yosys_dedup` is the same fingerprint used the other way —
+merging the copies inside one process, for when the design must stay in one.
+
+**`abc -fast` is not a speed/quality trade here, it is pure loss.** It cost
+39% of the cell count (4,718,269 against 2,867,603) to save under 1% of a
+runtime, because a run is dominated by reading the liberty and the blackboxes
+and abc was 18 of 443 seconds. The passes a full `synth` adds — `wreduce`,
+`alumacc`, `share`, `opt -full` — were measured on seven modules and are a
+wash once abc is doing its job, for twice the runtime. Do not add one back
+without a measurement on the design at hand.
+
+**A module boundary is a wall abc cannot optimise across**, and it is only
+worth paying where it buys a placeable block. `--flatten-below 2000` keeps 20
+of the 111 and gets 2,441,344 cells in 258s. Flattening `a datapath lane`'s subtree
+into it saves 21.6%; doing the same to `a destination block` saves 1.6%, which is
+inside the noise — deep stacks of tiny modules are where the walls cost
+something. Repeat runs of one flattened module vary by ~0.4%, so nothing under
+1% is a result.
+
+The vendor yosys (`/tools_vendor/tt/siliconpilot/*/bin/yosys`) execs through
+`ld-linux`, so `/proc/self/exe` is not the binary and **`techmap` dies with
+"unable to determine share/ directory"**. `YOSYS_DATDIR` is not honoured and
+running `libexec/yosys` directly segfaults. The fix is a shim directory holding
+a copy of the loader with a `share` symlink beside it, plus a `yosys-abc`
+forwarder — see `a scratch directory/yosysrt/`.
+
+Reading `stat` output needs care: its row labels sit in the same column as
+cell-type rows, so summing every row that parses reports three times the real
+count with `cells` and `wires` as the largest cell types in the design. And
+plain `stat` still emits a `=== design hierarchy ===` section — fold its tree
+rows into the last module's submodule list and the counts explode. Expanding a
+hierarchy must be **memoised**; summing over paths is exponential in a wide DAG
+and produced a 170-digit answer here.
+
 ## Off limits
 
 `/proj_pd/user_dev/rsrivastava/pyspark_cad` is read-only: shared repo, and
