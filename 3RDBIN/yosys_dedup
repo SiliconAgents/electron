@@ -76,39 +76,52 @@ def normalise(line):
 
 
 def modules(path):
-    """Yield (name, fingerprint) for each module in an RTLIL file."""
+    """Yield (name, fingerprint) for each non-blackbox module in an RTLIL file.
+
+    BLACKBOXES ARE NEVER MERGED, and that is a correctness requirement rather
+    than a nicety. A blackbox has no body, so two of them fingerprint on their
+    ports alone -- and AND2_D1 and OR2_D1 have exactly the same ports. Merging
+    them would silently change the logic, and nothing downstream would notice.
+    A library of 14,490 cells makes that a certainty, not a risk.
+    """
     name = None
     body = []
+    pending_attrs = []
+    depth = 0           # nesting inside the module, carried not recomputed
     with open(path, errors="replace") as fh:
         for line in fh:
             s = line.strip()
+            if name is None and s.startswith("attribute "):
+                pending_attrs.append(s)
+                continue
             if s.startswith("module "):
+                attrs, pending_attrs = pending_attrs, []
+                if any(a.startswith(("attribute \\blackbox", "attribute \\whitebox"))
+                       for a in attrs):
+                    name = None          # skip it entirely
+                    continue
                 name = s.split()[1]
                 body = []
+                depth = 0
                 continue
             if name is None:
+                pending_attrs = []
                 continue
-            if s == "end" and not body_is_open(body):
+            if s == "end" and depth == 0:
                 h = hashlib.sha1("\n".join(body).encode()).hexdigest()
                 yield name, h
                 name, body = None, []
                 continue
+            # Rescanning the body on every "end" to find the module's own end is
+            # quadratic in the module's size: invisible on a toy design, and it
+            # does not finish on a real one.
+            if s.startswith(("cell ", "process ", "switch ", "case ", "sync ")):
+                depth += 1
+            elif s == "end":
+                depth -= 1
             n = normalise(line)
             if n:
                 body.append(n)
-
-
-def body_is_open(body):
-    """True while inside a cell/process/case block, whose 'end' is not the
-    module's. Counted rather than parsed: every opener in RTLIL that needs an
-    end is one of these keywords at the start of a line."""
-    depth = 0
-    for b in body:
-        if b.startswith(("cell ", "process ", "switch ", "case ", "sync ")):
-            depth += 1
-        elif b == "end":
-            depth -= 1
-    return depth > 0
 
 
 def main():
@@ -122,10 +135,12 @@ def main():
     args = ap.parse_args()
 
     classes = collections.defaultdict(list)
+    base_total = collections.Counter()
     total = 0
     for name, h in modules(args.rtlil):
         total += 1
         classes[h].append(name)
+        base_total[name.split("$")[0]] += 1
 
     merged = 0
     lines = []
@@ -139,12 +154,21 @@ def main():
         merged += len(others)
 
         bases = {m.split("$")[0] for m in members}
-        if len(bases) == 1 and len(members) > 8:
-            # every member shares a base name, so one wildcard covers the class.
-            # Still exclude the representative: chtype on it is a no-op but
-            # listing it keeps the intent readable.
-            base = bases.pop()
-            lines.append(f"# {len(members)} copies of {base.lstrip(chr(92))}")
+        # A WILDCARD IS ONLY SAFE WHEN THE CLASS IS THE WHOLE BASE NAME.
+        #
+        # t:<base>$* matches every cell whose type starts with that base --
+        # including copies that are NOT in this class. A base with several
+        # genuine variants (a datapath lane has different port widths, a pipeline register
+        # 22 of them) then has one variant's wildcard swallow the others, and
+        # chtype rewrites the type without checking the ports match: yosys says
+        # "Resizing cell port a datapath lane from 11 bits to 18 bits" and carries on
+        # with the design silently miswired. 937 of those is how this was found.
+        one_base = len(bases) == 1
+        base = next(iter(bases))
+        whole_base = one_base and len(members) == base_total[base]
+        if whole_base and len(members) > 8:
+            lines.append(f"# {len(members)} copies of {base.lstrip(chr(92))}"
+                         f" -- the whole base name, so a wildcard is safe")
             lines.append(f"chtype -set {rep} t:{base}$*")
         else:
             lines.append(f"# {len(members)} copies, {len(bases)} base name(s)")
