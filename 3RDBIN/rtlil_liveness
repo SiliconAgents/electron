@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Find the registers a bottom-up synthesis has to keep but nothing actually uses.
+
+    rtlil_liveness design.il                 # the report
+    rtlil_liveness design.il --ports         # also, which ports are dead
+    rtlil_liveness design.il --masks         # also, how uniform each class is
+
+WHAT THIS IS FOR
+
+Synthesising each module on its own, with its children as blackboxes, means a
+register driving a module OUTPUT must be kept -- nothing has told the tool that
+no parent reads it. A commercial flow removes those (remove_unloaded_registers)
+because it sees the whole design at once. This measures what that costs here,
+before anyone writes the pass that fixes it.
+
+It only MEASURES. Nothing is rewritten.
+
+WHY IT HAS TO BE A SEPARATE PASS
+
+Liveness is a backward dataflow: it flows from outputs toward inputs, which
+across a hierarchy means parent to child. Bottom-up synthesis runs child to
+parent. The two directions are opposite and cannot be fused, so the analysis
+has to run first, on its own.
+
+It does not need synthesis results. A module's ports are the one thing the flow
+preserves by construction, so the pre-synthesis connectivity already says
+everything about which ports a parent uses.
+
+IT IS A MUTUAL FIXPOINT, NOT A SWEEP
+
+A dead output kills its driver cone; that cone may have been the only reader of
+one of the module's INPUTS; the parent then need not drive it, which can kill
+logic in the parent, which can make more child outputs dead. Dead-ness flows
+DOWN through outputs and back UP through inputs, so the two are iterated
+together until nothing changes. On a few hundred classes that is free, so there
+is no reason to approximate it with a single pass.
+
+CLASSES, NOT INSTANCES
+
+Copies of one module have identical bodies -- that is what the fingerprint in
+yosys_dedup guarantees -- so port usage is a property of the (parent class,
+cell) pair, and one representative per class is enough to read it from. An
+output port is safely dead only when it is dead at EVERY site that instantiates
+the class; --masks reports how often the sites disagree, which is what decides
+whether a conservative intersection is enough or the class has to be split.
+
+WHAT IS NEVER DEAD
+
+The top module's ports; anything a `keep` attribute marks; a port feeding a
+blackbox, since a connection into a standard cell or a macro is a real use
+whatever is inside; and the side-effect cells ($memwr_v2, $meminit, $print).
+Inouts are treated as live rather than reasoned about.
+"""
+
+import argparse
+import collections
+import os
+import re
+import sys
+from importlib.machinery import SourceFileLoader
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_rbu = SourceFileLoader("rtlil_bottom_up",
+                        os.path.join(_HERE, "rtlil_bottom_up")).load_module()
+
+# Output ports of yosys's own cells. Taken from the cell types that actually
+# appear in a real elaborated dump rather than from memory: everything
+# combinational drives \Y, the flop and latch family drives \Q, and a memory
+# read port drives \DATA.
+BUILTIN_OUTPUTS = {"\\Y", "\\Q", "\\DATA"}
+
+# Cells that matter even when nothing reads them.
+SIDE_EFFECT = {"$memwr_v2", "$meminit", "$print", "$assert", "$assume",
+               "$cover", "$live", "$fair"}
+
+SEQUENTIAL = {"$dff", "$dffe", "$adff", "$adffe", "$aldff", "$aldffe",
+              "$sdff", "$sdffe", "$sdffce", "$dffsr", "$dffsre",
+              "$dlatch", "$adlatch", "$dlatchsr"}
+
+_WIRE = re.compile(r"^\s*wire\s+(.*?)\s*$")
+_CELL = re.compile(r"^\s*cell\s+(\S+)\s+(\S+)\s*$")
+_CONNECT = re.compile(r"^\s*connect\s+(.*?)\s*$")
+_ATTR = re.compile(r"^\s*attribute\s+(\S+)")
+# A wire reference in a sigspec. BOTH prefixes matter: "\\" marks a name from
+# the source, "$" one yosys invented, and the invented ones are the majority --
+# 274,008 of 278,397 module-level connects on a real design. Matching only
+# "\\" silently drops them, liveness cannot cross an auto-generated wire, and
+# half the design reports as dead. That was the first result this tool gave.
+_SIGWIRE = re.compile(r"[\\$][^\s{}]+")
+_CONSTW = re.compile(r"\b(\d+)'")
+
+
+class Mod:
+    __slots__ = ("wires", "ports", "cells", "conns", "keepcells")
+
+    def __init__(self):
+        self.wires = {}          # name -> width
+        self.ports = {}          # name -> "input" | "output" | "inout"
+        self.cells = []          # (type, name, {port: sigspec}, keep)
+        self.conns = []          # (lhs sigspec, rhs sigspec)
+        self.keepcells = 0
+
+
+def sig_wires(sig):
+    return set(_SIGWIRE.findall(sig))
+
+
+def sig_width(sig, wires):
+    """Bit width of a sigspec, best effort -- used only for reporting."""
+    sig = sig.strip()
+    if sig.startswith("{"):
+        return sum(sig_width(p, wires)
+                   for p in re.findall(r"[\\$][^\s{}]+(?:\s*\[[^\]]*\])?|\d+'\S*",
+                                       sig))
+    m = re.match(r"^([\\$][^\s{}]+)\s*\[(\d+)(?::(\d+))?\]$", sig)
+    if m:
+        hi = int(m.group(2))
+        lo = int(m.group(3)) if m.group(3) is not None else hi
+        return abs(hi - lo) + 1
+    m = re.match(r"^([\\$][^\s{}]+)$", sig)
+    if m:
+        return wires.get(m.group(1), 1)
+    m = _CONSTW.match(sig)
+    if m:
+        return int(m.group(1))
+    return 1
+
+
+def parse_module(text):
+    """One module's body -> Mod. The dump is fully lowered; no processes."""
+    m = Mod()
+    cur = None           # (type, name, {port: sig}, keep)
+    pend_keep = False
+    for line in text.splitlines():
+        a = _ATTR.match(line)
+        if a:
+            if a.group(1) in ("\\keep", "\\dont_touch"):
+                pend_keep = True
+            continue
+        c = _CELL.match(line)
+        if c:
+            cur = (c.group(1), c.group(2), {}, pend_keep)
+            pend_keep = False
+            continue
+        if re.match(r"^\s*end\s*$", line):
+            if cur:
+                m.cells.append(cur)
+                cur = None
+            continue
+        cn = _CONNECT.match(line)
+        if cn:
+            rest = cn.group(1)
+            if cur is not None:
+                p, _, sig = rest.partition(" ")
+                cur[2][p] = sig.strip()
+            else:
+                # a module-level alias: lhs is driven by rhs
+                p, _, sig = rest.partition(" ")
+                m.conns.append((p, sig.strip()))
+            continue
+        w = _WIRE.match(line)
+        if w and cur is None:
+            spec = w.group(1)
+            wm = re.search(r"([\\$][^\s]+)\s*$", spec)
+            if not wm:
+                continue
+            name = wm.group(1)
+            width = 1
+            ww = re.search(r"\bwidth\s+(\d+)", spec)
+            if ww:
+                width = int(ww.group(1))
+            m.wires[name] = width
+            for d in ("input", "output", "inout"):
+                if re.search(r"\b%s\s+\d+" % d, spec):
+                    m.ports[name] = d
+            pend_keep = False
+    return m
+
+
+def cell_io(ctype, conns, port_dirs):
+    """(driven wires, read wires) for one cell.
+
+    For a child module the directions come from that module's own port
+    declarations. For one of yosys's cells they come from the table above. For
+    anything else -- a blackbox whose module was not in the dump -- every
+    connection is treated as BOTH, which keeps its cone live. That is the safe
+    direction to be wrong in: over-approximating liveness keeps registers that
+    could have gone, under-approximating deletes registers that are in use.
+    """
+    driven, read = set(), set()
+    known = port_dirs.get(ctype)
+    for port, sig in conns.items():
+        ws = sig_wires(sig)
+        if known is not None:
+            d = known.get(port)
+            if d == "output":
+                driven |= ws
+            elif d == "input":
+                read |= ws
+            else:
+                driven |= ws
+                read |= ws
+        elif ctype.startswith("$"):
+            if port in BUILTIN_OUTPUTS:
+                driven |= ws
+            else:
+                read |= ws
+        else:
+            driven |= ws
+            read |= ws
+    return driven, read
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="registers kept only because a module boundary hides that "
+                    "nothing reads them")
+    ap.add_argument("rtlil")
+    ap.add_argument("--ports", action="store_true",
+                    help="list the dead output ports")
+    ap.add_argument("--masks", action="store_true",
+                    help="report how much the instantiation sites of a class "
+                         "disagree about which of its ports are used")
+    ap.add_argument("--top", help="top module (default: the deepest class)")
+    args = ap.parse_args()
+
+    mods, bbox = _rbu.scan(args.rtlil)
+    cls, level, canon, name2fp = _rbu.classify(mods, bbox)
+    print(f"rtlil_liveness: {len(mods):,} module(s), {len(bbox):,} blackbox(es)"
+          f" -> {len(cls):,} distinct structure(s)")
+
+    rep = {fp: v[0] for fp, v in cls.items()}
+    copies = {fp: len(v) for fp, v in cls.items()}
+    fp_of_name = name2fp
+
+    # detail for one representative per class
+    detail = {}
+    with open(args.rtlil, errors="replace") as fh:
+        for fp, r in rep.items():
+            fh.seek(r.start)
+            detail[fp] = parse_module(fh.read(r.end - r.start))
+
+    # Port directions, keyed by the TYPE STRING a cell writes -- which is the
+    # child's own uniquified name, not its class representative's. Keying this
+    # by representative only would miss most of them (2,167 of 2,941 on a real
+    # design) and fall back to treating every connection as both driven and
+    # read. Safe, but it keeps cones alive that are not, which is the whole
+    # thing being measured. Every copy of a class has the same ports, so the
+    # class lookup is exact.
+    port_dirs = {}
+    for name, fp in name2fp.items():
+        if fp in detail:
+            port_dirs[name] = detail[fp].ports
+    bbox_ports = {}
+    # blackbox modules were skipped by scan(); read their ports too
+    with open(args.rtlil, errors="replace") as fh:
+        name, buf, depth = None, [], 0
+        for line in fh:
+            s = line.strip()
+            if s.startswith("module "):
+                nm = s.split()[1]
+                name = nm if nm in bbox else None
+                buf = []
+                continue
+            if name is None:
+                continue
+            if s == "end" and depth == 0:
+                bbox_ports[name] = parse_module("\n".join(buf)).ports
+                name = None
+                continue
+            buf.append(line.rstrip("\n"))
+    port_dirs.update(bbox_ports)
+
+    top_fp = max(cls, key=lambda f: level[f])
+    if args.top:
+        for fp, r in rep.items():
+            if canon[fp] == args.top:
+                top_fp = fp
+    print(f"rtlil_liveness: top is {canon[top_fp]}")
+
+    # ---- the fixpoint -------------------------------------------------------
+    live_out = collections.defaultdict(set)    # fp -> live output port names
+    live_in = collections.defaultdict(set)     # fp -> input ports the body reads
+    live_out[top_fp] = {p for p, d in detail[top_fp].ports.items()
+                        if d in ("output", "inout")}
+    live_wires = {}
+
+    def body_liveness(fp):
+        """Wires inside this class that reach something live."""
+        d = detail[fp]
+        live = set()
+        for p, dirn in d.ports.items():
+            if dirn in ("output", "inout") and p in live_out[fp]:
+                live.add(p)
+            if dirn == "inout":
+                live.add(p)
+        # seeds that do not depend on ports at all
+        for ctype, _, conns, keep in d.cells:
+            if keep or ctype in SIDE_EFFECT:
+                for sig in conns.values():
+                    live |= sig_wires(sig)
+        changed = True
+        while changed:
+            changed = False
+            for ctype, _, conns, _ in d.cells:
+                driven, read = cell_io(ctype, conns, port_dirs)
+                if driven & live and not read <= live:
+                    live |= read
+                    changed = True
+            for lhs, rhs in d.conns:
+                if sig_wires(lhs) & live and not sig_wires(rhs) <= live:
+                    live |= sig_wires(rhs)
+                    changed = True
+        return live
+
+    for _ in range(50):
+        moved = False
+        for fp in sorted(cls, key=lambda f: -level[f]):   # top down
+            live = body_liveness(fp)
+            live_wires[fp] = live
+            d = detail[fp]
+            # inputs this body actually reads
+            ins = {p for p, dirn in d.ports.items()
+                   if dirn == "input" and p in live}
+            if ins != live_in[fp]:
+                live_in[fp] = ins
+                moved = True
+            # which child output ports this body uses
+            for ctype, _, conns, keep in d.cells:
+                cfp = fp_of_name.get(ctype)
+                if cfp is None or ctype in bbox:
+                    continue
+                cd = detail[cfp]
+                for port, sig in conns.items():
+                    dirn = cd.ports.get(port)
+                    if dirn in ("output", "inout") and (sig_wires(sig) & live or keep):
+                        if port not in live_out[cfp]:
+                            live_out[cfp].add(port)
+                            moved = True
+        if not moved:
+            break
+
+    # ---- report -------------------------------------------------------------
+    tot = dead = 0
+    per_mod = collections.Counter()
+    dead_ports = collections.defaultdict(list)
+    for fp, d in detail.items():
+        live = live_wires.get(fp, set())
+        n = copies[fp]
+        for ctype, _, conns, keep in d.cells:
+            if ctype not in SEQUENTIAL:
+                continue
+            q = conns.get("\\Q", "")
+            bits = sig_width(q, d.wires)
+            tot += bits * n
+            if not keep and not (sig_wires(q) & live):
+                dead += bits * n
+                per_mod[canon[fp]] += bits * n
+        for p, dirn in d.ports.items():
+            if dirn == "output" and p not in live_out[fp] and fp != top_fp:
+                dead_ports[canon[fp]].append(p)
+
+    print(f"\nregister bits, counted across every instance:")
+    print(f"  total                {tot:>12,}")
+    print(f"  in a dead cone       {dead:>12,}   {100*dead/tot if tot else 0:.1f}%")
+    print(f"  kept by a boundary   {dead:>12,}   <- what the bottom-up flow "
+          f"cannot remove today")
+
+    if per_mod:
+        print(f"\n{'dead bits':>12}  module")
+        for m, v in per_mod.most_common(15):
+            print(f"{v:>12,}  {m}")
+
+    ndp = sum(len(v) for v in dead_ports.values())
+    print(f"\ndead output ports: {ndp:,} across {len(dead_ports):,} class(es)")
+    if args.ports:
+        for m, ps in sorted(dead_ports.items(), key=lambda kv: -len(kv[1]))[:20]:
+            print(f"  {len(ps):>4}  {m}: {', '.join(p.lstrip(chr(92)) for p in ps[:6])}"
+                  f"{' ...' if len(ps) > 6 else ''}")
+
+    if args.masks:
+        # how often do the sites that instantiate one class disagree?
+        sites = collections.defaultdict(list)
+        for fp, d in detail.items():
+            live = live_wires.get(fp, set())
+            for ctype, _, conns, _ in d.cells:
+                cfp = fp_of_name.get(ctype)
+                if cfp is None or ctype in bbox:
+                    continue
+                cd = detail[cfp]
+                used = frozenset(
+                    p for p, sig in conns.items()
+                    if cd.ports.get(p) == "output" and (sig_wires(sig) & live))
+                sites[cfp].append(used)
+        split = [(len(set(v)), canon[f], len(v)) for f, v in sites.items()]
+        many = sorted((s for s in split if s[0] > 1), reverse=True)
+        print(f"\nclasses whose sites disagree about port usage: "
+              f"{len(many):,} of {len(sites):,}")
+        print("  (a class with one mask can be narrowed outright; one with "
+              "several needs splitting)")
+        for n, m, s in many[:12]:
+            print(f"  {n:>3} distinct mask(s) over {s:>4} site(s)  {m}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
