@@ -211,6 +211,173 @@ def cell_io(ctype, conns, port_dirs):
     return driven, read
 
 
+_CONSTTOK = re.compile(r"^\d+'[01xzm-]*$")
+
+
+def sig_const(sig, cwires):
+    """Is every bit of this sigspec a known constant?
+
+    A literal is constant; a wire is constant only if something already proved
+    it so. An undefined bit (x) counts -- synthesis is free to pick a value for
+    it, which is what setundef does later anyway.
+    """
+    sig = sig.strip()
+    if not sig:
+        return False
+    if sig.startswith("{"):
+        parts = re.findall(r"[\\$][^\s{}]+(?:\s*\[[^\]]*\])?|\d+'\S*", sig)
+        return bool(parts) and all(sig_const(p, cwires) for p in parts)
+    if _CONSTTOK.match(sig):
+        return True
+    m = re.match(r"^([\\$][^\s{}]+)", sig)
+    if m:
+        return m.group(1) in cwires
+    return False
+
+
+def const_body(fp, detail, port_dirs, const_in, bbox, name2fp, const_out):
+    """Wires inside a class that plain constant propagation makes constant.
+
+    Seeded by input ports the parents tie to a literal, and by child outputs
+    already known constant. No values are tracked -- a cell's output is taken
+    as constant only when EVERY input is. That misses a mux whose select is
+    constant and whose chosen input is constant, so the number this produces is
+    a floor on what yosys would actually fold, not an estimate of it.
+    """
+    d = detail[fp]
+    cw = set(const_in)
+    changed = True
+    while changed:
+        changed = False
+        for ctype, _, conns, keep in d.cells:
+            if keep or ctype in SIDE_EFFECT:
+                continue
+            driven, read = cell_io(ctype, conns, port_dirs)
+            if not driven or driven <= cw:
+                continue
+            cfp = name2fp.get(ctype)
+            if cfp is not None and ctype not in bbox:
+                # a child module: its output is constant only if the child
+                # itself says so, which the cross-class fixpoint supplies
+                cd = detail.get(cfp)
+                if cd is None:
+                    continue
+                for port, sig in conns.items():
+                    if cd.ports.get(port) == "output" and (cfp, port) in const_out:
+                        ws = sig_wires(sig)
+                        if not ws <= cw:
+                            cw |= ws
+                            changed = True
+                continue
+            if ctype.startswith("$"):
+                ins = [s for p, s in conns.items() if p not in BUILTIN_OUTPUTS]
+                if ins and all(sig_const(s, cw) for s in ins):
+                    if not driven <= cw:
+                        cw |= driven
+                        changed = True
+        for lhs, rhs in d.conns:
+            if sig_const(rhs, cw):
+                ws = sig_wires(lhs)
+                if not ws <= cw:
+                    cw |= ws
+                    changed = True
+    return cw
+
+
+def analyse_constants(cls, detail, canon, copies, level, name2fp, bbox,
+                      port_dirs, top_fp, show_ports=False):
+    """Registers that a boundary stops the flow from folding to a constant.
+
+    Constants move BOTH ways, like liveness: down when a parent ties a child
+    input to a literal, up when a child output folds and the parent can see it.
+    The upward half is already free here -- bottom-up order means the child is
+    synthesised first and emits a constant driver the parent then folds -- so
+    the number below is about the downward half, which is the blind spot.
+    """
+    const_in = collections.defaultdict(dict)    # fp -> {port: literal}
+    const_out = set()                           # (fp, port)
+    cwires = {}
+
+    for _ in range(50):
+        moved = False
+        # downward: what every site ties this class's inputs to
+        tied = collections.defaultdict(lambda: collections.defaultdict(set))
+        sites = collections.Counter()
+        for fp, d in detail.items():
+            cw = cwires.get(fp, set())
+            for ctype, _, conns, keep in d.cells:
+                cfp = name2fp.get(ctype)
+                if cfp is None or ctype in bbox or keep:
+                    continue
+                cd = detail.get(cfp)
+                if cd is None:
+                    continue
+                sites[cfp] += 1
+                for port, sig in conns.items():
+                    if cd.ports.get(port) != "input":
+                        continue
+                    tied[cfp][port].add(sig.strip() if sig_const(sig, cw) else None)
+        for cfp, ports in tied.items():
+            for port, vals in ports.items():
+                # uniform across every site, and the same literal each time
+                if len(vals) == 1 and None not in vals:
+                    v = next(iter(vals))
+                    if const_in[cfp].get(port) != v:
+                        const_in[cfp][port] = v
+                        moved = True
+        # recompute each body, then see which outputs folded
+        for fp in sorted(cls, key=lambda f: -level[f]):
+            seed = set(const_in[fp])
+            cw = const_body(fp, detail, port_dirs, seed, bbox, name2fp, const_out)
+            if cw != cwires.get(fp):
+                cwires[fp] = cw
+                moved = True
+            d = detail[fp]
+            for p, dirn in d.ports.items():
+                if dirn == "output" and p in cw and (fp, p) not in const_out:
+                    const_out.add((fp, p))
+                    moved = True
+        if not moved:
+            break
+
+    tot = const = 0
+    per_mod = collections.Counter()
+    for fp, d in detail.items():
+        cw = cwires.get(fp, set())
+        n = copies[fp]
+        for ctype, _, conns, keep in d.cells:
+            if ctype not in SEQUENTIAL:
+                continue
+            q = conns.get("\\Q", "")
+            bits = sig_width(q, d.wires)
+            tot += bits * n
+            dsig = conns.get("\\D", "")
+            if not keep and dsig and sig_const(dsig, cw):
+                const += bits * n
+                per_mod[canon[fp]] += bits * n
+
+    ntied = sum(len(v) for v in const_in.values())
+    print(f"\nconstant registers (plain propagation, a floor not an estimate):")
+    print(f"  total                {tot:>12,}")
+    print(f"  D proved constant    {const:>12,}   "
+          f"{100*const/tot if tot else 0:.1f}%")
+    print(f"\ninput ports every site ties to the same literal: {ntied:,}"
+          f" across {sum(1 for v in const_in.values() if v):,} class(es)")
+    if per_mod:
+        print(f"\n{'const bits':>12}  module")
+        for m, v in per_mod.most_common(12):
+            print(f"{v:>12,}  {m}")
+    if show_ports:
+        for fp, ports in sorted(const_in.items(), key=lambda kv: -len(kv[1]))[:12]:
+            if not ports:
+                continue
+            names = ", ".join(f"{p.lstrip(chr(92))}={v}" for p, v in
+                              list(ports.items())[:4])
+            print(f"  {len(ports):>4}  {canon[fp]}: {names}"
+                  f"{' ...' if len(ports) > 4 else ''}")
+    return const
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="registers kept only because a module boundary hides that "
@@ -218,6 +385,9 @@ def main():
     ap.add_argument("rtlil")
     ap.add_argument("--ports", action="store_true",
                     help="list the dead output ports")
+    ap.add_argument("--const", action="store_true",
+                    help="also analyse registers a parent's tie-off would make "
+                         "constant, which a per-module synthesis cannot see")
     ap.add_argument("--masks", action="store_true",
                     help="report how much the instantiation sites of a class "
                          "disagree about which of its ports are used")
@@ -377,6 +547,10 @@ def main():
         for m, ps in sorted(dead_ports.items(), key=lambda kv: -len(kv[1]))[:20]:
             print(f"  {len(ps):>4}  {m}: {', '.join(p.lstrip(chr(92)) for p in ps[:6])}"
                   f"{' ...' if len(ps) > 6 else ''}")
+
+    if args.const:
+        analyse_constants(cls, detail, canon, copies, level, name2fp, bbox,
+                          port_dirs, top_fp, show_ports=args.ports)
 
     if args.masks:
         # how often do the sites that instantiate one class disagree?
