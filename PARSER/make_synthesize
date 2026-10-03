@@ -18,7 +18,8 @@ sub synthesize {
 my $noOfArguments = @_;
 if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "Usage : synthesize -rtl <filelist> [-top <module>] [-liberty <lib>[,<lib>...]]\n";
-  print "                   [-out <dir>] [-script <file>] [--no_run] [--keep_attributes] [--read]\n";
+  print "                   [-out <dir>] [-netlist <file>] [-script <file>] [--no_run]\n";
+  print "                   [--keep_attributes] [--read]\n";
   print "\n";
   print "        -rtl      a filelist: one RTL path per line, # comments and blanks ignored.\n";
   print "                  A .v or .sv given directly is taken as a one-file list.\n";
@@ -26,6 +27,8 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                  separate.  Gzipped files are decompressed into -out first.\n";
   print "                  Omitted, the list left by get_std_cell_libs --set is used.\n";
   print "        -out      work directory, default synthesis\n";
+  print "        -netlist  also write the filtered netlist here, gzipped when the name\n";
+  print "                  ends in .gz -- e.g. -netlist <top>.vg.gz\n";
   print "        --no_run  write the script and stop\n";
   print "        --read    read the filtered netlist back with read_verilog and elaborate\n";
   return;
@@ -38,6 +41,7 @@ my $scriptName;
 my $noRun = 0;
 my $keepAttr = 0;
 my $readBack = 0;
+my $netlistOut;
 my @libFiles = ();
 
 for(my $i = 0; $i < $noOfArguments; $i++){
@@ -45,6 +49,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-top"){$topModule = $_[$i+1];}
   if($_[$i] eq "-top_module"){$topModule = $_[$i+1];}
   if($_[$i] eq "-out"){$outDir = $_[$i+1];}
+  if($_[$i] eq "-netlist"){$netlistOut = $_[$i+1];}
   if($_[$i] eq "-script"){$scriptName = $_[$i+1];}
   if($_[$i] eq "-liberty"){ push(@libFiles, split(/\s*\,\s*/, $_[$i+1])); }
   if($_[$i] eq "--no_run"){$noRun = 1;}
@@ -169,6 +174,32 @@ else {
 }
 
 &dbfSynthReportLog($logFile);
+
+#<!-- -netlist: the deliverable, under the name the user wants.  It is the
+#     FILTERED netlist -- the one read_verilog can parse -- and not something
+#     written back out of electron's database after --read, which is a
+#     different netlist: reading one in adds assign buffers and tie cells.
+#     Gzipped when the name ends in .gz, which read_verilog -v reads directly.
+#     Written to .part and renamed, so a failed write never leaves a truncated
+#     netlist behind under the final name. -->
+if ( defined $netlistOut && $netlistOut ne "" ) {
+  unless ( -s $filtered ) {
+    print "ERROR-PAR-SYNTH : 042 : $filtered is empty, so no netlist was written to $netlistOut\n";
+    return;
+  }
+  my $dir = ".";
+  $dir = $1 if ( $netlistOut =~ /^(.*)\/[^\/]+$/ );
+  system("mkdir", "-p", $dir) unless ( -d $dir );
+  my $part = "$netlistOut.part";
+  my $rc = ( $netlistOut =~ /\.gz$/ ) ? system("gzip -c '$filtered' > '$part'")
+                                      : system("cp", $filtered, $part);
+  if ( $rc != 0 || ! -s $part || ! rename($part, $netlistOut) ) {
+    print "ERROR-PAR-SYNTH : 043 : could not write $netlistOut\n";
+    unlink($part) if ( -f $part );
+    return;
+  }
+  print "INFO-PAR-SYNTH : 044 : netlist written to $netlistOut\n";
+}
 
 if ( $readBack == 1 ) {
   print "INFO-PAR-SYNTH : 022 : reading $filtered back in\n";
