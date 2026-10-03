@@ -28,15 +28,23 @@ sub hier_synthesis {
 
 my $noOfArguments = @_;
 if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
-  print "Usage : hier_synthesis -rtlil <design.il> [-liberty <lib>] [-blackbox <cells.v>]\n";
+  print "Usage : hier_synthesis -rtl <filelist> -top <module> | -rtlil <design.il>\n";
+  print "                       [-liberty <lib>] [-blackbox <cells.v>]\n";
   print "                       [-out <dir>] [-jobs <n>] [-flatten_below <cells>]\n";
-  print "                       [-latchmap <file>] [--no_latchmap] [--no_verify] [--no_run]\n";
+  print "                       [-slang_args <args>] [-latchmap <file>]\n";
+  print "                       [--no_latchmap] [--no_verify] [--no_run]\n";
   print "\n";
-  print "        -rtlil          an RTLIL dump written by yosys after read_slang\n";
-  print "                        --keep-hierarchy.  One module per instance is expected.\n";
+  print "        -rtl            an RTL filelist, as the front end reads it: +incdir+ and\n";
+  print "                        +define+ lines are passed through.  Elaborated with\n";
+  print "                        read_slang --keep-hierarchy, which is what makes the\n";
+  print "                        hierarchy survive to the placer.\n";
+  print "        -top            top module.  Required with -rtl.\n";
+  print "        -rtlil          skip elaboration and start from a dump written earlier.\n";
+  print "        -slang_args     extra options for read_slang, appended to the defaults.\n";
   print "        -liberty        liberty for dfflibmap and abc.  Omitted, the list left\n";
   print "                        by get_std_cell_libs --set is used.\n";
-  print "        -blackbox       standard cell stubs, as 3RDBIN/lef_blackbox writes them.\n";
+  print "        -blackbox       standard cell stubs.  Omitted, they are built from the\n";
+  print "                        LEFs in the config read_library_config was pointed at.\n";
   print "        -out            work directory, default hier_synthesis\n";
   print "        -jobs           modules synthesised at once, default 8\n";
   print "        -flatten_below  keep a module as a hierarchy boundary only when its\n";
@@ -51,6 +59,9 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
 }
 
 my $rtlil;
+my $rtlList;
+my $topModule;
+my $slangArgs = "";
 my $outDir = "hier_synthesis";
 my $blackbox;
 my $latchmap;
@@ -63,6 +74,10 @@ my @libFiles = ();
 
 for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-rtlil"){$rtlil = $_[$i+1];}
+  if($_[$i] eq "-rtl"){$rtlList = $_[$i+1];}
+  if($_[$i] eq "-top"){$topModule = $_[$i+1];}
+  if($_[$i] eq "-top_module"){$topModule = $_[$i+1];}
+  if($_[$i] eq "-slang_args"){$slangArgs = $_[$i+1];}
   if($_[$i] eq "-out"){$outDir = $_[$i+1];}
   if($_[$i] eq "-blackbox"){$blackbox = $_[$i+1];}
   if($_[$i] eq "-latchmap"){$latchmap = $_[$i+1];}
@@ -74,13 +89,27 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "--no_run"){$noRun = 1;}
 }#for
 
-unless ( defined $rtlil && $rtlil ne "" ) {
-  print "ERROR-PAR-HR_SYN : 001 : no -rtlil given\n";
-  print "ERROR-PAR-HR_SYN : 002 : it wants the RTLIL yosys writes after read_slang --keep-hierarchy\n";
-  return;
+#<!-- Either an RTL filelist to elaborate, or a dump already elaborated. -->
+if ( defined $rtlList && $rtlList ne "" ) {
+  unless ( -f $rtlList ) {
+    print "ERROR-PAR-HR_SYN : 034 : filelist $rtlList does not exist\n";
+    return;
+  }
+  $topModule = $TOP_MODULE unless ( defined $topModule && $topModule ne "" );
+  unless ( defined $topModule && $topModule ne "" ) {
+    print "ERROR-PAR-HR_SYN : 035 : -rtl needs -top, and TOP_MODULE is not set\n";
+    return;
+  }
 }
-unless ( -f $rtlil ) {
-  print "ERROR-PAR-HR_SYN : 003 : $rtlil does not exist\n";
+elsif ( defined $rtlil && $rtlil ne "" ) {
+  unless ( -f $rtlil ) {
+    print "ERROR-PAR-HR_SYN : 003 : $rtlil does not exist\n";
+    return;
+  }
+}
+else {
+  print "ERROR-PAR-HR_SYN : 001 : give -rtl <filelist> -top <module>, or -rtlil <dump>\n";
+  print "ERROR-PAR-HR_SYN : 002 : -rtlil wants what yosys writes after read_slang --keep-hierarchy\n";
   return;
 }
 
@@ -110,16 +139,24 @@ unless ( -f $liberty ) {
 #     gigabyte-scale dump, and discovering a missing argument after it has run
 #     wastes a minute to say something that was knowable at the start. -->
 my $bbArg = "";
-unless ( defined $blackbox && $blackbox ne "" ) {
-  print "ERROR-PAR-HR_SYN : 019 : no -blackbox given; yosys needs stubs for the standard cells\n";
-  print "ERROR-PAR-HR_SYN : 020 :   3RDBIN/lef_blackbox -o cells.v --config <library.config> ...\n";
+if ( defined $blackbox && $blackbox ne "" ) {
+  unless ( -f $blackbox ) {
+    print "ERROR-PAR-HR_SYN : 018 : blackbox file $blackbox does not exist\n";
+    return;
+  }
+  $bbArg = "--blackbox $blackbox";
+}
+elsif ( defined $LIBCFG_FILE && $LIBCFG_FILE ne "" ) {
+  #<!-- Built from the same config, foundry, node and layer read_library_config
+  #     was given.  A netlist that instantiates library cells directly needs
+  #     these or hierarchy -check stops on every one of them. -->
+  $blackbox = "$outDir/cells.v";
+}
+else {
+  print "ERROR-PAR-HR_SYN : 019 : no -blackbox given and no library config has been read\n";
+  print "ERROR-PAR-HR_SYN : 020 :   read_library_config -config <library.config> -foundary <fab> -technode <node> -layer <n>\n";
   return;
 }
-unless ( -f $blackbox ) {
-  print "ERROR-PAR-HR_SYN : 018 : blackbox file $blackbox does not exist\n";
-  return;
-}
-$bbArg = "--blackbox $blackbox";
 
 unless ( -d $outDir ) {
   system("mkdir -p $outDir");
@@ -132,6 +169,91 @@ unless ( -d $outDir ) {
 my $beehome = $BEEHOME;
 my $levelDir = "$outDir/lvl";
 my $netDir   = "$outDir/netlists";
+
+#<!-- Step 0a: the standard cell stubs, when the caller did not supply them.
+#     Built once and reused: lef_blackbox reads every LEF the config lists for
+#     this foundry/node/layer, which is hundreds of files. -->
+unless ( -f $blackbox || $noRun == 1 ) {
+  my $bbLog = "$outDir/lef_blackbox.log";
+  my $inner = "python3 $beehome/3RDBIN/lef_blackbox -o $blackbox" .
+              " --config $LIBCFG_FILE --foundry $LIBCFG_FOUNDRY";
+  $inner .= " --node $LIBCFG_NODE"   if ( defined $LIBCFG_NODE  && $LIBCFG_NODE  ne "" );
+  $inner .= " --layer $LIBCFG_LAYER" if ( defined $LIBCFG_LAYER && $LIBCFG_LAYER ne "" );
+  my $cmd = &dbfElectronToolCommand("python3", $inner, $bbLog);
+  unless ( defined $cmd ) {
+    print "ERROR-PAR-HR_SYN : 036 : no python3 on PATH and no container image to run it in\n";
+    return;
+  }
+  print "INFO-PAR-HR_SYN : 037 : building standard cell stubs from the LEFs\n";
+  system($cmd);
+  unless ( -f $blackbox ) {
+    print "ERROR-PAR-HR_SYN : 038 : no stubs written; see $bbLog\n";
+    return;
+  }
+}
+$bbArg = "--blackbox $blackbox" if ( $bbArg eq "" );
+
+#<!-- Step 0b: a liberty yosys can actually read.  The CCS/LVF liberties a
+#     modern PDK ships are gigabytes and gzipped, and yosys parses neither --
+#     it stops on a group whose name contains a colon.  liberty_slim drops the
+#     signoff-only groups, which is all yosys needed gone. -->
+if ( $liberty =~ /\.gz$/ ) {
+  my $slim = "$outDir/" . "liberty_slim.lib";
+  #<!-- Computed even under --no_run, so the command printed there is the one
+  #     that would actually run.  Printing the .gz would be a lie: yosys cannot
+  #     read it, which is the entire reason this step exists. -->
+  unless ( -f $slim || $noRun == 1 ) {
+    my $slLog = "$outDir/liberty_slim.log";
+    my $inner = "python3 $beehome/3RDBIN/liberty_slim -o $slim $liberty";
+    my $cmd = &dbfElectronToolCommand("python3", $inner, $slLog);
+    unless ( defined $cmd ) {
+      print "ERROR-PAR-HR_SYN : 039 : no python3 on PATH and no container image to run it in\n";
+      return;
+    }
+    print "INFO-PAR-HR_SYN : 040 : slimming $liberty for yosys\n";
+    system($cmd);
+  }
+  if ( ! -f $slim && $noRun != 1 ) {
+    print "ERROR-PAR-HR_SYN : 041 : could not slim $liberty; see $outDir/liberty_slim.log\n";
+    return;
+  }
+  $liberty = $slim;
+}
+
+#<!-- Step 0c: elaborate, keeping one module per instance.  --keep-hierarchy is
+#     the whole point: without it yosys flattens and the placer gets back the
+#     one enormous module it cannot help with.
+#
+#     The relaxations are not optional on real RTL. Every one of them was added
+#     because a vendor IP in a real filelist stopped the front end dead: an
+#     identifier used before its declaration, an SVA, a duplicate definition, a
+#     loop that outruns the unroll limit. -slang_args appends more. -->
+if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
+  $rtlil = "$outDir/design.il" unless ( defined $rtlil && $rtlil ne "" );
+  unless ( -f $rtlil ) {
+    my $elabLog = "$outDir/elaborate.log";
+    my $flags = "--keep-hierarchy --single-unit --ignore-unknown-modules" .
+                " --ignore-assertions --allow-use-before-declare" .
+                " --allow-hierarchical-const --relax-enum-conversions --compat vcs" .
+                " --unroll-limit 200000 --error-limit 50" .
+                " -Wno-range-width-oob -Wno-duplicate-definition";
+    my $inner = "yosys -m slang -p \"read_slang -F $rtlList $blackbox --top $topModule" .
+                " $flags $slangArgs ; hierarchy -check -top $topModule ;" .
+                " stat -top $topModule ; write_rtlil $rtlil.part\"" .
+                " && mv $rtlil.part $rtlil";
+    my $cmd = &dbfElectronToolCommand("yosys", $inner, $elabLog);
+    unless ( defined $cmd ) {
+      print "ERROR-PAR-HR_SYN : 042 : no yosys on PATH and no container image to run it in\n";
+      return;
+    }
+    print "INFO-PAR-HR_SYN : 043 : elaborating $rtlList, top $topModule\n";
+    system($cmd);
+  }
+  unless ( -f $rtlil ) {
+    print "ERROR-PAR-HR_SYN : 044 : elaboration wrote no RTLIL; see $outDir/elaborate.log\n";
+    return;
+  }
+}
 
 #<!-- Step 1: the distinct modules, ranked by depth.  --level all extracts
 #     every level in ONE scan of the dump; one scan per level would read a
