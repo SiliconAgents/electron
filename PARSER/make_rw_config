@@ -41,6 +41,9 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
     #<!-- liberty paths collected, not opened; see the std-cell-libs block -->
     my $found_libs = 0;
     %STDCELL_LIB_ALREADY = ();
+    #<!-- the yosys-readable subset, when the config has one; see below -->
+    my $found_synth_libs = 0;
+    %SYNTH_LIB_ALREADY = ();
     #<!-- read after every LEF, since it stamps cells that only exist in PLDB
     #     once a LEF has been read -->
     my @func_maps = ();
@@ -130,6 +133,15 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
                 if (exists $file_group->{'std-cell-libs'}) {
                     $found_libs += &dbfConfigAddStdCellLibs($file_group->{'std-cell-libs'});
                 }
+                #<!-- "std-cell-synth-libs": liberties yosys can actually parse.
+                #     A modern PDK's std-cell-libs are CCS/LVF, which yosys
+                #     cannot read, so a config can also list slimmed NLDM copies
+                #     (3RDBIN/liberty_slim) under this key, same shapes.
+                #     get_std_cell_libs prefers them. -->
+                if (exists $file_group->{'std-cell-synth-libs'}) {
+                    $found_synth_libs += &dbfConfigAddStdCellLibs($file_group->{'std-cell-synth-libs'},
+                                                                  \%SYNTH_LIB_ALREADY);
+                }
 
                 # Cell function map: says which cells are combinational,
                 # sequential or memory when no liberty is read
@@ -198,6 +210,12 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
               join(", ", @summary), "\n";
         print "INFO-PAR-CONFIG : 004 : pick one with get_std_cell_libs -vt <flavour> -corner <pattern>\n";
     }
+    if ($found_synth_libs > 0) {
+        my @vts = sort keys %SYNTH_LIB_ALREADY;
+        print "INFO-PAR-CONFIG : 005 : $found_synth_libs synthesis liberty path(s) noted: ",
+              join(", ", map { "$_ " . scalar(@{$SYNTH_LIB_ALREADY{$_}}) } @vts), "\n";
+        print "INFO-PAR-CONFIG : 006 : get_std_cell_libs picks from these; --signoff searches the full list\n";
+    }
 
     #<!-- The library is loaded now, so choose the assign buffer.  Without one,
     #     read_verilog drops every assign statement and only says so at
@@ -229,22 +247,25 @@ print "Command read_config took:",timestr($td),"\n";
 #------------------------------------------------------------------------------------------#
 #<!-- Files a "std-cell-libs" entry into %STDCELL_LIB_ALREADY and says how many
 #     it filed.  The entry is either a hash keyed by VT flavour or a bare list,
-#     and both shapes appear in the configs in use.  Nothing is opened here. -->
+#     and both shapes appear in the configs in use.  Nothing is opened here.
+#     A second argument files into another hash instead; "std-cell-synth-libs"
+#     goes into %SYNTH_LIB_ALREADY that way. -->
 sub dbfConfigAddStdCellLibs {
-    my ($lib_group) = @_;
+    my ($lib_group, $into) = @_;
     return 0 unless ( defined $lib_group );
+    $into = \%STDCELL_LIB_ALREADY unless ( defined $into );
 
     my $count = 0;
     if (ref($lib_group) eq 'HASH') {
         foreach my $vt_type (keys %$lib_group) {
             my $lib_files = ref($lib_group->{$vt_type}) eq 'ARRAY' ?
                             $lib_group->{$vt_type} : [$lib_group->{$vt_type}];
-            push(@{$STDCELL_LIB_ALREADY{$vt_type}}, @$lib_files);
+            push(@{$into->{$vt_type}}, @$lib_files);
             $count += scalar(@$lib_files);
         }
     } else {
         my $lib_files = ref($lib_group) eq 'ARRAY' ? $lib_group : [$lib_group];
-        push(@{$STDCELL_LIB_ALREADY{'default'}}, @$lib_files);
+        push(@{$into->{'default'}}, @$lib_files);
         $count += scalar(@$lib_files);
     }
     return $count;
@@ -304,16 +325,26 @@ unless ( exists $config->{$foundry} && exists $config->{$foundry}{node} ) {
 }
 
 %STDCELL_LIB_ALREADY = () unless ( $append == 1 );
+%SYNTH_LIB_ALREADY   = () unless ( $append == 1 );
 
 my $found_libs = 0;
+my $found_synth_libs = 0;
 foreach my $node (@{$config->{$foundry}{node}}) {
   next if ( defined $tech_node && $tech_node ne "" && $node->{type} !~ /$tech_node/i );
 
   foreach my $file_group (@{$node->{files}}) {
     next if ( defined $layer && $layer ne "" && $layer ne $file_group->{layer} );
+    if ( exists $file_group->{'std-cell-synth-libs'} ) {
+      $found_synth_libs += &dbfConfigAddStdCellLibs($file_group->{'std-cell-synth-libs'},
+                                                    \%SYNTH_LIB_ALREADY);
+    }
     next unless ( exists $file_group->{'std-cell-libs'} );
     $found_libs += &dbfConfigAddStdCellLibs($file_group->{'std-cell-libs'});
   }
+}
+if ( $found_synth_libs > 0 ) {
+  print "INFO-PAR-LIBCFG : 009 : recorded $found_synth_libs synthesis liberty path(s): " .
+        join(", ", map { "$_ " . scalar(@{$SYNTH_LIB_ALREADY{$_}}) } sort keys %SYNTH_LIB_ALREADY) . "\n";
 }
 
 if ( $found_libs == 0 ) {
@@ -347,11 +378,14 @@ my $corner;
 my $maxPrint = 20;
 my $doSet = 0;
 my $wantFirst = 0;
+my $signoff = 0;
 
 my $noOfArguments = @_;
 if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
-  print "Usage : get_std_cell_libs [-vt <flavour>] [-corner <pattern>] [-max <n>] [--first] [--set]\n";
+  print "Usage : get_std_cell_libs [-vt <flavour>] [-corner <pattern>] [-max <n>] [--first] [--set] [--signoff]\n";
   print "        --first keeps only the first match, --set parks the result for synthesize\n";
+  print "        picks from the config's std-cell-synth-libs when it has them;\n";
+  print "        --signoff searches the full std-cell-libs list instead\n";
   return;
 }
 
@@ -361,15 +395,27 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-max"){$maxPrint = $_[$i+1];}
   if($_[$i] eq "--first"){$wantFirst = 1;}
   if($_[$i] eq "--set"){$doSet = 1;}
+  if($_[$i] eq "--signoff"){$signoff = 1;}
 }#for
 
-unless ( keys %STDCELL_LIB_ALREADY ) {
+#<!-- Which list to search.  A config that names std-cell-synth-libs is saying
+#     its std-cell-libs are not what a synthesiser can read -- on a modern PDK they are
+#     CCS/LVF and yosys fails on the first one -- so those win unless the
+#     caller asks for the full list.  A config without them, Nangate say,
+#     behaves exactly as it always did. -->
+my $libs = \%STDCELL_LIB_ALREADY;
+if ( $signoff == 0 && keys %SYNTH_LIB_ALREADY ) {
+  $libs = \%SYNTH_LIB_ALREADY;
+  print "INFO-PAR-LIBSEL : 009 : choosing from the config's std-cell-synth-libs; --signoff for the full list\n";
+}
+
+unless ( keys %$libs ) {
   print "ERROR-PAR-LIBSEL : 001 : no liberty paths are recorded\n";
   print "ERROR-PAR-LIBSEL : 002 : run read_library_config -config <library.config> -foundary <fab> -technode <node> first\n";
   return ();
 }
 
-my @flavours = sort keys %STDCELL_LIB_ALREADY;
+my @flavours = sort keys %$libs;
 if ( defined $vt && $vt ne "" ) {
   my @hit = grep { /^$vt$/i } @flavours;
   unless ( @hit ) {
@@ -381,7 +427,7 @@ if ( defined $vt && $vt ne "" ) {
 
 my @picked = ();
 foreach my $flavour ( @flavours ) {
-  foreach my $lib ( @{$STDCELL_LIB_ALREADY{$flavour}} ) {
+  foreach my $lib ( @{$libs->{$flavour}} ) {
     next if ( defined $corner && $corner ne "" && $lib !~ /$corner/ );
     push(@picked, $lib);
   }
