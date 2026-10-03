@@ -66,6 +66,25 @@ import time
 # is doing its job: between -5% and +6%, averaging nothing, for twice the
 # runtime. They were in a draft of this script and came out again. Add one back
 # only with a measurement that says it earns its place on the design at hand.
+#
+# Re-measured later on a second design, a register-heavy fabric, chasing the
+# registers a commercial flow removes and this one does not. Three candidates,
+# all negative:
+#
+#   opt_merge        already runs -- `opt -fast` does OPT_MERGE and OPT_DFF
+#                    twice each -- and `opt_merge -share_all` on top of it
+#                    changed the flop count by 0 or 1 on every module tried
+#   tie-off folding  driving a child's inputs with the literal every parent
+#                    already drives them with: 0.0% on four modules, 1.0% on a
+#                    fifth, despite 1,539 ports being uniformly tied
+#   opt -full        flops unchanged, and AREA is a coin flip: one module went
+#                    5,182 -> 8,756 cells (+69%) while another went
+#                    91,717 -> 86,424 (-6%)
+#
+# So the short script survives a second design, and the gap to a commercial
+# flow on that design is not register optimisation. See 3RDBIN/rtlil_liveness
+# for the one mechanism that did measure positive -- registers a module
+# boundary forces the flow to keep, 6.5% of the design's register bits.
 SCRIPT = """
 read_verilog -lib {blackbox}
 {children}
