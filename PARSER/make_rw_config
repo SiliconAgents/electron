@@ -9,8 +9,21 @@ my $foundry;
 my $layer;
 my $read_macro_lefs = 0;  # Default: don't read macro LEFs
 my $read_io_lefs = 0;     # Default: don't read IO cell LEFs
+my $cell_family = "";     # -cell_family a[,b]: read only these families
+my $row_site = "";        # -site: force the row site
+my $row_height = "";      # -row_height: force the row height, um
 
 my $noOfArguments = @_;
+if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
+  print "Usage : read_config_file -config <library.config> -foundary <fab> -technode <node> -layer <n>\n";
+  print "                         [-read_macro_lefs] [-read_io_lefs]\n";
+  print "                         [-cell_family <name>[,<name>...]] [-site <site>] [-row_height <um>]\n";
+  print "        -cell_family  read only the standard-cell LEFs of these families (the config's\n";
+  print "                      cell-families), rows on the first one's site and height, and let\n";
+  print "                      get_std_cell_libs pick only their liberties\n";
+  print "        -site, -row_height  force the rows whatever the family says\n";
+  return;
+}
 
 if( $noOfArguments == 2 || $noOfArguments >= 4 ) {
 
@@ -23,6 +36,9 @@ if($_[$i] eq "-foundary"){$foundry = $_[$i+1];}
 if($_[$i] eq "-layer"){$layer = $_[$i+1];}
 if($_[$i] eq "-read_macro_lefs"){$read_macro_lefs = 1;}
 if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
+if($_[$i] eq "-cell_family"){$cell_family = $_[$i+1];}
+if($_[$i] eq "-site"){$row_site = $_[$i+1];}
+if($_[$i] eq "-row_height"){$row_height = $_[$i+1];}
                                          } # for
 
 
@@ -42,6 +58,30 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
     $LIBCFG_LAYER   = $layer;
 
 my $config = parse_config($config_file);
+
+    #<!-- Families first, before a single LEF is read: an unknown name has to
+    #     stop the command, not show up as a library of the wrong cells.
+    #     The rows are released here and fixed again only after the LEFs,
+    #     so the tech LEF still sets its usual default on the way through. -->
+    @CELL_FAMILY_MATCH = ();
+    $ROW_SITE_PINNED   = 0;
+    $ROW_SITE_NAME     = "";
+    my $families = [];
+    my $group = &dbfConfigFileGroup($config, $foundry, $tech_node, $layer);
+    if ( $cell_family ne "" ) {
+        $families = &dbfConfigCellFamilies($group || {}, $cell_family);
+        return unless ( defined $families );
+        @CELL_FAMILY_MATCH = map { $_->{match} } @$families;
+    }
+    elsif ( $group && ref($group->{'cell-families'}) eq 'HASH'
+            && scalar(keys %{$group->{'cell-families'}}) > 1 ) {
+        print "WARN-PAR-CONFIG : 008 : this config has " . scalar(keys %{$group->{'cell-families'}}) .
+              " cell families (" . join(", ", sort keys %{$group->{'cell-families'}}) . ") and none was chosen;\n";
+        print "WARN-PAR-CONFIG : 008 : every family's LEFs are read and the rows take the smallest site --\n";
+        print "WARN-PAR-CONFIG : 008 : pass -cell_family <name> to read one family and place on its site\n";
+    }
+    my $lefs_skipped = 0;
+
     my $output_file = "load_lefs.tcl";
 
     open(my $fh, '>', $output_file) or die "Cannot open $output_file: $!\n";
@@ -98,6 +138,7 @@ my $config = parse_config($config_file);
                                                    $stdcell_lef_group->{$vt_type} : [$stdcell_lef_group->{$vt_type}];
 
                             foreach my $lef_file (@$stdcell_lef_files) {
+                                if ( ! &dbfConfigInCellFamily($lef_file) ) { $lefs_skipped++; next; }
                                 print $fh "read_lef -lef $lef_file -tech dont\n";
                                 &read_lef(-lef,$lef_file,-tech,dont);
                                 $found_lefs++;
@@ -109,6 +150,7 @@ my $config = parse_config($config_file);
                                                $stdcell_lef_group : [$stdcell_lef_group];
 
                         foreach my $lef_file (@$stdcell_lef_files) {
+                            if ( ! &dbfConfigInCellFamily($lef_file) ) { $lefs_skipped++; next; }
                             print $fh "read_lef -lef $lef_file -tech dont\n";
                             &read_lef(-lef,$lef_file,-tech,dont);
                             $found_lefs++;
@@ -209,6 +251,56 @@ my $config = parse_config($config_file);
         $lef_types .= " and " . join(" and ", @extra_types);
     }
     print "Generated $output_file with $found_lefs read_lef commands ($lef_types)\n";
+    if ( @$families ) {
+        print "INFO-PAR-CONFIG : 007 : cell famil" . ( @$families > 1 ? "ies " : "y " ) .
+              join(", ", map { $_->{name} } @$families) .
+              ": $lefs_skipped standard-cell LEF(s) of other families not read\n";
+    }
+
+    #<!-- The rows, fixed now that every LEF has been read: from -site and
+    #     -row_height if given, else from the first family.  The site has to
+    #     exist in a LEF that was read -- tech LEF or cell LEF -- and the
+    #     family's row-height has to be that site's height; either mistake
+    #     stops here rather than turning into rows the cells cannot sit on.
+    #     Pinned, so neither a later read_lef nor set_floorplan re-derives
+    #     them. -->
+    my $pin_site = $row_site ne "" ? $row_site : ( @$families ? ( $families->[0]{site} || "" ) : "" );
+    if ( $pin_site ne "" || $row_height ne "" ) {
+        my $site_h;
+        if ( $pin_site ne "" ) {
+            my $size;
+            if ( exists $TECHNOLOGY_PHYSICAL{$pin_site} && $TECHNOLOGY_PHYSICAL{$pin_site}{TYPE} eq "SITE" ) {
+                $size = $TECHNOLOGY_PHYSICAL{$pin_site}{SIZE};
+            } elsif ( exists $CELL_LEF_SITES{$pin_site} ) {
+                $size = $CELL_LEF_SITES{$pin_site}{SIZE};
+            }
+            unless ( defined $size && $size ne "" ) {
+                print "ERROR-PAR-CONFIG : 012 : row site $pin_site is not defined in any LEF that was read\n";
+                return;
+            }
+            $site_h = (split(/\s+/, $size))[1];
+        }
+        my $h = $row_height;
+        my $from = "-row_height";
+        if ( $h eq "" ) {
+            if ( $row_site eq "" && @$families && defined $families->[0]{height} ) {
+                $h = $families->[0]{height};
+                $from = "cell family " . $families->[0]{name};
+            } else {
+                $h = $site_h;
+                $from = "site $pin_site";
+            }
+            if ( defined $site_h && abs($h - $site_h) > 1e-6 ) {
+                print "ERROR-PAR-CONFIG : 013 : $from says row height $h, but site $pin_site is $site_h high\n";
+                return;
+            }
+        }
+        $GLOBAL->dbGlobalSetRowHeight($h);
+        $ROW_SITE_NAME   = $pin_site;
+        $ROW_SITE_PINNED = 1;
+        print "INFO-PAR-CONFIG : 011 : rows fixed: " .
+              ( $pin_site ne "" ? "site $pin_site, " : "" ) . "height $h um ($from)\n";
+    }
     if (@func_maps) {
         print "Read " . scalar(@func_maps) . " cell function map(s) from the config\n";
     }
@@ -254,6 +346,80 @@ print "Command read_config took:",timestr($td),"\n";
 }# sub read_config
 
 #------------------------------------------------------------------------------------------#
+#<!-- Cell families: which standard-cell LEFs and liberties belong together.
+#
+#     A PDK can ship several cell families -- different heights, different
+#     track counts -- side by side in one config, each with its own placement
+#     site.  Read them all and electron has to guess the rows: it takes the
+#     smallest site height of any LEF and the narrowest site of any, so a
+#     design of 0.156um cells got 0.065um rows on an unrelated site and every
+#     cell spanned two and a half of them.  The config says what belongs
+#     together instead:
+#
+#       "cell-families": {
+#         "<name>": { "match": "<substring of the file paths>",
+#                     "site": "<row site>", "row-height": <um> }, ...
+#       }
+#
+#     "match" picks the family's entries out of std-cell-lefs, std-cell-libs
+#     and std-cell-synth-libs alike; the vendor's names already carry it.
+#     Naming stays in the config, none of it in this code.
+#
+#     Returns the family records for a comma-separated list, or undef after
+#     saying what was wrong.  The first family named sets the rows. -->
+sub dbfConfigCellFamilies {
+    my ($file_group, $wanted) = @_;
+    my $defined = $file_group->{'cell-families'};
+    unless ( ref($defined) eq 'HASH' && keys %$defined ) {
+        print "ERROR-PAR-CONFIG : 010 : -cell_family $wanted given, but this config defines no cell-families\n";
+        return undef;
+    }
+    my @families = ();
+    foreach my $name ( split(/\s*,\s*/, $wanted) ) {
+        next if ( $name eq "" );
+        unless ( exists $defined->{$name} ) {
+            print "ERROR-PAR-CONFIG : 009 : no cell family named $name; the config has " .
+                  join(", ", sort keys %$defined) . "\n";
+            return undef;
+        }
+        my $fam = $defined->{$name};
+        unless ( defined $fam->{match} && $fam->{match} ne "" ) {
+            print "ERROR-PAR-CONFIG : 014 : cell family $name has no \"match\" in the config\n";
+            return undef;
+        }
+        push(@families, { name => $name, match => $fam->{match},
+                          site => $fam->{site}, height => $fam->{'row-height'} });
+    }
+    return \@families;
+}
+#------------------------------------------------------------------------------------------#
+#<!-- True when no family was chosen, or the path belongs to one that was.
+#     "match" is a plain substring, not a pattern: vendor file names are
+#     full of characters a regex would read. -->
+sub dbfConfigInCellFamily {
+    my ($path) = @_;
+    return 1 unless ( @CELL_FAMILY_MATCH );
+    foreach my $m ( @CELL_FAMILY_MATCH ) {
+        return 1 if ( index($path, $m) >= 0 );
+    }
+    return 0;
+}
+#------------------------------------------------------------------------------------------#
+#<!-- The config's file group for a foundry / node / layer, the same one the
+#     loops below walk.  undef when there is none. -->
+sub dbfConfigFileGroup {
+    my ($config, $foundry, $tech_node, $layer) = @_;
+    return undef unless ( exists $config->{$foundry} && exists $config->{$foundry}{node} );
+    foreach my $node (@{$config->{$foundry}{node}}) {
+        next if ( defined $tech_node && $tech_node ne "" && $node->{type} !~ /$tech_node/i );
+        foreach my $file_group (@{$node->{files}}) {
+            next if ( defined $layer && $layer ne "" && $layer ne $file_group->{layer} );
+            return $file_group;
+        }
+    }
+    return undef;
+}
+#------------------------------------------------------------------------------------------#
 #<!-- Files a "std-cell-libs" entry into %STDCELL_LIB_ALREADY and says how many
 #     it filed.  The entry is either a hash keyed by VT flavour or a bare list,
 #     and both shapes appear in the configs in use.  Nothing is opened here.
@@ -298,12 +464,17 @@ my $append = 0;
 my $noOfArguments = @_;
 if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "Usage : read_library_config -config <library.config> -foundary <fab> -technode <node> [-layer <n>] [--append]\n";
+  print "                            [-cell_family <name>[,<name>...]]\n";
   print "        Records the std-cell liberty paths only; reads no LEF and opens no liberty.\n";
   print "        Use get_std_cell_libs to pick one out of what this records.\n";
+  print "        -cell_family makes get_std_cell_libs pick only those families' liberties;\n";
+  print "        without it the session's family, if any, is left as it was.\n";
   return;
 }
 
+my $cell_family = "";
 for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-cell_family"){$cell_family = $_[$i+1];}
   if($_[$i] eq "-config"){$config_file = $_[$i+1];}
   if($_[$i] eq "-technode"){$tech_node = $_[$i+1];}
   if($_[$i] eq "-foundary"){$foundry = $_[$i+1];}
@@ -341,6 +512,15 @@ $LIBCFG_FILE    = $config_file;
 $LIBCFG_FOUNDRY = $foundry;
 $LIBCFG_NODE    = $tech_node;
 $LIBCFG_LAYER   = $layer;
+
+if ( $cell_family ne "" ) {
+  my $families = &dbfConfigCellFamilies(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer) || {},
+                                        $cell_family);
+  return unless ( defined $families );
+  @CELL_FAMILY_MATCH = map { $_->{match} } @$families;
+  print "INFO-PAR-LIBCFG : 010 : get_std_cell_libs will pick only cell family " .
+        join(", ", map { $_->{name} } @$families) . "\n";
+}
 
 %STDCELL_LIB_ALREADY = () unless ( $append == 1 );
 %SYNTH_LIB_ALREADY   = () unless ( $append == 1 );
@@ -448,6 +628,22 @@ foreach my $flavour ( @flavours ) {
   foreach my $lib ( @{$libs->{$flavour}} ) {
     next if ( defined $corner && $corner ne "" && $lib !~ /$corner/ );
     push(@picked, $lib);
+  }
+}
+
+#<!-- A cell family chosen at read_config_file / read_library_config narrows
+#     this too, so synthesis maps only to cells the rows can hold.  None left
+#     is said out loud: falling back to another family's liberty is exactly
+#     the mismatch the family exists to prevent. -->
+if ( @CELL_FAMILY_MATCH && @picked ) {
+  my $before = scalar(@picked);
+  @picked = grep { &dbfConfigInCellFamily($_) } @picked;
+  if ( @picked ) {
+    print "INFO-PAR-LIBSEL : 010 : " . scalar(@picked) . " of $before belong to the session's cell family\n";
+  } else {
+    print "WARN-PAR-LIBSEL : 011 : none of the $before liberty path(s) belong to the session's cell family (" .
+          join(", ", @CELL_FAMILY_MATCH) . ")\n";
+    return ();
   }
 }
 
