@@ -56,6 +56,11 @@ foreach my $layerName ( keys %TECHNOLOGY_PHYSICAL ) {
   delete $TECHNOLOGY_PHYSICAL{$layerName};
 }
 $GLOBAL->dbGlobalSetRowHeight(-1);
+#<!-- and what read_config_file -cell_family / -site fixed -->
+%CELL_LEF_SITES    = ();
+$ROW_SITE_PINNED   = 0;
+$ROW_SITE_NAME     = "";
+@CELL_FAMILY_MATCH = ();
 }#sub delete_technology_physical
 #-----------------------------------------------------------------------------------------------------------------------------------------#
 sub delete_vdb {

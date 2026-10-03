@@ -192,7 +192,11 @@ if (/^\s*SITE $siteName/ ... /END $siteName/ ) {
               if( $width > 0 && $height > 0 && $class =~ /core/i ) {
                                   if ( $class eq "CORE" || $class eq "core" ) {
                                     my $smallestRowHeight = $GLOBAL->dbGlobalGetRowHeight;
-                                    if (($smallestRowHeight == -1) || ($smallestRowHeight > $height )) {
+                                    #<!-- not once read_config_file -cell_family / -site has
+                                    #     fixed the rows: "smallest site wins" is what put
+                                    #     0.065um rows under 0.156um cells -->
+                                    if ( $ROW_SITE_PINNED ) {}
+                                    elsif (($smallestRowHeight == -1) || ($smallestRowHeight > $height )) {
                                     $GLOBAL->dbGlobalSetRowHeight($height);
                                     print "INFO-PAR-LEF : 006 : setting $siteName the row heignt to $height\n";
                                                                         }
@@ -452,6 +456,18 @@ if(!$macro_processing_started) {
 
     if($in_site_section) {
         print SITES_LEF "$original_line\n";
+        #<!-- Kept as well as copied.  sites.lef is rewritten by every LEF, so
+        #     by the end it holds one LEF's sites; %CELL_LEF_SITES holds every
+        #     site any cell LEF defined.  Its own table, not
+        #     %TECHNOLOGY_PHYSICAL: the row code searches that one for the
+        #     narrowest site, and adding these would change its answer for
+        #     every design.  read_config_file -cell_family / -site reads it. -->
+        if($_ =~ /^SIZE (\S+) BY (\S+)/) {
+            $CELL_LEF_SITES{$current_site_name}{SIZE} = "$1 $2";
+        }
+        if($_ =~ /^CLASS (\S+)/) {
+            ($CELL_LEF_SITES{$current_site_name}{CLASS} = $1) =~ s/;$//;
+        }
         if($_ =~ /^\s*END\s+$current_site_name\s*$/) {
             print "INFO-PAR-LEF : 010 : Extracted SITE '$current_site_name' definition to sites.lef\n";
             $in_site_section = 0;

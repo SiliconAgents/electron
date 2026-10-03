@@ -187,6 +187,34 @@ difference is yours. `legalize_flat` used to be nondeterministic run to run and
 it cost real time to discover that a "regression" was its own noise; it is
 deterministic now, and `hier_place_all` always was.
 
+The flat placer upstream of it is not: `nangate_flat` moves its mean
+legalization displacement by ~0.1um between two runs of the same build. Compare
+two builds with `PERL_HASH_SEED=0 PERL_PERTURB_KEYS=0`; then they agree to the
+byte or the difference is real.
+
+## Rows on a PDK with several cell families
+
+Left to itself electron derives the rows: height = the smallest CORE site of
+any LEF read, site = the narrowest CORE site, ties broken by hash order. With
+one cell family (Nangate) that is right. With several, side by side in one
+config, it is wrong in a way that looks like a legalizer bug: 0.156um cells on
+0.065um rows of an unrelated site, every cell "multi-row", `legalize_flat` 30x
+slower and thousands of cells left overlapping.
+
+`read_config_file ... -cell_family <name>` fixes it. The family comes from the
+config's `cell-families` (name -> path substring, site, row height); electron
+then reads only that family's standard-cell LEFs, fixes the rows to its site,
+and `get_std_cell_libs` picks only its liberties. `-site` / `-row_height`
+override. After `set_floorplan`, `WARN-PAR-FLP 006` lists any instantiated
+cell that is not a whole number of those rows tall -- cells from another family
+cannot legalize there. Without `-cell_family` nothing changes; the config warns
+when it defines several families and none was chosen.
+
+Cell LEFs' own SITE definitions are kept in `%CELL_LEF_SITES`, not
+`%TECHNOLOGY_PHYSICAL`, so the default row search is untouched. (`sites.lef` in
+the work directory is rewritten by every LEF read and ends up with one LEF's
+sites; nothing reads it.)
+
 ## legalize_flat
 
 Abacus, and it produces **zero** overlaps — check that in integer DBU, never in

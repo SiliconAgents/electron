@@ -206,9 +206,17 @@ $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{$flplanName}}->dbFlplanSetSize($llx, $lly, 
 $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{$flplanName}}->dbFlplanSetAspectRatio($ASPECT_RATIO);
 $FLOORPLAN_ALREADY{$FLOORPLAN_LOOKUP{$flplanName}}->dbgFlplanGetSize;
 #----------------------if site statement is not given in tech lef then set the site height and width------------------#
+#<!-- Rows fixed by read_config_file -cell_family / -site: nothing to derive,
+#     and re-deriving would undo it. -->
+if ( $ROW_SITE_PINNED ) {
+    print "INFO-PAR-FLP : 007 : rows use the site and height read_config_file fixed" .
+          ( $ROW_SITE_NAME ne "" ? " ($ROW_SITE_NAME, " : " (" ) . $GLOBAL->dbGlobalGetRowHeight . " um)\n";
+} else {
 &check_multiple_site_and_set_width_height;
+}
 my $get_height = $GLOBAL->dbGlobalGetRowHeight;
-if($get_height != -1 && $SITE_WIDTH > 0 && $SITE_HEIGHT > 0){
+if ( $ROW_SITE_PINNED ) {}
+elsif($get_height != -1 && $SITE_WIDTH > 0 && $SITE_HEIGHT > 0){
     print "WARN-PAR-FLP : 004 : site statement already exists in lef file So,we will not set site width and site height\n";
 }else{
   if($SITE_WIDTH > 0 && $SITE_HEIGHT > 0){
@@ -223,6 +231,7 @@ if($get_height != -1 && $SITE_WIDTH > 0 && $SITE_HEIGHT > 0){
 #---------------------------------------------------------------------------------------------------------------------#
 ########################### generate the Rows for the floorplan ##########################################
 &dbgGenerateRows($partitionName);
+&dbgReportOffRowCells if ( $ROW_SITE_PINNED );
                                         }#if floorplan is NOT already set
                                                        }# if correct arguments 
 my $t1 = new Benchmark;
@@ -311,6 +320,20 @@ $guiMuDieury = $dieSize[3]/$DBSCALEFACTOR;
                                                                        }# if site
                                                            }
                                             }# for each layer
+                  #<!-- A site fixed by read_config_file wins over the narrowest
+                  #     one.  On a PDK with several families every site is the
+                  #     same width, so "narrowest" was a hash-order coin toss
+                  #     between sites of three different heights. -->
+                  if ( $ROW_SITE_PINNED && $ROW_SITE_NAME ne "" ) {
+                      my $size = ( exists $TECHNOLOGY_PHYSICAL{$ROW_SITE_NAME} &&
+                                   $TECHNOLOGY_PHYSICAL{$ROW_SITE_NAME}{TYPE} eq "SITE" ) ?
+                                 $TECHNOLOGY_PHYSICAL{$ROW_SITE_NAME}{SIZE} :
+                                 $CELL_LEF_SITES{$ROW_SITE_NAME}{SIZE};
+                      if ( defined $size && $size ne "" ) {
+                          $min_width_site = $ROW_SITE_NAME;
+                          ($min_width, $height_min_width_site) = (split(/\s+/, $size))[0,1];
+                      }
+                  }
                   $height = $GLOBAL->dbGlobalGetRowHeight;
                   print "DBG-PAR : 003 : height = $height  width = $min_width\n" if ($DEBUG == 20);
                   my $numberOfRows = int(($guiMuDieury - $guiMuDielly)/$height);
@@ -336,6 +359,47 @@ $guiMuDieury = $dieSize[3]/$DBSCALEFACTOR;
                                                                }#for
 
 }#sub dbgGenerateRows
+#------------------------------------------------------------------------------------------------------------------------------#
+#<!-- Cells the fixed rows cannot hold, said once and up front.
+#
+#     With rows from one cell family, a cell from another family -- an RTL
+#     hand-instantiated synchroniser from a 0.130um library in 0.156um rows,
+#     say -- is not a whole number of rows tall and can never legalize.
+#     Without this it surfaces much later as legalize_flat's "found no span
+#     of free rows" with overlaps left in the DEF.  Double-height cells are a
+#     whole number of rows and are fine.  Cell sizes are microns (PLDB). -->
+sub dbgReportOffRowCells {
+my $rowH = $GLOBAL->dbGlobalGetRowHeight;
+return unless ( $rowH > 0 );
+my %off = ();       # cellref -> [instances, height]
+my %nolef = ();     # cellref -> instances
+foreach my $inst ( keys %CADB ) {
+  my $cellref = $CADB{$inst}->dbCadbGetCellref;
+  next unless ( defined $cellref && $cellref ne "" );
+  unless ( exists $PLDB{$cellref} ) { $nolef{$cellref}++; next; }
+  my $h = ($PLDB{$cellref}->dbMdbGetSize)[1];
+  next unless ( defined $h && $h > 0 );
+  my $rows = $h / $rowH;
+  next if ( abs($rows - int($rows + 0.5)) < 1e-3 );
+  $off{$cellref}[0]++;
+  $off{$cellref}[1] = $h;
+}
+if ( keys %off ) {
+  my $n = 0; $n += $off{$_}[0] foreach ( keys %off );
+  my @eg = sort { $off{$b}[0] <=> $off{$a}[0] } keys %off;
+  print "WARN-PAR-FLP : 006 : $n instance(s) of " . scalar(@eg) . " cell type(s) are not a whole number of\n";
+  print "WARN-PAR-FLP : 006 : $rowH um rows tall and cannot legalize in them:\n";
+  foreach my $c ( @eg[0 .. ($#eg < 4 ? $#eg : 4)] ) {
+    print "WARN-PAR-FLP : 006 :   $c x$off{$c}[0], $off{$c}[1] um\n";
+  }
+}
+if ( keys %nolef ) {
+  my $n = 0; $n += $nolef{$_} foreach ( keys %nolef );
+  my @eg = sort { $nolef{$b} <=> $nolef{$a} } keys %nolef;
+  print "WARN-PAR-FLP : 008 : $n instance(s) of " . scalar(@eg) . " cell type(s) have no LEF in this session, e.g. " .
+        join(", ", @eg[0 .. ($#eg < 2 ? $#eg : 2)]) . "\n";
+}
+}#sub dbgReportOffRowCells
 #------------------------------------------------------------------------------------------------------------------------------#
 sub set_chipdimension_site_multiple{
 #****f* /set_chipdimension_site_multiple
