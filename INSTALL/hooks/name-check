@@ -54,9 +54,20 @@ import sys
 # invisible to the only tool that would have found them. The shapes are written
 # as regex source (C\d+L\d{2,}), which the literal rules do not match, so there
 # was never anything to exempt.
+#
+# Fully exempt: functional data and vendored code.
 ALLOW_PATHS = (
-    "TESTS/", "CONFIG/", "lib64/",
+    "CONFIG/", "lib64/",
 )
+
+# PARTLY exempt. TESTS/ designs are allowed to be named -- that is the whole
+# point of a testcase -- so the design denylist does not apply there. The
+# LIBRARY rules still do. An earlier version exempted TESTS/ outright, and a
+# tcl naming a foundry, a process node and a /tech path passed the check
+# clean: the exemption meant for design names was silently covering library
+# names too. A testcase may say what it multiplies; it may not say which PDK
+# it was run against.
+DESIGN_EXEMPT = ("TESTS/",)
 ALLOW_SUFFIX = (".pdf", ".sif", ".png", ".gif", ".jpg", ".so", ".tar", ".gz")
 
 # Terms that look like a hit but are the ones we are allowed to say.
@@ -112,6 +123,13 @@ def skip(path):
     return (path.startswith(ALLOW_PATHS)
             or path.endswith(ALLOW_SUFFIX)
             or not os.path.isfile(path))
+
+
+def rules_for(path, rules, design_rules):
+    """The structural rules always; the design denylist only outside TESTS/."""
+    if path.startswith(DESIGN_EXEMPT):
+        return rules
+    return rules + design_rules
 
 
 def scan(path, rules, text=None):
@@ -186,13 +204,14 @@ def main():
         print("name-check: ELECTRON_SKIP_NAMECHECK=1, skipped", file=sys.stderr)
         return 0
 
-    rules = RULES + denylist()
+    design_rules = denylist()
+    rules = RULES
     bad = 0
 
     if args.range:
         seen = set()
         for label, path, text in blobs_in_range(args.range):
-            for n, what, hit, line in scan(path, rules, text=text):
+            for n, what, hit, line in scan(path, rules_for(path, rules, design_rules), text=text):
                 key = (path, what, hit)
                 if key in seen:       # the same name in ten commits is one leak
                     continue
@@ -203,7 +222,7 @@ def main():
         for path in files_from_git(args):
             if skip(path):
                 continue
-            for n, what, hit, line in scan(path, rules):
+            for n, what, hit, line in scan(path, rules_for(path, rules, design_rules)):
                 bad += 1
                 print(f"{path}:{n}: {what}: {hit}\n    {line}", file=sys.stderr)
 
@@ -213,7 +232,7 @@ def main():
         for sha in out:
             msg = subprocess.run(["git", "log", "-1", "--format=%B", sha],
                                  capture_output=True, text=True).stdout
-            for n, what, hit, line in scan(f"commit {sha[:8]}", rules, text=msg):
+            for n, what, hit, line in scan(f"commit {sha[:8]}", rules + design_rules, text=msg):
                 bad += 1
                 print(f"commit {sha[:8]} message line {n}: {what}: {hit}\n"
                       f"    {line}", file=sys.stderr)
