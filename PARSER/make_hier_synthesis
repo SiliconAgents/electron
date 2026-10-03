@@ -348,7 +348,7 @@ unless ( -d $netDir ) {
   return;
 }
 
-&dbfHierSynthReport($synthLog, $netDir);
+&dbfHierSynthReport($synthLog, $netDir, $levelDir);
 
 #<!-- One file, because nothing in electron reads a DIRECTORY of netlists.
 #     Without this the command ends with N files and the flow stops: read_verilog
@@ -397,10 +397,23 @@ return;
 #     No per-module run can check that, each having seen its children as
 #     blackboxes. -->
 sub dbfHierSynthReport {
-my ($logFile, $netDir) = @_;
+my ($logFile, $netDir, $levelDir) = @_;
 
-my @v = glob("$netDir/*.v");
-print "INFO-PAR-HR_SYN : 026 : " . scalar(@v) . " netlist(s) in $netDir\n";
+#<!-- Counted from the level manifests, not by globbing *.v.  yosys_bottom_up
+#     also drops a pruned standard-cell stub file in there, and a glob counts
+#     it as a module netlist -- six where five were written. -->
+my $n = 0;
+foreach my $man ( glob("$levelDir/lvl*/MODULES.tsv") ) {
+  next unless ( open(HSYN_C, "<$man") );
+  while ( my $line = <HSYN_C> ) {
+    next if ( $line =~ /^#/ );
+    chomp($line);
+    my ($name) = split(/\t/, $line);
+    $n++ if ( defined $name && $name ne "" && -f "$netDir/$name.v" );
+  }
+  close(HSYN_C);
+}
+print "INFO-PAR-HR_SYN : 026 : $n netlist(s) in $netDir\n";
 
 unless ( -f $logFile && open(HSYN_LOG, "<$logFile") ) {
   print "WARN-PAR-HR_SYN : 027 : no log at $logFile to report on\n";
