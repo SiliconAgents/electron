@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Re-trace every flop's clock root without electron, to check trace_clock_roots.
+
+    electron:  elaborate
+               trace_clock_roots -tsv clk.tsv
+               write_verilog -output flat.v --overwrite
+    then:      verify_clock_roots --netlist flat.v --tsv clk.tsv \\
+                   --map cells.map --lef a.lef --lef b.lef ...
+
+WHY
+
+A command's own summary is not evidence (CLAUDE.md, "Verifying placement or
+connectivity work").  This reads the flat netlist electron wrote, the LEFs and
+the cell function map itself, re-implements the trace from its specification
+-- none of electron's code -- and compares the set of roots of every flop with
+the FLOP records of the -tsv file.  Any flop missing on one side, or with a
+different clock pin or root set, is printed.
+
+THE RULES, restated so a disagreement can be settled against them
+
+    buffer, inverter, delay, and a cell with no function that has one signal
+        input and one signal output                  pass the input
+    ICG                                              pass the clock pin only
+    mux                                              pass every data input,
+                                                     never S / S0 / SEL
+    clock AND / OR / NAND / NOR                      pass the input(s) carrying
+        a clock: whose cone passes a clock cell, or ends at a root that clocks
+        flops with no such gate in the way (found by a first pass that stops
+        at the gates); every input when neither does
+    anything else, or a top input port               root
+
+    clock pin of a flop, latch or ICG: the first of
+        CP CPN CK CKN CLK CLKN CLOCK C G GN GB E EN
+    (electron prefers a liberty pin marked as a clock; this has no liberty, so
+    on a library whose clock pins are named otherwise the two will differ and
+    the difference is this script's.)
+
+A cell with no LEF here gives a "nolib:" root, as in electron, so read the
+same LEFs electron read -- every family the netlist uses.
+
+The map is either form read_cell_func_map takes as text: "<glob> <function>
+<family>" or "<glob> <type> <function>"; the column holding a class word
+(comb, seq, clock, ...) is the type.  First matching glob wins.
+"""
+import argparse
+import fnmatch
+import re
+import sys
+from collections import defaultdict
+
+CLASS = re.compile(r'^(comb|seq|block|macro|mem|sram|dram|ram$|rom$|reg.?file|arith|clock$|clk$|power$|phys)', re.I)
+CLKNAMES = ['CP', 'CPN', 'CK', 'CKN', 'CLK', 'CLKN', 'CLOCK', 'C', 'G', 'GN', 'GB', 'E', 'EN']
+
+
+def read_lefs(paths):
+    """macro -> {pin: [direction, use]}"""
+    pins = {}
+    for lef in paths:
+        mac = pin = None
+        for line in open(lef):
+            t = line.split()
+            if not t:
+                continue
+            if t[0] == 'MACRO':
+                mac = t[1]
+                pins.setdefault(mac, {})
+            elif t[0] == 'PIN' and mac:
+                pin = t[1]
+                pins[mac].setdefault(pin, ['', 'SIGNAL'])
+            elif t[0] == 'DIRECTION' and mac and pin:
+                pins[mac][pin][0] = t[1].upper()
+            elif t[0] == 'USE' and mac and pin:
+                pins[mac][pin][1] = t[1].upper()
+            elif t[0] == 'END' and len(t) > 1 and t[1] == pin:
+                pin = None
+            elif t[0] == 'END' and len(t) > 1 and t[1] == mac:
+                mac = None
+    return pins
+
+
+def read_map(path):
+    """[(glob, type, function)] in file order"""
+    rules = []
+    for line in open(path):
+        f = line.split('#')[0].replace(',', ' ').replace(':', ' ').split()
+        if len(f) < 2:
+            continue
+        a, b = f[1], f[2] if len(f) > 2 else ''
+        if CLASS.match(a) or a.lower() in ('flop', 'latch'):
+            rules.append((f[0], a.lower(), b.upper()))
+        else:
+            rules.append((f[0], b.lower(), a.upper()))
+    return rules
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--netlist', required=True, help='flat netlist from electron write_verilog')
+    ap.add_argument('--tsv', required=True, help='trace_clock_roots -tsv output')
+    ap.add_argument('--map', required=True, help='cell function map')
+    ap.add_argument('--lef', action='append', required=True, help='a cell LEF, repeatable')
+    ap.add_argument('--rule', nargs=2, action='append', default=[], metavar=('GLOB', 'KIND'),
+                    help='as trace_clock_roots -rule: buf icg mux gate root')
+    ap.add_argument('--show', type=int, default=10, help='differences to print')
+    args = ap.parse_args()
+    sys.setrecursionlimit(1000000)
+
+    pins = read_lefs(args.lef)
+    rules = read_map(args.map)
+
+    fcache = {}
+
+    def func_of(cell):
+        if cell not in fcache:
+            fcache[cell] = ('', '')
+            for g, typ, fn in rules:
+                if fnmatch.fnmatchcase(cell, g):
+                    fcache[cell] = (typ, fn)
+                    break
+        return fcache[cell]
+
+    def sig(cell, d):
+        return sorted(p for p, (dr, u) in pins[cell].items() if dr == d and u not in ('POWER', 'GROUND'))
+
+    def clock_pin(cell):
+        ins = set(sig(cell, 'INPUT'))
+        return next((n for n in CLKNAMES if n in ins), None)
+
+    kcache = {}
+
+    def kind(cell):
+        """(kind, inputs to follow, is a clock cell)"""
+        if cell in kcache:
+            return kcache[cell]
+        typ, f = func_of(cell)
+        ins, outs = sig(cell, 'INPUT'), sig(cell, 'OUTPUT')
+        seq = bool(re.match(r'^(seq|flop|latch)', typ)) or (
+            not re.match(r'^(seq|mem)', typ) and bool(re.search(r'icg|latch|flop|\bff\b|dff|reg', f, re.I)))
+        k = None
+        for g, user in args.rule:
+            if fnmatch.fnmatchcase(cell, g):
+                k = user
+                break
+        if k is None:
+            if re.match(r'^(ICG|CLOCKGATE|CLOCK_GATE|CLK_GATE|CLKGATE)', f):
+                k = 'icg'
+            elif re.match(r'^(CLK_)?MUX\d*(_INV)?$', f) or (f == '' and re.match(r'^(CK|CLK)?MUX\d', cell, re.I)):
+                k = 'mux'
+            elif re.match(r'^CLK_(AND|OR|NAND|NOR)\d*$', f):
+                k = 'gate'
+            elif seq:
+                k = 'seq'
+            elif re.match(r'^(CLK_|DCC_)?(BUF|INV|BUFFER|INVERTER|DELAY)(_AON)?$', f):
+                k = 'buf'
+            elif f == '' and not re.match(r'^(seq|mem|block|macro|phys)', typ) and len(ins) == 1 and len(outs) == 1:
+                k = 'buf'
+            else:
+                k = 'root'
+        follow = []
+        if k == 'icg':
+            cp = clock_pin(cell)
+            follow = [cp] if cp else []
+        elif k == 'mux':
+            follow = [p for p in ins if not re.match(r'^(S\d*|SEL\d*)$', p, re.I)]
+        elif k in ('buf', 'gate'):
+            follow = ins
+        if k in ('buf', 'icg', 'mux', 'gate') and (len(outs) != 1 or not follow or (k == 'buf' and len(follow) != 1)):
+            k, follow = 'root', []
+        clocky = k == 'icg' or (k in ('mux', 'gate') and re.match(r'^(ICG|CLK|CLOCK|DCC)', f) is not None) or (
+            k == 'buf' and re.match(r'^(CLK_|DCC_)', f) is not None)
+        kcache[cell] = (k, follow, clocky)
+        return kcache[cell]
+
+    # ---- the flat netlist: one instance per line, as write_verilog writes it
+    inputs = set()
+    inst_cell, inst_conn = {}, {}
+    driver = defaultdict(list)
+    nolib_on = defaultdict(list)
+    pinre = re.compile(r'\.([^\s(]+)\(\s*([^()]*?)\s*\)')
+    for line in open(args.netlist):
+        if line.startswith('input ') or line.startswith('inout '):
+            inputs.add(line.split(None, 1)[1].strip().rstrip(';').strip())
+            continue
+        m = re.match(r'^(\S+)\s+(.+?)\(\s*\.', line)
+        if not m:
+            continue
+        cell, inst = m.group(1), m.group(2).strip()
+        conn = dict(pinre.findall(line[m.end(2):]))
+        inst_cell[inst], inst_conn[inst] = cell, conn
+        for p, n in conn.items():
+            if cell not in pins:
+                nolib_on[n].append((inst, p))
+            elif pins[cell].get(p, ['', ''])[0] == 'OUTPUT':
+                driver[n].append((inst, p))
+    for n in inputs:
+        driver[n].append(('PORT', n))
+
+    def is_wire(n):
+        return n is not None and n != '' and not re.match(r"^\d*'", n)
+
+    memo, onstack, sources = {}, set(), set()
+
+    def trace(net, sink, spin, gate_mode):
+        """(frozenset of root ids, carries a clock)"""
+        if not is_wire(net):
+            return (frozenset(['const:' + net if net else 'unconnected:%s/%s' % (sink, spin)]), False)
+        if net in memo:
+            return memo[net]
+        if net in onstack:
+            return (frozenset(['loop:' + net]), False)
+        ds = sorted(driver.get(net, []))
+        ports = [d for d in ds if d[0] == 'PORT']
+        if not ds:
+            if nolib_on.get(net):
+                r = (frozenset(['nolib:%s/%s' % sorted(nolib_on[net])[0]]), False)
+            else:
+                r = (frozenset(['undriven:' + net]), False)
+        elif ports:
+            rid = 'port:' + ports[0][1]
+            r = (frozenset([rid]), rid in sources)
+        else:
+            inst, p = ds[0]
+            k, follow, clocky = kind(inst_cell[inst])
+            if k == 'gate' and gate_mode == 'root':
+                k = 'root'
+            if k in ('buf', 'icg', 'mux', 'gate'):
+                onstack.add(net)
+                ups = [trace(inst_conn[inst].get(fp), inst, fp, gate_mode) for fp in follow]
+                onstack.discard(net)
+                if k == 'gate' and any(u[1] for u in ups):
+                    ups = [u for u in ups if u[1]]
+                r = (frozenset().union(*[u[0] for u in ups]), clocky or any(u[1] for u in ups))
+            else:
+                rid = 'pin:%s/%s' % (inst, p)
+                r = (frozenset([rid]), rid in sources)
+        memo[net] = r
+        return r
+
+    flops = {}
+    for inst, cell in inst_cell.items():
+        if cell in pins and kind(cell)[0] == 'seq':
+            cp = clock_pin(cell)
+            if cp:
+                flops[inst] = cp
+
+    # pass 1 stops at the logic gates, to learn which roots are clock sources
+    saw_gate = False
+    for inst, cp in flops.items():
+        for rid in trace(inst_conn[inst].get(cp), inst, cp, 'root')[0]:
+            m = re.match(r'^pin:(.*)/[^/]+$', rid)
+            if m and inst_cell.get(m.group(1)) in pins and kind(inst_cell[m.group(1)])[0] == 'gate':
+                saw_gate = True
+            else:
+                sources.add(rid)
+    if saw_gate:
+        memo.clear()
+    mode = 'clock' if saw_gate else 'root'
+    mine = {inst: trace(inst_conn[inst].get(cp), inst, cp, mode)[0] for inst, cp in flops.items()}
+
+    # ---- compare
+    theirs, tpin = {}, {}
+    for line in open(args.tsv):
+        t = line.rstrip('\n').split('\t')
+        if t[0] == 'FLOP':
+            theirs[t[1]] = frozenset(t[5].split(' ')) if t[5] else frozenset()
+            tpin[t[1]] = t[3]
+    only_mine = sorted(set(mine) - set(theirs))
+    only_theirs = sorted(set(theirs) - set(mine))
+    diff = sorted(f for f in set(mine) & set(theirs) if mine[f] != theirs[f] or flops[f] != tpin[f])
+    count = defaultdict(int)
+    for rs in mine.values():
+        for r in rs:
+            count[r] += 1
+    print('flops: here %d, tsv %d; only here %d, only in tsv %d; clock pin or roots differ %d'
+          % (len(mine), len(theirs), len(only_mine), len(only_theirs), len(diff)))
+    print('roots here: %d; flops with more than one: %d' % (len(count), sum(1 for r in mine.values() if len(r) > 1)))
+    for r, c in sorted(count.items(), key=lambda x: (-x[1], x[0]))[:args.show]:
+        print('  %9d %s' % (c, r))
+    for f in diff[:args.show]:
+        print('DIFF %s  here %s %s  tsv %s %s' % (f, flops[f], ' '.join(sorted(mine[f])), tpin[f], ' '.join(sorted(theirs[f]))))
+    for f in only_mine[:args.show]:
+        print('ONLY_HERE %s (%s)' % (f, inst_cell[f]))
+    for f in only_theirs[:args.show]:
+        print('ONLY_TSV %s' % f)
+    return 0 if not (diff or only_mine or only_theirs) else 1
+
+
+if __name__ == '__main__':
+    sys.exit(main())
