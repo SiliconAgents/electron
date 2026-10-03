@@ -30,7 +30,8 @@ my $noOfArguments = @_;
 if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "Usage : hier_synthesis -rtl <filelist> -top <module> | -rtlil <design.il>\n";
   print "                       [-liberty <lib>] [-blackbox <cells.v>]\n";
-  print "                       [-out <dir>] [-jobs <n>] [-flatten_below <cells>]\n";
+  print "                       [-out <dir>] [-netlist <file>] [--read]\n";
+  print "                       [-jobs <n>] [-flatten_below <cells>]\n";
   print "                       [-slang_args <args>] [-latchmap <file>]\n";
   print "                       [--no_latchmap] [--no_verify] [--no_run]\n";
   print "\n";
@@ -46,6 +47,10 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "        -blackbox       standard cell stubs.  Omitted, they are built from the\n";
   print "                        LEFs in the config read_library_config was pointed at.\n";
   print "        -out            work directory, default hier_synthesis\n";
+  print "        -netlist        also write the whole hierarchy as ONE file here,\n";
+  print "                        gzipped when the name ends in .gz.  The per-module\n";
+  print "                        netlists stay in <out>/netlists either way.\n";
+  print "        --read          read that netlist back with read_verilog and elaborate\n";
   print "        -jobs           modules synthesised at once, default 8\n";
   print "        -flatten_below  keep a module as a hierarchy boundary only when its\n";
   print "                        subtree is at least this many cells, default 2000.\n";
@@ -62,6 +67,8 @@ my $rtlil;
 my $rtlList;
 my $topModule;
 my $slangArgs = "";
+my $netlistOut;
+my $readBack = 0;
 my $outDir = "hier_synthesis";
 my $blackbox;
 my $latchmap;
@@ -78,6 +85,8 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-top"){$topModule = $_[$i+1];}
   if($_[$i] eq "-top_module"){$topModule = $_[$i+1];}
   if($_[$i] eq "-slang_args"){$slangArgs = $_[$i+1];}
+  if($_[$i] eq "-netlist"){$netlistOut = $_[$i+1];}
+  if($_[$i] eq "--read"){$readBack = 1;}
   if($_[$i] eq "-out"){$outDir = $_[$i+1];}
   if($_[$i] eq "-blackbox"){$blackbox = $_[$i+1];}
   if($_[$i] eq "-latchmap"){$latchmap = $_[$i+1];}
@@ -341,6 +350,42 @@ unless ( -d $netDir ) {
 
 &dbfHierSynthReport($synthLog, $netDir);
 
+#<!-- One file, because nothing in electron reads a DIRECTORY of netlists.
+#     Without this the command ends with N files and the flow stops: read_verilog
+#     wants a file, and hier_place wants what read_verilog loaded. -->
+my $joined = "$outDir/" . "netlist.v";
+unless ( &dbfHierSynthJoin($levelDir, $netDir, $joined) ) {
+  return;
+}
+
+if ( defined $netlistOut && $netlistOut ne "" ) {
+  my $part = "$netlistOut.part";
+  my $rc = ( $netlistOut =~ /\.gz$/ ) ? system("gzip -c '$joined' > '$part'")
+                                      : system("cp '$joined' '$part'");
+  if ( $rc != 0 || ! -s $part || ! rename($part, $netlistOut) ) {
+    print "ERROR-PAR-HR_SYN : 048 : could not write $netlistOut\n";
+    unlink($part);
+    return;
+  }
+  print "INFO-PAR-HR_SYN : 049 : netlist written to $netlistOut\n";
+}
+
+if ( $readBack == 1 ) {
+  #<!-- The top is whatever the deepest level held.  With -rtlil the caller
+  #     never said, so it is taken from what the synthesis reported rather
+  #     than guessed from the file names. -->
+  my $top = $topModule;
+  $top = &dbfHierSynthTop($synthLog) unless ( defined $top && $top ne "" );
+  unless ( defined $top && $top ne "" ) {
+    print "ERROR-PAR-HR_SYN : 050 : cannot tell which module is the top, so --read is skipped\n";
+    return;
+  }
+  print "INFO-PAR-HR_SYN : 051 : reading $joined back in, top $top\n";
+  &read_verilog("-v", $joined);
+  $TOP_MODULE = $top;
+  &elaborate();
+}
+
 return;
 
 }# sub hier_synthesis
@@ -392,6 +437,78 @@ if ( $unmapped ne "" ) {
 return;
 
 }# sub dbfHierSynthReport
+#------------------------------------------------------------------------------------------#
+#<!-- Every module netlist in one file, deepest level first.
+#
+#     Verilog does not care about definition order, but a reader does, and a
+#     netlist whose leaves come first reads the way the design was built.  The
+#     order comes from the level directories rather than from sorting file
+#     names, which would interleave the hierarchy arbitrarily.
+#
+#     Standard cell stubs are NOT included: write_verilog leaves blackboxes
+#     out, and the cells come from the LEF on the electron side. -->
+sub dbfHierSynthJoin {
+my ($levelDir, $netDir, $joined) = @_;
+
+my @levels = sort { $a <=> $b }
+             map { /lvl(\d+)$/ ? $1 : () } glob("$levelDir/lvl*");
+unless ( @levels ) {
+  print "ERROR-PAR-HR_SYN : 045 : no level directories under $levelDir\n";
+  return 0;
+}
+
+unless ( open(HSYN_OUT, ">$joined") ) {
+  print "ERROR-PAR-HR_SYN : 046 : cannot write $joined : $!\n";
+  return 0;
+}
+print HSYN_OUT "// Hierarchical netlist, written by hier_synthesis.\n";
+print HSYN_OUT "// One module per distinct structure, deepest level first.\n";
+print HSYN_OUT "// Standard cells are not defined here; they come from the LEF.\n\n";
+
+my $count = 0;
+foreach my $lvl ( @levels ) {
+  my $man = "$levelDir/lvl$lvl/MODULES.tsv";
+  next unless ( -f $man );
+  next unless ( open(HSYN_MAN, "<$man") );
+  while ( my $line = <HSYN_MAN> ) {
+    next if ( $line =~ /^#/ );
+    chomp($line);
+    my ($name) = split(/\t/, $line);
+    next unless ( defined $name && $name ne "" );
+    my $v = "$netDir/$name.v";
+    next unless ( -f $v );
+    next unless ( open(HSYN_V, "<$v") );
+    while ( my $l = <HSYN_V> ) { print HSYN_OUT $l; }
+    close(HSYN_V);
+    print HSYN_OUT "\n";
+    $count++;
+  }
+  close(HSYN_MAN);
+}
+close(HSYN_OUT);
+
+if ( $count == 0 ) {
+  print "ERROR-PAR-HR_SYN : 047 : no module netlists found under $netDir\n";
+  return 0;
+}
+print "INFO-PAR-HR_SYN : 052 : joined $count module(s) into $joined\n";
+return 1;
+
+}# sub dbfHierSynthJoin
+#------------------------------------------------------------------------------------------#
+#<!-- The top module, from what the synthesis reported.  Needed by --read when
+#     the caller started from -rtlil and never named one. -->
+sub dbfHierSynthTop {
+my ($logFile) = @_;
+return undef unless ( -f $logFile && open(HSYN_T, "<$logFile") );
+my $top;
+while ( my $line = <HSYN_T> ) {
+  if ( $line =~ /yosys_bottom_up: top is (\S+?);/ ) { $top = $1; }
+}
+close(HSYN_T);
+return $top;
+
+}# sub dbfHierSynthTop
 #------------------------------------------------------------------------------------------#
 
 1;
