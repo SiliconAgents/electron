@@ -1,0 +1,709 @@
+#****f* /trace_clock_roots
+#  trace_clock_roots
+# FUNCTION
+#  Trace every flip-flop and latch clock pin backwards to its root, and keep
+#  the clock tree that lies between.
+#
+#  The walk passes THROUGH
+#    buffers, inverters and delay cells (clock or ordinary)  -- the one input
+#    integrated clock gates                                  -- the clock pin only, never E or TE
+#    muxes                                                   -- every data input, never the select,
+#                                                               so a flop can have several roots
+#    clock AND / OR / NAND / NOR gates                       -- the input(s) that carry a clock,
+#                                                               see below
+#  and STOPS at a top level input port or at the output of any other cell: a
+#  divider, a PLL, a flop used as a clock, an ordinary AND gate.  That pin is
+#  the root.
+#
+#  Which cells are which comes from the function string a cell function map
+#  (read_cell_func_map, or the cell-func-map of read_config_file) or a liberty
+#  read put on the cell, through the table in dbfClockRootsRuleOf.  A cell with
+#  no function at all that is combinational with exactly one signal input and
+#  one signal output can only be a buffer, an inverter or a delay, and is
+#  passed.  -rule overrides both for a cell name glob.
+#
+#  A clock gate built from logic has no pin that says "clock".  An input of
+#  one counts as a clock when the trace above it passes a clock cell (clock
+#  buffer, ICG, clock mux, ...) or ends at a root that also clocks flops with
+#  no such gate in the way; that second set comes from a first pass that stops
+#  at the gates.  If neither input qualifies, both are followed and the gate is
+#  reported.
+#
+#  The result stays in %CLOCK_ROOTS_ALREADY for other commands:
+#    {ROOT}{$rid} = { KIND => port|pin|nolib|const|undriven|unconnected|loop,
+#                     INST, CELL, PIN, NET, FLOPS => number of flops }
+#    {NODE}{$net} = { INST, CELL, IN => [input pins followed], OUT => pin,
+#                     UP => [the nets on those pins] }     # pass-through driver
+#    {NET}{$net}  = [ root ids ]                           # every net in the cones
+#    {FLOP}{$inst}= { CELL, PIN, NET, ROOTS => [ root ids ] }
+#  A root id is "port:<name>", "pin:<inst>/<pin>", "nolib:<inst>/<pin>"
+#  (a cell with no library data, so not traced through), "const:<value>",
+#  "undriven:<net>", "unconnected:<inst>/<pin>" or "loop:<net>".
+#  dbfClockRootsGetFlopPaths gives the chains of a flop.
+#
+#  Flat designs only: run it after elaborate or hier2flat.
+#****
+sub trace_clock_roots {
+
+my $noOfArguments = @_;
+#----------------- Defaults --------------------#
+my $flopGlob;
+my $reportFile;
+my $tsvFile;
+my $maxPaths = 16;
+my $verbose = 0;
+my @userRules = ();
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : trace_clock_roots [-flops <inst glob>]\n";
+  print "                          [-report <file>]      readable: roots, the tree under each, every flop's chain\n";
+  print "                          [-tsv <file>]         ROOT / NODE / FLOP records for a script\n";
+  print "                          [-rule <cell glob> <buf|icg|mux|gate|root>]   repeatable, wins over the library\n";
+  print "                          [-max_paths <n>]      chains written per flop, default 16\n";
+  print "                          [--verbose]\n";
+  print "        Traces each flop and latch clock pin back through buffers, inverters,\n";
+  print "        ICG clock pins and mux data inputs to a top input port or another cell's output.\n";
+  print "        Flat designs only: run after elaborate or hier2flat.\n";
+  return;
+}
+
+for ( my $i = 0; $i < $noOfArguments; $i++ ) {
+     if ( $_[$i] eq "-flops" )     { $flopGlob = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "-report" )    { $reportFile = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "-tsv" )       { $tsvFile = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "-max_paths" ) { $maxPaths = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "-rule" )      { push(@userRules, [$_[$i+1], $_[$i+2]]); $i += 2; }
+  elsif ( $_[$i] eq "--verbose" )  { $verbose = 1; }
+  else { print "WARN-PAR-TR_CLK_RT : 001 : invalid option $_[$i]\n"; }
+}
+
+foreach my $r ( @userRules ) {
+  my ($glob, $rule) = @$r;
+  unless ( defined $rule && $rule =~ m/^(buf|icg|mux|gate|root)$/ ) {
+    print "ERR-PAR-TR_CLK_RT : 002 : -rule $glob needs one of buf icg mux gate root\n";
+    return;
+  }
+}
+unless ( $maxPaths =~ m/^\d+$/ && $maxPaths > 0 ) {
+  print "ERR-PAR-TR_CLK_RT : 003 : -max_paths takes a positive number\n";
+  return;
+}
+unless ( keys %COMP_ALREADY ) {
+  print "ERR-PAR-TR_CLK_RT : 004 : no flat netlist, run elaborate or hier2flat first\n";
+  return;
+}
+
+my $t0 = new Benchmark;
+
+#<!-- The trace state is package level so the recursive subs below can share
+#     it.  Cleared here, so a second run never sees the first one's memo. -->
+%CLKRT_RULE = ();
+%CLKRT_NETMEMO = ();
+%CLKRT_ONSTACK = ();
+%CLKRT_DRIVER = ();
+%CLKRT_LOOPS = ();
+%CLKRT_GATEWARN = ();
+%CLKRT_SOURCES = ();
+$CLKRT_MULTIDRV = 0;
+@CLKRT_USERRULES = ();
+foreach my $r ( @userRules ) {
+  my ($glob, $rule) = @$r;
+  my $re = quotemeta($glob);
+  $re =~ s/\\\*/.*/g;
+  $re =~ s/\\\?/./g;
+  push(@CLKRT_USERRULES, [qr/^$re$/, $rule]);
+}
+
+#--------------------------------------------------------------------------#
+# the flops: sequential cells that are not clock gates, and their clock pin
+#--------------------------------------------------------------------------#
+my $flopRe;
+if ( defined $flopGlob ) {
+  my $re = quotemeta($flopGlob);
+  $re =~ s/\\\*/.*/g;
+  $re =~ s/\\\?/./g;
+  $flopRe = qr/^$re$/;
+}
+my %flopPin = ();
+my @noClock = ();
+my $seqCells = 0;
+my %noLib = ();
+foreach my $inst ( keys %COMP_ALREADY ) {
+  next unless ( exists $CADB{$inst} );
+  my $cell = $CADB{$inst}->dbCadbGetCellref;
+  unless ( exists $PLDB{$cell} ) { $noLib{$cell}++; next; }
+  my $rule = &dbfClockRootsRuleOf($cell);
+  next unless ( $rule->{RULE} eq "seq" );
+  $seqCells++;
+  next if ( defined $flopRe && $inst !~ $flopRe );
+  if ( defined $rule->{CLK} ) {
+    $flopPin{$inst} = $rule->{CLK};
+  }
+  else {
+    push(@noClock, $inst);
+  }
+}
+if ( $seqCells == 0 ) {
+  print "ERR-PAR-TR_CLK_RT : 005 : no instance is of a sequential cell; the library has no cell types --\n";
+  print "ERR-PAR-TR_CLK_RT : 006 : read a liberty or a cell function map (read_config_file does) first\n";
+  return;
+}
+if ( keys %noLib ) {
+  my @c = sort { $noLib{$b} <=> $noLib{$a} || $a cmp $b } keys %noLib;
+  my $n = 0; $n += $noLib{$_} foreach ( @c );
+  print "WARN-PAR-TR_CLK_RT : 022 : $n instance(s) of ", scalar(@c), " cell(s) have no library data: they are neither traced\n";
+  print "WARN-PAR-TR_CLK_RT : 023 : through nor counted as flops, and a net they drive ends at a nolib: root.  Read their LEF.  Most used: ",
+        join(" ", map { "$_($noLib{$_})" } @c[0..($#c > 4 ? 4 : $#c)]), "\n";
+}
+if ( @noClock ) {
+  my @s = sort @noClock;
+  print "WARN-PAR-TR_CLK_RT : 007 : ", scalar(@s), " sequential instance(s) have no recognisable clock pin and are skipped, first few: ",
+        join(" ", map { "$_(".$CADB{$_}->dbCadbGetCellref.")" } @s[0..($#s > 4 ? 4 : $#s)]), "\n";
+}
+print "INFO-PAR-TR_CLK_RT : 008 : tracing ", scalar(keys %flopPin), " flop and latch clock pins\n";
+
+#--------------------------------------------------------------------------#
+# pass 1, logic clock gates as roots: which roots are clock sources
+#--------------------------------------------------------------------------#
+$CLKRT_GATEMODE = "root";
+my $sawGate = 0;
+foreach my $inst ( keys %flopPin ) {
+  my $net = $COMP_ALREADY{$inst}{$flopPin{$inst}};
+  my $res = &dbfClockRootsTraceNet($net, $inst, $flopPin{$inst});
+  foreach my $rid ( @{$res->{ROOTS}} ) {
+    if ( $rid =~ m/^pin:(.*)\/[^\/]+$/ && exists $CADB{$1} &&
+         &dbfClockRootsRuleOf($CADB{$1}->dbCadbGetCellref)->{RULE} eq "gate" ) {
+      $sawGate = 1;
+      next;
+    }
+    $CLKRT_SOURCES{$rid} = 1;
+  }
+}
+
+#--------------------------------------------------------------------------#
+# pass 2, through the logic clock gates, only if there were any
+#--------------------------------------------------------------------------#
+if ( $sawGate ) {
+  %CLKRT_NETMEMO = ();
+  %CLKRT_ONSTACK = ();
+  %CLKRT_LOOPS = ();
+  $CLKRT_GATEMODE = "clock";
+  foreach my $inst ( keys %flopPin ) {
+    &dbfClockRootsTraceNet($COMP_ALREADY{$inst}{$flopPin{$inst}}, $inst, $flopPin{$inst});
+  }
+}
+
+#--------------------------------------------------------------------------#
+# into %CLOCK_ROOTS_ALREADY
+#--------------------------------------------------------------------------#
+%CLOCK_ROOTS_ALREADY = ( ROOT => {}, NODE => {}, NET => {}, FLOP => {} );
+my $R = \%CLOCK_ROOTS_ALREADY;
+foreach my $net ( keys %CLKRT_NETMEMO ) {
+  my $m = $CLKRT_NETMEMO{$net};
+  $R->{NET}{$net} = $m->{ROOTS};
+  if ( exists $m->{NODE} ) {
+    $R->{NODE}{$net} = $m->{NODE};
+  }
+}
+foreach my $inst ( keys %flopPin ) {
+  my $pin = $flopPin{$inst};
+  my $net = $COMP_ALREADY{$inst}{$pin};
+  my $res = &dbfClockRootsTraceNet($net, $inst, $pin);
+  my $netKey = &dbfClockRootsIsWire($net) ? $net : "";
+  $R->{FLOP}{$inst} = { CELL => $CADB{$inst}->dbCadbGetCellref, PIN => $pin, NET => $netKey,
+                        ROOTS => $res->{ROOTS} };
+  foreach my $rid ( @{$res->{ROOTS}} ) {
+    $R->{ROOT}{$rid} = &dbfClockRootsRootFromId($rid) unless ( exists $R->{ROOT}{$rid} );
+    $R->{ROOT}{$rid}{FLOPS}++;
+  }
+}
+
+my $t1 = new Benchmark;
+
+#--------------------------------------------------------------------------#
+# summary
+#--------------------------------------------------------------------------#
+my @roots = sort { $R->{ROOT}{$b}{FLOPS} <=> $R->{ROOT}{$a}{FLOPS} || $a cmp $b } keys %{$R->{ROOT}};
+my %byKind = ();
+my $multi = 0;
+foreach my $inst ( keys %{$R->{FLOP}} ) {
+  $multi++ if ( @{$R->{FLOP}{$inst}{ROOTS}} > 1 );
+}
+foreach my $rid ( @roots ) { $byKind{$R->{ROOT}{$rid}{KIND}}++; }
+print "INFO-PAR-TR_CLK_RT : 009 : ", scalar(keys %{$R->{FLOP}}), " flop(s), ", scalar(@roots), " root(s) (",
+      join(", ", map { "$byKind{$_} $_" } sort keys %byKind), "), ",
+      scalar(keys %{$R->{NODE}}), " pass-through cell(s) in the clock cones\n";
+if ( $multi > 0 ) {
+  print "INFO-PAR-TR_CLK_RT : 010 : $multi flop(s) have more than one root (through a mux or a gate)\n";
+}
+foreach my $rid ( @roots[0..($#roots > 19 ? 19 : $#roots)] ) {
+  my $r = $R->{ROOT}{$rid};
+  my $what = $r->{KIND} eq "pin" ? "  ($r->{CELL})" : "";
+  printf("INFO-PAR-TR_CLK_RT : 011 : %9d flops  %s%s\n", $r->{FLOPS}, $rid, $what);
+}
+if ( @roots > 20 ) {
+  print "INFO-PAR-TR_CLK_RT : 012 : ... and ", scalar(@roots) - 20, " more root(s), see -report\n";
+}
+if ( keys %CLKRT_LOOPS ) {
+  my @l = sort keys %CLKRT_LOOPS;
+  print "WARN-PAR-TR_CLK_RT : 013 : ", scalar(@l), " combinational loop(s) in the clock cones, cut at net(s): ",
+        join(" ", @l[0..($#l > 4 ? 4 : $#l)]), "\n";
+}
+if ( keys %CLKRT_GATEWARN ) {
+  my @g = sort keys %CLKRT_GATEWARN;
+  print "INFO-PAR-TR_CLK_RT : 014 : ", scalar(@g), " clock gate(s) where no input is known to carry a clock, so every input was followed\n";
+  print "INFO-PAR-TR_CLK_RT : 024 : -- right for an OR of two clocks, wrong for an enable; check: ",
+        join(" ", @g[0..($#g > 4 ? 4 : $#g)]), "\n";
+}
+if ( $CLKRT_MULTIDRV > 0 ) {
+  print "WARN-PAR-TR_CLK_RT : 015 : $CLKRT_MULTIDRV net(s) in the clock cones have more than one driver, the first by name was used\n";
+}
+if ( $verbose ) {
+  my %ruleCnt = ();
+  foreach my $net ( keys %{$R->{NODE}} ) {
+    $ruleCnt{&dbfClockRootsRuleOf($R->{NODE}{$net}{CELL})->{RULE}}++;
+  }
+  print "INFO-PAR-TR_CLK_RT : 016 : pass-through cells by rule: ",
+        join(", ", map { "$ruleCnt{$_} $_" } sort keys %ruleCnt), "\n";
+}
+
+if ( defined $reportFile ) { &dbfClockRootsWriteReport($reportFile, $maxPaths); }
+if ( defined $tsvFile )    { &dbfClockRootsWriteTsv($tsvFile); }
+
+my $t2 = new Benchmark;
+print "INFO-PAR-TR_CLK_RT : 017 : trace took ", timestr(timediff($t1, $t0)),
+      ", writing took ", timestr(timediff($t2, $t1)), "\n";
+}# sub trace_clock_roots
+
+
+#<!-- A net name that is a real wire, not a constant or a missing connection. -->
+sub dbfClockRootsIsWire {
+my ($net) = @_;
+return(0) unless ( defined $net && $net ne "" );
+return(0) if ( $net eq "SHIVA_PIN_UNCONNECTED" );
+return(0) if ( $net =~ m/^\d*'[bBhHdDoO]/ );
+return(1);
+}# sub dbfClockRootsIsWire
+
+#<!-- The ROOT record for a root id.  An instance name may hold "/" after a
+#     flatten, so a pin id splits at the last one. -->
+sub dbfClockRootsRootFromId {
+my ($rid) = @_;
+my ($kind, $rest) = split(/:/, $rid, 2);
+my %r = ( KIND => $kind, FLOPS => 0 );
+if ( $kind eq "port" ) {
+  $r{PIN} = $rest;
+  my @conn = $PORTS_ALREADY{$TOP_MODULE}{$rest}->dbPortGetConn;
+  $r{NET} = $conn[0];
+}
+elsif ( $kind eq "pin" || $kind eq "unconnected" || $kind eq "nolib" ) {
+  my ($inst, $pin) = $rest =~ m/^(.*)\/([^\/]+)$/;
+  @r{qw(INST PIN)} = ($inst, $pin);
+  $r{CELL} = $CADB{$inst}->dbCadbGetCellref if ( exists $CADB{$inst} );
+  $r{NET} = $COMP_ALREADY{$inst}{$pin} if ( $kind ne "unconnected" );
+}
+else {
+  $r{NET} = $rest;
+}
+return(\%r);
+}# sub dbfClockRootsRootFromId
+
+
+#<!-- What the trace does with a cell, memoised per cell:
+#       RULE  seq  -- a flop or latch: a clock sink, and a root if it drives a clock
+#             buf  -- pass the single signal input
+#             icg  -- pass the clock pin only
+#             mux  -- pass every data input, never the select
+#             gate -- logic clock gate: pass the input(s) carrying a clock
+#             root -- anything else
+#       IN    the inputs a pass-through cell is traced through
+#       CLK   the clock pin of a seq or icg cell
+#       OUT   the single signal output of a pass-through cell
+#
+#     This table is the policy; change it here, not in the walk. -->
+sub dbfClockRootsRuleOf {
+my ($cell) = @_;
+return($CLKRT_RULE{$cell}) if ( exists $CLKRT_RULE{$cell} );
+
+my $mdb = $PLDB{$cell};
+my (@in, @out);
+my @clockTyped = ();
+foreach my $pin ( sort $mdb->dbMdbGetPins ) {    # sorted: the pin list comes out of a hash
+  my $type = $mdb->dbMdbGetPinType($pin);
+  next if ( defined $type && ($type == 1 || $type == 2) );
+  my $dir = $mdb->dbMdbGetPinDir($pin);
+  if    ( $dir eq "0" ) { push(@in, $pin); push(@clockTyped, $pin) if ( defined $type && $type == 3 ); }
+  elsif ( $dir eq "1" ) { push(@out, $pin); }
+}
+my $func = lc($mdb->dbMdbGetFunction // "");
+$func = "" if ( $func eq "und" );    # the constructor's "nothing said"
+my $seq = $mdb->dbMdbIsSequential;
+
+my $rule;
+foreach my $u ( @CLKRT_USERRULES ) {
+  if ( $cell =~ $u->[0] ) { $rule = $u->[1]; last; }
+}
+unless ( defined $rule ) {
+     if ( $func =~ m/^(icg|clockgate|clock_gate|clk_gate|clkgate)/ )      { $rule = "icg"; }
+  elsif ( $func =~ m/^(clk_)?mux\d*(_inv)?$/ )                           { $rule = "mux"; }
+  elsif ( $func eq "" && $cell =~ m/^(CK|CLK)?MUX\d/i )                 { $rule = "mux"; }
+  elsif ( $func =~ m/^clk_(and|or|nand|nor)\d*$/ )                      { $rule = "gate"; }
+  elsif ( $seq )                                                         { $rule = "seq"; }
+  elsif ( $func =~ m/^(clk_|dcc_)?(buf|inv|buffer|inverter|delay)(_aon)?$/ ) { $rule = "buf"; }
+  elsif ( $func eq "" && $mdb->dbMdbGetType == 0 && @in == 1 && @out == 1 )  { $rule = "buf"; }
+  else                                                                   { $rule = "root"; }
+}
+
+my %r = ( RULE => $rule, IN => [], OUT => (@out == 1 ? $out[0] : undef) );
+if ( $rule eq "seq" || $rule eq "icg" ) {
+  $r{CLK} = &dbfClockRootsClockPin(\@in, \@clockTyped);
+  if ( $rule eq "icg" ) { $r{IN} = defined $r{CLK} ? [ $r{CLK} ] : []; }
+}
+elsif ( $rule eq "mux" ) {
+  $r{IN} = [ grep { $_ !~ m/^(S\d*|SEL\d*)$/i } @in ];
+}
+elsif ( $rule eq "buf" || $rule eq "gate" ) {
+  $r{IN} = [ @in ];
+}
+#<!-- a pass-through cell with no single output, or nothing to pass, is a root -->
+if ( $rule =~ m/^(buf|icg|mux|gate)$/ && ( ! defined $r{OUT} || @{$r{IN}} == 0 ||
+                                           ($rule eq "buf" && @{$r{IN}} != 1) ) ) {
+  $r{RULE} = "root";
+}
+$r{CLOCKY} = ( $r{RULE} =~ m/^(icg|mux|gate)$/ && $func =~ m/^(icg|clk|clock|dcc)/ ) ||
+             ( $r{RULE} eq "buf" && $func =~ m/^(clk_|dcc_)/ ) || $r{RULE} eq "icg" ? 1 : 0;
+$CLKRT_RULE{$cell} = \%r;
+return(\%r);
+}# sub dbfClockRootsRuleOf
+
+
+#<!-- The clock input of a flop, latch or ICG.  A liberty read marks it
+#     (pin type 3) and that wins.  Otherwise the first of these names the cell
+#     has: flop clocks before latch enables, so an enable flop's E is not taken
+#     for its clock. -->
+sub dbfClockRootsClockPin {
+my ($in, $clockTyped) = @_;
+return($clockTyped->[0]) if ( @$clockTyped == 1 );
+my %have = map { $_ => 1 } @$in;
+foreach my $name ( qw(CP CPN CK CKN CLK CLKN CLOCK C G GN GB E EN) ) {
+  return($name) if ( exists $have{$name} );
+}
+return($clockTyped->[0]) if ( @$clockTyped > 1 );
+return(undef);
+}# sub dbfClockRootsClockPin
+
+
+#<!-- The driver of a net: ("inst", $inst, $pin), ("port", $port), or
+#     ("nolib", $inst, $pin) when nothing known drives it but an instance whose
+#     cell has no library data -- which pin of that drives is unknowable -- is
+#     on it; () when nothing at all.
+#     %NETS_ALREADY keeps one pin per instance, so an instance with an input
+#     and an output on the same net (a divider's QN -> D) may be stored under
+#     the input; its outputs are checked as well. -->
+sub dbfClockRootsDriver {
+my ($net) = @_;
+return(@{$CLKRT_DRIVER{$net}}) if ( exists $CLKRT_DRIVER{$net} );
+my @drv = ();
+my @noLib = ();
+if ( exists $NETS_ALREADY{$net} ) {
+  foreach my $m ( sort keys %{$NETS_ALREADY{$net}} ) {
+    if ( exists $COMP_ALREADY{$m} && exists $CADB{$m} ) {
+      my $cell = $CADB{$m}->dbCadbGetCellref;
+      unless ( exists $PLDB{$cell} ) { push(@noLib, ["nolib", $m, $NETS_ALREADY{$net}{$m}]); next; }
+      my $pin = $NETS_ALREADY{$net}{$m};
+      if ( $PLDB{$cell}->dbMdbGetPinDir($pin) eq "1" ) {
+        push(@drv, ["inst", $m, $pin]);
+      }
+    }
+    elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$m} ) {
+      my $dir = $PORTS_ALREADY{$TOP_MODULE}{$m}->dbPortGetDir;
+      if ( $dir eq "input" || $dir eq "inout" ) {
+        push(@drv, ["port", $m]);
+      }
+    }
+  }
+}
+unless ( @drv ) {
+  foreach my $m ( sort keys %{$NETS_ALREADY{$net}} ) {
+    next unless ( exists $COMP_ALREADY{$m} && exists $CADB{$m} );
+    my $cell = $CADB{$m}->dbCadbGetCellref;
+    next unless ( exists $PLDB{$cell} );
+    foreach my $p ( sort keys %{$COMP_ALREADY{$m}} ) {
+      if ( $COMP_ALREADY{$m}{$p} eq $net && $PLDB{$cell}->dbMdbGetPinDir($p) eq "1" ) {
+        push(@drv, ["inst", $m, $p]);
+        last;
+      }
+    }
+  }
+}
+$CLKRT_MULTIDRV++ if ( @drv > 1 );
+@drv = ( $noLib[0] ) if ( @drv == 0 && @noLib );
+my @d = @drv ? @{$drv[0]} : ();
+$CLKRT_DRIVER{$net} = \@d;
+return(@d);
+}# sub dbfClockRootsDriver
+
+
+#<!-- Roots of a net, memoised: { ROOTS => [ids], CLOCKY => 0|1,
+#     NODE => {...} where the driver is a pass-through cell }.  CLOCKY says the cone above passes a clock cell or reaches a
+#     known clock source; it decides which inputs of a logic gate are clocks.
+#     $sinkInst/$sinkPin name the pin asking, for a constant or a missing
+#     connection, which have no net to key on. -->
+sub dbfClockRootsTraceNet {
+my ($net, $sinkInst, $sinkPin) = @_;
+
+unless ( &dbfClockRootsIsWire($net) ) {
+  my $id = ( defined $net && $net =~ m/^\d*'/ ) ? "const:$net" : "unconnected:$sinkInst/$sinkPin";
+  return({ ROOTS => [ $id ], CLOCKY => 0 });
+}
+return($CLKRT_NETMEMO{$net}) if ( exists $CLKRT_NETMEMO{$net} );
+#<!-- A loop is cut where it closes.  What the nets on it get memoised depends
+#     on where the walk entered it; loops in a clock cone are rare and are
+#     reported, so that is accepted rather than paid for on every net. -->
+if ( $CLKRT_ONSTACK{$net} ) {
+  $CLKRT_LOOPS{$net} = 1;
+  return({ ROOTS => [ "loop:$net" ], CLOCKY => 0 });
+}
+
+my @drv = &dbfClockRootsDriver($net);
+my $res;
+if ( @drv == 0 ) {
+  $res = { ROOTS => [ "undriven:$net" ], CLOCKY => 0 };
+}
+elsif ( $drv[0] eq "nolib" ) {
+  $res = { ROOTS => [ "nolib:$drv[1]/$drv[2]" ], CLOCKY => 0 };
+}
+elsif ( $drv[0] eq "port" ) {
+  my $id = "port:$drv[1]";
+  $res = { ROOTS => [ $id ], CLOCKY => (exists $CLKRT_SOURCES{$id} ? 1 : 0) };
+}
+else {
+  my (undef, $inst, $pin) = @drv;
+  my $cell = $CADB{$inst}->dbCadbGetCellref;
+  my $rule = &dbfClockRootsRuleOf($cell);
+  my $r = $rule->{RULE};
+  if ( $r eq "gate" && $CLKRT_GATEMODE eq "root" ) { $r = "root"; }
+  if ( $r =~ m/^(buf|icg|mux|gate)$/ && $pin eq $rule->{OUT} ) {
+    $CLKRT_ONSTACK{$net} = 1;
+    my @follow = ();
+    foreach my $in ( @{$rule->{IN}} ) {
+      my $up = $COMP_ALREADY{$inst}{$in};
+      push(@follow, [$in, $up, &dbfClockRootsTraceNet($up, $inst, $in)]);
+    }
+    if ( $r eq "gate" ) {
+      my @clk = grep { $_->[2]{CLOCKY} } @follow;
+      if ( @clk ) { @follow = @clk; }
+      else        { $CLKRT_GATEWARN{$inst} = 1; }
+    }
+    delete $CLKRT_ONSTACK{$net};
+    my %seen = ();
+    my @roots = grep { ! $seen{$_}++ } map { @{$_->[2]{ROOTS}} } @follow;
+    my $clocky = $rule->{CLOCKY};
+    foreach my $f ( @follow ) { $clocky = 1 if ( $f->[2]{CLOCKY} ); }
+    $res = { ROOTS => [ sort @roots ], CLOCKY => $clocky,
+             NODE => { INST => $inst, CELL => $cell, OUT => $pin,
+                       IN => [ map { $_->[0] } @follow ], UP => [ map { $_->[1] } @follow ] } };
+  }
+  else {
+    my $id = "pin:$inst/$pin";
+    $res = { ROOTS => [ $id ], CLOCKY => (exists $CLKRT_SOURCES{$id} ? 1 : 0) };
+  }
+}
+$CLKRT_NETMEMO{$net} = $res;
+return($res);
+}# sub dbfClockRootsTraceNet
+
+
+#<!-- Every chain from a root down to a flop's clock pin, at most $max of them.
+#     $memo, optional, is shared between calls on one result to save rework.
+#     A chain is a list of steps, root first:
+#       [ "root", $rootId ] then [ $inst, $cell, $inPin, $outPin, $net ] ... -->
+sub dbfClockRootsGetFlopPaths {
+my ($flop, $max, $memo) = @_;
+$max = 16 unless ( defined $max && $max > 0 );
+my $R = \%CLOCK_ROOTS_ALREADY;
+return() unless ( exists $R->{FLOP}{$flop} );
+my $f = $R->{FLOP}{$flop};
+if ( $f->{NET} eq "" ) {
+  return( [ [ "root", $f->{ROOTS}[0] ] ] );
+}
+$memo = {} unless ( defined $memo );
+return( @{&dbfClockRootsNetPaths($f->{NET}, $max, $memo, {})} );
+}# sub dbfClockRootsGetFlopPaths
+
+sub dbfClockRootsNetPaths {
+my ($net, $max, $memo, $onPath) = @_;
+return($memo->{$net}) if ( exists $memo->{$net} );
+my $R = \%CLOCK_ROOTS_ALREADY;
+my @paths = ();
+if ( exists $R->{NODE}{$net} && ! $onPath->{$net} ) {
+  my $n = $R->{NODE}{$net};
+  $onPath->{$net} = 1;
+  for ( my $i = 0; $i < @{$n->{UP}}; $i++ ) {
+    my $up = $n->{UP}[$i];
+    my $step = [ $n->{INST}, $n->{CELL}, $n->{IN}[$i], $n->{OUT}, $net ];
+    my @above;
+    if ( &dbfClockRootsIsWire($up) ) {
+      @above = @{&dbfClockRootsNetPaths($up, $max, $memo, $onPath)};
+    }
+    else {
+      my $id = $up =~ m/^\d*'/ ? "const:$up" : "unconnected:$n->{INST}/$n->{IN}[$i]";
+      @above = ( [ [ "root", $id ] ] );
+    }
+    foreach my $a ( @above ) {
+      last if ( @paths >= $max );
+      push(@paths, [ @$a, $step ]);
+    }
+  }
+  delete $onPath->{$net};
+}
+else {
+  my @ids = exists $R->{NET}{$net} ? @{$R->{NET}{$net}} : ( "loop:$net" );
+  @ids = ( "loop:$net" ) if ( $onPath->{$net} );
+  foreach my $id ( @ids ) { push(@paths, [ [ "root", $id ] ]); }
+}
+$memo->{$net} = \@paths;
+return(\@paths);
+}# sub dbfClockRootsNetPaths
+
+
+#<!-- Readable report: the roots, the tree under each with the flop count of
+#     every branch, then every flop's chain(s). -->
+sub dbfClockRootsWriteReport {
+my ($file, $maxPaths) = @_;
+my $R = \%CLOCK_ROOTS_ALREADY;
+unless ( open(CLKRT_RPT, ">$file") ) {
+  print "ERR-PAR-TR_CLK_RT : 018 : cannot write $file\n";
+  return;
+}
+
+#<!-- forward view of the cones: the pass-through cells each net feeds, and
+#     the flops clocked straight off it -->
+my %kids = ();
+my %flopsOn = ();
+foreach my $net ( keys %{$R->{NODE}} ) {
+  my $n = $R->{NODE}{$net};
+  for ( my $i = 0; $i < @{$n->{UP}}; $i++ ) {
+    push(@{$kids{$n->{UP}[$i]}}, [ $net, $n->{IN}[$i] ]);
+  }
+}
+my @constFlops = ();
+foreach my $flop ( keys %{$R->{FLOP}} ) {
+  my $f = $R->{FLOP}{$flop};
+  if ( $f->{NET} eq "" ) { push(@{$flopsOn{"ROOT:".$f->{ROOTS}[0]}}, $flop); }
+  else                   { push(@{$flopsOn{$f->{NET}}}, $flop); }
+}
+
+my @roots = sort { $R->{ROOT}{$b}{FLOPS} <=> $R->{ROOT}{$a}{FLOPS} || $a cmp $b } keys %{$R->{ROOT}};
+print CLKRT_RPT "# trace_clock_roots: ", scalar(keys %{$R->{FLOP}}), " flops, ", scalar(@roots), " roots, ",
+                scalar(keys %{$R->{NODE}}), " pass-through cells\n#\n";
+print CLKRT_RPT "# ROOTS\n";
+foreach my $rid ( @roots ) {
+  my $r = $R->{ROOT}{$rid};
+  printf CLKRT_RPT ("%10d  %s%s\n", $r->{FLOPS}, $rid, $r->{KIND} eq "pin" ? "  ($r->{CELL})" : "");
+}
+
+print CLKRT_RPT "\n# TREES -- every pass-through cell under each root, with the flops below it.\n";
+print CLKRT_RPT "#          A branch reached a second time (a mux with both inputs from one root) is marked, not repeated.\n";
+foreach my $rid ( @roots ) {
+  my $r = $R->{ROOT}{$rid};
+  print CLKRT_RPT "\n$rid  ($r->{FLOPS} flops)\n";
+  if ( ! defined $r->{NET} || ! exists $R->{NET}{$r->{NET}} ) {
+    my $n = exists $flopsOn{"ROOT:$rid"} ? scalar(@{$flopsOn{"ROOT:$rid"}}) : 0;
+    print CLKRT_RPT "  $n flop(s) directly\n" if ( $n > 0 );
+    next;
+  }
+  my %count = ();
+  my %done = ();
+  &dbfClockRootsCountTree($r->{NET}, \%kids, \%flopsOn, \%count, \%done);
+  my %shown = ();
+  &dbfClockRootsPrintTree($r->{NET}, "  ", \%kids, \%flopsOn, \%count, \%shown);
+}
+
+print CLKRT_RPT "\n# FLOPS -- flop/pin <- root -> inst (cell in->out) -> ... , the cell nearest the flop last\n";
+my %pathMemo = ();
+foreach my $flop ( sort keys %{$R->{FLOP}} ) {
+  my $f = $R->{FLOP}{$flop};
+  my @paths = &dbfClockRootsGetFlopPaths($flop, $maxPaths, \%pathMemo);
+  foreach my $p ( @paths ) {
+    my ($first, @steps) = @$p;
+    my $line = "$flop/$f->{PIN} <- $first->[1]";
+    if ( @steps ) {
+      $line .= " -> " . join(" -> ", map { "$_->[0] ($_->[1] $_->[2]->$_->[3])" } @steps);
+    }
+    print CLKRT_RPT "$line\n";
+  }
+  if ( @paths >= $maxPaths ) {
+    print CLKRT_RPT "$flop/$f->{PIN} ... more than $maxPaths chains, the rest are not listed\n";
+  }
+}
+close(CLKRT_RPT);
+print "INFO-PAR-TR_CLK_RT : 019 : wrote $file\n";
+}# sub dbfClockRootsWriteReport
+
+#<!-- Flops below each net, every flop once: a branch reached twice under one
+#     root is counted where it is first met.  The root total is then exact. -->
+sub dbfClockRootsCountTree {
+my ($net, $kids, $flopsOn, $count, $done) = @_;
+$done->{$net} = 1;
+my $n = exists $flopsOn->{$net} ? scalar(@{$flopsOn->{$net}}) : 0;
+foreach my $k ( @{$kids->{$net} // []} ) {
+  next if ( $done->{$k->[0]} );
+  $n += &dbfClockRootsCountTree($k->[0], $kids, $flopsOn, $count, $done);
+}
+$count->{$net} = $n;
+return($n);
+}# sub dbfClockRootsCountTree
+
+sub dbfClockRootsPrintTree {
+my ($net, $indent, $kids, $flopsOn, $count, $shown) = @_;
+$shown->{$net} = 1;
+my $direct = exists $flopsOn->{$net} ? scalar(@{$flopsOn->{$net}}) : 0;
+print CLKRT_RPT "${indent}net $net : $direct flop(s) directly\n" if ( $direct > 0 );
+my @k = sort { $count->{$b->[0]} <=> $count->{$a->[0]} || $a->[0] cmp $b->[0] } @{$kids->{$net} // []};
+foreach my $k ( @k ) {
+  my ($child, $inPin) = @$k;
+  my $n = $CLOCK_ROOTS_ALREADY{NODE}{$child};
+  if ( $shown->{$child} ) {
+    print CLKRT_RPT "$indent+- $n->{INST} ($n->{CELL} $inPin->$n->{OUT}) net $child  [also reached above]\n";
+    next;
+  }
+  print CLKRT_RPT "$indent+- $n->{INST} ($n->{CELL} $inPin->$n->{OUT}) net $child  ($count->{$child} flops)\n";
+  &dbfClockRootsPrintTree($child, "$indent|  ", $kids, $flopsOn, $count, $shown);
+}
+}# sub dbfClockRootsPrintTree
+
+
+#<!-- Machine readable, one record per line, tab separated, lists inside a
+#     field separated by spaces (a net name never holds whitespace):
+#       ROOT  id  kind  inst  cell  pin  net  flops
+#       NODE  net  inst  cell  in_pins  out_pin  up_nets      -- in_pins[i] carries up_nets[i]
+#       FLOP  inst  cell  clock_pin  net  root_ids
+#     Chains are the NODE records followed upwards from a FLOP's net. -->
+sub dbfClockRootsWriteTsv {
+my ($file) = @_;
+my $R = \%CLOCK_ROOTS_ALREADY;
+unless ( open(CLKRT_TSV, ">$file") ) {
+  print "ERR-PAR-TR_CLK_RT : 020 : cannot write $file\n";
+  return;
+}
+print CLKRT_TSV "#ROOT\tid\tkind\tinst\tcell\tpin\tnet\tflops\n";
+print CLKRT_TSV "#NODE\tnet\tinst\tcell\tin_pins\tout_pin\tup_nets\n";
+print CLKRT_TSV "#FLOP\tinst\tcell\tclock_pin\tnet\troot_ids\n";
+foreach my $rid ( sort keys %{$R->{ROOT}} ) {
+  my $r = $R->{ROOT}{$rid};
+  print CLKRT_TSV join("\t", "ROOT", $rid, $r->{KIND}, map { $_ // "" } @{$r}{qw(INST CELL PIN NET FLOPS)}), "\n";
+}
+foreach my $net ( sort keys %{$R->{NODE}} ) {
+  my $n = $R->{NODE}{$net};
+  print CLKRT_TSV join("\t", "NODE", $net, $n->{INST}, $n->{CELL}, "@{$n->{IN}}", $n->{OUT}, "@{$n->{UP}}"), "\n";
+}
+foreach my $flop ( sort keys %{$R->{FLOP}} ) {
+  my $f = $R->{FLOP}{$flop};
+  print CLKRT_TSV join("\t", "FLOP", $flop, $f->{CELL}, $f->{PIN}, $f->{NET}, "@{$f->{ROOTS}}"), "\n";
+}
+close(CLKRT_TSV);
+print "INFO-PAR-TR_CLK_RT : 021 : wrote $file\n";
+}# sub dbfClockRootsWriteTsv
+
+1;
