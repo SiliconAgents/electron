@@ -194,8 +194,48 @@ def modules_of(level_dir, manifest="MODULES.tsv"):
 _CELLS = re.compile(r"^\s+(\d+)\s+cells\s*$", re.M)
 
 
+def prune_stubs(stub_file, il, dest):
+    """Write the stubs for just the cells the extracted RTLIL instantiates.
+
+    A cell type counts when some module's RTLIL names it and it is not one of
+    the design's own modules (those come in as netlists) nor a yosys
+    built-in ($-cells).  Stubs are copied verbatim, attributes included, so a
+    job sees exactly what it saw in the full file -- only fewer of them.
+    """
+    used, own = set(), set(il)
+    for path in il.values():
+        with open(path, errors="replace") as fh:
+            for line in fh:
+                s = line.split()
+                if len(s) >= 2 and s[0] == "cell" and not s[1].startswith("$"):
+                    used.add(s[1].lstrip("\\"))
+    want = used - own
+    kept, pend, cur, keep = [], [], [], False
+    with open(stub_file, errors="replace") as fh:
+        for line in fh:
+            if line.startswith("(*"):
+                pend.append(line)
+                continue
+            if line.startswith("module "):
+                keep = line.split()[1].split("(")[0] in want
+                cur = pend + [line] if keep else []
+                pend = []
+                continue
+            pend = []
+            if keep:
+                cur.append(line)
+                if line.startswith("endmodule"):
+                    kept.append("".join(cur))
+                    keep = False
+    with open(dest, "w") as fh:
+        fh.write("".join(kept))
+    print(f"yosys_bottom_up: {len(kept)} of the stub file's cells are instantiated "
+          f"by the RTL ({len(want)} named); jobs read {dest}")
+    return dest
+
+
 def run_one(job):
-    name, copies, src, args, children, absorb = job
+    name, copies, src, args, children, absorb, stubs = job
     dest = os.path.join(args.out, name + ".v")
     log = os.path.join(args.out, name + ".log")
     # `flatten` leaves the absorbed modules DEFINED but no longer instantiated,
@@ -203,7 +243,7 @@ def run_one(job):
     # absorbed it -- the same module defined in a dozen files. The second
     # `hierarchy -top` drops what nothing references any more.
     flatten = f"flatten\nhierarchy -top {name}" if absorb else ""
-    script = SCRIPT.format(blackbox=args.blackbox, children=children, src=src,
+    script = SCRIPT.format(blackbox=stubs, children=children, src=src,
                            absorb=absorb, flatten=flatten,
                            top=name, liberty=args.liberty, dest=dest,
                            latchmap=(f"techmap -map {args.latchmap}"
@@ -277,9 +317,20 @@ def main():
             if f.endswith(".il"):
                 il[f[:-3]] = os.path.join(d, f)
 
+    # IDEA 1 -- stubs only for the cells the RTL instantiates.  The full stub
+    # file has one module per cell of every family and VT (54,158 on one
+    # design) and every job read all of them; they carry (* keep *), so they
+    # also survived hierarchy -top and every pass in every job walked them.
+    # A job needs a stub only for a cell its RTLIL names directly (a
+    # hand-instantiated sync cell, a memory macro): what abc maps to comes
+    # from the liberty.  --verify still reads the full file, because the
+    # mapped netlists name those library cells.
+    job_stubs = prune_stubs(args.blackbox, il, os.path.join(args.out, "stubs_used.v"))
+
     design = boundaries = None
-    if args.flatten_below:
+    if os.path.exists(os.path.join(args.levels, "DESIGN.tsv")):
         design = read_design(args.levels)
+    if args.flatten_below:
         top_name = max(design, key=lambda m: design[m][0])
         boundaries, memo = choose_boundaries(design, args.flatten_below, top_name)
         # Named by their own cell count, NOT their subtree size: the top's
@@ -301,16 +352,26 @@ def main():
             mods = [(n, c) for n, c in mods if n in boundaries]
             if not mods:
                 continue
-        # every netlist from a lower level, interfaces only
-        children = "\n".join(f"read_verilog -lib {p}" for p in done)
+        # IDEA 2 -- each job reads only the netlists of the children it
+        # instantiates, interfaces only.  It used to read every netlist
+        # written so far: 90 files and ~43s per job by the middle levels, for
+        # a module that instantiates two of them.  Without DESIGN.tsv to say
+        # who instantiates what, fall back to all of them.
+        done_by_name = {os.path.basename(p)[:-2]: p for p in done}
         jobs = []
         for n, c in mods:
             absorb = ""
+            kids = None
             if boundaries is not None:
-                take, _ = plan_flatten(design, boundaries, n)
+                take, kids = plan_flatten(design, boundaries, n)
                 absorb = "\n".join(f"read_rtlil {il[m]}" for m in sorted(take)
                                    if m in il)
-            jobs.append((n, c, il[n], args, children, absorb))
+            elif design is not None:
+                kids = set(design[n][3])
+            paths = done if kids is None else \
+                [done_by_name[k] for k in sorted(kids) if k in done_by_name]
+            children = "\n".join(f"read_verilog -lib {p}" for p in paths)
+            jobs.append((n, c, il[n], args, children, absorb, job_stubs))
         t = time.time()
         rows = []
         with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
