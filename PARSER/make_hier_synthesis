@@ -1,0 +1,275 @@
+#<!-- hier_synthesis: RTL hierarchy to a HIERARCHICAL gate netlist, one
+#     distinct module at a time.
+#
+#     synthesize is the flat path: one yosys run, one netlist, hierarchy gone.
+#     That is what a placer cannot use.  This is the other one, for a design
+#     elaborated with yosys-slang's --keep-hierarchy, which emits one module
+#     per INSTANCE -- 119,351 of them on one design, and 111 distinct
+#     structures.  A single yosys run over that does not finish, because every
+#     pass walks all 119,351 and optimises the same one-cell wrapper thirty-five
+#     thousand times.
+#
+#     So: group the copies into distinct modules, rank them by depth, and
+#     synthesise each ONCE, deepest first, reading the levels below as
+#     blackboxes.  What comes out is still hierarchical, which is what
+#     hier_place needs.  The work is done by 3RDBIN/rtlil_bottom_up and
+#     3RDBIN/yosys_bottom_up; this command is the electron face of them and the
+#     place the defaults live.
+#
+#     THE LATCH.  dfflibmap maps flip-flops only and yosys has no latch
+#     equivalent, so a latch is lowered to $_DLATCH_ and then ignored by every
+#     pass after it -- ending up in the netlist as a yosys internal cell that
+#     place and route has no model for, with nothing reporting a problem.  This
+#     builds the techmap from the liberty's own latch() groups by default.
+#     --no_latchmap turns that off; there is no good reason to. -->
+
+#------------------------------------------------------------------------------------------#
+sub hier_synthesis {
+
+my $noOfArguments = @_;
+if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
+  print "Usage : hier_synthesis -rtlil <design.il> [-liberty <lib>] [-blackbox <cells.v>]\n";
+  print "                       [-out <dir>] [-jobs <n>] [-flatten_below <cells>]\n";
+  print "                       [-latchmap <file>] [--no_latchmap] [--no_verify] [--no_run]\n";
+  print "\n";
+  print "        -rtlil          an RTLIL dump written by yosys after read_slang\n";
+  print "                        --keep-hierarchy.  One module per instance is expected.\n";
+  print "        -liberty        liberty for dfflibmap and abc.  Omitted, the list left\n";
+  print "                        by get_std_cell_libs --set is used.\n";
+  print "        -blackbox       standard cell stubs, as 3RDBIN/lef_blackbox writes them.\n";
+  print "        -out            work directory, default hier_synthesis\n";
+  print "        -jobs           modules synthesised at once, default 8\n";
+  print "        -flatten_below  keep a module as a hierarchy boundary only when its\n";
+  print "                        subtree is at least this many cells, default 2000.\n";
+  print "                        0 keeps every module, which costs area: a boundary is a\n";
+  print "                        wall abc cannot optimise across.\n";
+  print "        --no_latchmap   do not map latches to library cells.  They will reach\n";
+  print "                        the netlist as \$_DLATCH_ and nothing will say so.\n";
+  print "        --no_verify     skip reloading the netlists to check they compose\n";
+  print "        --no_run        write the setup and stop\n";
+  return;
+}
+
+my $rtlil;
+my $outDir = "hier_synthesis";
+my $blackbox;
+my $latchmap;
+my $jobs = 8;
+my $flattenBelow = 2000;
+my $noLatchmap = 0;
+my $noVerify = 0;
+my $noRun = 0;
+my @libFiles = ();
+
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-rtlil"){$rtlil = $_[$i+1];}
+  if($_[$i] eq "-out"){$outDir = $_[$i+1];}
+  if($_[$i] eq "-blackbox"){$blackbox = $_[$i+1];}
+  if($_[$i] eq "-latchmap"){$latchmap = $_[$i+1];}
+  if($_[$i] eq "-jobs"){$jobs = $_[$i+1];}
+  if($_[$i] eq "-flatten_below"){$flattenBelow = $_[$i+1];}
+  if($_[$i] eq "-liberty"){ push(@libFiles, split(/\s*\,\s*/, $_[$i+1])); }
+  if($_[$i] eq "--no_latchmap"){$noLatchmap = 1;}
+  if($_[$i] eq "--no_verify"){$noVerify = 1;}
+  if($_[$i] eq "--no_run"){$noRun = 1;}
+}#for
+
+unless ( defined $rtlil && $rtlil ne "" ) {
+  print "ERROR-PAR-HR_SYN : 001 : no -rtlil given\n";
+  print "ERROR-PAR-HR_SYN : 002 : it wants the RTLIL yosys writes after read_slang --keep-hierarchy\n";
+  return;
+}
+unless ( -f $rtlil ) {
+  print "ERROR-PAR-HR_SYN : 003 : $rtlil does not exist\n";
+  return;
+}
+
+#<!-- the liberty, exactly as synthesize picks it -->
+unless ( @libFiles ) {
+  @libFiles = @SYNTH_LIBERTY_LIST if ( @SYNTH_LIBERTY_LIST );
+}
+unless ( @libFiles ) {
+  print "ERROR-PAR-HR_SYN : 004 : no liberty given and none set by get_std_cell_libs --set\n";
+  print "ERROR-PAR-HR_SYN : 005 : either pass -liberty <file>, or\n";
+  print "ERROR-PAR-HR_SYN : 006 :   read_library_config -config <library.config> -foundary <fab> -technode <node>\n";
+  print "ERROR-PAR-HR_SYN : 007 :   get_std_cell_libs -vt <flavour> -corner <pattern> --first --set\n";
+  return;
+}
+#<!-- yosys_bottom_up takes one liberty.  Several would mean one dfflibmap and
+#     one abc per file, which is not what its script does. -->
+if ( scalar(@libFiles) > 1 ) {
+  print "WARN-PAR-HR_SYN : 008 : " . scalar(@libFiles) . " liberty files given; using the first\n";
+}
+my $liberty = $libFiles[0];
+unless ( -f $liberty ) {
+  print "ERROR-PAR-HR_SYN : 009 : liberty $liberty does not exist\n";
+  return;
+}
+
+#<!-- Checked here and not at the point of use: extraction is a scan of a
+#     gigabyte-scale dump, and discovering a missing argument after it has run
+#     wastes a minute to say something that was knowable at the start. -->
+my $bbArg = "";
+unless ( defined $blackbox && $blackbox ne "" ) {
+  print "ERROR-PAR-HR_SYN : 019 : no -blackbox given; yosys needs stubs for the standard cells\n";
+  print "ERROR-PAR-HR_SYN : 020 :   3RDBIN/lef_blackbox -o cells.v --config <library.config> ...\n";
+  return;
+}
+unless ( -f $blackbox ) {
+  print "ERROR-PAR-HR_SYN : 018 : blackbox file $blackbox does not exist\n";
+  return;
+}
+$bbArg = "--blackbox $blackbox";
+
+unless ( -d $outDir ) {
+  system("mkdir -p $outDir");
+  unless ( -d $outDir ) {
+    print "ERROR-PAR-HR_SYN : 010 : cannot create $outDir\n";
+    return;
+  }
+}
+
+my $beehome = $BEEHOME;
+my $levelDir = "$outDir/lvl";
+my $netDir   = "$outDir/netlists";
+
+#<!-- Step 1: the distinct modules, ranked by depth.  --level all extracts
+#     every level in ONE scan of the dump; one scan per level would read a
+#     gigabyte file ten times over. -->
+unless ( $noRun == 1 ) {
+  my $extractLog = "$outDir/extract.log";
+  my $inner = "python3 $beehome/3RDBIN/rtlil_bottom_up $rtlil --level all --extract $levelDir";
+  my $cmd = &dbfElectronToolCommand("python3", $inner, $extractLog);
+  unless ( defined $cmd ) {
+    print "ERROR-PAR-HR_SYN : 011 : no python3 on PATH and no container image to run it in\n";
+    return;
+  }
+  print "INFO-PAR-HR_SYN : 012 : grouping $rtlil into distinct modules\n";
+  system($cmd);
+  unless ( -f "$levelDir/DESIGN.tsv" ) {
+    print "ERROR-PAR-HR_SYN : 013 : extraction wrote no DESIGN.tsv; see $extractLog\n";
+    return;
+  }
+}
+
+#<!-- Step 2: the latch techmap.  Built from the liberty every time rather than
+#     cached, because it has to match the liberty actually being mapped to. -->
+my $latchArg = "";
+if ( $noLatchmap == 1 ) {
+  print "WARN-PAR-HR_SYN : 014 : --no_latchmap: a latch will reach the netlist as \$_DLATCH_\n";
+}
+elsif ( defined $latchmap && $latchmap ne "" ) {
+  unless ( -f $latchmap ) {
+    print "ERROR-PAR-HR_SYN : 015 : latchmap $latchmap does not exist\n";
+    return;
+  }
+  $latchArg = "--latchmap $latchmap";
+}
+else {
+  $latchmap = "$outDir/latchmap.v";
+  unless ( $noRun == 1 ) {
+    my $lmLog = "$outDir/latchmap.log";
+    my $inner = "python3 $beehome/3RDBIN/liberty_latchmap -o $latchmap $liberty";
+    my $cmd = &dbfElectronToolCommand("python3", $inner, $lmLog);
+    if ( defined $cmd ) {
+      system($cmd);
+    }
+  }
+  if ( -f $latchmap ) {
+    $latchArg = "--latchmap $latchmap";
+    print "INFO-PAR-HR_SYN : 016 : latches map through $latchmap\n";
+  }
+  elsif ( $noRun == 1 ) {
+    #<!-- Nothing was generated because nothing was run.  Saying "no latch cell
+    #     found" here would blame the liberty for the dry run. -->
+    $latchArg = "--latchmap $latchmap";
+    print "INFO-PAR-HR_SYN : 033 : --no_run, so $latchmap was not built yet\n";
+  }
+  else {
+    print "WARN-PAR-HR_SYN : 017 : no latch cell found in $liberty; latches will stay unmapped\n";
+  }
+}
+
+#<!-- Step 3: synthesise, deepest level first. -->
+my $verifyArg = ( $noVerify == 1 ) ? "" : "--verify";
+my $synthLog = "$outDir/synthesis.log";
+my $inner = "python3 -u $beehome/3RDBIN/yosys_bottom_up" .
+            " --levels $levelDir --liberty $liberty $bbArg" .
+            " --out $netDir --jobs $jobs --flatten-below $flattenBelow" .
+            " $latchArg $verifyArg";
+
+if ( $noRun == 1 ) {
+  print "INFO-PAR-HR_SYN : 021 : --no_run, so nothing was started\n";
+  print "INFO-PAR-HR_SYN : 022 : $inner\n";
+  return;
+}
+
+my $cmd = &dbfElectronToolCommand("python3", $inner, $synthLog);
+unless ( defined $cmd ) {
+  print "ERROR-PAR-HR_SYN : 023 : no python3 on PATH and no container image to run it in\n";
+  return;
+}
+print "INFO-PAR-HR_SYN : 024 : synthesising, log in $synthLog\n";
+system($cmd);
+
+unless ( -d $netDir ) {
+  print "ERROR-PAR-HR_SYN : 025 : no netlists written; see $synthLog\n";
+  return;
+}
+
+&dbfHierSynthReport($synthLog, $netDir);
+
+return;
+
+}# sub hier_synthesis
+#------------------------------------------------------------------------------------------#
+#<!-- What came out.  The numbers are read back from the log rather than
+#     recomputed: yosys_bottom_up --verify reloads every netlist and lets yosys
+#     walk the hierarchy, which is the only count that proves the netlists
+#     COMPOSE -- that every child is defined with the ports its parent expects.
+#     No per-module run can check that, each having seen its children as
+#     blackboxes. -->
+sub dbfHierSynthReport {
+my ($logFile, $netDir) = @_;
+
+my @v = glob("$netDir/*.v");
+print "INFO-PAR-HR_SYN : 026 : " . scalar(@v) . " netlist(s) in $netDir\n";
+
+unless ( -f $logFile && open(HSYN_LOG, "<$logFile") ) {
+  print "WARN-PAR-HR_SYN : 027 : no log at $logFile to report on\n";
+  return;
+}
+
+my $failed = 0;
+my $verified = "";
+my $sequential = "";
+my $unmapped = "";
+while ( my $line = <HSYN_LOG> ) {
+  chomp($line);
+  if ( $line =~ /(\d+) failed/ ) { $failed += $1; }
+  if ( $line =~ /verified in .* -- (.*)$/ ) { $verified = $1; }
+  if ( $line =~ /yosys_bottom_up: ([\d,]+ sequential.*)$/ ) { $sequential = $1; }
+  if ( $line =~ /WARNING -- (.*)$/ ) { $unmapped = $1; }
+}
+close(HSYN_LOG);
+
+if ( $failed > 0 ) {
+  print "ERROR-PAR-HR_SYN : 028 : $failed module(s) failed to synthesise; see $logFile\n";
+}
+if ( $verified ne "" ) {
+  print "INFO-PAR-HR_SYN : 029 : $verified\n";
+}
+if ( $sequential ne "" ) {
+  print "INFO-PAR-HR_SYN : 030 : $sequential\n";
+}
+if ( $unmapped ne "" ) {
+  print "WARN-PAR-HR_SYN : 031 : $unmapped\n";
+  print "WARN-PAR-HR_SYN : 032 : a \$_DLATCH_ here means the latch techmap did not run\n";
+}
+
+return;
+
+}# sub dbfHierSynthReport
+#------------------------------------------------------------------------------------------#
+
+1;

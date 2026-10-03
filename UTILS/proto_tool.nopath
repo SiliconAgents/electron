@@ -267,6 +267,7 @@ require "$BEEHOME/UTILS/make_run_gtkwave";
 
 ###### PARSERS #####
 require "$BEEHOME/PARSER/make_rw_verilog";
+require "$BEEHOME/PARSER/make_hier_synthesis";
 require "$BEEHOME/PARSER/make_flatten_hier";
 require "$BEEHOME/PARSER/make_elaborate";
 require "$BEEHOME/PARSER/make_querry";

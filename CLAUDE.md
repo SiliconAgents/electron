@@ -251,12 +251,28 @@ modules, and a single yosys run does not finish — it optimises the same
 one-cell wrapper 35,968 times. They were **111 distinct structures** in a
 hierarchy ten levels deep.
 
+From inside electron, which is where this belongs:
+
 ```
-3RDBIN/rtlil_bottom_up design.il --tree              # the 111, and what holds what
+hier_synthesis -rtlil design.il -liberty slim.lib -blackbox cells.v \
+               -out synth/ -jobs 10 -flatten_below 2000
+```
+
+It extracts the levels, builds the latch techmap from the liberty, synthesises
+and verifies. The tools underneath, for when a step needs driving by hand:
+
+```
+3RDBIN/rtlil_bottom_up design.il --tree              # the distinct modules, and what holds what
 3RDBIN/rtlil_bottom_up design.il --level all --extract lvl/
 3RDBIN/yosys_bottom_up --levels lvl/ --liberty slim.lib --blackbox cells.v \
-    --out netlists/ --jobs 10 --flatten-below 2000 --verify
+    --out netlists/ --jobs 10 --flatten-below 2000 --latchmap latchmap.v --verify
 ```
+
+**`dfflibmap` maps flip-flops only and yosys has no latch equivalent.** A latch
+is lowered to `$_DLATCH_`, ignored by dfflibmap, ignored by abc because abc is
+combinational, and written into the netlist as a yosys internal cell with every
+pass reporting success. `3RDBIN/liberty_latchmap` builds the techmap from the
+liberty's own `latch()` groups; `hier_synthesis` does it for you.
 
 Each level reads the levels below it with `read_verilog -lib` — interfaces
 only — so the result is a **hierarchical** netlist. Flattening would hand the
