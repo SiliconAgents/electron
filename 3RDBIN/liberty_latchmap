@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Write the techmap that maps yosys's internal latches onto library latches.
+
+    liberty_latchmap -o latchmap.v lib.lib
+    yosys: ... dfflibmap -liberty lib.lib ; techmap -map latchmap.v ; abc ...
+
+WHY THIS IS NEEDED
+
+`dfflibmap` maps FLIP-FLOPS. Its own help says so -- "map internal flip-flop
+cells" -- and there is no latch equivalent in yosys. So a design containing a
+latch goes through synthesis like this:
+
+    proc            infers $dlatch
+    techmap         simplemap lowers it to $_DLATCH_N_
+    dfflibmap       ignores it, being a flop mapper
+    abc             ignores it, being a combinational mapper
+    write_verilog   emits $_DLATCH_N_ into the netlist
+
+and nothing anywhere reports a problem. The result is a netlist with a yosys
+internal cell in it, which no place-and-route tool has a model for. It is the
+quietest possible failure: exit 0, every pass reporting success, and a cell in
+the output that does not exist in the library.
+
+WHAT IT PICKS
+
+The smallest latch cell with exactly a data pin, an enable pin and one output,
+per enable polarity -- so nothing with a set or clear pin, which would need a
+value this mapping has no way to supply. One cell for $_DLATCH_P_ and one for
+$_DLATCH_N_, read from the liberty's own latch() groups rather than guessed
+from cell names: the group gives data_in and enable directly, and the enable
+string carries the polarity ("E" against "(!EN)").
+
+If the liberty has no suitable cell for a polarity, that is said plainly and no
+module is emitted for it -- a techmap that silently maps nothing would put the
+problem straight back.
+"""
+
+import argparse
+import gzip
+import os
+import re
+import sys
+
+_CELL = re.compile(r"^\s*cell\s*\(\s*([^)\s]+)\s*\)")
+_LATCH = re.compile(r"^\s*latch\s*\(")
+_AREA = re.compile(r"^\s*area\s*:\s*([\d.]+)")
+_ENABLE = re.compile(r'^\s*enable\s*:\s*"([^"]*)"')
+_DATA = re.compile(r'^\s*data_in\s*:\s*"([^"]*)"')
+_PIN = re.compile(r"^\s*pin\s*\(\s*([^)\s]+)\s*\)")
+_DIR = re.compile(r'^\s*direction\s*:\s*"?(\w+)')
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def opener(path):
+    return gzip.open(path, "rt", errors="replace") if path.endswith(".gz") \
+        else open(path, errors="replace")
+
+
+def latches(paths):
+    """Every cell with a latch() group: name -> {area, d, en, inverted, pins}."""
+    out = {}
+    for path in paths:
+        cur, rec, pin = None, None, None
+        for line in opener(path):
+            m = _CELL.match(line)
+            if m:
+                if rec and rec.get("latch"):
+                    out[cur] = rec
+                cur, rec, pin = m.group(1), {"pins": {}, "area": None}, None
+                continue
+            if rec is None:
+                continue
+            if _LATCH.match(line):
+                rec["latch"] = True
+            a = _AREA.match(line)
+            if a and rec["area"] is None:
+                rec["area"] = float(a.group(1))
+            e = _ENABLE.match(line)
+            if e:
+                s = e.group(1)
+                rec["inverted"] = "!" in s
+                i = _IDENT.search(s)
+                rec["en"] = i.group(0) if i else None
+            d = _DATA.match(line)
+            if d:
+                i = _IDENT.search(d.group(1))
+                rec["d"] = i.group(0) if i else None
+            p = _PIN.match(line)
+            if p:
+                pin = p.group(1)
+                rec["pins"].setdefault(pin, None)
+                continue
+            dr = _DIR.match(line)
+            if dr and pin:
+                rec["pins"][pin] = dr.group(1)
+        if rec and rec.get("latch"):
+            out[cur] = rec
+    return out
+
+
+def pick(cands, inverted):
+    """Smallest latch of the wanted polarity with no set/clear pin."""
+    best = None
+    for name, r in cands.items():
+        if r.get("inverted") != inverted or not r.get("d") or not r.get("en"):
+            continue
+        outs = [p for p, d in r["pins"].items() if d == "output"]
+        ins = [p for p, d in r["pins"].items() if d == "input"]
+        if len(outs) != 1:
+            continue
+        # exactly data + enable on the input side: anything else is a set or
+        # clear, and this mapping has no value to drive it with
+        if set(ins) != {r["d"], r["en"]}:
+            continue
+        area = r["area"] if r["area"] is not None else 9e9
+        if best is None or area < best[0]:
+            best = (area, name, r, outs[0])
+    return best
+
+
+def main():
+    ap = argparse.ArgumentParser(description="yosys latch techmap from a liberty")
+    ap.add_argument("liberty", nargs="+")
+    ap.add_argument("-o", "--out", required=True)
+    ap.add_argument("--quiet", action="store_true")
+    args = ap.parse_args()
+
+    for p in args.liberty:
+        if not os.path.isfile(p):
+            sys.exit(f"liberty_latchmap: no {p}")
+
+    cands = latches(args.liberty)
+    chosen = {}
+    for cellty, inverted in (("$_DLATCH_P_", False), ("$_DLATCH_N_", True)):
+        got = pick(cands, inverted)
+        if got:
+            chosen[cellty] = got
+
+    with open(args.out, "w") as fh:
+        fh.write("// Generated by 3RDBIN/liberty_latchmap.\n")
+        fh.write("// dfflibmap maps flip-flops only, so without this a latch\n")
+        fh.write("// reaches the netlist as a yosys internal cell.\n\n")
+        for cellty, (area, name, r, q) in sorted(chosen.items()):
+            fh.write(f"// {name}  area {area}\n")
+            fh.write(f'(* techmap_celltype = "{cellty}" *)\n')
+            fh.write(f"module _tm_{cellty.strip('$_').lower()} "
+                     f"(input E, input D, output Q);\n")
+            fh.write(f"  {name} _TECHMAP_REPLACE_ "
+                     f"(.{r['d']}(D), .{r['en']}(E), .{q}(Q));\n")
+            fh.write("endmodule\n\n")
+
+    if not args.quiet:
+        print(f"liberty_latchmap: {len(cands)} latch cell(s) in the liberty")
+        for cellty in ("$_DLATCH_P_", "$_DLATCH_N_"):
+            if cellty in chosen:
+                area, name, r, q = chosen[cellty]
+                print(f"  {cellty:<14} -> {name}  "
+                      f"(.{r['d']}=D .{r['en']}=E .{q}=Q, area {area})")
+            else:
+                print(f"  {cellty:<14} -> NONE FOUND -- a latch of this "
+                      f"polarity will stay unmapped", file=sys.stderr)
+        print(f"liberty_latchmap: {args.out}")
+    return 0 if len(chosen) == 2 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
