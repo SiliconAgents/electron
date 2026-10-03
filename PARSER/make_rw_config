@@ -32,7 +32,16 @@ if($_[$i] eq "-read_io_lefs"){$read_io_lefs = 1;}
     die "Error: Foundry not specified\n" unless $foundry;
     die "Error: Layer not specified\n" unless defined $layer;
 
-    my $config = parse_config($config_file);
+    #<!-- Remembered so a later command can reach the same corner of the same
+    #     config without being told it twice.  Both this and
+    #     read_library_config set them, because either one may be how the
+    #     session picked its library. -->
+    $LIBCFG_FILE    = $config_file;
+    $LIBCFG_FOUNDRY = $foundry;
+    $LIBCFG_NODE    = $tech_node;
+    $LIBCFG_LAYER   = $layer;
+
+my $config = parse_config($config_file);
     my $output_file = "load_lefs.tcl";
 
     open(my $fh, '>', $output_file) or die "Cannot open $output_file: $!\n";
@@ -323,6 +332,15 @@ unless ( exists $config->{$foundry} && exists $config->{$foundry}{node} ) {
   print "ERROR-PAR-LIBCFG : 005 : the file has: " . join(", ", sort keys %$config) . "\n";
   return;
 }
+
+#<!-- The coordinates, for a later command that needs the LEFs sitting beside
+#     these liberties -- hier_synthesis builds its standard cell stubs from
+#     them. Set here as well as in read_config_file: either command may be how
+#     the session chose its library. -->
+$LIBCFG_FILE    = $config_file;
+$LIBCFG_FOUNDRY = $foundry;
+$LIBCFG_NODE    = $tech_node;
+$LIBCFG_LAYER   = $layer;
 
 %STDCELL_LIB_ALREADY = () unless ( $append == 1 );
 %SYNTH_LIB_ALREADY   = () unless ( $append == 1 );

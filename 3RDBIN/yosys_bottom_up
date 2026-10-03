@@ -66,6 +66,25 @@ import time
 # is doing its job: between -5% and +6%, averaging nothing, for twice the
 # runtime. They were in a draft of this script and came out again. Add one back
 # only with a measurement that says it earns its place on the design at hand.
+#
+# Re-measured later on a second design, a register-heavy fabric, chasing the
+# registers a commercial flow removes and this one does not. Three candidates,
+# all negative:
+#
+#   opt_merge        already runs -- `opt -fast` does OPT_MERGE and OPT_DFF
+#                    twice each -- and `opt_merge -share_all` on top of it
+#                    changed the flop count by 0 or 1 on every module tried
+#   tie-off folding  driving a child's inputs with the literal every parent
+#                    already drives them with: 0.0% on four modules, 1.0% on a
+#                    fifth, despite 1,539 ports being uniformly tied
+#   opt -full        flops unchanged, and AREA is a coin flip: one module went
+#                    5,182 -> 8,756 cells (+69%) while another went
+#                    91,717 -> 86,424 (-6%)
+#
+# So the short script survives a second design, and the gap to a commercial
+# flow on that design is not register optimisation. See 3RDBIN/rtlil_liveness
+# for the one mechanism that did measure positive -- registers a module
+# boundary forces the flow to keep, 6.5% of the design's register bits.
 SCRIPT = """
 read_verilog -lib {blackbox}
 {children}
@@ -79,6 +98,7 @@ memory_map
 techmap
 opt -fast
 dfflibmap -liberty {liberty}
+{latchmap}
 abc {abc}-liberty {liberty}
 setundef -zero
 clean -purge
@@ -186,6 +206,8 @@ def run_one(job):
     script = SCRIPT.format(blackbox=args.blackbox, children=children, src=src,
                            absorb=absorb, flatten=flatten,
                            top=name, liberty=args.liberty, dest=dest,
+                           latchmap=(f"techmap -map {args.latchmap}"
+                                     if args.latchmap else ""),
                            abc="-fast " if args.abc_fast else "")
     t = time.time()
     p = subprocess.run([args.yosys, "-p", script], capture_output=True, text=True)
@@ -223,6 +245,11 @@ def main():
                          "rest into their parents. Fewer, better-optimised "
                          "modules and a netlist whose boundaries are the ones "
                          "a floorplanner can use (try 2000)")
+    ap.add_argument("--latchmap", metavar="FILE",
+                    help="a techmap from 3RDBIN/liberty_latchmap. WITHOUT IT A "
+                         "LATCH REACHES THE NETLIST UNMAPPED: dfflibmap maps "
+                         "flip-flops only, abc is combinational, and nothing "
+                         "in between reports the $_DLATCH_ left behind")
     ap.add_argument("--abc-fast", action="store_true",
                     help="map with `abc -fast`. DO NOT, unless you are timing "
                          "something: on a large design it cost 44%% of the cell "
@@ -358,6 +385,14 @@ def verify(args, netlists, top):
         top4 = sorted(seq.items(), key=lambda kv: -kv[1])[:4]
         named = ", ".join("{:,} {}".format(v, k.split("_N_")[0]) for k, v in top4)
         print(f"yosys_bottom_up: {sum(seq.values()):,} sequential ({named})")
+    unmapped = {k: v for k, v in cells.items() if k.startswith("$")}
+    if unmapped:
+        named = ", ".join(f"{v:,} {k}" for k, v in
+                          sorted(unmapped.items(), key=lambda kv: -kv[1])[:6])
+        print(f"yosys_bottom_up: WARNING -- {sum(unmapped.values()):,} cell(s) "
+              f"are still yosys internals, not library cells: {named}")
+        print(f"yosys_bottom_up: a $_DLATCH_ here means --latchmap was not "
+              f"given; place-and-route has no model for any of these.")
     print(f"yosys_bottom_up: {log}")
     return 0
 
