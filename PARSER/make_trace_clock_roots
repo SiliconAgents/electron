@@ -51,15 +51,18 @@ my $flopGlob;
 my $reportFile;
 my $tsvFile;
 my $maxPaths = 16;
+my $chains = 0;
 my $verbose = 0;
 my @userRules = ();
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : trace_clock_roots [-flops <inst glob>]\n";
-  print "                          [-report <file>]      readable: roots, the tree under each, every flop's chain\n";
+  print "                          [-report <file>]      readable: roots, the tree under each, every flop's roots\n";
+  print "                          [--chains]            and every flop's full chain(s) in the report -- large:\n";
+  print "                                                5 roots x 400k flops wrote 1.7 GB\n";
   print "                          [-tsv <file>]         ROOT / NODE / FLOP records for a script\n";
   print "                          [-rule <cell glob> <buf|icg|mux|gate|root>]   repeatable, wins over the library\n";
-  print "                          [-max_paths <n>]      chains written per flop, default 16\n";
+  print "                          [-max_paths <n>]      with --chains, chains written per flop, default 16\n";
   print "                          [--verbose]\n";
   print "        Traces each flop and latch clock pin back through buffers, inverters,\n";
   print "        ICG clock pins and mux data inputs to a top input port or another cell's output.\n";
@@ -74,6 +77,7 @@ for ( my $i = 0; $i < $noOfArguments; $i++ ) {
   elsif ( $_[$i] eq "-max_paths" ) { $maxPaths = $_[$i+1]; $i++; }
   elsif ( $_[$i] eq "-rule" )      { push(@userRules, [$_[$i+1], $_[$i+2]]); $i += 2; }
   elsif ( $_[$i] eq "--verbose" )  { $verbose = 1; }
+  elsif ( $_[$i] eq "--chains" )   { $chains = 1; }
   else { print "WARN-PAR-TR_CLK_RT : 001 : invalid option $_[$i]\n"; }
 }
 
@@ -267,7 +271,7 @@ if ( $verbose ) {
         join(", ", map { "$ruleCnt{$_} $_" } sort keys %ruleCnt), "\n";
 }
 
-if ( defined $reportFile ) { &dbfClockRootsWriteReport($reportFile, $maxPaths); }
+if ( defined $reportFile ) { &dbfClockRootsWriteReport($reportFile, $maxPaths, $chains); }
 if ( defined $tsvFile )    { &dbfClockRootsWriteTsv($tsvFile); }
 
 my $t2 = new Benchmark;
@@ -568,9 +572,12 @@ return(\@paths);
 
 
 #<!-- Readable report: the roots, the tree under each with the flop count of
-#     every branch, then every flop's chain(s). -->
+#     every branch, then a line per flop -- its roots and the cell driving its
+#     clock net, or with $chains every chain in full.  The full chains repeat
+#     the tree once per flop per root, which is what made one report 1.7 GB;
+#     the tree above already holds them once. -->
 sub dbfClockRootsWriteReport {
-my ($file, $maxPaths) = @_;
+my ($file, $maxPaths, $chains) = @_;
 my $R = \%CLOCK_ROOTS_ALREADY;
 unless ( open(CLKRT_RPT, ">$file") ) {
   print "ERR-PAR-TR_CLK_RT : 018 : cannot write $file\n";
@@ -587,7 +594,6 @@ foreach my $net ( keys %{$R->{NODE}} ) {
     push(@{$kids{$n->{UP}[$i]}}, [ $net, $n->{IN}[$i] ]);
   }
 }
-my @constFlops = ();
 foreach my $flop ( keys %{$R->{FLOP}} ) {
   my $f = $R->{FLOP}{$flop};
   if ( $f->{NET} eq "" ) { push(@{$flopsOn{"ROOT:".$f->{ROOTS}[0]}}, $flop); }
@@ -620,6 +626,25 @@ foreach my $rid ( @roots ) {
   &dbfClockRootsPrintTree($r->{NET}, "  ", \%kids, \%flopsOn, \%count, \%shown);
 }
 
+unless ( $chains ) {
+  print CLKRT_RPT "\n# FLOPS -- flop/pin <- clock net [via the cell driving it] : root(s).  The chain is in the tree above;\n";
+  print CLKRT_RPT "#          --chains writes it out per flop.\n";
+  foreach my $flop ( sort keys %{$R->{FLOP}} ) {
+    my $f = $R->{FLOP}{$flop};
+    my $line = "$flop/$f->{PIN} <-";
+    if ( $f->{NET} ne "" ) {
+      $line .= " $f->{NET}";
+      if ( exists $R->{NODE}{$f->{NET}} ) {
+        my $n = $R->{NODE}{$f->{NET}};
+        $line .= " via $n->{INST} ($n->{CELL})";
+      }
+    }
+    print CLKRT_RPT "$line : @{$f->{ROOTS}}\n";
+  }
+  close(CLKRT_RPT);
+  print "INFO-PAR-TR_CLK_RT : 019 : wrote $file\n";
+  return;
+}
 print CLKRT_RPT "\n# FLOPS -- flop/pin <- root -> inst (cell in->out) -> ... , the cell nearest the flop last\n";
 my %pathMemo = ();
 foreach my $flop ( sort keys %{$R->{FLOP}} ) {
