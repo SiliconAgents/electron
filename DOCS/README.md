@@ -1,15 +1,14 @@
 # DOCS
 
-`electron.md` is the source; `electron.pdf` is generated from it.
+`electron.md` is the source and the thing under version control. The PDF is
+generated from it and gitignored.
 
-To regenerate after editing the markdown (on the host — the container has no
-PDF tooling):
+    make docs          # -> DOCS/electron.pdf
 
-    pandoc -s --metadata title="Electron" --toc --toc-depth=2 \
-      -c DOCS/style.css --self-contained DOCS/electron.md -o /tmp/electron.html
-    libreoffice --headless --convert-to pdf --outdir /tmp /tmp/electron.html
-    cp /tmp/electron.pdf DOCS/electron.pdf
+That runs ON THE HOST, unlike the rest of the Makefile: the container image has
+no pandoc and no PDF tooling. Nor does `pandoc -o x.pdf` work -- it wants a PDF
+engine, there is no LaTeX here, and groff is present but without the ms macros
+pandoc's roff route needs. The target goes through HTML and LibreOffice, which
+is the path that works and the one that keeps tables and code blocks intact.
 
-There is no LaTeX on this machine, so the usual `pandoc -o x.pdf` route does
-not work; it needs a PDF engine it does not have. The HTML-then-LibreOffice
-path is the one that does, and it keeps tables and code blocks intact.
+`style.css` is the stylesheet it uses; edit that to change how the PDF looks.

@@ -18,6 +18,11 @@ PPSIF     := $(ELECTRON)/INSTALL/podman/pysparkpp.sif
 
 # bash -c, NOT bash -lc: a login shell sources the host ~/.bashrc through the
 # bound home directory and puts a miniconda python3 ahead of the container's.
+# Simply expanded, NOT `?= $(shell mktemp -d)`: that is a recursively
+# expanded variable, so mktemp runs again at every reference -- the html
+# lands in one directory and the pdf is looked for in another.
+DOCSWORK := .docswork
+
 INCONTAINER = apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd \
 	--bind /home/$$USER:/home/$$USER $(PPSIF) bash -c
 
@@ -62,8 +67,31 @@ check-syntax: .frags.txt
 .frags.txt:
 	@grep -h '^require ' UTILS/*.nopath | sed 's|^require "[^/]*/||; s|";.*$$||' | sort -u > $@
 
+# DOCS/electron.pdf from DOCS/electron.md.
+#
+# ON THE HOST, unlike every other target here: the image has no pandoc and no
+# PDF tooling at all.  And not `pandoc -o x.pdf` either -- that wants a PDF
+# engine, and there is no LaTeX on this machine; groff is here but without the
+# ms macros pandoc's roff route needs.  HTML then LibreOffice is the path that
+# works, and it keeps the tables and code blocks the roff route drops.
+#
+# The PDF is gitignored.  Regenerate it when you want one; the markdown is the
+# thing under version control.
+DOCS/electron.pdf: DOCS/electron.md DOCS/style.css
+	@command -v pandoc >/dev/null || { echo "docs: no pandoc on PATH" >&2; exit 1; }
+	@command -v libreoffice >/dev/null || { echo "docs: no libreoffice on PATH" >&2; exit 1; }
+	@mkdir -p $(DOCSWORK)
+	@pandoc -s --metadata title="Electron" --toc --toc-depth=2 \
+	   -c DOCS/style.css --self-contained DOCS/electron.md -o $(DOCSWORK)/electron.html
+	@libreoffice --headless --convert-to pdf --outdir $(DOCSWORK) $(DOCSWORK)/electron.html >/dev/null 2>&1
+	@test -f $(DOCSWORK)/electron.pdf || { echo "docs: libreoffice wrote no pdf" >&2; exit 1; }
+	@mv $(DOCSWORK)/electron.pdf $@
+	@echo "docs: $@"
+
+docs: DOCS/electron.pdf
+
 # An interactive shell in the image the checks use.
 app:
 	apptainer shell --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$$USER:/home/$$USER $(PPSIF)
 
-.PHONY: check check-load check-syntax app
+.PHONY: check check-load check-syntax app docs
