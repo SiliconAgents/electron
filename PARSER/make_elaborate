@@ -172,6 +172,12 @@ print "DBG-PAR-ELA : 012 : Add outside port conn of $inst\n" if($DEBUG == 300);
                print "DBG-ERR-PAR-ELA : 014 : $pin on $cell for instance $inst is neither input nor output\n" if($DEBUG == 300);
                     }
                if ( $pinType == 1 ) { print "DBG-PAR-ELA : 015 : it is a bus\n" if($DEBUG == 300); } else { print "DBG-PAR-ELA : 016 : it is a single\n" if($DEBUG == 300); }
+               if ( $pinType == 1 && $net =~ /\d\s*'\s*[sS]?[bBhHdDoO]/ ) {
+                 foreach my $pair ( &elaborate_hier_port_bits($cell,$pin,$pinDir,$net,$TOP_MODULE) ) {
+                   $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$$pair[0]} = $$pair[1];
+                 }
+                 next;
+               }
 #---------------------------------------- if bus is explictly connected to the hier module ports -----------------#
                if ( $net =~ /\{/ ) { 
                     print "DBG-PAR-ELA : 017 :\t$pin \=\> $net\n" if ($DEBUG == 300); 
@@ -856,6 +862,12 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                print "DBG-ERR-PAR : 005 : $pin on $cell for instance $inst is neither input nor output\n" if($DEBUG == 300);
                     }
                if ( $pinType == 1 ) { print "DBG-PAR : 006 : it is a bus\n" if($DEBUG == 300); } else { print "DBG-PAR : 007 : it is a single\n" if($DEBUG == 300); }
+               if ( $pinType == 1 && $net =~ /\d\s*'\s*[sS]?[bBhHdDoO]/ ) {
+                 foreach my $pair ( &elaborate_hier_port_bits($cell,$pin,$pinDir,$net,$cellName) ) {
+                   $TEMP_HIER_PORT_NET_MAP{$inst_hash_key}{$$pair[0]} = $$pair[1];
+                 }
+                 next;
+               }
 #------------------------------------------------------------ if explicit connection -----------------------------------#
                if ( $net =~ /\{/ ) { 
                     print "DBG-PAR : 008 :\t$pin \=\> $net\n" if($DEBUG == 300); 
@@ -2104,5 +2116,50 @@ sub elaborate_resolve_hier_net {
   }
   return $netName;
 }#sub elaborate_resolve_hier_net
+
+
+#-----------------------------------------------------------------------------#
+# A bus port of a hierarchical instance connected to an expression with a
+# sized constant in it: .i_vld(12'h000), .a({ 2'h0, b, 1'b1 }).  The general
+# port mapping above cannot take these.  A bare constant went down the
+# full-bus branch and every bit was mapped to a net named after the literal
+# -- 12'h000[11], or for one module four bits on a single net "4'h5", which
+# also merged pins that have nothing to do with each other -- and in a
+# concatenation dbfVerilogBlastConnExpr drops constant bits, so those port
+# bits were never mapped and the child's pins on them floated.  Either way
+# the tie-off was invisible: a parent tying off a whole request interface
+# (24,612 bits of zeros, every valid low) left the child's request path
+# looking live.
+#
+# Blast with array_of_blasted_expr -- constant bits become 1'b0 / 1'b1 -- and
+# pair with the port's declared bits from the LSB end.  Returns [port bit,
+# net bit] pairs, the net bit in $scope's own names, which is what
+# %TEMP_HIER_PORT_NET_MAP holds.
+#-----------------------------------------------------------------------------#
+sub elaborate_hier_port_bits {
+  my ($cell,$pin,$pinDir,$net,$scope) = @_;
+  my $width = "";
+  if    ($pinDir == 1){$width = $MODULE_ALREADY{$cell}->dbVNOMGetInputBits($pin);}
+  elsif ($pinDir == 2){$width = $MODULE_ALREADY{$cell}->dbVNOMGetOutputBits($pin);}
+  elsif ($pinDir == 3){$width = $MODULE_ALREADY{$cell}->dbVNOMGetBidiBits($pin);}
+  $width =~ s/\[//; $width =~ s/\]//;
+  my ($msb,$lsb) = split(/\s*\:\s*/,$width);
+  return () unless ( defined $msb && defined $lsb );
+  my @pinBits = ();                                  # LSB first
+  if ( $msb >= $lsb ) { for ( my $x = $lsb ; $x <= $msb ; $x++ ) { push(@pinBits, $pin."[".$x."]"); } }
+  else                { for ( my $x = $lsb ; $x >= $msb ; $x-- ) { push(@pinBits, $pin."[".$x."]"); } }
+  my @netBits = reverse &array_of_blasted_expr($net,$scope);
+  my $n = ( @netBits < @pinBits ) ? scalar(@netBits) : scalar(@pinBits);
+  if ( @netBits != @pinBits ) {
+    print "WARN-PAR-ELA : 064 : $cell port $pin is ".scalar(@pinBits)." bits but $net is ".scalar(@netBits).", connected $n from the LSB\n";
+  }
+  my @pairs = ();
+  for ( my $k = 0 ; $k < $n ; $k++ ) {
+    my $bit = $netBits[$k];
+    $bit =~ s/\s+//g;
+    push(@pairs,[$pinBits[$k],$bit]);
+  }
+  return @pairs;
+}#sub elaborate_hier_port_bits
 
 1;
