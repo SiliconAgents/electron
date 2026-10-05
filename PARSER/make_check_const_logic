@@ -69,6 +69,7 @@ my $noOfArguments = @_;
 if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "Usage : check_const_logic [-liberty <lib>[,<lib>...]] [-report <file>] [-max <n>] [-depth <n>]\n";
   print "                          [-explain <inst>[,<inst>...]] [-noinduct] [-reset_only]\n";
+  print "                          [-keep_pattern <regex>] [-dont_touch <file>] [--no_keep]\n";
   print "        Propagates constants forward from tied nets and tie cells through the\n";
   print "        cells' liberty functions, flops included, and reports every net, cell and\n";
   print "        flop that can only hold one value -- then how much logic dies when those\n";
@@ -81,6 +82,7 @@ if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "        -explain for each instance: its pins, nets and their values\n";
   print "        -noinduct skip proving flops that hold their reset value through each other\n";
   print "        -reset_only only reset-backed flop constants: never pick a no-reset flop's power-up value\n";
+  &check_dead_logic_keep_usage;
   return;
 }
 for(my $i = 0; $i < $noOfArguments; $i++){
@@ -109,6 +111,9 @@ if ( !@libs ) {
   print "INFO-UTS-CHK_CONST : 003 : cell functions from the config's $vt synthesis libraries\n";
 }
 
+my $keep = &check_dead_logic_keep_set(@_);
+return unless ( defined $keep );
+
 use Benchmark;
 my $t0 = new Benchmark;
 %CONST_LOGIC = ();
@@ -135,7 +140,8 @@ foreach my $inst ( keys %COMP_ALREADY ) {
   next unless ( exists $CADB{$inst} );
   my $cell = $CADB{$inst}->dbCadbGetCellref;
   my $mdb = $PLDB{$cell};
-  my $f = &check_const_logic_func_of($cell);
+  #<!-- dont_touch: opaque, its outputs stay X -->
+  my $f = exists $keep->{$inst} ? undef : &check_const_logic_func_of($cell);
   foreach my $pin ( keys %{$COMP_ALREADY{$inst}} ) {
     my $net = $COMP_ALREADY{$inst}{$pin};
     next if ( !defined $net || $net eq "" );
@@ -151,7 +157,7 @@ foreach my $inst ( keys %COMP_ALREADY ) {
   if ( defined $f ) {
     $func{$inst} = $f;
     push(@queue, $inst) unless ( @{$f->{INS}} );      # tie cells: no inputs at all
-  } elsif ( defined $mdb && $mdb->dbMdbGetClass !~ /^(BLOCK|PAD|AREAIO|COVER)/ && $mdb->dbMdbGetType != 4 ) {
+  } elsif ( !exists $keep->{$inst} && defined $mdb && $mdb->dbMdbGetClass !~ /^(BLOCK|PAD|AREAIO|COVER)/ && $mdb->dbMdbGetType != 4 ) {
     $noFunc{$cell}++; $nNoFunc++;
   }
 }
@@ -173,7 +179,8 @@ foreach my $net ( keys %loads ) {
     push(@queue, @{$loads{$net}});
   }
 }
-print "INFO-UTS-CHK_CONST : 005 : seeded from $nLiteral tied net(s); " . scalar(@queue) . " evaluation(s) queued\n";
+print "INFO-UTS-CHK_CONST : 005 : seeded from $nLiteral tied net(s); " . scalar(@queue) . " evaluation(s) queued" .
+      ( keys %$keep ? "; " . scalar(keys %$keep) . " dont_touch cell(s) kept opaque" : "" ) . "\n";
 if ( $nNoFunc ) {
   my @c = sort { $noFunc{$b} <=> $noFunc{$a} || $a cmp $b } keys %noFunc;
   print "WARN-UTS-CHK_CONST : 006 : $nNoFunc instance(s) of " . scalar(@c) . " cell type(s) have no liberty function; their outputs stay X:\n";
@@ -334,7 +341,7 @@ if ( $induct ) {
 #<!-- What folds: a logic or sequential cell every connected output of which
 #     is constant.  Then the sweep, once as check_dead_logic does it and once
 #     with the folded cells cut. -->
-my $g = &check_dead_logic_graph;
+my $g = &check_dead_logic_graph($keep);
 my $kind = $g->{KIND};
 my %cut = ();
 my ($nFold, $nFoldSeq, $nConstNet, $nSimplify) = (0, 0, 0, 0);

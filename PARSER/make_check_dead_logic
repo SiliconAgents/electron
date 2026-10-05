@@ -40,6 +40,7 @@ my @explain = ();
 my $noOfArguments = @_;
 if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "Usage : check_dead_logic [-report <file>] [-max <n>] [-depth <n>] [-explain <inst>[,<inst>...]]\n";
+  print "                          [-keep_pattern <regex>] [-dont_touch <file>] [--no_keep]\n";
   print "        Sweeps back from the top output ports (and from the inputs of macros,\n";
   print "        memories and cells with no library data) and reports every cell and\n";
   print "        flop that can never reach one.  Flat designs: after elaborate or hier2flat.\n";
@@ -47,6 +48,7 @@ if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "        -max     how many cell types and hierarchy branches to list (default 15)\n";
   print "        -depth   hierarchy levels to group dead cells by (default 2)\n";
   print "        -explain for each instance: live or dead, and per pin its net and what else is on it\n";
+  &check_dead_logic_keep_usage;
   return;
 }
 for(my $i = 0; $i < $noOfArguments; $i++){
@@ -65,7 +67,9 @@ use Benchmark;
 my $t0 = new Benchmark;
 %DEAD_LOGIC = ();
 
-my $g = &check_dead_logic_graph;
+my $keep = &check_dead_logic_keep_set(@_);
+return unless ( defined $keep );
+my $g = &check_dead_logic_graph($keep);
 my $kind = $g->{KIND};
 my ($nNoLib, $nPhys, $nSink, $nOutPorts) = @{$g}{qw(NOLIB PHYS SINK OUTPORTS)};
 my %physByCell = %{$g->{PHYS_BY_CELL}};
@@ -100,6 +104,7 @@ $DEAD_LOGIC{SUMMARY} = { CELLS => $nAll, DEAD => $dAll, FLOPS => $nSeq, DEAD_FLO
 my $pct = sub { my ($a, $b) = @_; return $b ? sprintf("%.2f%%", 100 * $a / $b) : "-"; };
 print "INFO-UTS-CHK_DEAD : 003 : swept from $nOutPorts output port(s)" .
       ( $nSink ? ", $nSink macro/memory input set(s)" : "" ) .
+      ( $g->{KEEP} ? ", $g->{KEEP} dont_touch cell(s)" : "" ) .
       ( $nNoLib ? ", $nNoLib cell(s) with no library data (kept, never called dead)" : "" ) . "\n";
 print "INFO-UTS-CHK_DEAD : 004 : dead: $dAll of $nAll logic cells (" . $pct->($dAll, $nAll) . "), " .
       "of which $dSeq of $nSeq sequential (" . $pct->($dSeq, $nSeq) . ")" .
@@ -191,6 +196,9 @@ return;
 #     top output ports and the inputs of every cell the tool cannot see
 #     into. -->
 sub check_dead_logic_graph {
+my ($keep) = @_;
+$keep = {} unless ( defined $keep );
+my $nKeep = 0;
 my %drivers = ();     # net -> [instances driving it]
 my %inNets = ();      # inst -> [nets on its inputs]
 my %kind = ();        # inst -> logic | seq | sink | phys
@@ -232,7 +240,12 @@ foreach my $inst ( keys %COMP_ALREADY ) {
   #     the constructor's 0, combinational; its LEF CLASS BLOCK says what it
   #     is.  Called logic, a macro whose outputs nobody reads went dead and
   #     took its whole address and data fanin with it. -->
-  if ( $ctype == 2 || $ctype == 3 || $mdb->dbMdbGetClass =~ /^(BLOCK|PAD|AREAIO|COVER)/ ) {
+  if ( exists $keep->{$inst} ) {
+    #<!-- dont_touch: kept whatever it drives, so what it reads is kept too -->
+    $kind{$inst} = "sink"; $nKeep++;
+    push(@live, @ins);
+  }
+  elsif ( $ctype == 2 || $ctype == 3 || $mdb->dbMdbGetClass =~ /^(BLOCK|PAD|AREAIO|COVER)/ ) {
     #<!-- a block or a memory: its inputs are observable whatever is inside -->
     $kind{$inst} = "sink"; $nSink++;
     push(@live, @ins);
@@ -261,7 +274,7 @@ foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
   $nOutPorts++;
 }
 return { DRIVERS => \%drivers, IN_NETS => \%inNets, KIND => \%kind, SEEDS => \@live,
-         NOLIB => $nNoLib, PHYS => $nPhys, SINK => $nSink, OUTPORTS => $nOutPorts,
+         NOLIB => $nNoLib, PHYS => $nPhys, SINK => $nSink, OUTPORTS => $nOutPorts, KEEP => $nKeep,
          PHYS_BY_CELL => \%physByCell, PHYS_UNCONNECTED => $physUnconnected };
 }# sub check_dead_logic_graph
 
@@ -288,6 +301,64 @@ while ( @live ) {
 }
 return ( \%liveNet, \%liveInst );
 }# sub check_dead_logic_sweep
+#------------------------------------------------------------------------------------------#
+
+#<!-- The dont_touch set, shared by check_dead_logic, check_const_logic and
+#     remove_dead_logic so that all three agree on what may go.  A kept
+#     instance is opaque, like a macro: never dead, never folded, its inputs
+#     stay live and no constant is propagated through it.
+#       -keep_pattern <regex>  instances whose path matches (default d0nt_,
+#                              the library-cell wrappers that must survive:
+#                              synchronisers, clock gates, hardened flops)
+#       -dont_touch <file>     one glob per line against the instance path,
+#                              or "cell <glob>" against the cell; # comments
+#       --no_keep              no default pattern
+#     Paths are matched with escaping backslashes removed.  Returns a hash
+#     ref, or undef when the list cannot be read. -->
+sub check_dead_logic_keep_usage {
+  print "        -keep_pattern instances whose path matches are dont_touch (default d0nt_)\n";
+  print "        -dont_touch   file of instance globs, or \"cell <glob>\" lines, to keep\n";
+  print "        --no_keep     no default dont_touch pattern\n";
+}
+sub check_dead_logic_keep_set {
+my @args = @_;
+my ($pattern, $file, $useDefault) = ("", "", 1);
+for ( my $i = 0 ; $i < @args ; $i++ ) {
+  if ( $args[$i] eq "-keep_pattern" ) { $pattern = $args[$i+1]; }
+  if ( $args[$i] eq "-dont_touch" )   { $file = $args[$i+1]; }
+  if ( $args[$i] eq "--no_keep" )     { $useDefault = 0; }
+}
+my @instRe = ();
+my @cellRe = ();
+push(@instRe, $pattern) if ( $pattern ne "" );
+push(@instRe, 'd0nt_') if ( $pattern eq "" && $useDefault );
+if ( $file ne "" ) {
+  my $fh;
+  unless ( open($fh, "<", $file) ) {
+    print "ERROR-UTS-CHK_DEAD : 011 : cannot read dont_touch list $file : $!\n";
+    return undef;
+  }
+  while ( my $l = <$fh> ) {
+    $l =~ s/#.*//; $l =~ s/^\s+|\s+$//g;
+    next if ( $l eq "" );
+    my $isCell = ( $l =~ s/^cell\s+// );
+    ( my $re = quotemeta($l) ) =~ s/\\\*/.*/g;
+    $re =~ s/\\\?/./g;
+    if ( $isCell ) { push(@cellRe, "^$re\$"); } else { push(@instRe, "^$re\$"); }
+  }
+  close($fh);
+}
+my %keep = ();
+return \%keep unless ( @instRe || @cellRe );
+my $ir = @instRe ? join("|", map { "(?:$_)" } @instRe) : undef;
+my $cr = @cellRe ? join("|", map { "(?:$_)" } @cellRe) : undef;
+foreach my $inst ( keys %COMP_ALREADY ) {
+  ( my $plain = $inst ) =~ s/\\//g;
+  if ( defined $ir && $plain =~ /$ir/ ) { $keep{$inst} = 1; next; }
+  if ( defined $cr && exists $CADB{$inst} && $CADB{$inst}->dbCadbGetCellref =~ /$cr/ ) { $keep{$inst} = 1; }
+}
+return \%keep;
+}# sub check_dead_logic_keep_set
 #------------------------------------------------------------------------------------------#
 
 1;
