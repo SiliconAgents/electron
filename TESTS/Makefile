@@ -110,8 +110,33 @@ nangate_rtl_hier:
 # from 64 of the same vedic_16x16 these place one of -- 204,816 instances --
 # and it takes about five minutes end to end, which is too long for something
 # the push hook can be asked to run.  "cd large && make matmul_hier".
+# check_dead_logic, check_const_logic and remove_dead_logic on small designs
+# whose every cell has a known fate (rtls/dead_logic/dead_logic.v says which):
+# a dead self-toggling flop, constants through a flop, an enable flop held by
+# a constant tied in through a hierarchical port, a no-reset flop that is
+# constant only for a chosen power-up value, a dead cell kept by its d0nt_
+# name, and 25 loads on two constant nets for tie sharing.  Three sessions,
+# because removal changes the database.  Fails unless each removes exactly
+# what it should and the checks run afterwards find nothing left.
+comma := ,
+DL_RUN = cd workarea/dl_$(1) && PATH=/usr/bin:$$PATH $(ELECTRON)/electron --nogui --cleanlog --nolog -f ../../dead_logic/$(1).tcl > run.log 2>&1
+DL_EXPECT = grep -q "$(2)" workarea/dl_$(1)/run.log || { echo "nangate_dead_logic $(1): expected \"$(2)\""; exit 1; }
+nangate_dead_logic:
+	mkdir -p workarea/dl_reset workarea/dl_powerup workarea/dl_ties
+	$(call DL_RUN,reset)
+	$(call DL_RUN,powerup)
+	$(call DL_RUN,ties)
+	$(call DL_EXPECT,reset,removing 9 instance(s)$(comma) 3 of them flops: 4 const$(comma) 2 const-flop$(comma) 2 dead$(comma) 1 dead-after-fold)
+	$(call DL_EXPECT,reset,dead: 0 of)
+	$(call DL_EXPECT,reset,: 0 cell(s) fold to a tie)
+	$(call DL_EXPECT,powerup,removing 12 instance(s)$(comma) 4 of them flops)
+	$(call DL_EXPECT,powerup,dead: 0 of)
+	$(call DL_EXPECT,powerup,: 0 cell(s) fold to a tie)
+	$(call DL_EXPECT,ties,added 2 tie cell(s) for 2 constant net(s))
+	@echo "nangate_dead_logic: all expected results"
+
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_rtl_hier
+nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_rtl_hier nangate_dead_logic
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
