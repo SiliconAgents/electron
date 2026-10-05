@@ -6,6 +6,7 @@ my $t0 = new Benchmark;
 #my %TEMP_HIER_PORT_NET_MAP = ();
 $is_to_do_selective_flatten = $GLOBAL->dbGlobalGetFlattenSelectively();
 $CURRENT_MODULE_FLAT_START_POINT = "" ;
+%ELABORATE_LEAF_BUS_CACHE = ();
 print "INFO-PAR-ELA : 001 : elaborating the Top level $TOP_MODULE\n";
 print "INFO-PAR-ELA : 002 : Building the component database\n";
       if ( exists $MODULE_ALREADY{$TOP_MODULE} ) {
@@ -668,6 +669,13 @@ print "DBG-PAR-ELA : 053 : leaf connection  : $connLine\n" if($DEBUG == 300);
                $pin =~ s/\.//;
                $netName = $net;
                print "working on $net\n" if ($DEBUG == 300) ;
+               if ( $PLDB{$cell}->dbMdbDoesPinExist($pin) != 1 && $PLDB{$cell}->dbMdbDoesBusExist($pin) == 1 ) {
+                 next if ( $net =~ /^\s*$/ );
+                 foreach my $pair ( &elaborate_leaf_bus_bits($cell,$pin,$net,$TOP_MODULE) ) {
+                   $COMP_ALREADY{$inst}{$$pair[0]} = $$pair[1];
+                 }
+                 next;
+               }
                if ( $net =~ /\{/ ) { 
                     print "DBG-PAR-ELA : 054 :\t$pin \=\> $net\n" if($DEBUG == 300); 
                     $net =~ s/\{//; $net =~ s/\}//;
@@ -1456,6 +1464,17 @@ print "DBG-PAR : 045 : leaf connection  : $connLine\n" if($DEBUG == 300);
                $busExist = $PLDB{$cell}->dbMdbDoesBusExist($pin);
                print "DBG-PAR : 048 : Yes! is a bus pin on the leaf macro $cell\n" if ($busExist ==1 && $DEBUG == 300 );
                     }
+               if ( $busExist == 1 ) {
+                 next if ( $net =~ /^\s*$/ );
+                 foreach my $pair ( &elaborate_leaf_bus_bits($cell,$pin,$net,$cellName) ) {
+                   my ($pinBit,$netBit) = @$pair;
+                   $COMP_ALREADY{$instName}{$pinBit} = &elaborate_resolve_hier_net($netBit,$hierPath,$hierInstName_hash_key);
+                   if ( $CURRENT_MODULE_FLAT_START_POINT ne "" ) {
+                     &add_expr_to_port_net_connection($pinBit,$netBit,$hierInstName);
+                   }
+                 }
+                 next;
+               }
                $netName = $net;
                if ( $net =~ /\{/ ) { 
                     print "DBG-PAR : 049 :\t$pin \=\> $net\n" if($DEBUG == 300); 
@@ -2018,4 +2037,72 @@ my $hierModuleInst = $_[0];
 
 
 }#sub dbMarkHierInstAsBlackBox
+
+#-----------------------------------------------------------------------------#
+# A bus pin on a leaf cell -- a memory macro's AB, D, Q -- connected to any
+# expression.  The cases below used to be handled one shape at a time, and
+# only a bare, unescaped bus name came through whole: a part select
+# (addr[7:4]), a sized constant (8'h00), an escaped bus (\u.rd_data ) or a
+# concatenation with a constant in it left the pin as a single bit, or as
+# AB[UND] tied to one net, and everything the macro reads or drives lost its
+# connection.  Now the expression is blasted with array_of_blasted_expr and
+# matched to the cell's bus bits from the LSB end, as verilog does.
+#
+# Returns a list of [pin bit, net bit] pairs; empty when $pin is not a bus on
+# $cell.  Constant bits come back as 1'b0 / 1'b1.
+#-----------------------------------------------------------------------------#
+sub elaborate_leaf_bus_bits {
+  my ($cell,$pin,$net,$module) = @_;
+  my $busBits = $ELABORATE_LEAF_BUS_CACHE{$cell}{$pin};
+  if ( !defined $busBits ) {
+    my %bitOf = ();
+    foreach my $p ( $PLDB{$cell}->dbMdbGetPins ) {
+      if ( $p =~ /^\Q$pin\E\[(\d+)\]$/ ) { $bitOf{$p} = $1; }
+    }
+    my @lsbFirst = sort { $bitOf{$a} <=> $bitOf{$b} } keys %bitOf;
+    $busBits = \@lsbFirst;
+    $ELABORATE_LEAF_BUS_CACHE{$cell}{$pin} = $busBits;
+  }
+  return () if ( @$busBits == 0 );
+  my @netBits = reverse &array_of_blasted_expr($net,$module);
+  my @pairs = ();
+  my $n = ( @netBits < @$busBits ) ? scalar(@netBits) : scalar(@$busBits);
+  for ( my $k = 0 ; $k < $n ; $k++ ) {
+    my $bit = $netBits[$k];
+    $bit =~ s/\s+//g;
+    push(@pairs,[$$busBits[$k],$bit]);
+  }
+  if ( @netBits != @$busBits ) {
+    print "WARN-PAR-ELA : 063 : $cell pin $pin is ".scalar(@$busBits)." bits but $net is ".scalar(@netBits).", connected $n from the LSB\n";
+  }
+  return @pairs;
+}#sub elaborate_leaf_bus_bits
+
+#-----------------------------------------------------------------------------#
+# The net a leaf pin in the current hierarchical instance really sits on: a
+# local net becomes hierPath/net, and a net that is a port of this instance is
+# followed up through %TEMP_HIER_PORT_NET_MAP to the ancestor that owns it.
+# The same walk the scalar-pin case does inline in dbgElaborateHierInsts.
+#-----------------------------------------------------------------------------#
+sub elaborate_resolve_hier_net {
+  my ($net,$hierPath,$hierInstName_hash_key) = @_;
+  return $net if ( $net =~ /^1\'b[01]$/ );
+  my $netName = $hierPath."/".$net;
+  if ( exists $TEMP_HIER_PORT_NET_MAP{$hierInstName_hash_key}{$net} ) {
+    $netName = $net;
+    my $depth = @TEMP_PATH;
+    for ( my $xx = $depth -1 ; $xx >= 0 ; $xx-- ) {
+      last if ( $TEMP_PATH[$xx] eq $TOP_MODULE );
+      my $temp_inst_hash_key = $TEMP_PATH[$xx]."_".$xx;
+      if ( exists $TEMP_HIER_PORT_NET_MAP{$temp_inst_hash_key}{$netName} ) {
+        $netName = $TEMP_HIER_PORT_NET_MAP{$temp_inst_hash_key}{$netName};
+      } else {
+        $netName = join("/",@TEMP_PATH[0..$xx])."/".$netName;
+        last;
+      }
+    }
+  }
+  return $netName;
+}#sub elaborate_resolve_hier_net
+
 1;
