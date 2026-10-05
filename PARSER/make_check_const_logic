@@ -1,0 +1,726 @@
+#<!-- check_const_logic: which nets, cells and flops can only ever hold one
+#     value, and how much logic goes with them.
+#
+#     The dual of check_dead_logic.  That one sweeps BACKWARDS from what is
+#     observable; this one propagates FORWARDS from what is known: nets tied
+#     to a literal (1'b0, 8'h00 blasted to bits), tie cells, and from there
+#     through every cell whose library function lets a constant through.
+#     Three values, 0 1 X.  A gate is constant when its known inputs force it
+#     -- an AND with a 0, a mux whose select is tied and whose chosen input is
+#     tied -- not only when every input is.  When a cell has a constant input
+#     and at most four unknown ones, every assignment of the unknowns is
+#     tried, which also settles a mux whose two data inputs are tied alike.
+#
+#     Flops, from their liberty ff group:
+#       D=v      next_state is v whatever the flop holds, the clock can tick,
+#                and the reset that could fight v is tied off.  Constant
+#                from the first clock edge on.
+#       hold v   next_state with the flop holding v is v again (an enable
+#                tied off, D tied to the flop's own reset value, or a clock
+#                that never ticks), a reset can put v there, and the reset
+#                that could fight v is tied off.  Constant from reset on.
+#     Latches the same way, with data_in and enable.  A flop that comes out
+#     constant feeds the next round, so the propagation runs to a fixpoint.
+#     It only ever turns X into a value, never the other way, so it is sound
+#     and it terminates.
+#       holds-reset-inductive
+#                what that cannot see: a flop whose D comes back from its own
+#                Q -- an enable flop is a mux and a flop -- or from another
+#                flop's.  Assume every flop with a live reset holds its reset
+#                value, drop each one whose next state disagrees, repeat
+#                until none drops.  What is left holds by induction from
+#                reset.  -noinduct turns it off.
+#       holds-powerup, never-loaded
+#                the same hold with no reset that can fire: the flop starts
+#                as x and synthesis is free to pick its value, so a register
+#                whose D is tied but whose enable is not is still a constant,
+#                and one that is never loaded at all (enable tied off) is
+#                whatever we pick -- 0.  yosys opt_dff removes both.  Kept
+#                apart in the report from the reset-backed ones.
+#
+#     Then the payoff: every cell whose outputs are all constant becomes a
+#     tie, so it no longer needs its inputs.  check_dead_logic's sweep is
+#     re-run with those cells cut, and whatever dies as a result is counted
+#     with them.
+#
+#     Cell functions come from the liberty, not from %PLDB.  The libraries of
+#     a modern node are well over a gigabyte each, so they are not read: grep
+#     pulls the cell, pin, direction, function and ff/latch lines (a second or
+#     two per library) and indentation tells the cell's own pins from the
+#     copies in its test_cell.  Default: the config's std-cell-synth-libs, the
+#     svt flavour.  A cell not found by name is looked up with its VT suffix
+#     dropped, since the function does not change with VT.
+#
+#     Kept in %CONST_LOGIC: {NET}{$net} = 0|1 for every net proved constant,
+#     {FOLD}{$inst} = cellref for every cell whose outputs all are,
+#     {FLOP}{$inst} = "value reason", {SUMMARY} the counts. -->
+#------------------------------------------------------------------------------------------#
+sub check_const_logic {
+
+my $report = "";
+my $maxShow = 15;
+my $depth = 2;
+my @explain = ();
+my @libs = ();
+my $induct = 1;
+$CONST_LOGIC_POWERUP = 1;
+
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
+  print "Usage : check_const_logic [-liberty <lib>[,<lib>...]] [-report <file>] [-max <n>] [-depth <n>]\n";
+  print "                          [-explain <inst>[,<inst>...]] [-noinduct] [-reset_only]\n";
+  print "        Propagates constants forward from tied nets and tie cells through the\n";
+  print "        cells' liberty functions, flops included, and reports every net, cell and\n";
+  print "        flop that can only hold one value -- then how much logic dies when those\n";
+  print "        cells become ties.  Flat designs: after elaborate or hier2flat.\n";
+  print "        -liberty cell functions from these libraries (default: the config's\n";
+  print "                 std-cell-synth-libs, svt flavour)\n";
+  print "        -report  write every constant flop and folded cell to <file>\n";
+  print "        -max     how many cell types and hierarchy branches to list (default 15)\n";
+  print "        -depth   hierarchy levels to group by (default 2)\n";
+  print "        -explain for each instance: its pins, nets and their values\n";
+  print "        -noinduct skip proving flops that hold their reset value through each other\n";
+  print "        -reset_only only reset-backed flop constants: never pick a no-reset flop's power-up value\n";
+  return;
+}
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-liberty"){push(@libs, split(/\s*,\s*/, $_[$i+1]));}
+  if($_[$i] eq "-report"){$report = $_[$i+1];}
+  if($_[$i] eq "-max"){$maxShow = $_[$i+1];}
+  if($_[$i] eq "-depth"){$depth = $_[$i+1];}
+  if($_[$i] eq "-explain"){push(@explain, split(/\s*,\s*/, $_[$i+1]));}
+  if($_[$i] eq "-noinduct"){$induct = 0;}
+  if($_[$i] eq "-reset_only"){$CONST_LOGIC_POWERUP = 0;}
+}#for
+
+unless ( keys %COMP_ALREADY ) {
+  print "ERROR-UTS-CHK_CONST : 001 : no instances in the flat database; read a netlist and elaborate first\n";
+  return;
+}
+if ( !@libs ) {
+  my @vts = sort keys %SYNTH_LIB_ALREADY;
+  my ($vt) = grep { /^svt$/i } @vts;
+  $vt = $vts[0] unless ( defined $vt );
+  @libs = @{$SYNTH_LIB_ALREADY{$vt}} if ( defined $vt );
+  if ( !@libs ) {
+    print "ERROR-UTS-CHK_CONST : 002 : no liberty to take cell functions from; give -liberty, or a config with std-cell-synth-libs\n";
+    return;
+  }
+  print "INFO-UTS-CHK_CONST : 003 : cell functions from the config's $vt synthesis libraries\n";
+}
+
+use Benchmark;
+my $t0 = new Benchmark;
+%CONST_LOGIC = ();
+
+foreach my $lib ( @libs ) {
+  next if ( $CONST_LOGIC_LIBS_READ{$lib} );
+  my $n = &check_const_logic_read_liberty($lib);
+  return if ( $n < 0 );
+  $CONST_LOGIC_LIBS_READ{$lib} = 1;
+  print "INFO-UTS-CHK_CONST : 004 : $n cell function(s) from $lib\n";
+}
+
+#<!-- Per instance: its function entry, which net each signal pin is on.
+#     %loads is net -> instances that read it; %nDrv counts drivers so that a
+#     net with two is never called constant. -->
+my %func = ();        # inst -> function entry
+my %loads = ();
+my %nDrv = ();
+my %val = ();         # net -> 0 | 1, absent = X
+my %why = ();         # flop inst -> reason
+my (%noFunc, $nNoFunc) = ((), 0);
+my @queue = ();
+foreach my $inst ( keys %COMP_ALREADY ) {
+  next unless ( exists $CADB{$inst} );
+  my $cell = $CADB{$inst}->dbCadbGetCellref;
+  my $mdb = $PLDB{$cell};
+  my $f = &check_const_logic_func_of($cell);
+  foreach my $pin ( keys %{$COMP_ALREADY{$inst}} ) {
+    my $net = $COMP_ALREADY{$inst}{$pin};
+    next if ( !defined $net || $net eq "" );
+    my $dir = defined $mdb ? $mdb->dbMdbGetPinDir($pin) : 2;
+    next if ( $dir eq "" );
+    if ( defined $mdb ) {
+      my $type = $mdb->dbMdbGetPinType($pin);
+      next if ( $type == 1 || $type == 2 );
+    }
+    push(@{$loads{$net}}, $inst) if ( $dir == 0 || $dir == 2 );
+    $nDrv{$net}++ if ( $dir == 1 || $dir == 2 );
+  }
+  if ( defined $f ) {
+    $func{$inst} = $f;
+    push(@queue, $inst) unless ( @{$f->{INS}} );      # tie cells: no inputs at all
+  } elsif ( defined $mdb && $mdb->dbMdbGetClass !~ /^(BLOCK|PAD|AREAIO|COVER)/ && $mdb->dbMdbGetType != 4 ) {
+    $noFunc{$cell}++; $nNoFunc++;
+  }
+}
+foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
+  my $dir = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetDir;
+  next unless ( $dir eq "input" || $dir eq "inout" );
+  my @conn = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetConn;
+  $nDrv{$conn[0]}++ if ( @conn && defined $conn[0] && $conn[0] ne "" );
+}
+
+#<!-- Seeds: nets named for a literal.  A bus bit tied off comes out of
+#     elaborate as 1'b0 / 1'b1; a scalar pin tied off inside a module keeps
+#     the module's path, u_x/1'h0. -->
+my $nLiteral = 0;
+foreach my $net ( keys %loads ) {
+  if ( $net =~ m{(?:^|/)1'[bBhHdD]([01])$} ) {
+    next if ( $nDrv{$net} );
+    $val{$net} = $1 + 0; $nLiteral++;
+    push(@queue, @{$loads{$net}});
+  }
+}
+print "INFO-UTS-CHK_CONST : 005 : seeded from $nLiteral tied net(s); " . scalar(@queue) . " evaluation(s) queued\n";
+if ( $nNoFunc ) {
+  my @c = sort { $noFunc{$b} <=> $noFunc{$a} || $a cmp $b } keys %noFunc;
+  print "WARN-UTS-CHK_CONST : 006 : $nNoFunc instance(s) of " . scalar(@c) . " cell type(s) have no liberty function; their outputs stay X:\n";
+  foreach my $cell ( @c[0 .. ( $#c < 4 ? $#c : 4 )] ) {
+    printf("WARN-UTS-CHK_CONST : 006 :   %8d  %s\n", $noFunc{$cell}, $cell);
+  }
+}
+
+#<!-- The fixpoint.  An instance is re-evaluated whenever one of its inputs
+#     becomes constant; a net is set once and never changes.  An instance in
+#     %$fixed is a flop whose value is being assumed, not evaluated. -->
+my $nEval = 0;
+my $inputsOf = sub {
+  my ($inst, $f, $val) = @_;
+  my $pins = $COMP_ALREADY{$inst};
+  my %v = ();
+  foreach my $pin ( @{$f->{INS}} ) {
+    my $net = $pins->{$pin};
+    $v{$pin} = ( defined $net && exists $val->{$net} ) ? $val->{$net} : 2;
+  }
+  return \%v;
+};
+my $setOutputs = sub {
+  my ($inst, $out, $val, $queue) = @_;
+  my $pins = $COMP_ALREADY{$inst};
+  my $set = 0;
+  foreach my $pin ( keys %$out ) {
+    my $o = $out->{$pin};
+    next if ( $o == 2 );
+    my $net = $pins->{$pin};
+    next if ( !defined $net || $net eq "" || exists $val->{$net} );
+    next if ( ( $nDrv{$net} || 0 ) != 1 );
+    $val->{$net} = $o; $set++;
+    push(@$queue, @{$loads{$net}}) if ( exists $loads{$net} );
+  }
+  return $set;
+};
+my $propagate = sub {
+  my ($val, $queue, $why, $fixed) = @_;
+  while ( @$queue ) {
+    my $inst = pop(@$queue);
+    next if ( exists $fixed->{$inst} );
+    my $f = $func{$inst};
+    next unless ( defined $f );
+    $nEval++;
+    my %out = &check_const_logic_eval_cell($f, $inputsOf->($inst, $f, $val), \my $reason);
+    my $set = $setOutputs->($inst, \%out, $val, $queue);
+    $why->{$inst} = $reason if ( defined $reason && ( $set || $reason =~ /^X / ) );
+  }
+};
+$propagate->(\%val, \@queue, \%why, {});
+my $nProved = scalar(grep { $nDrv{$_} } keys %val);
+
+#<!-- Flops that hold each other.  An enable flop comes out of synthesis as a
+#     mux feeding Q back to D; tie the enable off and the flop holds its reset
+#     value for ever, but proving it needs the flop's own value, so the
+#     propagation above, which only ever uses what it has already proved,
+#     cannot.  So assume: every flop with a reset that can fire holds its
+#     reset value, and every flop with none holds 0 (then 1).  Propagate under that, and drop every flop whose next state
+#     does not give the assumed value back.  Repeat until nothing drops; what
+#     is left holds by induction from reset.  -noinduct skips it. -->
+my $nInduct = 0;
+if ( $induct ) {
+  my (%cand, %powerup) = ();
+  foreach my $inst ( keys %func ) {
+    my $s = $func{$inst}{SEQ};
+    next unless ( defined $s && !exists $why{$inst} );
+    my $v = $inputsOf->($inst, $func{$inst}, \%val);
+    my %w = %$v; $w{$s->{IQ}} = 2; $w{$s->{IQN}} = 2 if ( defined $s->{IQN} );
+    my $clr = defined $s->{CLR} ? &check_const_logic_eval($s->{CLR}, \%w) : 0;
+    my $pre = defined $s->{PRE} ? &check_const_logic_eval($s->{PRE}, \%w) : 0;
+    if    ( $clr != 0 && $pre == 0 ) { $cand{$inst} = 0; }
+    elsif ( $pre != 0 && $clr == 0 ) { $cand{$inst} = 1; }
+    elsif ( $clr == 0 && $pre == 0 && $CONST_LOGIC_POWERUP ) { $cand{$inst} = 0; $powerup{$inst} = 1; }
+  }
+  my $nCand = scalar(keys %cand);
+  #<!-- Incremental.  Round one propagates every assumption from scratch.
+  #     After that, a dropped flop can only have propagated into its own
+  #     forward cone, so only the values there are retracted (never one the
+  #     plain propagation proved) and the cells there evaluated again.  A
+  #     value outside the cone has no path from the dropped flop and stands.
+  #     A shift register unravels one stage per round, which from scratch
+  #     cost a full propagation per stage. -->
+  my ($round, %v2, %why2) = (0);
+  %v2 = %val;
+  my @q = ();
+  foreach my $inst ( keys %cand ) {
+    my %out = &check_const_logic_eval_cell($func{$inst}, $inputsOf->($inst, $func{$inst}, \%v2), \my $r, $cand{$inst});
+    $setOutputs->($inst, \%out, \%v2, \@q);
+  }
+  $propagate->(\%v2, \@q, \%why2, \%cand);
+  while ( %cand ) {
+    $round++;
+    my @drop = ();
+    foreach my $inst ( keys %cand ) {
+      my $c = $cand{$inst};
+      my $s = $func{$inst}{SEQ};
+      my $v = $inputsOf->($inst, $func{$inst}, \%v2);
+      my %w = %$v; $w{$s->{IQ}} = $c; $w{$s->{IQN}} = 1 - $c if ( defined $s->{IQN} );
+      my $clr = defined $s->{CLR} ? &check_const_logic_eval($s->{CLR}, \%w) : 0;
+      my $pre = defined $s->{PRE} ? &check_const_logic_eval($s->{PRE}, \%w) : 0;
+      my $clk = &check_const_logic_eval($s->{CLK}, \%w);
+      my $frozen = ( $s->{TYPE} eq "ff" ) ? ( $clk != 2 ) : ( $clk == 0 );
+      my ($fights, $sets) = ( $c == 0 ) ? ($pre, $clr) : ($clr, $pre);
+      my $ok = ( $fights == 0 && ( $sets != 0 || ( $powerup{$inst} && $clr == 0 && $pre == 0 ) ) ) &&
+               ( $frozen || &check_const_logic_eval($s->{NS}, \%w) == $c );
+      push(@drop, $inst) unless ( $ok );
+    }
+    print "INFO-UTS-CHK_CONST : 020 : induction round $round: " . scalar(keys %cand) . " flop(s) assumed, " . scalar(@drop) . " dropped\n" if ( $round <= 10 || $round % 10 == 0 || !@drop );
+    last unless ( @drop );
+    #<!-- a flop with no reset assumed at 0 gets a second try at 1: its
+    #     power-up value is ours to pick either way -->
+    my @flip = grep { $powerup{$_} && $cand{$_} == 0 } @drop;
+    delete @cand{@drop};
+    $cand{$_} = 1 foreach ( @flip );
+    #<!-- retract the forward cone of the dropped flops -->
+    my %seen = ();
+    my @nets = ();
+    my @redo = ();
+    foreach my $inst ( @drop ) {
+      $seen{$inst} = 1; push(@redo, $inst);
+      foreach my $pin ( keys %{$func{$inst}{OUT}} ) {
+        my $net = $COMP_ALREADY{$inst}{$pin};
+        next unless ( defined $net && exists $v2{$net} && !exists $val{$net} );
+        delete $v2{$net}; push(@nets, $net);
+      }
+    }
+    while ( @nets ) {
+      my $net = pop(@nets);
+      next unless ( exists $loads{$net} );
+      foreach my $inst ( @{$loads{$net}} ) {
+        next if ( $seen{$inst}++ || exists $cand{$inst} || !exists $func{$inst} );
+        push(@redo, $inst);
+        delete $why2{$inst};
+        foreach my $pin ( keys %{$func{$inst}{OUT}} ) {
+          my $o = $COMP_ALREADY{$inst}{$pin};
+          next unless ( defined $o && exists $v2{$o} && !exists $val{$o} );
+          delete $v2{$o}; push(@nets, $o);
+        }
+      }
+    }
+    delete $why2{$_} foreach ( @drop );
+    foreach my $inst ( @flip ) {
+      my %out = &check_const_logic_eval_cell($func{$inst}, $inputsOf->($inst, $func{$inst}, \%v2), \my $r, 1);
+      $setOutputs->($inst, \%out, \%v2, \@redo);
+    }
+    $propagate->(\%v2, \@redo, \%why2, \%cand);
+  }
+  if ( %cand ) {
+    %val = %v2;
+    $why{$_} = $why2{$_} foreach ( keys %why2 );
+    $why{$_} = "$cand{$_} holds-" . ( $powerup{$_} ? "powerup" : "reset" ) . "-inductive" foreach ( keys %cand );
+    $nInduct = scalar(keys %cand);
+  }
+  print "INFO-UTS-CHK_CONST : 021 : $nInduct of $nCand flop(s) assumed hold their value for ever\n";
+}
+
+#<!-- What folds: a logic or sequential cell every connected output of which
+#     is constant.  Then the sweep, once as check_dead_logic does it and once
+#     with the folded cells cut. -->
+my $g = &check_dead_logic_graph;
+my $kind = $g->{KIND};
+my %cut = ();
+my ($nFold, $nFoldSeq, $nConstNet, $nSimplify) = (0, 0, 0, 0);
+my (%byCell, %byHier, %seqByHier, %flopWhy) = ();
+foreach my $net ( keys %val ) { $nConstNet++ if ( $nDrv{$net} ); }
+foreach my $inst ( keys %func ) {
+  my $k = $kind->{$inst};
+  next unless ( defined $k && ( $k eq "logic" || $k eq "seq" ) );
+  my $f = $func{$inst};
+  next unless ( @{$f->{INS}} );             # a tie cell is one already
+  my $pins = $COMP_ALREADY{$inst};
+  my ($nOut, $nConst) = (0, 0);
+  foreach my $pin ( keys %{$f->{OUT}} ) {
+    my $net = $pins->{$pin};
+    next if ( !defined $net || $net eq "" );
+    $nOut++;
+    $nConst++ if ( exists $val{$net} );
+  }
+  if ( $nOut && ( $nOut == $nConst || ( defined $why{$inst} && $why{$inst} =~ /^X / ) ) ) {
+    $cut{$inst} = 1;
+    my $cell = $CADB{$inst}->dbCadbGetCellref;
+    $CONST_LOGIC{FOLD}{$inst} = $cell;
+    $nFold++;
+    $byCell{$cell}++;
+    my @p = split(/\//, $inst);
+    my $branch = @p > 1 ? join("/", @p[0 .. ( $#p - 1 < $depth - 1 ? $#p - 1 : $depth - 1 )]) : "(top)";
+    $byHier{$branch}++;
+    if ( $k eq "seq" ) {
+      $nFoldSeq++; $seqByHier{$branch}++;
+      my $r = defined $why{$inst} ? $why{$inst} : "?";
+      $CONST_LOGIC{FLOP}{$inst} = $r;
+      ( my $tag = $r ) =~ s/^[01X] //;
+      $flopWhy{$tag}++;
+    }
+  } elsif ( $nOut ) {
+    foreach my $pin ( @{$f->{INS}} ) {
+      my $net = $pins->{$pin};
+      if ( defined $net && exists $val{$net} ) { $nSimplify++; last; }
+    }
+  }
+}
+$CONST_LOGIC{NET} = \%val;
+
+my ($live0) = ( &check_dead_logic_sweep($g, {}) )[1];
+my ($live1) = ( &check_dead_logic_sweep($g, \%cut) )[1];
+my ($nAll, $nSeq, $dead0, $dead0Seq, $newDead, $newDeadSeq, $foldLive, $foldLiveSeq) = (0) x 8;
+foreach my $inst ( keys %$kind ) {
+  my $k = $kind->{$inst};
+  next unless ( $k eq "logic" || $k eq "seq" );
+  my $s = ( $k eq "seq" ) ? 1 : 0;
+  $nAll++; $nSeq += $s;
+  if ( !$live0->{$inst} ) { $dead0++; $dead0Seq += $s; next; }
+  if ( !$live1->{$inst} ) { $newDead++; $newDeadSeq += $s; $CONST_LOGIC{NEW_DEAD}{$inst} = 1; next; }
+  if ( $cut{$inst} ) { $foldLive++; $foldLiveSeq += $s; }
+}
+my $gain = $newDead + $foldLive;
+my $gainSeq = $newDeadSeq + $foldLiveSeq;
+$CONST_LOGIC{SUMMARY} = { CELLS => $nAll, FLOPS => $nSeq, CONST_NETS => $nConstNet,
+                          FOLD => $nFold, FOLD_FLOPS => $nFoldSeq, DEAD => $dead0,
+                          NEW_DEAD => $newDead, REMOVABLE => $dead0 + $gain };
+
+my $pct = sub { my ($a, $b) = @_; return $b ? sprintf("%.2f%%", 100 * $a / $b) : "-"; };
+print "INFO-UTS-CHK_CONST : 007 : $nConstNet driven net(s) constant ($nProved by propagation alone) after $nEval evaluation(s)\n";
+print "INFO-UTS-CHK_CONST : 008 : $nFold cell(s) fold to a tie, of which $nFoldSeq flop(s)" .
+      ( %flopWhy ? " (" . join(", ", map { "$flopWhy{$_} $_" } sort keys %flopWhy) . ")" : "" ) . "\n";
+print "INFO-UTS-CHK_CONST : 009 : $nSimplify more cell(s) have a constant input but not a constant output (smaller cell, not removed)\n";
+print "INFO-UTS-CHK_CONST : 010 : already dead (check_dead_logic): $dead0 of $nAll (" . $pct->($dead0, $nAll) . "), $dead0Seq flop(s)\n";
+print "INFO-UTS-CHK_CONST : 011 : constants remove $gain more (" . $pct->($gain, $nAll) . "), $gainSeq flop(s): " .
+      "$foldLive live cell(s) that fold, $newDead whose only use was one\n";
+print "INFO-UTS-CHK_CONST : 012 : removable in all: " . ( $dead0 + $gain ) . " of $nAll (" . $pct->($dead0 + $gain, $nAll) . "), " .
+      ( $dead0Seq + $gainSeq ) . " of $nSeq flop(s) (" . $pct->($dead0Seq + $gainSeq, $nSeq) . ")\n";
+
+if ( $nFold ) {
+  my @c = sort { $byCell{$b} <=> $byCell{$a} || $a cmp $b } keys %byCell;
+  print "INFO-UTS-CHK_CONST : 013 : folded by cell type:\n";
+  foreach my $cell ( @c[0 .. ( $#c < $maxShow - 1 ? $#c : $maxShow - 1 )] ) {
+    printf("INFO-UTS-CHK_CONST : 013 :   %8d  %s\n", $byCell{$cell}, $cell);
+  }
+  my @h = sort { $byHier{$b} <=> $byHier{$a} || $a cmp $b } keys %byHier;
+  print "INFO-UTS-CHK_CONST : 014 : folded by hierarchy (depth $depth): cells, of which flops\n";
+  foreach my $b ( @h[0 .. ( $#h < $maxShow - 1 ? $#h : $maxShow - 1 )] ) {
+    printf("INFO-UTS-CHK_CONST : 014 :   %8d  %7d  %s\n", $byHier{$b}, $seqByHier{$b} || 0, $b);
+  }
+}
+
+my %plain = ();
+if ( @explain ) {
+  my %want = map { ( my $k = $_ ) =~ s/\\//g; ( $k => 1 ) } @explain;
+  foreach my $i ( keys %COMP_ALREADY ) {
+    ( my $k = $i ) =~ s/\\//g;
+    $plain{$k} = $i if ( $want{$k} );
+  }
+  @explain = map { ( my $k = $_ ) =~ s/\\//g; exists $plain{$k} ? $plain{$k} : $_ } @explain;
+}
+foreach my $inst ( @explain ) {
+  unless ( exists $COMP_ALREADY{$inst} && exists $CADB{$inst} ) {
+    print "INFO-UTS-CHK_CONST : 015 : $inst: no such instance\n"; next;
+  }
+  my $cell = $CADB{$inst}->dbCadbGetCellref;
+  print "INFO-UTS-CHK_CONST : 015 : $inst ($cell" . ( exists $func{$inst} ? "" : ", no function" ) . ")" .
+        ( $cut{$inst} ? " folds" : "" ) . ( defined $why{$inst} ? " -- $why{$inst}" : "" ) . "\n";
+  foreach my $pin ( sort keys %{$COMP_ALREADY{$inst}} ) {
+    my $net = $COMP_ALREADY{$inst}{$pin};
+    my $v = ( defined $net && exists $val{$net} ) ? $val{$net} : "X";
+    print "INFO-UTS-CHK_CONST : 015 :   $pin net=" . ( defined $net ? $net : "-" ) . " value=$v\n";
+  }
+}
+
+if ( $report ne "" ) {
+  if ( open(my $fh, ">", $report) ) {
+    print $fh "# check_const_logic: cells of $TOP_MODULE whose outputs can only hold one value\n";
+    print $fh "# <instance> <cell> <logic|seq> <value> <reason>: reason is the flop's for a flop,\n";
+    print $fh "#   fold for a cell whose outputs are constant, dead-after-fold for one whose only use was one\n";
+    foreach my $inst ( sort keys %{$CONST_LOGIC{FOLD}} ) {
+      print $fh "$inst $CONST_LOGIC{FOLD}{$inst} $kind->{$inst} " .
+                ( exists $CONST_LOGIC{FLOP}{$inst} ? $CONST_LOGIC{FLOP}{$inst} : "- fold" ) . "\n";
+    }
+    foreach my $inst ( sort keys %{$CONST_LOGIC{NEW_DEAD}} ) {
+      print $fh "$inst " . $CADB{$inst}->dbCadbGetCellref . " $kind->{$inst} - dead-after-fold\n";
+    }
+    close($fh);
+    print "INFO-UTS-CHK_CONST : 016 : $nFold folded and $newDead dead-after-fold instance(s) written to $report\n";
+  } else {
+    print "ERROR-UTS-CHK_CONST : 017 : cannot write $report : $!\n";
+  }
+}
+
+my $t1 = new Benchmark;
+print "Command check_const_logic took:", timestr(timediff($t1, $t0)), "\n";
+return;
+
+}# sub check_const_logic
+#------------------------------------------------------------------------------------------#
+
+#<!-- Three-valued logic, 0 1 and 2 for X, as lookup tables indexed 3*a+b. -->
+@CCL_AND = (0,0,0, 0,1,2, 0,2,2);
+@CCL_OR  = (0,1,2, 1,1,1, 2,1,2);
+@CCL_XOR = (0,1,2, 1,0,2, 2,2,2);
+@CCL_NOT = (1,0,2);
+
+#<!-- A cell's function entry, found by name or, failing that, by the name
+#     with its VT suffix dropped. -->
+sub check_const_logic_func_of {
+my ($cell) = @_;
+return $CONST_LOGIC_FUNC{$cell} if ( exists $CONST_LOGIC_FUNC{$cell} );
+( my $key = $cell ) =~ s/(ULVTLL|LVTLL|ULVT|ELVT|LVT|SVT)$//;
+return $CONST_LOGIC_FUNC_BY_KEY{$key};
+}# sub check_const_logic_func_of
+
+#<!-- grep out of one liberty what a function needs, and compile it.  Each
+#     entry: INS the input pins, OUT pin -> compiled function, and for a flop
+#     or latch SEQ with its next state, clock or enable, clear and preset. -->
+sub check_const_logic_read_liberty {
+my ($lib) = @_;
+unless ( -r $lib ) {
+  print "ERROR-UTS-CHK_CONST : 018 : cannot read $lib\n";
+  return -1;
+}
+my $pat = '^\s*(cell ?\(|pin ?\(|ff ?\(|latch ?\(|ff_bank|statetable|test_cell|bus ?\(|bundle ?\(|' .
+          'function|next_state|clocked_on|clear|preset|data_in|enable|direction)';
+my $grep = ( $lib =~ /\.gz$/ ) ? "zgrep" : "grep";
+my $fh;
+unless ( open($fh, "-|", $grep, "-E", $pat, $lib) ) {
+  print "ERROR-UTS-CHK_CONST : 019 : cannot run $grep on $lib : $!\n";
+  return -1;
+}
+my ($n, $cell, $cellIndent, $grp, $grpName, $grpIndent) = (0, undef, 0, "", "", 0);
+my %raw = ();
+my $flush = sub {
+  return unless ( defined $cell );
+  my $e = &check_const_logic_compile_cell($cell, $raw{$cell});
+  if ( defined $e ) {
+    $CONST_LOGIC_FUNC{$cell} = $e;
+    ( my $key = $cell ) =~ s/(ULVTLL|LVTLL|ULVT|ELVT|LVT|SVT)$//;
+    $CONST_LOGIC_FUNC_BY_KEY{$key} = $e unless ( exists $CONST_LOGIC_FUNC_BY_KEY{$key} );
+    $n++;
+  }
+  delete $raw{$cell};
+};
+while ( my $line = <$fh> ) {
+  $line =~ /^(\s*)/;
+  my $ind = length($1);
+  if ( $line =~ /^\s*cell\s*\(\s*"?([^"\)\s]+)"?\s*\)/ ) {
+    $flush->();
+    ($cell, $cellIndent, $grp) = ($1, -1, "");
+    $raw{$cell} = { PIN => {}, DIR => {}, SEQ => undef, UNKNOWN => 0 };
+    next;
+  }
+  next unless ( defined $cell );
+  my $r = $raw{$cell};
+  if ( $line =~ /^\s*(pin|ff|latch|ff_bank|statetable|test_cell|bus|bundle)\s*\(\s*([^\)]*)\)/ ) {
+    my ($g, $name) = ($1, $2);
+    $name =~ s/"//g; $name =~ s/^\s+|\s+$//g;
+    #<!-- the cell's own groups all sit at one indent, the first one seen;
+    #     anything deeper is inside test_cell -->
+    $cellIndent = $ind if ( $cellIndent < 0 );
+    if ( $ind > $cellIndent ) { $grp = "skip"; $grpIndent = $ind; next; }
+    if ( $g eq "test_cell" ) { $grp = "skip"; $grpIndent = $ind; next; }
+    if ( $g eq "ff_bank" || $g eq "statetable" || $g eq "bus" || $g eq "bundle" ) { $r->{UNKNOWN} = 1; $grp = "skip"; next; }
+    ($grp, $grpName, $grpIndent) = ($g, $name, $ind);
+    if ( $g eq "ff" || $g eq "latch" ) {
+      my ($iq, $iqn) = split(/\s*,\s*/, $name);
+      $r->{SEQ} = { TYPE => $g, IQ => $iq, IQN => $iqn };
+    }
+    next;
+  }
+  next if ( $grp eq "skip" || $grp eq "" );
+  next unless ( $ind > $grpIndent );
+  next unless ( $line =~ /^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;/ );
+  my ($attr, $value) = ($1, $2);
+  if ( $grp eq "pin" ) {
+    $r->{DIR}{$grpName} = $value if ( $attr eq "direction" );
+    $r->{PIN}{$grpName} = $value if ( $attr eq "function" );
+  } elsif ( $grp eq "ff" || $grp eq "latch" ) {
+    $r->{SEQ}{$attr} = $value;
+  }
+}
+$flush->();
+close($fh);
+return $n;
+}# sub check_const_logic_read_liberty
+
+sub check_const_logic_compile_cell {
+my ($cell, $r) = @_;
+my @ins = sort grep { $r->{DIR}{$_} eq "input" || $r->{DIR}{$_} eq "inout" } keys %{$r->{DIR}};
+my @outs = sort grep { $r->{DIR}{$_} eq "output" || $r->{DIR}{$_} eq "inout" } keys %{$r->{DIR}};
+return undef unless ( @outs );
+my $e = { INS => \@ins, OUT => {} };
+foreach my $pin ( @outs ) {
+  next unless ( exists $r->{PIN}{$pin} );
+  my $c = &check_const_logic_compile_expr($r->{PIN}{$pin});
+  $e->{OUT}{$pin} = $c if ( defined $c );
+}
+my $s = $r->{SEQ};
+if ( defined $s && !$r->{UNKNOWN} ) {
+  my ($nsAttr, $clkAttr) = ( $s->{TYPE} eq "ff" ) ? ("next_state", "clocked_on") : ("data_in", "enable");
+  my $seq = { TYPE => $s->{TYPE}, IQ => $s->{IQ}, IQN => $s->{IQN} };
+  foreach my $k ( [NS => $nsAttr], [CLK => $clkAttr], [CLR => "clear"], [PRE => "preset"] ) {
+    my ($slot, $attr) = @$k;
+    next unless ( exists $s->{$attr} );
+    $seq->{$slot} = &check_const_logic_compile_expr($s->{$attr});
+    return undef unless ( defined $seq->{$slot} );
+  }
+  return undef unless ( defined $seq->{NS} && defined $seq->{CLK} );
+  $e->{SEQ} = $seq;
+} elsif ( defined $s || $r->{UNKNOWN} ) {
+  #<!-- a state table or a bank of flops: the outputs are left X -->
+  foreach my $pin ( keys %{$e->{OUT}} ) {
+    delete $e->{OUT}{$pin} if ( grep { !exists $r->{DIR}{$_} || $r->{DIR}{$_} eq "internal" } @{$e->{OUT}{$pin}{VARS}} );
+  }
+}
+#<!-- an output whose function names something that is not an input -- an
+#     internal node of a state table -- cannot be evaluated -->
+foreach my $pin ( keys %{$e->{OUT}} ) {
+  my $ok = 1;
+  foreach my $v ( @{$e->{OUT}{$pin}{VARS}} ) {
+    next if ( defined $e->{SEQ} && ( $v eq $e->{SEQ}{IQ} || ( defined $e->{SEQ}{IQN} && $v eq $e->{SEQ}{IQN} ) ) );
+    $ok = 0 unless ( exists $r->{DIR}{$v} && $r->{DIR}{$v} ne "internal" );
+  }
+  delete $e->{OUT}{$pin} unless ( $ok );
+}
+return undef unless ( keys %{$e->{OUT}} );
+return $e;
+}# sub check_const_logic_compile_cell
+
+#<!-- A liberty boolean expression to a perl sub over a hash of pin values.
+#     Precedence, tightest first: ! and postfix ', then ^, then & * and plain
+#     juxtaposition, then | +.  Returns { SUB, VARS } or undef if it does not
+#     parse. -->
+sub check_const_logic_compile_expr {
+my ($text) = @_;
+my @tok = ( $text =~ /([A-Za-z_][\w\[\]\.]*|[01]|[!'^&*|+()])/g );
+my $pos = 0;
+my %vars = ();
+my ($pOr, $pAnd, $pXor, $pUnary);
+$pUnary = sub {
+  my $t = $tok[$pos];
+  return undef unless ( defined $t );
+  my $code;
+  if ( $t eq "!" ) { $pos++; my $c = $pUnary->(); return undef unless ( defined $c ); $code = "\$CCL_NOT[$c]"; }
+  elsif ( $t eq "(" ) { $pos++; $code = $pOr->(); return undef unless ( defined $code && defined $tok[$pos] && $tok[$pos] eq ")" ); $pos++; }
+  elsif ( $t eq "0" || $t eq "1" ) { $pos++; $code = $t; }
+  elsif ( $t =~ /^[A-Za-z_]/ ) { $pos++; $vars{$t} = 1; $code = "(\$v->{'$t'} // 2)"; }
+  else { return undef; }
+  while ( defined $tok[$pos] && $tok[$pos] eq "'" ) { $pos++; $code = "\$CCL_NOT[$code]"; }
+  return $code;
+};
+$pXor = sub {
+  my $a = $pUnary->(); return undef unless ( defined $a );
+  while ( defined $tok[$pos] && $tok[$pos] eq "^" ) { $pos++; my $b = $pUnary->(); return undef unless ( defined $b ); $a = "\$CCL_XOR[3*($a)+($b)]"; }
+  return $a;
+};
+$pAnd = sub {
+  my $a = $pXor->(); return undef unless ( defined $a );
+  while ( defined $tok[$pos] && $tok[$pos] =~ /^([&*!(01]|[A-Za-z_].*)$/ ) {
+    $pos++ if ( $tok[$pos] eq "&" || $tok[$pos] eq "*" );
+    my $b = $pXor->(); return undef unless ( defined $b );
+    $a = "\$CCL_AND[3*($a)+($b)]";
+  }
+  return $a;
+};
+$pOr = sub {
+  my $a = $pAnd->(); return undef unless ( defined $a );
+  while ( defined $tok[$pos] && ( $tok[$pos] eq "|" || $tok[$pos] eq "+" ) ) { $pos++; my $b = $pAnd->(); return undef unless ( defined $b ); $a = "\$CCL_OR[3*($a)+($b)]"; }
+  return $a;
+};
+my $code = $pOr->();
+return undef unless ( defined $code && $pos == @tok );
+my $sub = eval "sub { my \$v = shift; return $code; }";
+return undef unless ( defined $sub );
+return { SUB => $sub, VARS => [ sort keys %vars ], TEXT => $text };
+}# sub check_const_logic_compile_expr
+
+#<!-- One function under a pin assignment, exactly when it is cheap: Kleene
+#     first, and if that says X while some input is known and at most four of
+#     its inputs are not, every completion of the unknown ones. -->
+sub check_const_logic_eval {
+my ($c, $v) = @_;
+my $r = $c->{SUB}->($v);
+return $r unless ( $r == 2 );
+my @x = grep { ( $v->{$_} // 2 ) == 2 } @{$c->{VARS}};
+return 2 if ( @x == 0 || @x > 4 || @x == @{$c->{VARS}} );
+my %w = %$v;
+my $first;
+for ( my $m = 0 ; $m < ( 1 << @x ) ; $m++ ) {
+  for ( my $k = 0 ; $k < @x ; $k++ ) { $w{$x[$k]} = ( $m >> $k ) & 1; }
+  my $o = $c->{SUB}->(\%w);
+  $first = $o unless ( defined $first );
+  return 2 if ( $o != $first );
+}
+return $first;
+}# sub check_const_logic_eval
+
+#<!-- Every output of one instance, given its input values.  For a flop the
+#     reason it is constant goes back through $$reason; $force sets the value
+#     a flop is assumed to hold instead. -->
+sub check_const_logic_eval_cell {
+my ($f, $v, $reason, $force) = @_;
+my %out = ();
+my $s = $f->{SEQ};
+if ( defined $s && defined $force ) {
+  my %w = %$v; $w{$s->{IQ}} = $force; $w{$s->{IQN}} = 1 - $force if ( defined $s->{IQN} );
+  foreach my $pin ( keys %{$f->{OUT}} ) { $out{$pin} = &check_const_logic_eval($f->{OUT}{$pin}, \%w); }
+  return %out;
+}
+if ( defined $s ) {
+  my ($iq, $iqn) = ($s->{IQ}, $s->{IQN});
+  my $at = sub { my ($q) = @_; my %w = %$v; $w{$iq} = $q; $w{$iqn} = ( $q == 2 ) ? 2 : 1 - $q if ( defined $iqn ); return \%w; };
+  my $clr = defined $s->{CLR} ? &check_const_logic_eval($s->{CLR}, $at->(2)) : 0;
+  my $pre = defined $s->{PRE} ? &check_const_logic_eval($s->{PRE}, $at->(2)) : 0;
+  my $clk = &check_const_logic_eval($s->{CLK}, $at->(2));
+  #<!-- a flop's clock that never moves, or a latch's enable tied shut, never
+  #     loads; a latch enable tied open still does -->
+  my $frozen = ( $s->{TYPE} eq "ff" ) ? ( $clk != 2 ) : ( $clk == 0 );
+  my $q = 2;
+  my $ns = $frozen ? 2 : &check_const_logic_eval($s->{NS}, $at->(2));
+  if ( $ns != 2 && ( $ns == 0 ? $pre == 0 : $clr == 0 ) ) {
+    $q = $ns; $$reason = "$q D=$q";
+  } else {
+    #<!-- hold: once it has c it keeps c.  It gets c from a reset that can
+    #     fire, or, when no reset can, from power-up: a flop with no reset
+    #     starts as x and synthesis may pick its value, which is what removes
+    #     a register whose D is tied but whose enable is not. -->
+    my $noReset = ( $clr == 0 && $pre == 0 );
+    my @holds = ();
+    foreach my $c ( 0, 1 ) {
+      my $fights = ( $c == 0 ) ? $pre : $clr;
+      next unless ( $fights == 0 );
+      push(@holds, $c) if ( $frozen || &check_const_logic_eval($s->{NS}, $at->($c)) == $c );
+    }
+    foreach my $c ( @holds ) {
+      my $sets = ( $c == 0 ) ? $clr : $pre;
+      if ( $sets != 0 ) { $q = $c; $$reason = "$q holds-reset"; last; }
+    }
+    if ( $q == 2 && $noReset && @holds && $CONST_LOGIC_POWERUP ) {
+      $q = $holds[0];
+      $$reason = ( @holds == 2 ) ? "$q never-loaded" : "$q holds-powerup";
+    }
+  }
+  my $w = $at->($q);
+  foreach my $pin ( keys %{$f->{OUT}} ) { $out{$pin} = &check_const_logic_eval($f->{OUT}{$pin}, $w); }
+  return %out;
+}
+foreach my $pin ( keys %{$f->{OUT}} ) { $out{$pin} = &check_const_logic_eval($f->{OUT}{$pin}, $v); }
+return %out;
+}# sub check_const_logic_eval_cell
+#------------------------------------------------------------------------------------------#
+
+1;

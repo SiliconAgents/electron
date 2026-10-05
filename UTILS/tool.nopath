@@ -278,6 +278,7 @@ require "$BEEHOME/PARSER/make_rw_udn";
 require "$BEEHOME/PARSER/make_build_clock";
 require "$BEEHOME/PARSER/make_trace_clock_roots";
 require "$BEEHOME/PARSER/make_check_dead_logic";
+require "$BEEHOME/PARSER/make_check_const_logic";
 require "$BEEHOME/PARSER/make_rwt_clock_tree";
 require "$BEEHOME/PARSER/make_rw_ipc";
 require "$BEEHOME/PARSER/make_rw_dummy_netlist";
