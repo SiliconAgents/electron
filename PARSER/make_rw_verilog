@@ -550,42 +550,112 @@ print "INFO-PAR-VERI : 003 : Begin writing the Verilog in file $OUTPUT_VERILOG !
 print WRITE "/* VERILOG written from electron version-$TOOL_VERSION */\n";
 #------------------------------------------------ flat : begin : writing from the DEF database  ---------------------------------------------------------------------#
 if ( $flat == 1 ) {
-  print WRITE "module $moduleName\(";
-  my $referToPortsAdded = \%PORTS_ALREADY;
-  my @temp = ();
-  foreach $portName ( keys %{$PORTS_ALREADY{$moduleName}} ) { push(@temp,$portName); }
-  print WRITE join ",",@temp;
-  print WRITE "\)\;\n\n";
-  foreach $portName ( keys %{$PORTS_ALREADY{$moduleName}} ) { 
-    $dir = $PORTS_ALREADY{$moduleName}{$portName}->dbPortGetDir;
-    print WRITE "$dir $portName\;\n"; 
-  }#foreach portName
+  #<!-- What comes out has to be verilog a reader and an equivalence checker
+  #     take, and its top ports have to be the original's, so that the two
+  #     netlists match by name.  The database holds a bus port bit by bit --
+  #     o[19], o[21], ... -- and written that way they were nineteen scalar
+  #     ports with illegal names; a flattened instance or net (u_sub/qe,
+  #     u_c/\esc.rd[0]) is not a simple identifier either, and went out
+  #     unescaped.  So the ports are put back together as the buses the top
+  #     module declares, a pin on one of their bits keeps its bit select,
+  #     and every other name that is not a simple identifier is written
+  #     escaped.  Instances are written in sorted order, so two runs of one
+  #     database give one file. -->
+  my %busBits = ();         # base -> [bit indices]
+  my %portBit = ();         # "base[k]" -> 1
+  my %portDir = ();         # port as declared -> direction
+  my @portOrder = ();
+  foreach my $portName ( sort keys %{$PORTS_ALREADY{$moduleName}} ) {
+    my $dir = $PORTS_ALREADY{$moduleName}{$portName}->dbPortGetDir;
+    if ( $portName =~ /^([A-Za-z_][A-Za-z0-9_\$]*)\[(\d+)\]$/ ) {
+      my ($base, $bit) = ($1, $2);
+      push(@portOrder, $base) unless ( exists $busBits{$base} );
+      push(@{$busBits{$base}}, $bit);
+      $portBit{$portName} = 1;
+      $portDir{$base} = $dir;
+    } else {
+      push(@portOrder, $portName);
+      $portDir{$portName} = $dir;
+    }
+  }
+  my $name = sub {
+    my ($n) = @_;
+    return $n if ( !defined $n || $n eq "" );
+    return $n if ( $n =~ /^[A-Za-z_][A-Za-z0-9_\$]*$/ );     # simple identifier
+    return $n if ( exists $portBit{$n} );                    # bit of a bus port
+    return $n if ( $n =~ /^\d+'[bBhHdDoO][0-9a-fA-FxXzZ_]+$/ ); # a constant
+    $n =~ s/\s+$//;
+    return ( $n =~ /^\\/ ? $n : "\\" . $n ) . " ";
+  };
+  print WRITE "module $moduleName\(" . join(", ", map { $name->($_) } @portOrder) . "\)\;\n\n";
+  foreach my $p ( @portOrder ) {
+    my $range = "";
+    if ( exists $busBits{$p} ) {
+      #<!-- the range as the module declares it, so [0:7] stays [0:7] -->
+      my $decl = "";
+      if ( exists $MODULE_ALREADY{$moduleName} ) {
+        my $m = $MODULE_ALREADY{$moduleName};
+        if    ( $portDir{$p} eq "input"  && $m->dbVNOMGetInputType($p) == 1 )  { $decl = $m->dbVNOMGetInputBits($p); }
+        elsif ( $portDir{$p} eq "output" && $m->dbVNOMGetOutputType($p) == 1 ) { $decl = $m->dbVNOMGetOutputBits($p); }
+        elsif ( $portDir{$p} eq "inout"  && $m->dbVNOMGetBidiType($p) == 1 )   { $decl = $m->dbVNOMGetBidiBits($p); }
+      }
+      $decl =~ s/\s+//g;
+      if ( $decl =~ /^\[-?\d+:-?\d+\]$/ ) { $range = "$decl "; }
+      else {
+        my @b = sort { $a <=> $b } @{$busBits{$p}};
+        $range = "[$b[-1]:$b[0]] ";
+      }
+    }
+    print WRITE "$portDir{$p} $range" . $name->($p) . "\;\n";
+  }#foreach port
   print WRITE "\n\n";
-  foreach my $instance (keys %COMP_ALREADY) {
+  foreach my $instance ( sort keys %COMP_ALREADY ) {
     my $cellref = $CADB{$instance}->dbCadbGetCellref;
-    print WRITE "$cellref $instance\( ";
-    @temp = ();
+    print WRITE "$cellref " . $name->($instance) . "\( ";
+    my @temp = ();
     my $class;
     if(exists $MODULE_ALREADY{$cellref}){
       $class = $MODULE_ALREADY{$cellref}->dbVNOMGetClass;
     }
     if($class == 11){
-      foreach my $pinName (keys %{$COMP_ALREADY{$instance}}){
-        push(@temp, "\.$pinName\($COMP_ALREADY{$instance}{$pinName}\)"); 
+      foreach my $pinName ( sort keys %{$COMP_ALREADY{$instance}} ){
+        push(@temp, "\.$pinName\(" . $name->($COMP_ALREADY{$instance}{$pinName}) . "\)");
       }
     }else {
+      #<!-- A macro's bus pins are separate pins in the library, AB[0] AB[1]
+      #     ..., and ".AB[3](n)" is not verilog: a named connection takes the
+      #     whole port.  So the bits of one bus go out as one concatenation,
+      #     MSB first, and a bit with nothing on it gets a net of its own
+      #     (a concatenation has no empty slots). -->
       my @pins = $PLDB{$cellref}->dbMdbGetPins;
-      foreach my $pinName ( @pins ) { 
+      my %bus = ();
+      foreach my $pinName ( @pins ) {
         my $flag = $PLDB{$cellref}->dbMdbGetPinType($pinName);
-        if ( $flag == 1 || $flag == 2 ) { } else {
-        #print WRITE "\.$pinName\($COMP_ALREADY{$instance}{$pinName}\)\, " 
-          if ( exists $COMP_ALREADY{$instance}{$pinName} ) {
-            push(@temp, "\.$pinName\($COMP_ALREADY{$instance}{$pinName}\)"); 
-          }else {
-            push(@temp, "\.$pinName\(\)"); 
-          }#else
+        next if ( $flag == 1 || $flag == 2 );
+        if ( $pinName =~ /^([A-Za-z_][A-Za-z0-9_]*)\[(\d+)\]$/ ) {
+          push(@temp, "BUS:$1") unless ( exists $bus{$1} );
+          $bus{$1}{$2} = $pinName;
+          next;
+        }
+        if ( exists $COMP_ALREADY{$instance}{$pinName} ) {
+          push(@temp, "\.$pinName\(" . $name->($COMP_ALREADY{$instance}{$pinName}) . "\)");
+        }else {
+          push(@temp, "\.$pinName\(\)");
         }#else
       }#foreach pinName
+      foreach my $t ( @temp ) {
+        next unless ( $t =~ /^BUS:(.*)$/ );
+        my $base = $1;
+        my @bits = sort { $b <=> $a } keys %{$bus{$base}};
+        my @nets = ();
+        for ( my $k = $bits[0] ; $k >= $bits[-1] ; $k-- ) {
+          my $pn = "$base\[$k\]";
+          my $n = ( exists $COMP_ALREADY{$instance}{$pn} && $COMP_ALREADY{$instance}{$pn} ne "" ) ?
+                  $COMP_ALREADY{$instance}{$pn} : "$instance/$pn" . "_unconnected";
+          push(@nets, $name->($n));
+        }
+        $t = "\.$base\(\{" . join(", ", @nets) . "\}\)";
+      }
     }#else
     print WRITE join ", ", @temp;
     print WRITE " \)\;\n";
