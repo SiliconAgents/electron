@@ -1,0 +1,296 @@
+#<!-- remove_dead_logic: take out of the flat database what check_dead_logic
+#     and check_const_logic found.
+#
+#     It runs both checks itself, with the same dont_touch set, so what it
+#     removes is exactly what they report -- a stale %DEAD_LOGIC from an
+#     earlier run, or one taken with a different keep list, would otherwise
+#     remove the wrong things.  Flat database only: %CADB, %COMP_ALREADY,
+#     %NETS_ALREADY and %NADB, the stores elaborate fills and that the flat
+#     flow (set_floorplan, place_flat_design, legalize_flat, write_def,
+#     write_verilog --flat) reads.  %MODULE_ALREADY, the hierarchical view,
+#     is not touched.
+#
+#     What goes:
+#       every dead instance (no path to a top output, a macro, or a
+#       dont_touch cell)
+#       with -const, every cell whose outputs are all constant, and every
+#       cell whose only use was one of those.  Reset-backed constants only;
+#       -powerup adds the flops whose constancy rests on choosing a no-reset
+#       flop's power-up value (holds-powerup, never-loaded).
+#
+#     A constant net that still has loads once its driver is gone is driven
+#     by a tie cell, $GLOBAL's tie high / tie low (set_tie_cells, or the
+#     config's cell-func-map), named bt_const_tie_<n> in the removed
+#     driver's hierarchy; ties are shared, -tie_fanout loads each.  With no tie cell configured the
+#     command refuses rather than leave inputs floating; --no_tie ties the
+#     load pins to 1'b0 / 1'b1 instead, as electron already does for a
+#     scalar tie-off when the library has none.
+#
+#     Nets left with no pin at all are deleted, from %NETS_ALREADY and %NADB
+#     together (write_def reads one under a guard on the other), and from
+#     %NETS_ROUTING_ALREADY.  A net still on a top port stays.
+#
+#     Run it after elaborate (or hier2flat) and before placement. -->
+#------------------------------------------------------------------------------------------#
+sub remove_dead_logic {
+
+my ($doConst, $powerup, $dry, $noTie) = (0, 0, 0, 0);
+my $tieFanout = 20;
+my $report = "";
+my @libs = ();
+my @keepArgs = ();
+
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
+  print "Usage : remove_dead_logic [-const] [-powerup] [-liberty <lib>[,<lib>...]] [-report <file>]\n";
+  print "                          [-keep_pattern <regex>] [-dont_touch <file>] [--no_keep]\n";
+  print "                          [-dry_run] [-tie_fanout <n>] [--no_tie]\n";
+  print "        Removes from the flat database every cell and flop check_dead_logic\n";
+  print "        calls dead and, with -const, every cell check_const_logic folds and\n";
+  print "        whatever dies with them.  Both checks are run here, with the same\n";
+  print "        dont_touch set.  Before placement, after elaborate or hier2flat.\n";
+  print "        -const    also remove constant logic (reset-backed constants only)\n";
+  print "        -powerup  with -const, also the flops that are constant only for a\n";
+  print "                  chosen power-up value (no-reset flops)\n";
+  print "        -liberty  cell functions for -const (default: the config's synthesis libs)\n";
+  print "        -report   write every removed instance and every tie cell added\n";
+  print "        -dry_run  report what would be removed, change nothing\n";
+  print "        -tie_fanout  load pins per tie cell, shared within one hierarchy (default 20;\n";
+  print "                  0 = one tie per constant net)\n";
+  print "        --no_tie  tie the loads of a constant net to 1'b0/1'b1 instead of adding\n";
+  print "                  tie cells (they are left off any net in the DEF)\n";
+  &check_dead_logic_keep_usage;
+  return;
+}
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-const"){$doConst = 1;}
+  if($_[$i] eq "-powerup"){$powerup = 1;}
+  if($_[$i] eq "-liberty"){push(@libs, $_[$i+1]);}
+  if($_[$i] eq "-report"){$report = $_[$i+1];}
+  if($_[$i] eq "-dry_run"){$dry = 1;}
+  if($_[$i] eq "--no_tie"){$noTie = 1;}
+  if($_[$i] eq "-tie_fanout"){$tieFanout = $_[$i+1];}
+  if($_[$i] eq "-keep_pattern" || $_[$i] eq "-dont_touch"){push(@keepArgs, $_[$i], $_[$i+1]);}
+  if($_[$i] eq "--no_keep"){push(@keepArgs, $_[$i]);}
+}#for
+
+unless ( keys %COMP_ALREADY ) {
+  print "ERROR-UTS-RM_DEAD : 001 : no instances in the flat database; read a netlist and elaborate first\n";
+  return;
+}
+if ( $powerup && !$doConst ) {
+  print "WARN-UTS-RM_DEAD : 002 : -powerup only matters with -const; ignoring it\n";
+}
+
+#<!-- tie cells, checked before anything is changed -->
+my ($tieHi, $tieLo) = ($GLOBAL->dbfGlobalGetTieHighCell, $GLOBAL->dbfGlobalGetTieLowCell);
+$tieHi = "" unless ( defined $tieHi );
+$tieLo = "" unless ( defined $tieLo );
+my ($tieHiOut, $tieLoOut) = ("", "");
+$tieHiOut = &dbfVerilogGetCellSingleOutputPin($tieHi) if ( $tieHi ne "" );
+$tieLoOut = &dbfVerilogGetCellSingleOutputPin($tieLo) if ( $tieLo ne "" );
+if ( $doConst && !$noTie && !$dry && ( $tieHiOut eq "" || $tieLoOut eq "" ) ) {
+  print "ERROR-UTS-RM_DEAD : 003 : -const needs a tie high and a tie low cell (have \"$tieHi\" / \"$tieLo\");\n";
+  print "ERROR-UTS-RM_DEAD : 003 :   give them a tie_high / tie_low function in the cell-func-map, or set_tie_cells,\n";
+  print "ERROR-UTS-RM_DEAD : 003 :   or pass --no_tie to tie the load pins to constants instead\n";
+  return;
+}
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+#<!-- the checks, with the same dont_touch set -->
+&check_dead_logic(@keepArgs);
+my %dead = %{ $DEAD_LOGIC{INST} || {} };
+my (%fold, %newDead, %val, %flopWhy) = ();
+if ( $doConst ) {
+  my @cArgs = @keepArgs;
+  push(@cArgs, "-liberty", join(",", @libs)) if ( @libs );
+  push(@cArgs, "-reset_only") unless ( $powerup );
+  &check_const_logic(@cArgs);
+  unless ( exists $CONST_LOGIC{SUMMARY} ) {
+    print "ERROR-UTS-RM_DEAD : 004 : check_const_logic did not run; nothing removed\n";
+    return;
+  }
+  %fold = %{ $CONST_LOGIC{FOLD} || {} };
+  %newDead = %{ $CONST_LOGIC{NEW_DEAD} || {} };
+  %val = %{ $CONST_LOGIC{NET} || {} };
+  %flopWhy = %{ $CONST_LOGIC{FLOP} || {} };
+}
+
+my %why = ();
+$why{$_} = "dead" foreach ( keys %dead );
+foreach my $inst ( keys %fold ) {
+  next if ( exists $why{$inst} );
+  $why{$inst} = exists $flopWhy{$inst} ? "const-flop:$flopWhy{$inst}" : "const";
+}
+foreach my $inst ( keys %newDead ) { $why{$inst} = "dead-after-fold" unless ( exists $why{$inst} ); }
+my $nFlop = 0;
+foreach my $inst ( keys %why ) {
+  my $cell = exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : "";
+  $nFlop++ if ( exists $PLDB{$cell} && $PLDB{$cell}->dbMdbGetType == 1 );
+}
+
+#<!-- the constant nets that will need a driver: a folded cell's outputs,
+#     wherever a pin that stays still reads them -->
+my @ties = ();          # [net, value, hierarchy of the removed driver]
+foreach my $inst ( sort keys %fold ) {
+  next unless ( exists $COMP_ALREADY{$inst} );
+  my $cell = $CADB{$inst}->dbCadbGetCellref;
+  foreach my $pin ( sort keys %{$COMP_ALREADY{$inst}} ) {
+    my $net = $COMP_ALREADY{$inst}{$pin};
+    next unless ( defined $net && exists $val{$net} );
+    next unless ( exists $PLDB{$cell} && $PLDB{$cell}->dbMdbGetPinDir($pin) == 1 );
+    my $stays = 0;
+    foreach my $m ( keys %{$NETS_ALREADY{$net} || {}} ) {
+      next if ( $m eq $inst || exists $why{$m} );
+      $stays = 1; last;
+    }
+    next unless ( $stays );
+    ( my $hier = $inst ) =~ s{/?[^/]*$}{};
+    push(@ties, [$net, $val{$net}, $hier]);
+  }
+}
+
+my %byWhy = ();
+foreach my $inst ( keys %why ) { ( my $w = $why{$inst} ) =~ s/:.*//; $byWhy{$w}++; }
+my $nAll = scalar(keys %why);
+print "INFO-UTS-RM_DEAD : 005 : " . ( $dry ? "would remove" : "removing" ) . " $nAll instance(s), $nFlop of them flops: " .
+      join(", ", map { "$byWhy{$_} $_" } sort keys %byWhy) . "\n";
+print "INFO-UTS-RM_DEAD : 006 : " . scalar(@ties) . " constant net(s) still read by what stays: " .
+      ( $noTie ? "loads tied to 1'b0/1'b1" : ( $tieFanout > 0 ? "tie cells shared per hierarchy, up to $tieFanout loads each" : "one tie cell each" ) ) . "\n";
+
+my $fh;
+if ( $report ne "" ) {
+  unless ( open($fh, ">", $report) ) {
+    print "ERROR-UTS-RM_DEAD : 007 : cannot write $report : $!\n";
+    return;
+  }
+  print $fh "# remove_dead_logic on $TOP_MODULE" . ( $dry ? " (dry run)" : "" ) . "\n";
+  print $fh "# removed <instance> <cell> <reason>\n# tie <instance> <cell> <net> <value>\n";
+  foreach my $inst ( sort keys %why ) {
+    print $fh "removed $inst " . $CADB{$inst}->dbCadbGetCellref . " $why{$inst}\n" if ( exists $CADB{$inst} );
+  }
+}
+if ( $dry ) {
+  close($fh) if ( defined $fh );
+  print "INFO-UTS-RM_DEAD : 008 : dry run, the database is unchanged\n";
+  return;
+}
+
+#<!-- take the instances out -->
+my %touched = ();
+foreach my $inst ( keys %why ) {
+  next unless ( exists $COMP_ALREADY{$inst} );
+  foreach my $pin ( keys %{$COMP_ALREADY{$inst}} ) {
+    my $net = $COMP_ALREADY{$inst}{$pin};
+    next unless ( defined $net && exists $NETS_ALREADY{$net} );
+    delete $NETS_ALREADY{$net}{$inst};
+    $touched{$net} = 1;
+  }
+  delete $COMP_ALREADY{$inst};
+  delete $CADB{$inst};
+}
+
+#<!-- drive the constant nets that still have loads.  One tie cell per net
+#     would be one per folded driver -- 107,598 on a 2M-instance design --
+#     so the load pins of every constant net of one value in one hierarchy
+#     are packed onto shared tie nets, at most -tie_fanout pins on each
+#     (default 20; 0 keeps one tie per original net).  Loads are taken in
+#     instance-name order, which keeps a tie's pins in one corner of the
+#     hierarchy.  A net that reaches a top port keeps its own name, since the
+#     port refers to it by name, and gets a tie of its own. -->
+my ($nTie, $nTiedPins, $nMerged) = (0, 0, 0);
+my $seq = 0;
+my $newTie = sub {
+  my ($hier, $v, $net) = @_;
+  my ($cell, $out) = $v ? ($tieHi, $tieHiOut) : ($tieLo, $tieLoOut);
+  my $name;
+  do { $name = ( $hier ne "" ? "$hier/" : "" ) . "bt_const_tie_" . $seq++; } while ( exists $COMP_ALREADY{$name} );
+  $net = $name . "_net" unless ( defined $net );
+  $CADB{$name} = CompAttDB::new();
+  $CADB{$name}->dbCadbSetCellref($cell);
+  $COMP_ALREADY{$name}{$out} = $net;
+  unless ( exists $NETS_ALREADY{$net} ) {
+    $NADB{$net} = NetsAttrDB::new();
+    $NADB{$net}->dbNadbSetNetType(0);
+  }
+  $NETS_ALREADY{$net}{$name} = $out;
+  $nTie++;
+  print $fh "tie $name $cell $net $v\n" if ( defined $fh );
+  return $net;
+};
+my %group = ();         # "hier\tvalue" -> [ [inst, pin], ... ]
+foreach my $t ( @ties ) {
+  my ($net, $v, $hier) = @$t;
+  next unless ( exists $NETS_ALREADY{$net} && keys %{$NETS_ALREADY{$net}} );
+  my @loads = sort grep { exists $COMP_ALREADY{$_} } keys %{$NETS_ALREADY{$net}};
+  my $onPort = scalar(grep { !exists $COMP_ALREADY{$_} } keys %{$NETS_ALREADY{$net}});
+  if ( $noTie ) {
+    my $c = $v ? "1'b1" : "1'b0";
+    foreach my $m ( @loads ) {
+      foreach my $pin ( keys %{$COMP_ALREADY{$m}} ) {
+        next unless ( $COMP_ALREADY{$m}{$pin} eq $net );
+        $COMP_ALREADY{$m}{$pin} = $c; $nTiedPins++;
+      }
+      delete $NETS_ALREADY{$net}{$m};
+    }
+    next;
+  }
+  if ( $onPort || $tieFanout <= 0 ) {
+    $newTie->($hier, $v, $net);
+    next;
+  }
+  #<!-- every pin, not only the one %NETS_ALREADY keeps per instance -->
+  foreach my $m ( @loads ) {
+    foreach my $pin ( sort keys %{$COMP_ALREADY{$m}} ) {
+      push(@{$group{"$hier\t$v"}}, [$m, $pin]) if ( $COMP_ALREADY{$m}{$pin} eq $net );
+    }
+    delete $NETS_ALREADY{$net}{$m};
+  }
+  $nMerged++;
+}
+foreach my $key ( sort keys %group ) {
+  my ($hier, $v) = split(/\t/, $key);
+  my @pins = sort { $a->[0] cmp $b->[0] || $a->[1] cmp $b->[1] } @{$group{$key}};
+  for ( my $k = 0 ; $k < @pins ; $k += $tieFanout ) {
+    my $net = $newTie->($hier, $v, undef);
+    foreach my $lp ( @pins[$k .. ( $k + $tieFanout - 1 < $#pins ? $k + $tieFanout - 1 : $#pins )] ) {
+      my ($m, $pin) = @$lp;
+      $COMP_ALREADY{$m}{$pin} = $net;
+      $NETS_ALREADY{$net}{$m} = $pin;
+    }
+  }
+}
+
+#<!-- nets with nothing left on them -->
+my $nNetGone = 0;
+foreach my $net ( keys %touched ) {
+  next unless ( exists $NETS_ALREADY{$net} );
+  next if ( keys %{$NETS_ALREADY{$net}} );
+  delete $NETS_ALREADY{$net};
+  delete $NADB{$net};
+  delete $NETS_ROUTING_ALREADY{$net} if ( exists $NETS_ROUTING_ALREADY{$net} );
+  $nNetGone++;
+}
+close($fh) if ( defined $fh );
+
+#<!-- what the checks found is gone; their results describe a netlist that
+#     no longer exists -->
+%DEAD_LOGIC = ();
+%CONST_LOGIC = ();
+
+print "INFO-UTS-RM_DEAD : 009 : removed $nAll instance(s); added $nTie tie cell(s)" .
+      ( $nMerged ? " for $nMerged constant net(s)" : "" ) .
+      ( $nTiedPins ? ", tied $nTiedPins pin(s) to constants" : "" ) . "; deleted $nNetGone net(s) left empty\n";
+print "INFO-UTS-RM_DEAD : 010 : " . scalar(keys %COMP_ALREADY) . " instance(s) and " . scalar(keys %NETS_ALREADY) . " net(s) remain\n";
+print "INFO-UTS-RM_DEAD : 011 : report written to $report\n" if ( $report ne "" );
+
+my $t1 = new Benchmark;
+print "Command remove_dead_logic took:", timestr(timediff($t1, $t0)), "\n";
+return;
+
+}# sub remove_dead_logic
+#------------------------------------------------------------------------------------------#
+
+1;

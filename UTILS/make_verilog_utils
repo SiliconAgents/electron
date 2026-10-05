@@ -175,9 +175,15 @@ sub array_of_blasted_expr
    while ( defined ( $conn = shift @connList ) ) {  
       print "DBG-UTS-VERI : 003 : processing $conn\n" if ($DEBUG == 101);
 
-   if ( $conn =~ /\[\s*[0-9]+\s*\:\s*[0-9]+\s*\]/ ) {
-     $conn =~ s/\[/ /; $conn =~ s/\]//; $conn =~ s/\:/ /;
-     my ($name,$from,$to) = (split(/\s+/,$conn))[0,1,2];
+   #<!-- The part select is the LAST [msb:lsb] of the expression.  An escaped
+   #     identifier can hold brackets of its own -- yosys writes every signal
+   #     of a generate block as \gen_x[3].y.z [9:3] -- and taking the FIRST
+   #     "[" split \gen_x[3].y.z[9:3] into the name \gen_x and a garbage
+   #     range: the width came out wrong, the assign was skipped as a width
+   #     mismatch (WARN-PAR-VERI 007), and every net behind it lost its
+   #     driver.  183 assigns on one design. -->
+   if ( $conn =~ /^(.*)\[\s*([0-9]+)\s*\:\s*([0-9]+)\s*\]$/ ) {
+     my ($name,$from,$to) = ($1,$2,$3);
      if ( $from <= $to ) {
        for ( my $xx = $from ; $xx <= $to ; $xx++ ){
          my $newNetName = $name."[".$xx."]";
