@@ -126,6 +126,10 @@ unless ( open(SYNTH_YS, ">$scriptName") ) {
 foreach my $rtl ( @rtlFiles ) { print SYNTH_YS "read_verilog $rtl\n"; }
 print SYNTH_YS "\n";
 print SYNTH_YS "hierarchy -check -top $topModule\n";
+#<!-- an RTL $display / $write / assertion is a $print / $check cell to yosys,
+#     and write_verilog would put it back into the gate netlist as an initial
+#     or always block (see 3RDBIN/yosys_bottom_up, which does the same) -->
+print SYNTH_YS "delete t:\$print t:\$check\n";
 print SYNTH_YS "\n";
 print SYNTH_YS "proc; opt; fsm; opt; memory; opt\n";
 print SYNTH_YS "\n";

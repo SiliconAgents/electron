@@ -139,8 +139,24 @@ nangate_dead_logic:
 	grep -q "^output \[24:0\] o;" workarea/dl_ties/dl_ties.flat.v || { echo "nangate_dead_logic ties: bus port o not written as output [24:0] o"; exit 1; }
 	@echo "nangate_dead_logic: all expected results"
 
+# $display / $write in RTL must not reach a gate netlist.  yosys keeps them as
+# $print cells through every pass and write_verilog puts them back as initial
+# or always blocks; a clocked one also keeps alive the logic its arguments read.
+# rtls/print/print.sv has both kinds, in the top and in a child instantiated
+# twice; hier_synthesis and synthesize must each write a netlist with no
+# initial, always or $write, and without the XOR that only fed the $display.
+nangate_print:
+	mkdir -p workarea/print
+	cd workarea/print && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../print/print.tcl > run.log 2>&1
+	for f in workarea/print/print_hier.v workarea/print/flat/print_top.vg; do \
+	  test -s $$f || { echo "nangate_print: $$f was not written"; exit 1; }; \
+	  if grep -qE 'initial|always|\$$write|\$$display' $$f; then echo "nangate_print: $$f has simulation code left in it"; exit 1; fi; \
+	  if grep -qE 'X(N)?OR' $$f; then echo "nangate_print: $$f kept the logic that only fed a \$$display"; exit 1; fi; \
+	done
+	@echo "nangate_print: no simulation code in either netlist"
+
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_rtl_hier nangate_dead_logic
+nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_rtl_hier nangate_dead_logic nangate_print
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
