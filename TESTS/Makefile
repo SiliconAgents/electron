@@ -115,7 +115,9 @@ nangate_rtl_hier:
 # a dead self-toggling flop, constants through a flop, an enable flop held by
 # a constant tied in through a hierarchical port, a no-reset flop that is
 # constant only for a chosen power-up value, a dead cell kept by its d0nt_
-# name, and 25 loads on two constant nets for tie sharing.  Three sessions,
+# name, and 25 loads on two constant nets for tie sharing; the last is also
+# written with write_verilog --flat and must parse in yosys with its bus port
+# intact.  Three sessions,
 # because removal changes the database.  Fails unless each removes exactly
 # what it should and the checks run afterwards find nothing left.
 comma := ,
@@ -133,6 +135,8 @@ nangate_dead_logic:
 	$(call DL_EXPECT,powerup,dead: 0 of)
 	$(call DL_EXPECT,powerup,: 0 cell(s) fold to a tie)
 	$(call DL_EXPECT,ties,added 2 tie cell(s) for 2 constant net(s))
+	cd workarea/dl_ties && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog dl_ties.flat.v; hierarchy -check -top dl_ties" > yosys.log 2>&1 || { echo "nangate_dead_logic ties: write_verilog --flat output does not parse, see workarea/dl_ties/yosys.log"; exit 1; }
+	grep -q "^output \[24:0\] o;" workarea/dl_ties/dl_ties.flat.v || { echo "nangate_dead_logic ties: bus port o not written as output [24:0] o"; exit 1; }
 	@echo "nangate_dead_logic: all expected results"
 
 nangate_both: nangate_flat nangate_hier
