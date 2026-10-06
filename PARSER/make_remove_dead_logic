@@ -34,7 +34,7 @@
 #------------------------------------------------------------------------------------------#
 sub remove_dead_logic {
 
-my ($doConst, $powerup, $dry, $noTie) = (0, 0, 0, 0);
+my ($doConst, $powerup, $dry, $noTie, $hier) = (0, 0, 0, 0, 0);
 my $tieFanout = 20;
 my $report = "";
 my @libs = ();
@@ -44,7 +44,7 @@ my $noOfArguments = @_;
 if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "Usage : remove_dead_logic [-const] [-powerup] [-liberty <lib>[,<lib>...]] [-report <file>]\n";
   print "                          [-keep_pattern <regex>] [-dont_touch <file>] [--no_keep]\n";
-  print "                          [-dry_run] [-tie_fanout <n>] [--no_tie]\n";
+  print "                          [-dry_run] [-tie_fanout <n>] [--no_tie] [-hier]\n";
   print "        Removes from the flat database every cell and flop check_dead_logic\n";
   print "        calls dead and, with -const, every cell check_const_logic folds and\n";
   print "        whatever dies with them.  Both checks are run here, with the same\n";
@@ -57,6 +57,9 @@ if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "        -dry_run  report what would be removed, change nothing\n";
   print "        -tie_fanout  load pins per tie cell, shared within one hierarchy (default 20;\n";
   print "                  0 = one tie per constant net)\n";
+  print "        -hier     edit the hierarchical netlist too, per module definition: a\n";
+  print "                  cell goes only where it is removable in every instance of its\n";
+  print "                  module, so write_verilog --hier writes a netlist hier_place reads\n";
   print "        --no_tie  tie the loads of a constant net to 1'b0/1'b1 instead of adding\n";
   print "                  tie cells (they are left off any net in the DEF)\n";
   &check_dead_logic_keep_usage;
@@ -69,6 +72,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-report"){$report = $_[$i+1];}
   if($_[$i] eq "-dry_run"){$dry = 1;}
   if($_[$i] eq "--no_tie"){$noTie = 1;}
+  if($_[$i] eq "-hier"){$hier = 1;}
   if($_[$i] eq "-tie_fanout"){$tieFanout = $_[$i+1];}
   if($_[$i] eq "-keep_pattern" || $_[$i] eq "-dont_touch"){push(@keepArgs, $_[$i], $_[$i+1]);}
   if($_[$i] eq "--no_keep"){push(@keepArgs, $_[$i]);}
@@ -129,6 +133,19 @@ my $nFlop = 0;
 foreach my $inst ( keys %why ) {
   my $cell = exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : "";
   $nFlop++ if ( exists $PLDB{$cell} && $PLDB{$cell}->dbMdbGetType == 1 );
+}
+
+if ( $hier ) {
+  if ( $noTie ) {
+    print "ERROR-UTS-RM_DEAD : 012 : -hier needs tie cells; --no_tie is not supported with it\n";
+    return;
+  }
+  &remove_dead_logic_hier(\%why, \%val, $tieFanout, $dry, $report, [$tieHi, $tieHiOut, $tieLo, $tieLoOut]);
+  %DEAD_LOGIC = ();
+  %CONST_LOGIC = ();
+  my $t1 = new Benchmark;
+  print "Command remove_dead_logic took:", timestr(timediff($t1, $t0)), "\n";
+  return;
 }
 
 #<!-- the constant nets that will need a driver: a folded cell's outputs,
@@ -291,6 +308,366 @@ print "Command remove_dead_logic took:", timestr(timediff($t1, $t0)), "\n";
 return;
 
 }# sub remove_dead_logic
+#------------------------------------------------------------------------------------------#
+
+#<!-- remove_dead_logic -hier: the same removal, applied to the hierarchical
+#     netlist (%MODULE_ALREADY) as well as to the flat database, so that
+#     write_verilog --hier writes something hier_place can read.
+#
+#     A module definition is shared by its instances, so a cell can only be
+#     taken out of it where it is removable in EVERY instance.  On a 2M-instance
+#     design that is 96.0% of the cells the flat removal takes;
+#     the rest stays.  Taking a subset of a removal is not automatically safe:
+#     a cell that stays may still read one that goes.  So the set is closed:
+#     whenever a cell that stays reads the output of one that goes, the net
+#     has to be constant, with the same value, in every instance of the
+#     reader's module -- then the reader's pin is moved onto a tie net in its
+#     own module -- or the driver stays too.  Repeat until nothing changes.
+#     A top output port read off a removed driver gets its own tie the same
+#     way.  Nothing that stays is left undriven.
+#
+#     The same plan is then applied to both views: per module, the removed
+#     cells' connection lines and leaf entries go, readers are rewired, tie
+#     cells are added (shared, -tie_fanout pins each, named bt_const_tie_<n>
+#     on bt_const_tie_<n>_net) and the module area follows; per instance of
+#     that module, the flat database gets exactly the same edits under the
+#     instance's path.  The two cannot drift. -->
+sub remove_dead_logic_hier {
+my ($why, $val, $tieFanout, $dry, $report, $tie) = @_;
+my ($tieHi, $tieHiOut, $tieLo, $tieLoOut) = @$tie;
+
+#<!-- where each module is instantiated, by the path elaborate gives the flat
+#     instances under it -->
+my (%pathMod, %modPaths) = ();
+my $walk;
+$walk = sub {
+  my ($m, $p) = @_;
+  $pathMod{$p} = $m;
+  push(@{$modPaths{$m}}, $p);
+  foreach my $h ( sort $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+    my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($h);
+    next unless ( exists $MODULE_ALREADY{$c} );
+    next if ( $MODULE_ALREADY{$c}->dbVNOMGetClass == 11 );     # a blackbox is a leaf
+    $walk->($c, ( $p eq "" ? $h : "$p/$h" ));
+  }
+};
+$walk->($TOP_MODULE, "");
+my $split = sub {
+  my ($inst) = @_;
+  my ($p, $l) = ( $inst =~ m{^(.*)/([^/]+)$} ) ? ($1, $2) : ("", $inst);
+  return () unless ( exists $pathMod{$p} && $MODULE_ALREADY{$pathMod{$p}}->dbVNOMHasLeafInst($l) );
+  return ($pathMod{$p}, $p, $l);
+};
+
+#<!-- candidates: removable in every instance of the module -->
+my %count = ();
+foreach my $inst ( keys %$why ) {
+  my ($m, $p, $l) = $split->($inst);
+  next unless ( defined $m );
+  $count{$m}{$l}++;
+}
+my %U = ();
+my $nCand = 0;
+foreach my $m ( keys %count ) {
+  foreach my $l ( keys %{$count{$m}} ) {
+    if ( $count{$m}{$l} == scalar(@{$modPaths{$m}}) ) { $U{$m}{$l} = 1; $nCand++; }
+  }
+}
+
+#<!-- the flat connectivity the closure walks -->
+my (%readers, %outNets) = ();
+foreach my $inst ( keys %COMP_ALREADY ) {
+  my $cell = exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : "";
+  my $mdb = $PLDB{$cell};
+  foreach my $pin ( keys %{$COMP_ALREADY{$inst}} ) {
+    my $net = $COMP_ALREADY{$inst}{$pin};
+    next if ( !defined $net || $net eq "" || $net =~ /^1'b[01]$/ );
+    my $dir = defined $mdb ? $mdb->dbMdbGetPinDir($pin) : 2;
+    next if ( $dir eq "" );
+    push(@{$readers{$net}}, [$inst, $pin]) if ( $dir == 0 || $dir == 2 );
+    push(@{$outNets{$inst}}, $net) if ( $dir == 1 || $dir == 2 );
+  }
+}
+my %outPort = ();
+foreach my $port ( keys %{$PORTS_ALREADY{$TOP_MODULE}} ) {
+  my $dir = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetDir;
+  next unless ( $dir eq "output" || $dir eq "inout" );
+  my @conn = $PORTS_ALREADY{$TOP_MODULE}{$port}->dbPortGetConn;
+  $outPort{$conn[0]} = 1 if ( @conn && defined $conn[0] && $conn[0] ne "" );
+}
+my $gone = sub {
+  my ($inst) = @_;
+  my ($m, $p, $l) = $split->($inst);
+  return ( defined $m && exists $U{$m}{$l} ) ? 1 : 0;
+};
+
+#<!-- The closure.  The first pass looks at every removed driver; after that
+#     only the cells just kept can have created a conflict -- by reading a
+#     removed driver -- so each round looks only at the removed drivers of
+#     the nets those cells read.  A full pass at the end recomputes the ties
+#     from scratch and confirms nothing was missed (if it finds a conflict
+#     after all, the rounds go on).  From scratch every round cost a full pass
+#     per round, 27 of them on a 2M-instance design. -->
+my %inNetsOf = ();
+foreach my $n ( keys %readers ) {
+  foreach my $rp ( @{$readers{$n}} ) { push(@{$inNetsOf{$rp->[0]}}, $n); }
+}
+my %driverOf = ();
+foreach my $d ( keys %outNets ) { $driverOf{$_} = $d foreach ( @{$outNets{$d}} ); }
+my $scan = sub {
+  my ($drivers) = @_;
+  my (%drop, %rq, %reqDrv, %pt) = ();
+  foreach my $d ( @$drivers ) {
+    next unless ( $gone->($d) );
+    my ($dm, $dp, $dl) = $split->($d);
+    foreach my $n ( @{$outNets{$d} || []} ) {
+      foreach my $rp ( @{$readers{$n} || []} ) {
+        my ($r, $pin) = @$rp;
+        next if ( $gone->($r) );
+        my ($rm, $rpath, $rl) = $split->($r);
+        if ( exists $val->{$n} && defined $rm && $pin !~ /\[/ ) {
+          my $k = "$rm\t$rl\t$pin";
+          $rq{$k} = 1;
+          push(@{$reqDrv{$k}}, "$dm\t$dl");
+        } else {
+          $drop{"$dm\t$dl"} = 1;
+        }
+      }
+      if ( $outPort{$n} ) {
+        if ( exists $val->{$n} ) { $pt{$n} = $val->{$n}; } else { $drop{"$dm\t$dl"} = 1; }
+      }
+    }
+  }
+  #<!-- a rewired pin has to see one constant in every instance of its module -->
+  foreach my $k ( keys %rq ) {
+    my ($rm, $rl, $pin) = split(/\t/, $k);
+    my %vals = ();
+    foreach my $p ( @{$modPaths{$rm}} ) {
+      my $fi = ( $p eq "" ) ? $rl : "$p/$rl";
+      my $n = exists $COMP_ALREADY{$fi} ? $COMP_ALREADY{$fi}{$pin} : undef;
+      my $v = ( defined $n && exists $val->{$n} ) ? $val->{$n} : ( defined $n && $n =~ /^1'b([01])$/ ? $1 : "X" );
+      $vals{$v} = 1;
+    }
+    if ( keys %vals == 1 && !exists $vals{X} ) { $rq{$k} = ( keys %vals )[0]; }
+    else { $drop{$_} = 1 foreach ( @{$reqDrv{$k}} ); }
+  }
+  return (\%drop, \%rq, \%pt);
+};
+my ($round, %req, %portTie) = (0);
+my @next = keys %outNets;
+my $full = 1;
+while ( 1 ) {
+  $round++;
+  my ($drop, $rq, $pt) = $scan->(\@next);
+  if ( !%$drop ) {
+    if ( $full ) { %req = %$rq; %portTie = %$pt; last; }
+    @next = keys %outNets; $full = 1;           # converged: one full pass to confirm
+    next;
+  }
+  my @kept = ();
+  foreach my $ml ( keys %$drop ) {
+    my ($m, $l) = split(/\t/, $ml);
+    delete $U{$m}{$l};
+    foreach my $p ( @{$modPaths{$m}} ) { push(@kept, ( $p eq "" ) ? $l : "$p/$l"); }
+  }
+  my %nx = ();
+  foreach my $k ( @kept ) {
+    foreach my $n ( @{$inNetsOf{$k} || []} ) {
+      my $d = $driverOf{$n};
+      $nx{$d} = 1 if ( defined $d && $gone->($d) );
+    }
+  }
+  @next = keys %nx; $full = 0;
+  print "INFO-UTS-RM_DEAD : 013 : closure round $round: " . scalar(keys %$drop) . " cell(s) kept so that nothing that stays loses its driver\n";
+}
+
+#<!-- the plan, per module: what goes, and the ties for what stays -->
+my ($nModLeaf, $nTieMod, $nModEdited) = (0, 0, 0);
+my %plan = ();          # M -> { GONE => {L}, TIES => [[name, net, value, [[L,pin],...]], ...] }
+my %reqByMod = ();
+foreach my $k ( keys %req ) {
+  my ($rm, $rl, $pin) = split(/\t/, $k);
+  push(@{$reqByMod{$rm}{$req{$k}}}, [$rl, $pin]);
+}
+foreach my $m ( keys %U ) { $plan{$m}{GONE} = $U{$m}; $nModLeaf += scalar(keys %{$U{$m}}); }
+foreach my $m ( keys %reqByMod ) {
+  my $seq = 0;
+  foreach my $v ( sort keys %{$reqByMod{$m}} ) {
+    my @pins = sort { $a->[0] cmp $b->[0] || $a->[1] cmp $b->[1] } @{$reqByMod{$m}{$v}};
+    my $fan = ( $tieFanout > 0 ) ? $tieFanout : scalar(@pins);
+    for ( my $i = 0 ; $i < @pins ; $i += $fan ) {
+      my $name;
+      do { $name = "bt_const_tie_" . $seq++; } while ( $MODULE_ALREADY{$m}->dbVNOMHasLeafInst($name) || $MODULE_ALREADY{$m}->dbVNOMHasHierInst($name) );
+      push(@{$plan{$m}{TIES}}, [$name, "${name}_net", $v, [ @pins[$i .. ( $i + $fan - 1 < $#pins ? $i + $fan - 1 : $#pins )] ]]);
+      $nTieMod++;
+    }
+  }
+}
+foreach my $n ( sort keys %portTie ) {
+  my $seq = 0; my $name;
+  do { $name = "bt_const_tie_port_" . $seq++; } while ( $MODULE_ALREADY{$TOP_MODULE}->dbVNOMHasLeafInst($name) || grep { $_->[0] eq $name } @{$plan{$TOP_MODULE}{TIES} || []} );
+  push(@{$plan{$TOP_MODULE}{TIES}}, [$name, $n, $portTie{$n}, []]);
+  $nTieMod++;
+}
+
+#<!-- what that is in the flat database -->
+my ($nFlatGone, $nFlatTie, $nFlatFlop) = (0, 0, 0);
+foreach my $m ( keys %plan ) {
+  my $np = scalar(@{$modPaths{$m}});
+  $nFlatGone += $np * scalar(keys %{$plan{$m}{GONE} || {}});
+  $nFlatTie  += $np * scalar(@{$plan{$m}{TIES} || []});
+  foreach my $l ( keys %{$plan{$m}{GONE} || {}} ) {
+    my $c = $MODULE_ALREADY{$m}->dbVNOMGetLeafInstCell($l);
+    $nFlatFlop += $np if ( exists $PLDB{$c} && $PLDB{$c}->dbMdbGetType == 1 );
+  }
+}
+my $nFlatRemovable = scalar(keys %$why);
+printf "INFO-UTS-RM_DEAD : 014 : per module: %d cell(s) in %d module(s) go, %d of the %d the flat removal takes (%.1f%%); %d of them flops\n",
+       $nFlatGone, scalar(grep { %{$plan{$_}{GONE} || {}} } keys %plan), $nFlatGone, $nFlatRemovable,
+       $nFlatRemovable ? 100 * $nFlatGone / $nFlatRemovable : 0, $nFlatFlop;
+print "INFO-UTS-RM_DEAD : 015 : $nTieMod tie cell(s) in the module definitions, $nFlatTie in the flat database; " . scalar(keys %portTie) . " on top output ports\n";
+
+my $fh;
+if ( $report ne "" ) {
+  if ( open($fh, ">", $report) ) {
+    print $fh "# remove_dead_logic -hier on $TOP_MODULE" . ( $dry ? " (dry run)" : "" ) . "\n";
+    print $fh "# module <module> removed <leaf> <cell>\n# module <module> tie <name> <cell> <net> <value> <loads>\n";
+    foreach my $m ( sort keys %plan ) {
+      foreach my $l ( sort keys %{$plan{$m}{GONE} || {}} ) {
+        print $fh "module $m removed $l " . $MODULE_ALREADY{$m}->dbVNOMGetLeafInstCell($l) . "\n";
+      }
+      foreach my $t ( @{$plan{$m}{TIES} || []} ) {
+        print $fh "module $m tie $t->[0] " . ( $t->[2] ? $tieHi : $tieLo ) . " $t->[1] $t->[2] " . scalar(@{$t->[3]}) . "\n";
+      }
+    }
+  } else {
+    print "ERROR-UTS-RM_DEAD : 007 : cannot write $report : $!\n";
+    return;
+  }
+}
+if ( $dry ) {
+  close($fh) if ( defined $fh );
+  print "INFO-UTS-RM_DEAD : 008 : dry run, the database is unchanged\n";
+  return;
+}
+
+#<!-- apply: module definitions -->
+my $nBefore = scalar(keys %COMP_ALREADY);
+foreach my $m ( sort keys %plan ) {
+  my $mod = $MODULE_ALREADY{$m};
+  my $gone = $plan{$m}{GONE} || {};
+  my %rewire = ();      # leaf -> pin -> net
+  foreach my $t ( @{$plan{$m}{TIES} || []} ) {
+    foreach my $lp ( @{$t->[3]} ) { $rewire{$lp->[0]}{$lp->[1]} = $t->[1]; }
+  }
+  my @keep = ();
+  my $area = $mod->dbVNOMGetArea;
+  foreach my $line ( $mod->dbVNOMGetConn ) {
+    my ($cell, $inst) = ( split(/\s+/, $line) )[0, 1];
+    if ( defined $inst && exists $gone->{$inst} ) {
+      my @size = exists $PLDB{$cell} ? $PLDB{$cell}->dbMdbGetSize : (0, 0);
+      $area -= $size[0] * $size[1];
+      next;
+    }
+    if ( defined $inst && exists $rewire{$inst} ) {
+      foreach my $pin ( keys %{$rewire{$inst}} ) {
+        my $new = $rewire{$inst}{$pin};
+        $line =~ s/\.\Q$pin\E\s*\(\s*[^()]*?\s*\)/.$pin($new)/;
+      }
+    }
+    push(@keep, $line);
+  }
+  foreach my $t ( @{$plan{$m}{TIES} || []} ) {
+    my ($name, $net, $v) = @$t;
+    my ($cell, $out) = $v ? ($tieHi, $tieHiOut) : ($tieLo, $tieLoOut);
+    push(@keep, "$cell $name (.$out($net)) ;");
+    $mod->dbVNOMAddLeafInst($name);
+    $mod->dbVNOMSetLeafInstCell($name, $cell);
+    my @size = exists $PLDB{$cell} ? $PLDB{$cell}->dbMdbGetSize : (0, 0);
+    $area += $size[0] * $size[1];
+  }
+  $mod->{conn} = \@keep;
+  delete ${$mod->{Lchild}}{$_} foreach ( keys %$gone );
+  $mod->dbVNOMSetArea($area);
+  $nModEdited++;
+}
+#<!-- cached hierarchical areas are stale now; report_verilog_area recomputes -->
+foreach my $m ( keys %MODULE_ALREADY ) {
+  $MODULE_ALREADY{$m}->dbVNOMSetLeafArea(0);
+  $MODULE_ALREADY{$m}->dbVNOMSetHierArea(0);
+}
+
+#<!-- apply: the flat database, the same edits under every instance path -->
+my %touched = ();
+my $nFlatAdded = 0;
+foreach my $m ( sort keys %plan ) {
+  foreach my $p ( @{$modPaths{$m}} ) {
+    my $pre = ( $p eq "" ) ? "" : "$p/";
+    foreach my $l ( keys %{$plan{$m}{GONE} || {}} ) {
+      my $inst = "$pre$l";
+      next unless ( exists $COMP_ALREADY{$inst} );
+      foreach my $pin ( keys %{$COMP_ALREADY{$inst}} ) {
+        my $net = $COMP_ALREADY{$inst}{$pin};
+        next unless ( defined $net && exists $NETS_ALREADY{$net} );
+        delete $NETS_ALREADY{$net}{$inst};
+        $touched{$net} = 1;
+      }
+      delete $COMP_ALREADY{$inst};
+      delete $CADB{$inst};
+    }
+    foreach my $t ( @{$plan{$m}{TIES} || []} ) {
+      my ($name, $net, $v, $loads) = @$t;
+      my ($cell, $out) = $v ? ($tieHi, $tieHiOut) : ($tieLo, $tieLoOut);
+      my $fnet = ( @$loads ) ? "$pre$net" : $net;          # a port tie keeps the port's net
+      my $fi = "$pre$name";
+      $CADB{$fi} = CompAttDB::new();
+      $CADB{$fi}->dbCadbSetCellref($cell);
+      $COMP_ALREADY{$fi}{$out} = $fnet;
+      unless ( exists $NETS_ALREADY{$fnet} ) {
+        $NADB{$fnet} = NetsAttrDB::new();
+        $NADB{$fnet}->dbNadbSetNetType(0);
+      }
+      $NETS_ALREADY{$fnet}{$fi} = $out;
+      $nFlatAdded++;
+      foreach my $lp ( @$loads ) {
+        my ($l, $pin) = @$lp;
+        my $li = "$pre$l";
+        next unless ( exists $COMP_ALREADY{$li} );
+        my $old = $COMP_ALREADY{$li}{$pin};
+        $COMP_ALREADY{$li}{$pin} = $fnet;
+        if ( defined $old && exists $NETS_ALREADY{$old} && exists $NETS_ALREADY{$old}{$li} ) {
+          my $still = grep { defined $COMP_ALREADY{$li}{$_} && $COMP_ALREADY{$li}{$_} eq $old } keys %{$COMP_ALREADY{$li}};
+          if ( $still ) {
+            my ($other) = grep { $COMP_ALREADY{$li}{$_} eq $old } keys %{$COMP_ALREADY{$li}};
+            $NETS_ALREADY{$old}{$li} = $other;
+          } else {
+            delete $NETS_ALREADY{$old}{$li};
+          }
+          $touched{$old} = 1;
+        }
+        $NETS_ALREADY{$fnet}{$li} = $pin;
+      }
+    }
+  }
+}
+my $nNetGone = 0;
+foreach my $net ( keys %touched ) {
+  next unless ( exists $NETS_ALREADY{$net} );
+  next if ( keys %{$NETS_ALREADY{$net}} );
+  delete $NETS_ALREADY{$net};
+  delete $NADB{$net};
+  delete $NETS_ROUTING_ALREADY{$net} if ( exists $NETS_ROUTING_ALREADY{$net} );
+  $nNetGone++;
+}
+close($fh) if ( defined $fh );
+
+my $nAfter = scalar(keys %COMP_ALREADY);
+print "INFO-UTS-RM_DEAD : 009 : edited $nModEdited module definition(s); flat database $nBefore -> $nAfter instance(s) " .
+      "($nFlatGone removed, $nFlatAdded tie cell(s) added); deleted $nNetGone net(s) left empty\n";
+if ( $nAfter != $nBefore - $nFlatGone + $nFlatAdded ) {
+  print "WARN-UTS-RM_DEAD : 016 : flat instance count is $nAfter, the plan says " . ( $nBefore - $nFlatGone + $nFlatAdded ) . "\n";
+}
+}# sub remove_dead_logic_hier
 #------------------------------------------------------------------------------------------#
 
 1;

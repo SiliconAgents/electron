@@ -679,9 +679,11 @@ foreach $moduleName (@temp_module_list) {
     my @inPorts = $MODULE_ALREADY{$moduleName}->dbVNOMGetInput;
     my @outPorts = $MODULE_ALREADY{$moduleName}->dbVNOMGetOutput;
     my @bidiPorts = $MODULE_ALREADY{$moduleName}->dbVNOMGetBidi;
-       foreach my $i ( @inPorts ) { if ( $i =~ /\\/ ){$i = $i." "}; push ( @allPorts, $i); }
-       foreach my $i ( @outPorts ) { if ( $i =~ /\\/ ){$i = $i." "}; push ( @allPorts, $i); }
-       foreach my $i ( @bidiPorts ) { if ( $i =~ /\\/ ){$i = $i." "}; push ( @allPorts, $i); }
+       #<!-- on a copy: foreach aliases, and appending the escaped name's
+       #     terminating space to the array element itself made the width
+       #     lookup below miss, so every escaped bus port ("output [37:0]
+       #     \a.b[0].c") was written as a scalar -->
+       foreach my $p ( @inPorts, @outPorts, @bidiPorts ) { my $i = $p; if ( $i =~ /\\/ ){$i = $i." "}; push ( @allPorts, $i); }
        my $line = join ",", @allPorts ;
        print WRITE "$line";
        print WRITE ") \;\n";
@@ -725,23 +727,26 @@ $connLine =~ s/\s*\)\s*\)\s*\;?.*$/\)/;
 my ($cell,$inst) = ( split(/\s+/, $connLine ))[0,1];
 #----------------------------check assign instance-------------------------------#
       if(($GLOBAL->dbfGlobalGetWriteAssignAsBuffer ==0) && $GLOBAL->dbfGlobalCheckAssignInstance($inst)){
-        my $temp_line = "";
+        #<!-- An assign buffer goes back out as "assign <output net> = <input
+        #     net> ;", whatever the nets are.  It used to take a net only when
+        #     it was a port of the module, so an assign between two internal
+        #     nets came out as a bare "assign" with no semicolon: read back,
+        #     that swallowed the statements after it, cells included -- 29,000
+        #     of them on one design. -->
+        my ($inPin, $outPin) = ($GLOBAL->dbfGlobalGetBufForAssignIn, $GLOBAL->dbfGlobalGetBufForAssignOut);
+        my %pinNet = ();
         my @nets = split(/\s*\)\s*\,\s*/, $connLine);
-        my  $noOfPins = @nets;
-        for(my $i = 1 ; $i < $noOfPins ; $i++){
-          $nets[$i] =~ s/\s*\(\s*/\|/;
-          $nets[$i] =~ s/\s*\)\s*//;
-          my ($pin,$net)=(split(/\s*\|\s*/, $nets[$i]))[0,1];
-          my $temp_net = $net;
-          $temp_net =~ s/\[\d//;$temp_net =~ s/\]//;
-          if(exists $MODULE_ALREADY{$moduleName}->{ins}{$temp_net}){
-            $temp_line = $temp_line." = ".$net;
-          }elsif(exists $MODULE_ALREADY{$moduleName}->{outs}{$temp_net}){
-            $temp_line = $temp_line." = ".$net;
-          }
+        for(my $i = 1 ; $i < @nets ; $i++){
+          my $pn = $nets[$i];
+          $pn =~ s/\s*\(\s*/\|/;
+          $pn =~ s/\s*\)\s*$//;
+          my ($pin,$net)=(split(/\s*\|\s*/, $pn))[0,1];
+          $pin =~ s/^\s*\.//;
+          $pinNet{$pin} = $net if ( defined $net && $net ne "" );
         }#for
-        $temp_line =~ s/\s*=//;
-        $assignList{$inst} = $temp_line; 
+        if ( exists $pinNet{$outPin} && exists $pinNet{$inPin} ) {
+          $assignList{$inst} = &dbfVerilogNetToken($moduleName, $pinNet{$outPin}) . " = " . &dbfVerilogNetToken($moduleName, $pinNet{$inPin});
+        }
       }#if exists 
 #---------------------------------------------------------------------------------------------------------#
          if (( $MODULE_ALREADY{$moduleName}->dbVNOMHasHierInst($inst) ) 
@@ -1013,6 +1018,15 @@ elsif ( exists $PLDB{$cell}) {
                                           {$wires{$name} = $new_widthStr;}
                                         }
                                      }
+                                     #<!-- a scalar net that only leaf cells use was left to verilog's
+                                     #     implicit net, which a reader under `default_nettype none
+                                     #     (yosys -noautowire) rejects; declare it like any other -->
+                                     elsif ( $netNameExpr =~ /^\s*(\\\S+|[A-Za-z_][\w\$]*)\s*$/ ) {
+                                       my $name = $1;
+                                       unless ( exists $wires{$name} || exists $MODULE_ALREADY{$moduleName}->{ins}{$name} || exists $MODULE_ALREADY{$moduleName}->{outs}{$name} || exists $MODULE_ALREADY{$moduleName}->{bidis}{$name} ) {
+                                         $wires{$name} = "";
+                                       }
+                                     }
                                            }
 
                                      } # if the conn line is for a leaf instance
@@ -1020,8 +1034,27 @@ elsif ( exists $PLDB{$cell}) {
 
                                                }#if exists in hierInst or leafInst
                                 }# for all conn lines
-foreach my $net ( keys %wires ) {
+#<!-- A bus the module declares keeps its declared range.  The inference above
+#     only sees the bit selects this module happens to use: one module wrote
+#     "wire [53:0] req" for a declared [97:0] that is also connected whole
+#     to a 98-bit child port, and read back the bus no longer lined up --
+#     9,270 nets came back with different pins, one with bit -10. -->
+foreach my $w ( $MODULE_ALREADY{$moduleName}->dbVNOMGetWire ) {
+  next unless ( $MODULE_ALREADY{$moduleName}->dbVNOMGetWireType($w) == 1 );
+  my $bits = $MODULE_ALREADY{$moduleName}->dbVNOMGetWireBits($w);
+  $wires{$w} = $bits if ( defined $bits && $bits =~ /^\[\s*-?\d+\s*:\s*-?\d+\s*\]$/ );
+}
+foreach my $net ( sort keys %wires ) {
                                       my $width_temp = $wires{$net} ;
+                                      #<!-- a sized constant on a port (.en(2'h2)) is taken for a
+                                      #     bus by the inference above and came out as
+                                      #     "wire [1:0] 2'h2 ;", which no reader accepts -->
+                                      next if ( $net =~ /^\d*\s*'\s*[sS]?[bBhHdDoO]/ || $net =~ /^\d+$/ );
+                                      next if ( $net =~ /^\s*$/ );     # an escaped name split at its space
+                                      #<!-- the inference splits an escaped name at the first "[" inside
+                                      #     it (\gen_x[4].y.z) and builds a range out of the rest; only a
+                                      #     well-formed [msb:lsb], or none, is a declaration -->
+                                      next unless ( $wires{$net} eq "" || $wires{$net} =~ /^\[\s*-?\d+\s*:\s*-?\d+\s*\]$/ );
                                       if ( $net =~ /\\/ ) {# escaped identifier
                                         print WRITE "wire $wires{$net} $net  \;\n";
                                       }else {
@@ -1030,8 +1063,8 @@ foreach my $net ( keys %wires ) {
                                 }
 #--------------------------------------assign statement write--------------------#
 print WRITE "\n";
-foreach my $inst (keys %assignList){
-  print WRITE "assign $assignList{$inst}\n";
+foreach my $inst (sort keys %assignList){
+  print WRITE "assign $assignList{$inst} ;\n";
 }
        #---------------- print the conn line -----------------------------------#
        my @conns = $MODULE_ALREADY{$moduleName}->dbVNOMGetConn;
@@ -1242,10 +1275,14 @@ if ( $assignBufName ne "" ) {
                            if($#left_pins_or_nets_array == $#right_pins_or_nets_array) {
                              foreach my $temp_left_bit (@left_pins_or_nets_array){
                                my $temp_right_bit = shift(@right_pins_or_nets_array);
+                               #<!-- an escaped name ends at whitespace, so it needs its space
+                               #     back before the ")" these generated lines put after it, or
+                               #     the ")" becomes part of the name -->
+                               my $esc = sub { return &dbfVerilogNetToken($moduleName, $_[0]); };
                                if(($temp_right_bit !~ /'b/) && ( $temp_left_bit !~ /'b/)) {
                                  my $temp_assign_component_name = "bt_assign_buf"."_".$no_of_added_inst;
                                  #my $temp_assign_component_port_expr = "("."\.".$assignOut."(".$temp_left_bit.")".","."\.".$assignIn."(".$temp_right_bit.")".","."\.".$power."(1'b1".")".","."\.".$gnd."(1'b0".")".")" ;
-                                 my $temp_assign_component_port_expr = "("."\.".$assignOut."(".$temp_left_bit.")".","."\.".$assignIn."(".$temp_right_bit.")".")" ;
+                                 my $temp_assign_component_port_expr = "("."\.".$assignOut."(".$esc->($temp_left_bit).")".","."\.".$assignIn."(".$esc->($temp_right_bit).")".")" ;
                                  $no_of_added_inst++;
                                  my $temp_conn_line = $assignBufName." ".$temp_assign_component_name.$temp_assign_component_port_expr;
                                  $temp_conn_line =~ s/^\s*//;
@@ -1278,7 +1315,7 @@ if ( $assignBufName ne "" ) {
                                  if (( $tieCell ne "" ) && ( $tieOut ne "" )) {
                                    my $temp_tie_component_name = "bt_assign_tie"."_".$no_of_added_inst;
                                    $no_of_added_inst++;
-                                   my $temp_conn_line = $tieCell." ".$temp_tie_component_name." \(\.".$tieOut."\(".$temp_left_bit."\)\) \;";
+                                   my $temp_conn_line = $tieCell." ".$temp_tie_component_name." \(\.".$tieOut."\(".$esc->($temp_left_bit)."\)\) \;";
                                    print "\nDBG-PAR-VERI : 005 : Added tie conn line $temp_conn_line to module $moduleName" if ($DEBUG == 300);
                                    $MODULE_ALREADY{$moduleName}->dbVNOMAddConn($temp_conn_line);
                                    my $area = $MODULE_ALREADY{$moduleName}->dbVNOMGetArea;
@@ -1308,7 +1345,7 @@ if($line =~ /\b[i,o][n,u]t*p*o*ut\b/){  $line =~ s/^\s+//;
                                   if($line =~ /\[\s*\-*\s*[0-9]+\s*\:\s*\-*\s*[0-9]+\s*\]/){ # if the pin is a BUS
 #-------------------- added extra space after the closing bracket --------------------- CLIENT #
                                     $line =~ s/\]/ /; $line =~ s/\[/ /; $line =~ s/\:/ /; $line =~ s/\,/ /g; $line =~ s/\;//;
-                                    $line =~ s/reg//;
+                                    $line =~ s/^(\S+)\s+(?:reg|wire)\s/$1 /; # the keyword, not "reg" inside a port name
                                     my @tempStringList =(split(/\s+/, $line));
                                     my $number_of_string = @tempStringList;
                                     my @new_tempStringList = ();
@@ -1356,7 +1393,7 @@ if($line =~ /\b[i,o][n,u]t*p*o*ut\b/){  $line =~ s/^\s+//;
                                      else { print "WARN-PAR-VERI : 008 : syntax issue at line $count\n"; } 
      if ($pinDirection eq 'input' ) { 
                                       foreach my $pinName ( @pins ) {
-                                        if($pinName =~ /reg/){next;} 
+                                        if($pinName eq 'reg' || $pinName eq 'wire'){next;}
                                       $MODULE_ALREADY{$moduleName}->dbVNOMAddInput($pinName); 
                                       $MODULE_ALREADY{$moduleName}->dbVNOMSetInputType($pinName,0);
                                       print "DBG-PAR-VERI : 009 : Adding input pin $pinName to $moduleName\n" if ($DEBUG == 300);
@@ -1364,7 +1401,7 @@ if($line =~ /\b[i,o][n,u]t*p*o*ut\b/){  $line =~ s/^\s+//;
                                      }
      elsif ($pinDirection eq 'output' ) {
                                       foreach my $pinName ( @pins ) {
-                                        if($pinName =~ /reg/){next;} 
+                                        if($pinName eq 'reg' || $pinName eq 'wire'){next;}
                                       $MODULE_ALREADY{$moduleName}->dbVNOMAddOutput($pinName); 
                                       $MODULE_ALREADY{$moduleName}->dbVNOMSetOutputType($pinName,0);
                                       print "DBG-PAR-VERI : 010 : Adding output pin $pinName to $moduleName\n" if ($DEBUG == 300);
@@ -1372,7 +1409,7 @@ if($line =~ /\b[i,o][n,u]t*p*o*ut\b/){  $line =~ s/^\s+//;
                                       }
      elsif ($pinDirection eq 'inout' ) {
                                       foreach my $pinName ( @pins ) {
-                                        if($pinName =~ /reg/){next;} 
+                                        if($pinName eq 'reg' || $pinName eq 'wire'){next;}
                                       $MODULE_ALREADY{$moduleName}->dbVNOMAddBidi($pinName);
                                       $MODULE_ALREADY{$moduleName}->dbVNOMSetBidiType($pinName,0);
                                       print "DBG-PAR-VERI : 011 : Adding output pin $pinName to $moduleName\n" if ($DEBUG == 300);
@@ -2056,5 +2093,28 @@ sub lef2verilog {
 }#sub lef2verilog
 
 ################################################################################################
+
+#-----------------------------------------------------------------------------#
+# One bit of a net as verilog has to spell it inside a statement electron
+# writes.  Internally a bit of an escaped bus is "\a.b[3]" -- the space the
+# source had before "[3]" is gone -- and written like that it is a different,
+# undeclared, scalar identifier: other tools fail with "can't find definition
+# of variable" on an assign, or quietly make a one-bit implicit wire on a port.
+# When "\a.b" is a bus the module declares (a wire or a port), it is written
+# "\a.b [3]"; any other escaped name gets the space that ends it.
+#-----------------------------------------------------------------------------#
+sub dbfVerilogNetToken {
+  my ($module, $net) = @_;
+  return $net unless ( defined $net && $net =~ /^\\/ );
+  $net =~ s/\s+$//;
+  if ( $net =~ /^(\\\S+?)\[(-?\d+)\]$/ && exists $MODULE_ALREADY{$module} ) {
+    my ($base, $bit) = ($1, $2);
+    my $m = $MODULE_ALREADY{$module};
+    if ( exists $m->{wire}{$base} || exists $m->{ins}{$base} || exists $m->{outs}{$base} || exists $m->{bidis}{$base} ) {
+      return "$base [$bit] ";
+    }
+  }
+  return "$net ";
+}#sub dbfVerilogNetToken
 
 1;

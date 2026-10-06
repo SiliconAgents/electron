@@ -85,12 +85,19 @@ import time
 # flow on that design is not register optimisation. See 3RDBIN/rtlil_liveness
 # for the one mechanism that did measure positive -- registers a module
 # boundary forces the flow to keep, 6.5% of the design's register bits.
+# delete t:$print t:$check: an RTL $display / $write / assertion reaches yosys
+# as a $print / $check cell, survives every pass, and write_verilog puts it back
+# as an initial or always block with a $write in it -- behavioural code in a
+# gate netlist, which electron's read_verilog took for an instance of a cell
+# called "initial".  A clocked one also keeps alive all the logic its arguments
+# read.  Gone here, clean -purge takes that logic with it.
 SCRIPT = """
 read_verilog -lib {blackbox}
 {children}
 read_rtlil {src}
 {absorb}
 hierarchy -check -top {top}
+delete t:$print t:$check
 {flatten}
 proc
 opt -fast
