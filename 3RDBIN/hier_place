@@ -2406,6 +2406,56 @@ class PlaceWidget(QWidget):
         print(f"Wrote {path}")
 
 
+def array_siblings(view, min_n: int) -> List["Node"]:
+    """Lay identical sibling blocks out on a grid; return them, held FIXED.
+
+    A group is every free block (TYPE=block) with one cellref and one size.  The grid is the
+    rows x columns that fits the die with the aspect closest to the die's, centred
+    on the group's centroid and clamped inside; members fill it row by row in the
+    y-then-x order the relaxation left them in, so neighbours stay neighbours.
+    """
+    x0, y0, x1, y1 = view.die
+    W, H = x1 - x0, y1 - y0
+    groups: Dict[Tuple[str, float, float], List[Node]] = defaultdict(list)
+    for n in view.nodes.values():
+        # blocks only: the flops in this pass share a cellref and a size too
+        if n.edge or n.fixed or not n.cellref or n.ntype != "block":
+            continue
+        groups[(n.cellref, round(n.width, 6), round(n.height, 6))].append(n)
+    arrayed: List[Node] = []
+    for (ref, w, h), mem in sorted(groups.items()):
+        k = len(mem)
+        if k < min_n:
+            continue
+        best = None
+        for c in range(1, k + 1):
+            r = -(-k // c)
+            if c * w > W * (1 + 1e-9) or r * h > H * (1 + 1e-9):
+                continue
+            score = (abs(math.log((c * w) / (r * h)) - math.log(W / H)), r * c - k)
+            if best is None or score < best[0]:
+                best = (score, r, c)
+        if best is None:
+            print(f"Array: {k} x {ref} ({w:g} x {h:g}) do not fit the die on any grid, left as placed")
+            continue
+        _, r, c = best
+        gw, gh = c * w, r * h
+        mx = sum(n.x for n in mem) / k
+        my = sum(n.y for n in mem) / k
+        ox = min(max(mx - gw / 2.0, x0), x1 - gw)
+        oy = min(max(my - gh / 2.0, y0), y1 - gh)
+        order = sorted(mem, key=lambda n: (n.y, n.x))
+        for row in range(r):
+            chunk = sorted(order[row * c:(row + 1) * c], key=lambda n: n.x)
+            for col, n in enumerate(chunk):
+                n.x = ox + (col + 0.5) * w
+                n.y = oy + (row + 0.5) * h
+                n.fixed = True
+                arrayed.append(n)
+        print(f"Array: {k} x {ref} as {r} x {c}, {gw:g} x {gh:g} um at ({ox:g}, {oy:g})")
+    return arrayed
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self, nodefile: str, edgefile: str, kinds: List[str],
@@ -2896,6 +2946,12 @@ Controls:
                              "(default: the relaxation value, 1.0)")
     parser.add_argument("--settle-position", action="store_true",
                         help="settle without momentum (position based)")
+    parser.add_argument("--array", type=int, default=0, metavar="N",
+                        help="with --batch, after the relaxation lay out every group of at "
+                             "least N free blocks of one module and one size on a grid, "
+                             "in the order the relaxation left them, then settle the "
+                             "other blocks around it.  Force placement does not find the "
+                             "array identical siblings want, and piles them instead")
     parser.add_argument("--settle", type=int, default=0, metavar="N",
                         help="after --batch, run N steps with every attractive "
                              "force off, leaving only overlap separation and the "
@@ -3135,6 +3191,17 @@ Controls:
                 if args.frames and (i + 1) % args.frame_every == 0:
                     _grab()
             window.view.settle_mode = False
+
+        if args.array > 0:
+            arrayed = array_siblings(window.view, args.array)
+            # the rest settles around the arrays, which hold still meanwhile
+            if arrayed:
+                window.view.settle_mode = True
+                for i in range(max(args.settle, 100)):
+                    window.view.step()
+                window.view.settle_mode = False
+                for n in arrayed:
+                    n.fixed = False
 
         window.view.animation_running = False
         window.view.save_nodefile(out)

@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""Analytic cell placer for one module, a drop-in for hier_place's cell pass.
+
+  hier_place_qp <nodefile> <graph> --save <placed nodefile> [--iters N] [--density D]
+
+Run by hier_place_cells when hier_place_all is given -cells_placer.  hier_place
+is a force-directed placer built for a module's few dozen blocks; handed every
+standard cell of a module it does all-pairs work in pure Python, minutes per
+step for 30k cells.  On the same input this takes seconds, for shorter wires
+and a far more even spread (see the commit that added it for the numbers).
+
+Reads what hier_place_cells writes (nodes: INST/PORT, FIXED/PLACED; graph:
+one "a b" pair per line), moves only the PLACED instances and writes the same
+format hier_place does, so electron's read_pseudo_nodefile takes it unchanged.
+
+SimPL-style: a quadratic placement (sparse Laplacian, fixed nodes as anchors)
+gives the wirelength-optimal but overlapping lower bound; rough legalisation
+by recursive bisection over a capacity map gives a spread upper bound; the
+next quadratic solve is pulled toward that spread by a weight that grows each
+round.  Fixed blocks have no capacity, so no cell is spread into one.
+"""
+import argparse, sys, time
+import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+
+def read_nodes(path):
+    hdr, nodes = {}, []
+    for line in open(path):
+        if line.startswith("#") or not line.strip():
+            continue
+        t = line.split()
+        if t[0] in ("DBU", "ROWHEIGHT"):
+            hdr[t[0]] = float(t[1]); continue
+        if t[0] == "DIEAREA":
+            hdr["DIEAREA"] = tuple(float(v) for v in t[1:5]); continue
+        if t[0] == "NODES":
+            continue
+        idx, name, kind, w, h, status = int(t[0]), t[1], t[2], float(t[3]), float(t[4]), t[5]
+        rest = t[6:]
+        x = y = 0.0
+        if rest and not rest[0].startswith("TYPE=") and not rest[0].startswith("CELL="):
+            x, y = float(rest[0]), float(rest[1]); rest = rest[2:]
+        nodes.append((idx, name, kind, w, h, status, x, y, " ".join(rest)))
+    return hdr, nodes
+
+
+def write_nodes(path, src, hdr, nodes, cx, cy, movable):
+    with open(path, "w") as fh:
+        fh.write("# hierarchical placement written by hier_place_qp\n")
+        fh.write(f"# source: {src}\n")
+        fh.write("# all coordinates and dimensions are in microns\n")
+        fh.write("# <x> <y> is the lower left corner of the node, as read in\n")
+        fh.write("# <node> <name> INST|PORT <width> <height> <status> <x> <y> TYPE=<node type> [CELL=<module>]\n")
+        if "DBU" in hdr: fh.write(f"DBU {int(hdr['DBU'])}\n")
+        d = hdr["DIEAREA"]; fh.write(f"DIEAREA {d[0]:g} {d[1]:g} {d[2]:g} {d[3]:g}\n")
+        if "ROWHEIGHT" in hdr: fh.write(f"ROWHEIGHT {hdr['ROWHEIGHT']:g}\n")
+        fh.write(f"NODES {len(nodes)}\n")
+        for k, (idx, name, kind, w, h, status, x, y, tail) in enumerate(nodes):
+            if movable[k]:
+                x, y, status = cx[k] - w / 2.0, cy[k] - h / 2.0, "PLACED"
+            fh.write(f"{idx} {name} {kind} {w:.6f} {h:.6f} {status} {x:.4f} {y:.4f} {tail}\n")
+
+
+class Capacity:
+    """Free area per grid bin (die minus fixed blocks), with 2D prefix sums."""
+    def __init__(self, die, blocks, nbx, nby, density):
+        self.x0, self.y0, x1, y1 = die
+        self.nbx, self.nby = nbx, nby
+        self.bw, self.bh = (x1 - self.x0) / nbx, (y1 - self.y0) / nby
+        cap = np.full((nbx, nby), self.bw * self.bh)
+        for (l, b, r, t) in blocks:
+            i0 = max(0, int((l - self.x0) / self.bw)); i1 = min(nbx - 1, int((r - self.x0) / self.bw))
+            j0 = max(0, int((b - self.y0) / self.bh)); j1 = min(nby - 1, int((t - self.y0) / self.bh))
+            for i in range(i0, i1 + 1):
+                bl = self.x0 + i * self.bw
+                ox = max(0.0, min(r, bl + self.bw) - max(l, bl))
+                if ox <= 0: continue
+                for j in range(j0, j1 + 1):
+                    bb = self.y0 + j * self.bh
+                    oy = max(0.0, min(t, bb + self.bh) - max(b, bb))
+                    cap[i, j] -= ox * oy
+        self.cap = np.clip(cap, 0.0, None) * density
+        self.ps = np.zeros((nbx + 1, nby + 1))
+        self.ps[1:, 1:] = self.cap.cumsum(0).cumsum(1)
+
+    def total(self, i0, i1, j0, j1):          # bins [i0,i1) x [j0,j1)
+        p = self.ps
+        return p[i1, j1] - p[i0, j1] - p[i1, j0] + p[i0, j0]
+
+
+def spread(cx, cy, area, cap):
+    """Rough legalisation: recursive bisection by capacity.  Returns new centres."""
+    nx, ny = cx.copy(), cy.copy()
+    stack = [(np.arange(len(cx)), 0, cap.nbx, 0, cap.nby)]
+    while stack:
+        ids, i0, i1, j0, j1 = stack.pop()
+        if len(ids) == 0:
+            continue
+        if (i1 - i0 == 1 and j1 - j0 == 1) or len(ids) == 1:
+            # one bin (or one cell): spread the cells evenly across the region,
+            # keeping their relative order, so the region is filled not stacked
+            rx0, rx1 = cap.x0 + i0 * cap.bw, cap.x0 + i1 * cap.bw
+            ry0, ry1 = cap.y0 + j0 * cap.bh, cap.y0 + j1 * cap.bh
+            for arr, lo, hi in ((nx, rx0, rx1), (ny, ry0, ry1)):
+                c = arr[ids]
+                o = np.argsort(c, kind="stable")
+                r = np.empty(len(ids)); r[o] = (np.arange(len(ids)) + 0.5) / len(ids)
+                arr[ids] = lo + r * (hi - lo)
+            continue
+        horiz = (i1 - i0) * cap.bw >= (j1 - j0) * cap.bh
+        if horiz and i1 - i0 > 1 or (not horiz and j1 - j0 <= 1):
+            # cut in x at the bin boundary nearest the middle, cells split by capacity
+            m = (i0 + i1) // 2
+            ca, cb = cap.total(i0, m, j0, j1), cap.total(m, i1, j0, j1)
+            key = cx[ids]
+            sub = ((i0, m, j0, j1), (m, i1, j0, j1))
+        else:
+            m = (j0 + j1) // 2
+            ca, cb = cap.total(i0, i1, j0, m), cap.total(i0, i1, m, j1)
+            key = cy[ids]
+            sub = ((i0, i1, j0, m), (i0, i1, m, j1))
+        if ca + cb <= 0:
+            ca = cb = 1.0
+        order = ids[np.argsort(key, kind="stable")]
+        cum = np.cumsum(area[order])
+        if cb <= 0:
+            k = len(order)
+        elif ca <= 0:
+            k = 0
+        else:
+            k = int(np.searchsorted(cum, cum[-1] * ca / (ca + cb)))
+        stack.append((order[:k],) + sub[0])
+        stack.append((order[k:],) + sub[1])
+    return nx, ny
+
+
+def hpwl(cx, cy, ea, eb):
+    return float(np.abs(cx[ea] - cx[eb]).sum() + np.abs(cy[ea] - cy[eb]).sum())
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("nodefile"); ap.add_argument("graph")
+    ap.add_argument("--save", required=True)
+    ap.add_argument("--iters", type=int, default=30)
+    ap.add_argument("--density", type=float, default=1.0,
+                    help="fraction of each bin's free area cells may use")
+    ap.add_argument("--bin_rows", type=float, default=8.0,
+                    help="bin edge in row heights (default 8)")
+    a, _unknown = ap.parse_known_args()   # hier_place's own switches are accepted and ignored
+    t0 = time.time()
+    hdr, nodes = read_nodes(a.nodefile)
+    n = len(nodes)
+    pos = {nd[0]: k for k, nd in enumerate(nodes)}
+    w = np.array([nd[3] for nd in nodes]); h = np.array([nd[4] for nd in nodes])
+    cx = np.array([nd[6] for nd in nodes]) + w / 2.0
+    cy = np.array([nd[7] for nd in nodes]) + h / 2.0
+    # A block is a placed child module whose contents were arranged for exactly
+    # that box; this pass only fills in cells around it, so it never moves one.
+    movable = np.array([nd[2] == "INST" and nd[5] != "FIXED" and "TYPE=block" not in nd[8]
+                        for nd in nodes])
+    die = hdr["DIEAREA"]
+    blocks = [(nd[6], nd[7], nd[6] + nd[3], nd[7] + nd[4]) for nd in nodes
+              if nd[2] == "INST" and "TYPE=block" in nd[8]]
+
+    ea, eb = [], []
+    for line in open(a.graph):
+        t = line.split()
+        if len(t) >= 2:
+            p, q = pos.get(int(t[0])), pos.get(int(t[1]))
+            if p is not None and q is not None and p != q:
+                ea.append(p); eb.append(q)
+    ea = np.array(ea); eb = np.array(eb)
+    keep = movable[ea] | movable[eb]
+    ea, eb = ea[keep], eb[keep]
+
+    mi = np.flatnonzero(movable); m = len(mi)
+    if m == 0:
+        # a module of blocks only (a wrapper, a level that just groups): nothing
+        # of its own to place, so the nodes go back as they came
+        write_nodes(a.save, a.nodefile, hdr, nodes, cx, cy, movable)
+        print(f"hier_place_qp: no movable cells, wrote {a.save} unchanged")
+        return 0
+    slot = -np.ones(n, dtype=int); slot[mi] = np.arange(m)
+    # Laplacian over movable cells; edges to fixed nodes go to the right-hand side
+    am, bm = movable[ea], movable[eb]
+    both = am & bm
+    rows = np.concatenate([slot[ea[both]], slot[eb[both]], slot[ea[both]], slot[eb[both]]])
+    cols = np.concatenate([slot[eb[both]], slot[ea[both]], slot[ea[both]], slot[eb[both]]])
+    vals = np.concatenate([-np.ones(both.sum()), -np.ones(both.sum()),
+                           np.ones(both.sum()), np.ones(both.sum())])
+    one = am ^ bm
+    mv = np.where(am[one], ea[one], eb[one]); fx = np.where(am[one], eb[one], ea[one])
+    rows = np.concatenate([rows, slot[mv]]); cols = np.concatenate([cols, slot[mv]])
+    vals = np.concatenate([vals, np.ones(len(mv))])
+    L = sp.csr_matrix((vals, (rows, cols)), shape=(m, m))
+    bx = np.bincount(slot[mv], weights=cx[fx], minlength=m).astype(float)
+    by = np.bincount(slot[mv], weights=cy[fx], minlength=m).astype(float)
+    # a cell with no connection at all would make L singular: tie everything,
+    # very weakly, to the die centre
+    eps = 1e-6
+    dcx, dcy = (die[0] + die[2]) / 2.0, (die[1] + die[3]) / 2.0
+    L = (L + eps * sp.identity(m)).tocsr()
+    bx += eps * dcx; by += eps * dcy
+
+    rh = hdr.get("ROWHEIGHT", 0.2)
+    bin_edge = a.bin_rows * rh
+    nbx = max(1, min(512, int((die[2] - die[0]) / bin_edge)))
+    nby = max(1, min(512, int((die[3] - die[1]) / bin_edge)))
+    cap = Capacity(die, blocks, nbx, nby, a.density)
+    area = (w * h)[mi]
+    print(f"hier_place_qp: {m} movable, {n - m} fixed ({len(blocks)} blocks), {len(ea)} edges, "
+          f"{nbx}x{nby} bins of {bin_edge:.2f} um; cell area {area.sum():.0f} um2, "
+          f"free capacity {cap.cap.sum():.0f} um2")
+
+    x0 = np.where(movable, cx, dcx)[mi]; y0 = np.where(movable, cy, dcy)[mi]
+    xs, _ = spla.cg(L, bx, x0=x0, rtol=1e-6, maxiter=2000)
+    ys, _ = spla.cg(L, by, x0=y0, rtol=1e-6, maxiter=2000)
+    cx[mi], cy[mi] = xs, ys
+    lb = hpwl(cx, cy, ea, eb)
+    best = None
+    for it in range(a.iters):
+        sx, sy = spread(cx[mi], cy[mi], area, cap)
+        ux, uy = cx.copy(), cy.copy(); ux[mi], uy[mi] = sx, sy
+        ub = hpwl(ux, uy, ea, eb)
+        if best is None or ub < best[0]:
+            best = (ub, sx.copy(), sy.copy())
+        print(f"  iter {it:2d}: lower bound {lb:12.1f}  spread {ub:12.1f}  gap {100*(ub-lb)/max(ub,1e-9):5.1f}%")
+        if ub - lb < 0.05 * ub:
+            break
+        alpha = 0.01 * (1 + it) * (L.diagonal().mean())
+        A = (L + alpha * sp.identity(m)).tocsr()
+        xs, _ = spla.cg(A, bx + alpha * sx, x0=cx[mi], rtol=1e-6, maxiter=1000)
+        ys, _ = spla.cg(A, by + alpha * sy, x0=cy[mi], rtol=1e-6, maxiter=1000)
+        cx[mi], cy[mi] = xs, ys
+        lb = hpwl(cx, cy, ea, eb)
+    _, sx, sy = best
+    cx[mi], cy[mi] = sx, sy
+    write_nodes(a.save, a.nodefile, hdr, nodes, cx, cy, movable)
+    print(f"hier_place_qp: wrote {a.save}, spread HPWL {best[0]:.1f}, {time.time() - t0:.1f}s")
+
+
+if __name__ == "__main__":
+    sys.exit(main())
