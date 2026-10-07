@@ -287,6 +287,7 @@
 #                              default, see above
 #               --no_snap_x : leave x off the site grid
 #               --report_only : say what it would do and change nothing
+#               --incremental : keep the legal cells, repair only the rest
 #
 # OUTPUTS
 #               instance locations in CADB, and the instance boxes
@@ -347,6 +348,7 @@ my $rowWin = 6;
 my $maxDispUm;
 my $iterCap = 20;
 my ($noSnapX, $reportOnly, $debug) = (0, 0, 0);
+my $incremental = 0;
 #<!-- Pass 1 is OFF by default.  See the measurement above the pass itself. -->
 my $doSpread = 0;
 my ($extPlacer, $extArgs, $keepExt);
@@ -380,6 +382,9 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                      --no_spread    the default; kept so old scripts run\n";
   print "                      --no_snap_x    leave x off the site grid\n";
   print "                      --report_only  change nothing\n";
+  print "                      --incremental  keep every cell that is already legal where it\n";
+  print "                                     is and move only the rest into the nearest gap\n";
+  print "                                     (after hier_place_all --legalize, say)\n";
   print "                      -dbin <um>     column width for the local density\n";
   print "                                     cap on the row assignment.  0, the\n";
   print "                                     default, is 100 mean cell widths\n";
@@ -435,6 +440,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--spread")     { $doSpread = 1; }
   elsif ($_[$i] eq "--no_snap_x")  { $noSnapX = 1; }
   elsif ($_[$i] eq "--report_only"){ $reportOnly = 1; }
+  elsif ($_[$i] eq "--incremental"){ $incremental = 1; }
   elsif ($_[$i] eq "-spread_order"){ $spreadOrder = $_[$i+1]; }
   elsif ($_[$i] eq "-dbin")        { $dbinUm = $_[$i+1]; }
   elsif ($_[$i] eq "--no_dbin")    { $dbinUm = -1; }
@@ -458,12 +464,22 @@ unless ( defined $dbu && $dbu > 0 ) {
   return;
 }
 
+#<!-- A caller can hand this the problem instead of having it read the flat
+#     database: legalize_module does, with one module's own cells, its child
+#     blocks as obstacles and rows laid over its box.  $LEGAL_SOURCE is a hash
+#     of die, rowH (microns), rows (tags as dbFlplanGetRows gives them), mov
+#     and obs (as built below); $LEGAL_SINK takes the answer instead of %CADB.
+#     Both are consumed here, so a plain legalize_flat is exactly what it was. -->
+my $src = $LEGAL_SOURCE;
+my $sink = $LEGAL_SINK;
+$LEGAL_SOURCE = undef;
+$LEGAL_SINK = undef;
 my $flplanID = $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"};
-unless ( defined $flplanID && exists $FLOORPLAN_ALREADY{$flplanID} ) {
+unless ( $src || ( defined $flplanID && exists $FLOORPLAN_ALREADY{$flplanID} ) ) {
   print "ERR-ALG-LEGAL : 003 : module $TOP_MODULE has no floorplan\n";
   return;
 }
-my @die = $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
+my @die = $src ? @{$src->{die}} : $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetSize;
 unless ( @die >= 4 && $die[2] > $die[0] && $die[3] > $die[1] ) {
   print "ERR-ALG-LEGAL : 004 : module $TOP_MODULE has no die area\n";
   return;
@@ -474,7 +490,7 @@ unless ( @die >= 4 && $die[2] > $die[0] && $die[3] > $die[1] ) {
 #     read_def and by dbgGenerateRows, all of it in dbu.  Field 3 is the row's
 #     y and field 7 its site pitch, which is what dbPlaceGetNearestRow and
 #     dbPlaceGetNearestXStep already rely on. -->
-my $rowH = $GLOBAL->dbGlobalGetRowHeight;
+my $rowH = $src ? $src->{rowH} : $GLOBAL->dbGlobalGetRowHeight;
 unless ( defined $rowH && $rowH > 0 ) {
   print "ERR-ALG-LEGAL : 005 : row height is not set, read a LEF with a site\n";
   return;
@@ -486,7 +502,7 @@ my %rowX0 = ();
 my %rowX1 = ();
 my %rowOrient = ();
 my $siteX = 0;
-foreach my $tag ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetRows ) {
+foreach my $tag ( $src ? @{$src->{rows}} : $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetRows ) {
   my @f = split(/\s+/, $tag);
   next unless ( @f >= 8 );
   my ($x0, $y, $numX, $stepX) = ($f[2], $f[3], $f[5], $f[7]);
@@ -532,7 +548,11 @@ my ($skipNoCell, $skipNoSize, $unplacedCnt) = (0, 0, 0);
 #     are not what a router escapes out of a tile. -->
 my %pinsOf = ();
 
-foreach my $inst ( sort keys %CADB ) {
+if ( $src ) {
+  foreach my $m ( @{$src->{mov}} ) { push(@mov, [ @$m ]); $totMovW += $m->[1]; }
+  foreach my $o ( @{$src->{obs}} ) { push(@obs, [ @$o ]); }
+}
+foreach my $inst ( $src ? () : sort keys %CADB ) {
   my $cellref = $CADB{$inst}->dbCadbGetCellref;
   unless ( defined $cellref && exists $PLDB{$cellref} ) {
     $skipNoCell++;
@@ -630,6 +650,10 @@ foreach my $m ( @mov ) {
 #     The CELL record carries a trailing signal pin count, added for pass 1b.
 #     It sits after the name so that a reader written against the old six
 #     field record is unaffected; nothing on the far side reads it yet. -->
+if ( $src && defined $extPlacer && $extPlacer ne "" ) {
+  print "ERR-ALG-LEGAL : 053 : -placer works on the flat database only, not on one module\n";
+  return;
+}
 if ( defined $extPlacer && $extPlacer ne "" ) {
   unless ( -e $extPlacer ) {
     print "ERR-ALG-LEGAL : 022 : no legalizer at $extPlacer\n";
@@ -765,6 +789,272 @@ if ( defined $extPlacer && $extPlacer ne "" ) {
   print "INFO-ALG-LEGAL : 034 : updating instance boxes\n";
   &set_inst_box;
   unless ( $keepExt ) { unlink($inFile); unlink($outFile); }
+  my $t1 = new Benchmark;
+  print "Command legalize_flat took:",timestr(timediff($t1,$t0)),"\n";
+  return;
+}
+
+#<!-- Applying an answer: to the caller's sink (legalize_module), or to the
+#     flat database.  Shared by the full run and by --incremental. -->
+my $writeBack = sub {
+  my ($locs) = @_;
+  if ( $sink ) {
+    $sink->($locs, \%rowOrient);
+    return;
+  }
+  my $reOriented = 0;
+  foreach my $n ( @$locs ) {
+    my ($inst, $x, $y) = @$n;
+    $CADB{$inst}->dbCadbSetLoc($x, $y);
+    $CADB{$inst}->dbCadbSetStatus(PLACED);
+    #<!-- and the orientation the row it landed in requires -->
+    if ( exists $rowOrient{$y} ) {
+      my $was = $CADB{$inst}->dbCadbGetOrient;
+      my $now = &dbfLegalOrientForRow($was, $rowOrient{$y});
+      if ( ! defined $was || $was ne $now ) {
+        $CADB{$inst}->dbCadbSetOrient($now);
+        $reOriented++;
+      }
+    }
+    #<!-- the placer keeps a parallel location for flops and reads it back, so it
+    #     has to agree with CADB or a later placer step undoes this -->
+    if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
+      $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
+    }
+  }
+  if ( $reOriented > 0 ) {
+    print "INFO-ALG-LEGAL : 037 : $reOriented cell(s) re-oriented to match their row\n";
+  }
+  print "INFO-ALG-LEGAL : 021 : updating instance boxes\n";
+  &set_inst_box;
+};
+
+#========================= --incremental: repair only ======================#
+#<!-- Keep every cell that is already legal exactly where it is and move only
+#     the ones that are not into the nearest gap that fits.
+#
+#     For a placement that is legal almost everywhere -- the hierarchy
+#     legalized module by module (legalize_module), then flattened -- where a
+#     full run would re-solve millions of cells to fix a few.  A cell is kept
+#     when it sits on a row, on the site grid, inside the row, and overlaps
+#     nothing kept before it (in y, x, name order, so the result does not
+#     depend on hash order).  The kept cells and the obstacles become the
+#     occupied part of each row; the rest is gaps, and the cells that were
+#     not kept go into them nearest first, tallest first, each cutting the
+#     gap it takes. -->
+if ( $incremental ) {
+  my $tInc = time();
+  my %rIdx = ();
+  for ( my $r = 0 ; $r < $nRows ; $r++ ) { $rIdx{$rowY[$r]} = $r; }
+  my $rowAt = sub {           #<!-- index of the row whose band holds y, or -1 -->
+    my ($y) = @_;
+    my ($lo, $hi) = (0, $nRows - 1);
+    return -1 if ( $y < $rowY[0] || $y >= $rowY[$nRows-1] + $rowH );
+    while ( $lo < $hi ) {
+      my $mid = int( ($lo + $hi + 1) / 2 );
+      if ( $rowY[$mid] <= $y ) { $lo = $mid; } else { $hi = $mid - 1; }
+    }
+    return $lo;
+  };
+  my $firstEnd = sub {
+    my ($list, $x) = @_;
+    my ($lo, $hi) = (0, scalar(@$list));
+    while ( $lo < $hi ) {
+      my $mid = int( ($lo + $hi) / 2 );
+      if ( $list->[$mid][1] > $x ) { $hi = $mid; } else { $lo = $mid + 1; }
+    }
+    return $lo;
+  };
+  #<!-- occupied intervals per row, kept sorted and disjoint-or-touching -->
+  my @occ = map { [] } (1 .. $nRows);
+  my $overlaps = sub {
+    my ($r, $x0, $x1) = @_;
+    my $L = $occ[$r];
+    my $i = $firstEnd->($L, $x0);
+    return ( $i < @$L && $L->[$i][0] < $x1 ) ? 1 : 0;
+  };
+  my $occupy = sub {
+    my ($r, $x0, $x1) = @_;
+    my $L = $occ[$r];
+    my $i = $firstEnd->($L, $x0);
+    splice(@$L, $i, 0, [ $x0, $x1 ]);
+  };
+  foreach my $o ( @obs ) {
+    my $ra = $rowAt->($o->[1]);
+    $ra = 0 if ( $ra < 0 && $o->[1] < $rowY[0] );
+    next if ( $ra < 0 );
+    for ( my $r = $ra ; $r < $nRows && $rowY[$r] < $o->[3] ; $r++ ) {
+      next if ( $rowY[$r] + $rowH <= $o->[1] );
+      #<!-- obstacles may overlap each other; merge rather than double count -->
+      my $L = $occ[$r];
+      my ($x0, $x1) = ( $o->[0], $o->[2] );
+      my $i = $firstEnd->($L, $x0);
+      my $j = $i;
+      while ( $j < @$L && $L->[$j][0] <= $x1 ) {
+        $x0 = $L->[$j][0] if ( $L->[$j][0] < $x0 );
+        $x1 = $L->[$j][1] if ( $L->[$j][1] > $x1 );
+        $j++;
+      }
+      splice(@$L, $i, $j - $i, [ $x0, $x1 ]);
+    }
+  }
+  my (@keep, @fix);
+  foreach my $m ( sort { $a->[4] <=> $b->[4] || $a->[3] <=> $b->[3] || $a->[0] cmp $b->[0] } @mov ) {
+    my ($inst, $w, $h, $x, $y) = @$m;
+    my $need = int( ($h + $rowH - 1) / $rowH );
+    my $ok = exists $rIdx{$y};
+    my $r = $ok ? $rIdx{$y} : -1;
+    $ok = 0 if ( $ok && ( $r + $need > $nRows ) );
+    if ( $ok ) {
+      for ( my $k = 0 ; $k < $need ; $k++ ) {
+        my $yy = $rowY[$r + $k];
+        if ( $yy != $y + $k * $rowH || $x < $rowX0{$yy} || $x + $w > $rowX1{$yy} ) { $ok = 0; last; }
+      }
+    }
+    $ok = 0 if ( $ok && ! $noSnapX && ( ($x - $rowX0{$y}) % $siteX ) );
+    if ( $ok ) {
+      for ( my $k = 0 ; $k < $need ; $k++ ) {
+        if ( $overlaps->($r + $k, $x, $x + $w) ) { $ok = 0; last; }
+      }
+    }
+    if ( $ok ) {
+      $occupy->($r + $_, $x, $x + $w) for ( 0 .. $need - 1 );
+      push(@keep, $m);
+    }
+    else {
+      push(@fix, [ $m, $need ]);
+    }
+  }
+  #<!-- the gaps: each row's extent less what is occupied -->
+  my @gap = ();
+  for ( my $r = 0 ; $r < $nRows ; $r++ ) {
+    my $y = $rowY[$r];
+    my @g = ();
+    my $x = $rowX0{$y};
+    foreach my $iv ( @{$occ[$r]} ) {
+      push(@g, [ $x, $iv->[0] ]) if ( $iv->[0] > $x );
+      $x = $iv->[1] if ( $iv->[1] > $x );
+    }
+    push(@g, [ $x, $rowX1{$y} ]) if ( $rowX1{$y} > $x );
+    $gap[$r] = \@g;
+  }
+  @occ = ();
+  #<!-- nearest x in rows r .. r+need-1, all free, on the site grid -->
+  my $fitAt = sub {
+    my ($r, $need, $w, $tx) = @_;
+    my $base = $gap[$r];
+    my $x0row = $rowX0{$rowY[$r]};
+    my ($bestX, $bestC);
+    my $evalIv = sub {
+      my ($a0, $a1) = @_;
+      my @cur = ( [ $a0, $a1 ] );
+      for ( my $k = 1 ; $k < $need && @cur ; $k++ ) {
+        my $nxt = $gap[$r + $k];
+        my @out = ();
+        my $j = $firstEnd->($nxt, $cur[0][0]);
+        my $i = 0;
+        while ( $i < @cur && $j < @$nxt ) {
+          my $b0 = ( $cur[$i][0] > $nxt->[$j][0] ) ? $cur[$i][0] : $nxt->[$j][0];
+          my $b1 = ( $cur[$i][1] < $nxt->[$j][1] ) ? $cur[$i][1] : $nxt->[$j][1];
+          push(@out, [ $b0, $b1 ]) if ( $b1 > $b0 );
+          if ( $cur[$i][1] < $nxt->[$j][1] ) { $i++; } else { $j++; }
+        }
+        @cur = @out;
+      }
+      foreach my $iv ( @cur ) {
+        next if ( $iv->[1] - $iv->[0] < $w );
+        my $x = $tx;
+        $x = $iv->[0] if ( $x < $iv->[0] );
+        $x = $iv->[1] - $w if ( $x > $iv->[1] - $w );
+        unless ( $noSnapX ) {
+          my $n = int( ($x - $x0row) / $siteX + 0.5 );
+          $x = $x0row + $n * $siteX;
+          $x += $siteX while ( $x < $iv->[0] );
+          $x -= $siteX while ( $x + $w > $iv->[1] );
+          next if ( $x < $iv->[0] );
+        }
+        my $c = abs($x - $tx);
+        if ( ! defined $bestC || $c < $bestC || ( $c == $bestC && $x < $bestX ) ) { ($bestC, $bestX) = ($c, $x); }
+      }
+    };
+    my $s0 = $firstEnd->($base, $tx);
+    for ( my $b = $s0 ; $b < @$base ; $b++ ) {
+      my $lb = ( $base->[$b][0] > $tx ) ? $base->[$b][0] - $tx : 0;
+      last if ( defined $bestC && $lb >= $bestC );
+      $evalIv->( @{$base->[$b]} );
+    }
+    for ( my $b = $s0 - 1 ; $b >= 0 ; $b-- ) {
+      my $lb = $tx - ( $base->[$b][1] - $w );
+      last if ( defined $bestC && $lb > $bestC );
+      $evalIv->( @{$base->[$b]} );
+    }
+    return ( $bestX, $bestC );
+  };
+  my @moved = ();
+  my ($sumD, $maxD, $maxI, $noFit) = (0, 0, "", 0);
+  foreach my $fm ( sort { $b->[1] <=> $a->[1] || $a->[0][4] <=> $b->[0][4] ||
+                          $a->[0][3] <=> $b->[0][3] || $a->[0][0] cmp $b->[0][0] } @fix ) {
+    my ($m, $need) = @$fm;
+    my ($inst, $w, $h, $tx, $ty) = @$m;
+    my $best = $rowAt->($ty);
+    $best = ( $ty < $rowY[0] ) ? 0 : $nRows - 1 if ( $best < 0 );
+    my ($pR, $pX, $pC);
+    #<!-- the usual window, then wider: a cell this pass cannot place is
+    #     one more overlap left in a placement that was nearly legal -->
+    foreach my $win ( $rowWin, 4 * $rowWin, $nRows ) {
+      for ( my $d = 0 ; $d <= $win ; $d++ ) {
+        foreach my $r ( ($best - $d), ($best + $d) ) {
+          next if ( $d > 0 && $r == $best );
+          next if ( $r < 0 || $r + $need > $nRows );
+          my $okSpan = 1;
+          for ( my $k = 1 ; $k < $need ; $k++ ) {
+            if ( $rowY[$r+$k] != $rowY[$r] + $k * $rowH ) { $okSpan = 0; last; }
+          }
+          next unless ( $okSpan );
+          my ($x, $cx) = $fitAt->($r, $need, $w, $tx);
+          next unless ( defined $x );
+          my $c = $cx + abs($rowY[$r] - $ty);
+          if ( ! defined $pC || $c < $pC ) { ($pC, $pR, $pX) = ($c, $r, $x); }
+        }
+        last if ( defined $pC && $pC <= ($d + 1) * $rowH );
+      }
+      last if ( defined $pC );
+    }
+    unless ( defined $pR ) { $noFit++; next; }
+    for ( my $k = 0 ; $k < $need ; $k++ ) {
+      my $L = $gap[$pR + $k];
+      my $i = $firstEnd->($L, $pX);
+      my $j = $i;
+      my @rep = ();
+      while ( $j < @$L && $L->[$j][0] < $pX + $w ) {
+        my $iv = $L->[$j];
+        push(@rep, [ $iv->[0], $pX ]) if ( $pX > $iv->[0] );
+        push(@rep, [ $pX + $w, $iv->[1] ]) if ( $iv->[1] > $pX + $w );
+        $j++;
+      }
+      splice(@$L, $i, $j - $i, @rep);
+    }
+    push(@moved, [ $inst, $pX, $rowY[$pR] ]);
+    my $disp = abs($pX - $tx) + abs($rowY[$pR] - $ty);
+    $sumD += $disp;
+    if ( $disp > $maxD ) { ($maxD, $maxI) = ($disp, $inst); }
+  }
+  %LEGAL_STATS = ( mode => "incremental", cells => $nMov, kept => scalar(@keep),
+                   placed => scalar(@moved),
+                   mean_move_um => @moved ? $sumD / @moved / $dbu : 0, worst_move_um => $maxD / $dbu,
+                   no_room => $noFit, rows => $nRows );
+  printf("INFO-ALG-LEGAL : 054 : --incremental: %d cell(s) already legal and kept, %d moved, average move %.3f um, worst %.3f um%s, %d s\n",
+         scalar(@keep), scalar(@moved), @moved ? $sumD / @moved / $dbu : 0, $maxD / $dbu,
+         ( $maxI ne "" ) ? " on $maxI" : "", time() - $tInc);
+  if ( $noFit > 0 ) {
+    print "WARN-ALG-LEGAL : 055 : $noFit cell(s) found no gap anywhere and keep their location\n";
+  }
+  if ( $reportOnly ) {
+    print "INFO-ALG-LEGAL : 020 : --report_only given, nothing was changed\n";
+  }
+  else {
+    $writeBack->(\@moved);
+  }
   my $t1 = new Benchmark;
   print "Command legalize_flat took:",timestr(timediff($t1,$t0)),"\n";
   return;
@@ -1018,6 +1308,16 @@ if ( $doPinPad ) {
 }
 
 #====================== pass 2: rows and Abacus ============================#
+#<!-- Wall time per phase, so a slow run says where it is slow.  A 6.7M-cell
+#     tile sat in here for hours printing nothing, and which phase it was in
+#     had to be read off the code. -->
+my $tPhase = time();
+my $phaseDone = sub {
+  my ($what) = @_;
+  my $now = time();
+  print "INFO-ALG-LEGAL : 052 : $what took " . ($now - $tPhase) . " s\n";
+  $tPhase = $now;
+};
 #<!-- Free intervals per row.  An obstacle covering part of a row's y band cuts
 #     it in two, and each piece is legalized on its own: a cell cannot slide
 #     through a macro. -->
@@ -1081,43 +1381,86 @@ for ( my $r = 0 ; $r < $nRows ; $r++ ) { $rowIdxOf{$rowY[$r]} = $r; }
 
 #<!-- the widest x near $tx at which rows $r .. $r+$need-1 are ALL free for
 #     $w, or undef if there is no such x -->
+#<!-- First index in a sorted, disjoint interval list whose right end is past
+#     $x: the interval holding $x, or the first one to its right. -->
+my $firstEndingAfter = sub {
+  my ($list, $x) = @_;
+  my ($lo, $hi) = (0, scalar(@$list));
+  while ( $lo < $hi ) {
+    my $mid = int( ($lo + $hi) / 2 );
+    if ( $list->[$mid][1] > $x ) { $hi = $mid; } else { $lo = $mid + 1; }
+  }
+  return $lo;
+};
+
+#<!-- the widest x near $tx at which rows $r .. $r+$need-1 are ALL free for
+#     $w, or undef if there is no such x.
+#
+#     Visits row $r's intervals nearest first and intersects only those with
+#     the rows above, instead of intersecting every row's whole list on every
+#     call: the rows are cut by every tall cell placed before, ~500 intervals a
+#     row on a tile of 1.33M of them, and the whole-list version took an hour.
+#     Same answer as before, ties included -- the old loop kept the leftmost x
+#     at the lowest cost, so walking right an equal cost stops the walk and
+#     walking left it does not. -->
 my $multiFit = sub {
   my ($r, $need, $w, $tx) = @_;
-  my @cur = map { [ @$_ ] } @{$seg{$rowY[$r]}};
-  for ( my $k = 1 ; $k < $need ; $k++ ) {
-    my $nxt = $seg{$rowY[$r+$k]};
-    my @out = ();
-    my ($i, $j) = (0, 0);
-    #<!-- both lists are sorted and disjoint, so one walk intersects them -->
-    while ( $i < @cur && $j < @$nxt ) {
-      my $a0 = ( $cur[$i][0] > $nxt->[$j][0] ) ? $cur[$i][0] : $nxt->[$j][0];
-      my $a1 = ( $cur[$i][1] < $nxt->[$j][1] ) ? $cur[$i][1] : $nxt->[$j][1];
-      push(@out, [$a0, $a1]) if ( $a1 > $a0 );
-      if ( $cur[$i][1] < $nxt->[$j][1] ) { $i++; } else { $j++; }
-    }
-    @cur = @out;
-    last unless ( @cur );
-  }
+  my $base = $seg{$rowY[$r]};
   my ($bestX, $bestCost);
-  foreach my $iv ( @cur ) {
-    next if ( $iv->[1] - $iv->[0] < $w );
-    my $x = $tx;
-    $x = $iv->[0] if ( $x < $iv->[0] );
-    $x = $iv->[1] - $w if ( $x > $iv->[1] - $w );
-    #<!-- on the site grid, measured from the ROW's origin rather than from the
-    #     interval's: the interval starts wherever a macro happens to end, and
-    #     snapping to that would put the cell between sites -->
-    unless ( $noSnapX ) {
-      my $x0 = $rowX0{$rowY[$r]};
-      my $n = int( ($x - $x0) / $siteX + 0.5 );
-      $x = $x0 + $n * $siteX;
-      $x = $iv->[0] + ( ( $iv->[0] - $x0 ) % $siteX ? $siteX - ( ( $iv->[0] - $x0 ) % $siteX ) : 0 )
-        if ( $x < $iv->[0] );
-      while ( $x + $w > $iv->[1] ) { $x -= $siteX; }
-      next if ( $x < $iv->[0] );
+  #<!-- the pieces of one base interval that are free in every spanned row -->
+  my $pieces = sub {
+    my ($iv) = @_;
+    my @cur = ( [ $iv->[0], $iv->[1] ] );
+    for ( my $k = 1 ; $k < $need && @cur ; $k++ ) {
+      my $nxt = $seg{$rowY[$r+$k]};
+      my @out = ();
+      my $j = $firstEndingAfter->($nxt, $cur[0][0]);
+      my $i = 0;
+      #<!-- both lists are sorted and disjoint, so one walk intersects them -->
+      while ( $i < @cur && $j < @$nxt ) {
+        my $a0 = ( $cur[$i][0] > $nxt->[$j][0] ) ? $cur[$i][0] : $nxt->[$j][0];
+        my $a1 = ( $cur[$i][1] < $nxt->[$j][1] ) ? $cur[$i][1] : $nxt->[$j][1];
+        push(@out, [$a0, $a1]) if ( $a1 > $a0 );
+        if ( $cur[$i][1] < $nxt->[$j][1] ) { $i++; } else { $j++; }
+      }
+      @cur = @out;
     }
-    my $c = abs($x - $tx);
-    if ( ! defined $bestCost || $c < $bestCost ) { $bestCost = $c; $bestX = $x; }
+    return @cur;
+  };
+  my $evalPieces = sub {
+    foreach my $iv ( @_ ) {
+      next if ( $iv->[1] - $iv->[0] < $w );
+      my $x = $tx;
+      $x = $iv->[0] if ( $x < $iv->[0] );
+      $x = $iv->[1] - $w if ( $x > $iv->[1] - $w );
+      #<!-- on the site grid, measured from the ROW's origin rather than from the
+      #     interval's: the interval starts wherever a macro happens to end, and
+      #     snapping to that would put the cell between sites -->
+      unless ( $noSnapX ) {
+        my $x0 = $rowX0{$rowY[$r]};
+        my $n = int( ($x - $x0) / $siteX + 0.5 );
+        $x = $x0 + $n * $siteX;
+        $x = $iv->[0] + ( ( $iv->[0] - $x0 ) % $siteX ? $siteX - ( ( $iv->[0] - $x0 ) % $siteX ) : 0 )
+          if ( $x < $iv->[0] );
+        while ( $x + $w > $iv->[1] ) { $x -= $siteX; }
+        next if ( $x < $iv->[0] );
+      }
+      my $c = abs($x - $tx);
+      if ( ! defined $bestCost || $c < $bestCost || ( $c == $bestCost && $x < $bestX ) ) {
+        $bestCost = $c; $bestX = $x;
+      }
+    }
+  };
+  my $start = $firstEndingAfter->($base, $tx);
+  for ( my $b = $start ; $b < @$base ; $b++ ) {
+    my $lb = ( $base->[$b][0] > $tx ) ? $base->[$b][0] - $tx : 0;
+    last if ( defined $bestCost && $lb >= $bestCost );
+    $evalPieces->( $pieces->($base->[$b]) );
+  }
+  for ( my $b = $start - 1 ; $b >= 0 ; $b-- ) {
+    my $lb = $tx - ( $base->[$b][1] - $w );
+    last if ( defined $bestCost && $lb > $bestCost );
+    $evalPieces->( $pieces->($base->[$b]) );
   }
   return $bestX;
 };
@@ -1184,20 +1527,26 @@ my ($tooTall, $multiNoRoom) = (0, 0);
       next;
     }
 
-    #<!-- and now it is an obstacle: cut it out of every row it spans -->
+    #<!-- and now it is an obstacle: cut it out of every row it spans
+    #     -- only the intervals it overlaps, spliced in place, rather than the
+    #     whole row rebuilt for every tall cell -->
     for ( my $k = 0 ; $k < $need ; $k++ ) {
-      my $y = $rowY[$pickR + $k];
-      my @new = ();
-      foreach my $iv ( @{$seg{$y}} ) {
-        if ( $iv->[1] <= $pickX || $iv->[0] >= $pickX + $w ) { push(@new, [ @$iv ]); next; }
-        push(@new, [ $iv->[0], $pickX ]) if ( $pickX > $iv->[0] );
-        push(@new, [ $pickX + $w, $iv->[1] ]) if ( $iv->[1] > $pickX + $w );
+      my $L = $seg{$rowY[$pickR + $k]};
+      my $i = $firstEndingAfter->($L, $pickX);
+      my $j = $i;
+      my @rep = ();
+      while ( $j < @$L && $L->[$j][0] < $pickX + $w ) {
+        my $iv = $L->[$j];
+        push(@rep, [ $iv->[0], $pickX ]) if ( $pickX > $iv->[0] );
+        push(@rep, [ $pickX + $w, $iv->[1] ]) if ( $iv->[1] > $pickX + $w );
+        $j++;
       }
-      $seg{$y} = \@new;
+      splice(@$L, $i, $j - $i, @rep);
     }
     push(@multiLoc, [$inst, $pickX, $rowY[$pickR]]);
   }
 }
+$phaseDone->("rows, and the cells taller than one row,");
 if ( $tooTall > 0 ) {
   printf("INFO-ALG-LEGAL : 015 : %d cell(s) span more than one row; %d placed first, with the rows they take cut out of the rows below them\n",
          $tooTall, scalar(@multiLoc));
@@ -1401,14 +1750,56 @@ my @newLoc = ();
 #
 #     The second run costs what the first did.  That is the whole price of the
 #     option and it is only paid when the option is on. -->
+#<!-- Dead segments, skipped rather than stepped over.
+#
+#     A segment with less free width than the narrowest single-height cell can
+#     never take another cell, and the search below already rejects it for
+#     every cell -- so jumping over it changes no answer.  What it changes is
+#     the cost of a crowded region: on a tile whose blocks overlapped, cells
+#     travelled 20um and more, and each of them walked across every full
+#     segment between it and a gap.  Per row, nextLive/prevLive point at the
+#     nearest segment that may still be live, path compressed as dead ones are
+#     passed. -->
+my (%nextLive, %prevLive);
+my $minW;
+my $liveR = sub {
+  my ($nx, $s, $ns) = @_;
+  my $r = $s;
+  $r = $nx->[$r] while ( $r < $ns && $nx->[$r] != $r );
+  while ( $s < $ns && $nx->[$s] != $s ) { my $t = $nx->[$s]; $nx->[$s] = $r; $s = $t; }
+  return $r;
+};
+my $liveL = sub {
+  my ($pv, $s) = @_;
+  my $r = $s;
+  $r = $pv->[$r] while ( $r >= 0 && $pv->[$r] != $r );
+  while ( $s >= 0 && $pv->[$s] != $s ) { my $t = $pv->[$s]; $pv->[$s] = $r; $s = $t; }
+  return $r;
+};
+my $killSeg = sub {
+  my ($y, $s) = @_;
+  $nextLive{$y}[$s] = $s + 1;
+  $prevLive{$y}[$s] = $s - 1;
+};
 my $rowsAndAbacus = sub {
   %inSeg = ();
   %segFree = ();
   %binLoad = ();
+  %nextLive = ();
+  %prevLive = ();
+  $minW = undef;
+  foreach my $m ( @single ) {
+    $minW = $m->[6] if ( ! defined $minW || $m->[6] < $minW );
+  }
+  $minW = 1 unless ( defined $minW && $minW > 0 );
   foreach my $y ( @rowY ) {
-    for ( my $s = 0 ; $s < @{$seg{$y}} ; $s++ ) {
+    my $ns = @{$seg{$y}};
+    $nextLive{$y} = [ 0 .. $ns - 1 ];
+    $prevLive{$y} = [ 0 .. $ns - 1 ];
+    for ( my $s = 0 ; $s < $ns ; $s++ ) {
       $segFree{"$y,$s"} = $seg{$y}[$s][1] - $seg{$y}[$s][0];
       $inSeg{"$y,$s"} = [];
+      $killSeg->($y, $s) if ( $segFree{"$y,$s"} < $minW );
     }
   }
   $noRoom = 0;
@@ -1484,11 +1875,38 @@ foreach my $m ( @byY ) {
       next if ( $d > 0 && $r == $best );
       next if ( $r < 0 || $r >= $nRows );
       my $y = $rowY[$r];
-      for ( my $s = 0 ; $s < @{$seg{$y}} ; $s++ ) {
+      #<!-- The segments of a row, nearest first, instead of every one of them.
+      #
+      #     This loop used to try every segment of every candidate row.  A row
+      #     is one segment until something cuts it, so that cost nothing on any
+      #     design it had met -- and on a tile with 1.33M double-height cells,
+      #     each placed above as an obstacle, every row was ~500 segments and
+      #     the 5.4M single-height cells spent hours here.
+      #
+      #     The segments are sorted and disjoint, so bisect to the first one
+      #     ending right of $tx and walk out both ways while a segment could
+      #     still win.  A segment to the right costs at least sx0 - tx, one to
+      #     the left at least tx - (sx1 - w), and both bounds only grow outward.
+      #
+      #     The answer is the one the full scan gave, ties included: the scan
+      #     kept the FIRST segment at the lowest cost, so on the right an equal
+      #     cost never displaces the best (stop at >=) and on the left it does
+      #     (stop only at >).  Checked byte for byte against the old scan. -->
+      my $segs = $seg{$y};
+      my $ns = @$segs;
+      my $dy = abs($y - $ty);
+      my ($lo2, $hi2) = (0, $ns);
+      while ( $lo2 < $hi2 ) {
+        my $mid = int( ($lo2 + $hi2) / 2 );
+        if ( $segs->[$mid][1] > $tx ) { $hi2 = $mid; } else { $lo2 = $mid + 1; }
+      }
+      my ($rbCost, $rbS, $rbBi);
+      my $tryS = sub {
+        my ($s) = @_;
         my $k = "$y,$s";
-        next if ( $segFree{$k} < $w );
-        my ($sx0, $sx1) = @{$seg{$y}[$s]};
-        next if ( $sx1 - $sx0 < $w );
+        return if ( $segFree{$k} < $w );
+        my ($sx0, $sx1) = @{$segs->[$s]};
+        return if ( $sx1 - $sx0 < $w );
         #<!-- where in this segment it wants to be, and what that costs -->
         my $wx = $tx;
         $wx = $sx0 if ( $wx < $sx0 );
@@ -1503,17 +1921,33 @@ foreach my $m ( @byY ) {
           $bi = $nBins - 1 if ( $bi > $nBins - 1 );
           if ( $useCap ) {
             my $cap = $binCap{"$r,$bi"};
-            next unless ( defined $cap );
-            next if ( $binLoad{"$r,$bi"} + $w > $cap );
+            return unless ( defined $cap );
+            return if ( $binLoad{"$r,$bi"} + $w > $cap );
           }
         }
-        my $cost = abs($wx - $tx) + abs($y - $ty);
-        if ( ! defined $pickCost || $cost < $pickCost ) {
-          $pickCost = $cost;
-          $pickKey = $k;
-          $pickBin = ( defined $bi ) ? "$r,$bi" : undef;
-          $pickR = $r;
+        my $cost = abs($wx - $tx) + $dy;
+        if ( ! defined $rbCost || $cost < $rbCost || ( $cost == $rbCost && $s < $rbS ) ) {
+          ($rbCost, $rbS, $rbBi) = ($cost, $s, $bi);
         }
+      };
+      my ($nxL, $pvL) = ( $nextLive{$y}, $prevLive{$y} );
+      for ( my $s = $liveR->($nxL, $lo2, $ns) ; $s < $ns ; $s = $liveR->($nxL, $s + 1, $ns) ) {
+        my $lb = ( $segs->[$s][0] > $tx ) ? $segs->[$s][0] - $tx + $dy : $dy;
+        last if ( defined $rbCost && $lb >= $rbCost );
+        last if ( defined $pickCost && $lb >= $pickCost );
+        $tryS->($s);
+      }
+      for ( my $s = $liveL->($pvL, $lo2 - 1) ; $s >= 0 ; $s = $liveL->($pvL, $s - 1) ) {
+        my $lb = $tx - ( $segs->[$s][1] - $w ) + $dy;
+        last if ( defined $rbCost && $lb > $rbCost );
+        last if ( defined $pickCost && $lb >= $pickCost );
+        $tryS->($s);
+      }
+      if ( defined $rbCost && ( ! defined $pickCost || $rbCost < $pickCost ) ) {
+        $pickCost = $rbCost;
+        $pickKey = "$y,$rbS";
+        $pickBin = ( defined $rbBi ) ? "$r,$rbBi" : undef;
+        $pickR = $r;
       }
     }
     #<!-- Stop widening once no row further out could possibly win.
@@ -1543,6 +1977,10 @@ foreach my $m ( @byY ) {
   }
   push(@{$inSeg{$pickKey}}, [$inst, $w, $tx]);
   $segFree{$pickKey} -= $w;
+  if ( $segFree{$pickKey} < $minW ) {
+    my ($py, $ps) = split(/,/, $pickKey);
+    $killSeg->($py, $ps);
+  }
   $binLoad{$pickBin} += $w if ( defined $pickBin );
   #<!-- how many cells the cap pushed off their nearest row, and how far -->
   if ( defined $pickR && $pickR != $best ) {
@@ -1554,6 +1992,7 @@ foreach my $m ( @byY ) {
 }
 
 #--------------------------- solve and write back --------------------------#
+$phaseDone->("assigning cells to row segments");
 foreach my $y ( @rowY ) {
   for ( my $s = 0 ; $s < @{$seg{$y}} ; $s++ ) {
     my $k = "$y,$s";
@@ -1595,6 +2034,7 @@ foreach my $y ( @rowY ) {
     }
   }
 }
+$phaseDone->("Abacus over the segments");
 };#sub rowsAndAbacus
 
 #<!-- Run it.  Without --pin_spread that is the whole of pass 2 and the only
@@ -1731,6 +2171,11 @@ if ( $noRoom > 0 ) {
   print "WARN-ALG-LEGAL : 035 : or the design does not fit\n";
 }
 my $avg = ( $placed > 0 ) ? $sumDisp / $placed : 0;
+#<!-- what this run did, for a caller collecting metrics (hier_place_all) -->
+%LEGAL_STATS = ( mode => "full", cells => $nMov, placed => $placed,
+                 mean_move_um => $avg / $dbu, worst_move_um => $maxDisp / $dbu,
+                 no_room => $noRoom, multi_row => $tooTall, multi_no_room => $multiNoRoom,
+                 moved_row => $movedRow, rows => $nRows );
 printf("INFO-ALG-LEGAL : 018 : legalized %d cell(s), average move %.3f um, worst %.3f um%s\n",
        $placed, $avg / $dbu, $maxDisp / $dbu,
        ( $maxDispInst ne "" ) ? " on $maxDispInst" : "");
@@ -1760,31 +2205,7 @@ if ( $reportOnly ) {
   return;
 }
 
-my $reOriented = 0;
-foreach my $n ( @newLoc ) {
-  my ($inst, $x, $y) = @$n;
-  $CADB{$inst}->dbCadbSetLoc($x, $y);
-  $CADB{$inst}->dbCadbSetStatus(PLACED);
-  #<!-- and the orientation the row it landed in requires -->
-  if ( exists $rowOrient{$y} ) {
-    my $was = $CADB{$inst}->dbCadbGetOrient;
-    my $now = &dbfLegalOrientForRow($was, $rowOrient{$y});
-    if ( ! defined $was || $was ne $now ) {
-      $CADB{$inst}->dbCadbSetOrient($now);
-      $reOriented++;
-    }
-  }
-  #<!-- the placer keeps a parallel location for flops and reads it back, so it
-  #     has to agree with CADB or a later placer step undoes this -->
-  if ( exists $PLACE{$TOP_MODULE} && $PLACE{$TOP_MODULE}->dbPlaceGetIsInstFlop($inst) ) {
-    $PLACE{$TOP_MODULE}->dbPlaceSetFlopLoc($inst, $x, $y);
-  }
-}
-if ( $reOriented > 0 ) {
-  print "INFO-ALG-LEGAL : 037 : $reOriented cell(s) re-oriented to match their row\n";
-}
-print "INFO-ALG-LEGAL : 021 : updating instance boxes\n";
-&set_inst_box;
+$writeBack->(\@newLoc);
 
 my $t1 = new Benchmark;
 print "Command legalize_flat took:",timestr(timediff($t1,$t0)),"\n";
