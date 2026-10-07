@@ -19,7 +19,7 @@ by recursive bisection over a capacity map gives a spread upper bound; the
 next quadratic solve is pulled toward that spread by a weight that grows each
 round.  Fixed blocks have no capacity, so no cell is spread into one.
 """
-import argparse, sys, time
+import argparse, json, sys, time
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -136,6 +136,15 @@ def spread(cx, cy, area, cap):
     return nx, ny
 
 
+def write_stats(save, stats):
+    """<save>.stats.json, read by hier_place_cells for the per-module metrics."""
+    try:
+        with open(save + ".stats.json", "w") as fh:
+            json.dump(stats, fh)
+    except OSError:
+        pass
+
+
 def hpwl(cx, cy, ea, eb):
     return float(np.abs(cx[ea] - cx[eb]).sum() + np.abs(cy[ea] - cy[eb]).sum())
 
@@ -182,6 +191,7 @@ def main():
         # of its own to place, so the nodes go back as they came
         write_nodes(a.save, a.nodefile, hdr, nodes, cx, cy, movable)
         print(f"hier_place_qp: no movable cells, wrote {a.save} unchanged")
+        write_stats(a.save, {"movable": 0, "fixed": n, "seconds": round(time.time() - t0, 3)})
         return 0
     slot = -np.ones(n, dtype=int); slot[mi] = np.arange(m)
     # Laplacian over movable cells; edges to fixed nodes go to the right-hand side
@@ -221,7 +231,9 @@ def main():
     cx[mi], cy[mi] = xs, ys
     lb = hpwl(cx, cy, ea, eb)
     best = None
+    iters = 0
     for it in range(a.iters):
+        iters = it + 1
         sx, sy = spread(cx[mi], cy[mi], area, cap)
         ux, uy = cx.copy(), cy.copy(); ux[mi], uy[mi] = sx, sy
         ub = hpwl(ux, uy, ea, eb)
@@ -239,6 +251,19 @@ def main():
     _, sx, sy = best
     cx[mi], cy[mi] = sx, sy
     write_nodes(a.save, a.nodefile, hdr, nodes, cx, cy, movable)
+    # how evenly the result fills the free area: movable cell area over bin
+    # capacity, as a fraction of all movable area -- for the metrics record
+    ci = np.clip(((sx - cap.x0) / cap.bw).astype(int), 0, cap.nbx - 1)
+    cj = np.clip(((sy - cap.y0) / cap.bh).astype(int), 0, cap.nby - 1)
+    use = np.zeros((cap.nbx, cap.nby)); np.add.at(use, (ci, cj), area)
+    over = float(np.clip(use - cap.cap, 0, None).sum() / max(area.sum(), 1e-12))
+    write_stats(a.save, {"movable": int(m), "fixed": int(n - m), "blocks": len(blocks),
+                         "edges": int(len(ea)), "iterations": iters,
+                         "hpwl_lower": round(float(lb), 3), "hpwl_spread": round(float(best[0]), 3),
+                         "gap": round(float((best[0] - lb) / max(best[0], 1e-9)), 4),
+                         "overflow": round(over, 4), "cell_area": round(float(area.sum()), 4),
+                         "free_capacity": round(float(cap.cap.sum()), 4),
+                         "seconds": round(time.time() - t0, 3)})
     print(f"hier_place_qp: wrote {a.save}, spread HPWL {best[0]:.1f}, {time.time() - t0:.1f}s")
 
 

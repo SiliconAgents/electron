@@ -3501,10 +3501,22 @@ unless ( -e $placedFile ) {
 #     placer's to change.  Only the locations come back. -->
 &read_pseudo_nodefile("-module", $module, "-input", $placedFile, "--no_size");
 
+#<!-- the placer's own account of the run, when it gives one (hier_place_qp
+#     does), for hier_place_all's per-module metrics -->
+delete $HIER_PLACE_CELL_STATS{$module};
+if ( -e "$placedFile.stats.json" && open(my $sfh, "<", "$placedFile.stats.json") ) {
+  local $/;
+  my $txt = <$sfh>;
+  close($sfh);
+  my $st = eval { JSON->new->decode($txt) };
+  $HIER_PLACE_CELL_STATS{$module} = $st if ( ref($st) eq "HASH" );
+}
+
 unless ( $keepFiles ) {
   unlink($nodeFile);
   unlink($graphFile);
   unlink($placedFile);
+  unlink("$placedFile.stats.json");
 }
 
 my $t1 = new Benchmark;

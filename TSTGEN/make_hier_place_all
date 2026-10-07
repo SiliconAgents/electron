@@ -62,10 +62,12 @@
 #
 #     WHAT IT DOES NOT DO
 #
-#     It does not legalise.  hier_place spreads on a continuous field and snaps
-#     nothing to a row, so every level comes out overlapping and off grid.  Row
-#     legalisation happens once, on the flat database, after hier2flat:
-#     legalize_flat.  There is no legaliser that works on the pseudo database.
+#     It does not legalise unless asked.  hier_place spreads on a continuous
+#     field and snaps nothing to a row, so every level comes out overlapping
+#     and off grid.  Either legalize the flat database once, after hier2flat
+#     (legalize_flat), or give --legalize and each module is legalized on its
+#     own rows before its commit (legalize_module), so hier2flat copies legal
+#     arrangements -- the hierarchy's reuse, kept through legalisation.
 #
 #     It does not route, and it does not size a module by anything but its
 #     parent's box: -util is passed to edit_module for the one case where there
@@ -137,6 +139,384 @@ foreach my $inst ( $FLOORPLAN_ALREADY{$flplanID}->dbFlplanGetLeafInstList ) {
 return 0;
 
 }# sub dbfTstgenHierModuleIsPlaced
+
+
+#<!-- Cell area a module needs, with a whitespace budget at every level.
+#
+#     edit_module sizes every module at one utilization of its own subtree's
+#     cell area, all the way down.  So a parent's box is exactly its own cells
+#     at that utilization plus its children's boxes: the children fill it and
+#     there is no room to arrange them.  On a 6.7M-cell tile the top level's
+#     sixteen column blocks covered 99.6% of their parent and overlapped, and
+#     everything below -- placement and legalization -- paid for it.
+#
+#     effective(m) = own cell area + sum over child instances of
+#                    effective(child) / pack
+#
+#     and box = effective / util.  pack = 1 - whitespace: each level keeps
+#     that fraction of its children's area free to arrange them in.  It
+#     compounds -- k nested levels of blocks cost pack^k -- which the top level
+#     reports when it does not fit.  Memoized per module definition. -->
+sub dbfTstgenHierEffArea {
+
+my ($module, $pack, $memo) = @_;
+return $memo->{$module} if ( exists $memo->{$module} );
+return 0 unless ( exists $MODULE_ALREADY{$module} );
+my $own = 0;
+foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetLeafInst ) {
+  my $ref = $MODULE_ALREADY{$module}->dbVNOMGetLeafInstCell($inst);
+  next unless ( defined $ref && exists $PLDB{$ref} );
+  my @sz = $PLDB{$ref}->dbMdbGetSize;
+  $own += $sz[0] * $sz[1] if ( @sz >= 2 );
+}
+my $kids = 0;
+foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetHierInst ) {
+  my $ref = $MODULE_ALREADY{$module}->dbVNOMGetHierInstCell($inst);
+  next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+  $kids += &dbfTstgenHierEffArea($ref, $pack, $memo);
+}
+$memo->{$module} = $own + $kids / $pack;
+return $memo->{$module};
+
+}# sub dbfTstgenHierEffArea
+
+
+#<!-- How much room a module's children need to be arranged, as a packing
+#     factor: 1 when there is nothing to arrange -- no children, one child, or
+#     identical children that tile a square grid exactly (the 4x4 columns) --
+#     and 1 - mixed whitespace otherwise.  Charging every level the same
+#     whitespace compounded: 5% over five levels cost 17 points of die
+#     utilization on a tile whose levels were mostly one child or an exact
+#     array. -->
+sub dbfTstgenHierPack {
+
+my ($module, $packMixed) = @_;
+return 1 unless ( exists $MODULE_ALREADY{$module} );
+my %byRef = ();
+my $n = 0;
+foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetHierInst ) {
+  my $ref = $MODULE_ALREADY{$module}->dbVNOMGetHierInstCell($inst);
+  next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+  $byRef{$ref}++;
+  $n++;
+}
+return 1 if ( $n <= 1 );
+if ( scalar(keys %byRef) == 1 ) {
+  my $k = int( sqrt($n) + 0.5 );
+  return 1 if ( $k * $k == $n );
+}
+return $packMixed;
+
+}# sub dbfTstgenHierPack
+
+
+#<!-- The budget model: the area a module's box needs.
+#
+#       box(m) = macros(m) x (1 + halo) + own cells(m) / u
+#              + sum over child instances of box(child) / pack(m)
+#
+#     Hard macros take a halo and no utilization slack; standard cells take
+#     the one utilization u solved for the whole tree; children take the
+#     packing factor of dbfTstgenHierPack.  Memoized per module and u. -->
+sub dbfTstgenHierBudgetArea {
+
+my ($module, $u, $packMixed, $halo, $memo) = @_;
+return $memo->{$module} if ( exists $memo->{$module} );
+return 0 unless ( exists $MODULE_ALREADY{$module} );
+my ($std, $mac) = (0, 0);
+foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetLeafInst ) {
+  my $ref = $MODULE_ALREADY{$module}->dbVNOMGetLeafInstCell($inst);
+  next unless ( defined $ref && exists $PLDB{$ref} );
+  my @sz = $PLDB{$ref}->dbMdbGetSize;
+  next unless ( @sz >= 2 );
+  my $class = $PLDB{$ref}->dbMdbGetClass;
+  if ( defined $class && $class ne "" && $class !~ m/^CORE/ ) { $mac += $sz[0] * $sz[1]; }
+  else                                                         { $std += $sz[0] * $sz[1]; }
+}
+my $kids = 0;
+foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetHierInst ) {
+  my $ref = $MODULE_ALREADY{$module}->dbVNOMGetHierInstCell($inst);
+  next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+  $kids += &dbfTstgenHierBudgetArea($ref, $u, $packMixed, $halo, $memo);
+}
+$memo->{$module} = $mac * (1 + $halo) + $std / $u
+                 + $kids / &dbfTstgenHierPack($module, $packMixed);
+return $memo->{$module};
+
+}# sub dbfTstgenHierBudgetArea
+
+
+#<!-- What a module is, for the metrics record: its own contents and its
+#     children, read from VNOM and the library.  Microns. -->
+sub dbfTstgenHierModuleFeatures {
+
+my ($module, $rowHum) = @_;
+my %f = ( std_area => 0, macro_area => 0, macros => 0, cells => 0, seq => 0,
+          multi_row => 0, child_blocks => 0, distinct_children => 0,
+          largest_identical => 0, port_bits => 0 );
+return \%f unless ( exists $MODULE_ALREADY{$module} );
+my $V = $MODULE_ALREADY{$module};
+foreach my $inst ( $V->dbVNOMGetLeafInst ) {
+  my $ref = $V->dbVNOMGetLeafInstCell($inst);
+  next unless ( defined $ref && exists $PLDB{$ref} );
+  my @sz = $PLDB{$ref}->dbMdbGetSize;
+  next unless ( @sz >= 2 );
+  $f{cells}++;
+  my $class = $PLDB{$ref}->dbMdbGetClass;
+  if ( defined $class && $class ne "" && $class !~ m/^CORE/ ) {
+    $f{macros}++; $f{macro_area} += $sz[0] * $sz[1];
+    next;
+  }
+  $f{std_area} += $sz[0] * $sz[1];
+  $f{seq}++ if ( &dbfFlatNodeType($ref) eq "seq" );
+  $f{multi_row}++ if ( defined $rowHum && $rowHum > 0 && $sz[1] > 1.5 * $rowHum );
+}
+my %byRef = ();
+foreach my $inst ( $V->dbVNOMGetHierInst ) {
+  my $ref = $V->dbVNOMGetHierInstCell($inst);
+  next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+  $byRef{$ref}++;
+  $f{child_blocks}++;
+}
+$f{distinct_children} = scalar(keys %byRef);
+foreach my $c ( values %byRef ) { $f{largest_identical} = $c if ( $c > $f{largest_identical} ); }
+foreach my $p ( $V->dbVNOMGetInput, $V->dbVNOMGetOutput, $V->dbVNOMGetBidi ) {
+  my $bits = 1;
+  my $w = $V->dbVNOMGetInputBits($p);
+  $w = $V->dbVNOMGetOutputBits($p) unless ( defined $w && $w ne "" );
+  $w = $V->dbVNOMGetBidiBits($p) unless ( defined $w && $w ne "" );
+  if ( defined $w && $w =~ m/\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\]/ ) { $bits = abs($1 - $2) + 1; }
+  $f{port_bits} += $bits;
+}
+return \%f;
+
+}# sub dbfTstgenHierModuleFeatures
+
+
+#<!-- The child blocks of a module after its block pass: how much of the box
+#     they cover, how much of them overlaps another block, how much hangs
+#     outside the box.  Microns squared. -->
+sub dbfTstgenHierBlockFit {
+
+my ($module, $W, $H) = @_;
+my @b = ();
+foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+  next if ( $inst eq "PIN" );
+  my $ref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+  next unless ( defined $ref && ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} ) );
+  my @bb = &dbfTstgenBboxFromCoords($PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox);
+  push(@b, [ @bb[0..3] ]) if ( @bb >= 4 && defined $bb[3] );
+}
+my ($area, $over, $out) = (0, 0, 0);
+for ( my $i = 0 ; $i < @b ; $i++ ) {
+  my ($l, $t, $r, $u) = @{$b[$i]};
+  my $a = ($r - $l) * ($u - $t);
+  $area += $a;
+  my $il = ( $l > 0 ) ? $l : 0;   my $ir = ( $r < $W ) ? $r : $W;
+  my $it = ( $t > 0 ) ? $t : 0;   my $iu = ( $u < $H ) ? $u : $H;
+  my $inside = ( $ir > $il && $iu > $it ) ? ($ir - $il) * ($iu - $it) : 0;
+  $out += $a - $inside;
+  for ( my $j = $i + 1 ; $j < @b ; $j++ ) {
+    my ($l2, $t2, $r2, $u2) = @{$b[$j]};
+    my $ox = ( ($r < $r2) ? $r : $r2 ) - ( ($l > $l2) ? $l : $l2 );
+    my $oy = ( ($u < $u2) ? $u : $u2 ) - ( ($t > $t2) ? $t : $t2 );
+    $over += $ox * $oy if ( $ox > 0 && $oy > 0 );
+  }
+}
+my $box = $W * $H;
+return { blocks => scalar(@b), fill => ( $box > 0 ) ? $area / $box : 0,
+         overlap_frac => ( $area > 0 ) ? $over / $area : 0,
+         outside_frac => ( $area > 0 ) ? $out / $area : 0 };
+
+}# sub dbfTstgenHierBlockFit
+
+
+#<!-- --slice_blocks: a module's child blocks laid out without overlap.
+#
+#     The block pass is force directed, and at a level of mixed blocks it
+#     settles with them still overlapping: 17% to 33% of the block area on a
+#     6.7M-cell tile, at every level but the one whose blocks formed an exact
+#     array.  Sixteen copies of each overlapping layout put the contents of
+#     different blocks on the same rows -- 4.4M cells -- and no legalizer can
+#     make that legal: the flat one left 651k cells with no row.
+#
+#     So, after the block pass, the box is sliced.  Identical siblings are one
+#     group (they share a floorplan, so they must share a shape) and are laid
+#     out as a grid inside their slice.  Groups are cut apart recursively, in
+#     the order the block pass left them, each side getting box area in
+#     proportion to its blocks' area -- so the free area of the box is spread
+#     as channels between blocks, where the module's own cells will go.  Every
+#     cut direction and split point is tried and scored: a group whose shape
+#     is already fixed (an earlier parent sliced it) must fit, and no slice may
+#     be a sliver.  Each block takes its own area inside its slice, at the
+#     slice's aspect, on the site grid and an even number of rows, centred.
+#     Blocks cannot overlap because slices do not.
+#
+#     Returns a summary.  $fixed is module => [w, h] for the shapes an earlier
+#     slicing set -- hard here -- and gets every shape set here; $sizes is the
+#     table hier_place_all re-applies when a module is opened, and gets them
+#     too. -->
+sub dbfTstgenHierSliceBlocks {
+
+my ($module, $W, $H, $siteUm, $rowHum, $fixed, $sizes) = @_;
+my $pitchY = 2 * $rowHum;
+my %grp = ();
+my %box = ();
+foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+  next if ( $inst eq "PIN" );
+  my $ref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+  next unless ( defined $ref && ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} ) );
+  my @bb = &dbfTstgenBboxFromCoords($PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox);
+  next unless ( @bb >= 4 && defined $bb[3] && $bb[2] > $bb[0] && $bb[3] > $bb[1] );
+  $box{$inst} = [ @bb[0..3] ];
+  push(@{$grp{$ref}}, $inst);
+}
+return { blocks => 0 } unless ( %box );
+my @items = ();
+foreach my $ref ( sort keys %grp ) {
+  my @ins = @{$grp{$ref}};
+  my ($bw, $bh) = ( $box{$ins[0]}[2] - $box{$ins[0]}[0], $box{$ins[0]}[3] - $box{$ins[0]}[1] );
+  my ($cx, $cy) = (0, 0);
+  foreach my $i ( @ins ) {
+    $cx += ($box{$i}[0] + $box{$i}[2]) / 2;
+    $cy += ($box{$i}[1] + $box{$i}[3]) / 2;
+  }
+  push(@items, { ref => $ref, insts => \@ins, k => scalar(@ins),
+                 a => $bw * $bh, area => scalar(@ins) * $bw * $bh,
+                 cx => $cx / @ins, cy => $cy / @ins,
+                 hard => ( exists $fixed->{$ref} ) ? $fixed->{$ref} : undef });
+}
+
+#<!-- the grid a group takes in a w x h slice: [rows, cols, badness] -->
+my $gridFor = sub {
+  my ($it, $w, $h) = @_;
+  my $best;
+  for ( my $c = 1 ; $c <= $it->{k} ; $c++ ) {
+    my $r = POSIX::ceil( $it->{k} / $c );
+    next if ( ($r - 1) * $c >= $it->{k} );           #<!-- a whole empty row -->
+    my ($cw, $ch) = ( $w / $c, $h / $r );
+    my $bad = 0;
+    if ( $it->{hard} ) {
+      my ($hw, $hh) = @{$it->{hard}};
+      my $sw = ( $cw < $hw ) ? $hw - $cw : 0;
+      my $sh = ( $ch < $hh ) ? $hh - $ch : 0;
+      $bad += 1000 * ( $sw * $hh + $sh * $hw ) / ( $hw * $hh );   #<!-- must fit -->
+    }
+    my $asp = ( $cw > $ch ) ? $cw / $ch : $ch / $cw;
+    $bad += ( $asp > 3 ) ? $asp - 3 : 0;
+    $bad += 0.5 * ( $r * $c - $it->{k} ) / $it->{k};               #<!-- empty cells -->
+    $best = [ $r, $c, $bad ] if ( ! defined $best || $bad < $best->[2] );
+  }
+  return $best;
+};
+
+#<!-- best slicing of a set of groups into a rectangle: [badness, plan] where a
+#     plan is a leaf [item] or [dir, k, order, left plan, right plan, cut] -->
+my $solve;
+$solve = sub {
+  my ($its, $x0, $y0, $x1, $y1, $depth) = @_;
+  my ($w, $h) = ( $x1 - $x0, $y1 - $y0 );
+  if ( @$its == 1 ) {
+    my $g = $gridFor->($its->[0], $w, $h);
+    return [ $g->[2], [ 'leaf', $its->[0] ] ];
+  }
+  my $A = 0;
+  $A += $_->{area} foreach ( @$its );
+  my $best;
+  #<!-- longer side first, so on a tie the cut is across it -->
+  foreach my $dir ( ( $w >= $h ) ? ('v', 'h') : ('h', 'v') ) {
+    my @s = sort { ( ($dir eq 'v') ? $a->{cx} <=> $b->{cx} : $a->{cy} <=> $b->{cy} )
+                   || $a->{ref} cmp $b->{ref} } @$its;
+    my $cum = 0;
+    for ( my $k = 1 ; $k < @s ; $k++ ) {
+      $cum += $s[$k-1]{area};
+      my $f = $cum / $A;
+      my @L = @s[0 .. $k-1];
+      my @R = @s[$k .. $#s];
+      my ($l, $r, $cut);
+      if ( $dir eq 'v' ) {
+        $cut = $x0 + $w * $f;
+        $l = $solve->(\@L, $x0, $y0, $cut, $y1, $depth + 1);
+        $r = $solve->(\@R, $cut, $y0, $x1, $y1, $depth + 1);
+      }
+      else {
+        $cut = $y0 + $h * $f;
+        $l = $solve->(\@L, $x0, $y0, $x1, $cut, $depth + 1);
+        $r = $solve->(\@R, $x0, $cut, $x1, $y1, $depth + 1);
+      }
+      my $bad = $l->[0] + $r->[0] + 0.01 * abs($f - 0.5);
+      $best = [ $bad, [ $dir, $cut, $l->[1], $r->[1] ] ] if ( ! defined $best || $bad < $best->[0] );
+    }
+    #<!-- past a handful of groups, one direction is enough: the search is
+    #     exponential and the levels that matter have two to six groups -->
+    last if ( @$its > 6 && defined $best );
+  }
+  return $best;
+};
+
+my $sol = $solve->(\@items, 0, 0, $W, $H, 0);
+my ($nBlocks, $worstAsp, $minAreaRatio, $hardMiss) = (0, 1, 1, 0);
+my $snapUp = sub { my ($v, $p) = @_; return ( $p > 0 ) ? POSIX::ceil( $v / $p - 1e-9 ) * $p : $v; };
+my $snapDn = sub { my ($v, $p) = @_; return ( $p > 0 ) ? POSIX::floor( $v / $p + 1e-9 ) * $p : $v; };
+my $apply;
+$apply = sub {
+  my ($plan, $x0, $y0, $x1, $y1) = @_;
+  if ( $plan->[0] eq 'leaf' ) {
+    my $it = $plan->[1];
+    my ($w, $h) = ( $x1 - $x0, $y1 - $y0 );
+    my ($r, $c) = @{ $gridFor->($it, $w, $h) };
+    my ($cw, $ch) = ( $w / $c, $h / $r );
+    my ($bw, $bh);
+    if ( $it->{hard} ) {
+      ($bw, $bh) = @{$it->{hard}};
+      $hardMiss++ if ( $bw > $cw + 1e-6 || $bh > $ch + 1e-6 );
+    }
+    else {
+      $bw = sqrt( $it->{a} * $cw / $ch );
+      $bw = $snapUp->($bw, $siteUm);
+      $bw = $snapDn->($cw, $siteUm) if ( $bw > $cw );
+      $bh = $snapUp->($it->{a} / $bw, $pitchY);
+      $bh = $snapDn->($ch, $pitchY) if ( $bh > $ch );
+      $minAreaRatio = ($bw * $bh) / $it->{a} if ( ($bw * $bh) / $it->{a} < $minAreaRatio );
+    }
+    my $asp = ( $bw > $bh ) ? $bw / $bh : $bh / $bw;
+    $worstAsp = $asp if ( $asp > $worstAsp );
+    #<!-- instances into the grid in the order the block pass left them -->
+    my @ord = sort { ( ($box{$a}[1] + $box{$a}[3]) <=> ($box{$b}[1] + $box{$b}[3]) )
+                     || ( ($box{$a}[0] + $box{$a}[2]) <=> ($box{$b}[0] + $box{$b}[2]) )
+                     || $a cmp $b } @{$it->{insts}};
+    for ( my $row = 0 ; $row < $r ; $row++ ) {
+      my @rowI = sort { ($box{$a}[0] + $box{$a}[2]) <=> ($box{$b}[0] + $box{$b}[2]) || $a cmp $b }
+                 @ord[ $row * $c .. ( ($row + 1) * $c - 1 < $#ord ? ($row + 1) * $c - 1 : $#ord ) ];
+      for ( my $col = 0 ; $col < @rowI ; $col++ ) {
+        my ($cx0, $cy0) = ( $x0 + $col * $cw, $y0 + $row * $ch );
+        my $bx = $snapDn->( $cx0 + ($cw - $bw) / 2, $siteUm );
+        $bx = $snapUp->( $cx0, $siteUm ) if ( $bx < $cx0 - 1e-6 );
+        my $by = $snapDn->( $cy0 + ($ch - $bh) / 2, $pitchY );
+        $by = $snapUp->( $cy0, $pitchY ) if ( $by < $cy0 - 1e-6 );
+        $bx = $W - $bw if ( $bx + $bw > $W );
+        $by = $H - $bh if ( $by + $bh > $H );
+        $PSEUDO_VINST_ALREADY{$module}{$rowI[$col]}->dbPimDBSetInstRelBbox($bx, $by, $bx + $bw, $by + $bh);
+        $nBlocks++;
+      }
+    }
+    unless ( $it->{hard} ) {
+      $PSEUDO_MODULE_ALREADY{$it->{ref}}->dbaTstgenSetSize(0, 0, $bw, $bh)
+        if ( exists $PSEUDO_MODULE_ALREADY{$it->{ref}} );
+      $fixed->{$it->{ref}} = [ $bw, $bh ];
+      $sizes->{$it->{ref}} = [ $bw, $bh ];
+    }
+    return;
+  }
+  my ($dir, $cut, $l, $rr) = @$plan;
+  if ( $dir eq 'v' ) { $apply->($l, $x0, $y0, $cut, $y1); $apply->($rr, $cut, $y0, $x1, $y1); }
+  else               { $apply->($l, $x0, $y0, $x1, $cut); $apply->($rr, $x0, $cut, $x1, $y1); }
+};
+$apply->($sol->[1], 0, 0, $W, $H);
+return { blocks => $nBlocks, groups => scalar(@items), worst_aspect => $worstAsp,
+         min_area_ratio => $minAreaRatio, hard_misses => $hardMiss };
+
+}# sub dbfTstgenHierSliceBlocks
 
 
 #<!-- The module's own box, in microns, as the pseudo database has it. -->
@@ -235,6 +615,13 @@ my $placer;
 my $cellsPlacer;
 my $freeFlops = 0;
 my $seqAnchorLimit = 2000;
+my $legalize = 0;
+my $whitespace = 0;
+my $sizing = "";
+my $mixedWs = 10;
+my $macroHalo = 15;
+my $metricsFile = "hier_place_all.metrics.jsonl";
+my $sliceBlocks = 0;
 my $fanoutLimit = 0;
 my $extra = "";
 my ($noCells, $noFlatten, $skipPlaced, $reportOnly, $keepFiles) = (0, 0, 0, 0, 0);
@@ -257,6 +644,26 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                               the analytic one: seconds where\n";
   print "                                               hier_place takes hours on a big module\n";
   print "                       --free_flops            the cell pass places the flops too\n";
+  print "                       -whitespace <pct>       size every child block with this much\n";
+  print "                                               room to arrange it in, at every level;\n";
+  print "                                               0 (the default) keeps the old sizes\n";
+  print "                       -sizing budget          size every child block by the budget\n";
+  print "                                               model: macros with a halo, cells at\n";
+  print "                                               one utilization solved so the top fits\n";
+  print "                                               its die, and whitespace only where\n";
+  print "                                               children are mixed\n";
+  print "                       -mixed_whitespace <pct> for -sizing budget, default 10\n";
+  print "                       -macro_halo <pct>       for -sizing budget, default 15\n";
+  print "                       --slice_blocks          after each block pass, lay the child\n";
+  print "                                               blocks out without overlap by slicing\n";
+  print "                                               the box (identical siblings as a grid)\n";
+  print "                       -metrics <file>         one JSON line per module per run,\n";
+  print "                                               appended; default\n";
+  print "                                               hier_place_all.metrics.jsonl\n";
+  print "                       --no_metrics            write none\n";
+  print "                       --legalize              legalize_module every module before\n";
+  print "                                               its commit: hier2flat then copies a\n";
+  print "                                               legal arrangement into every instance\n";
   print "                       -seq_anchor_limit <n>   with --free_flops, a module with more\n";
   print "                                               than n flops and latches leaves them out\n";
   print "                                               of its block pass (default 2000)\n";
@@ -281,8 +688,8 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "        floorplan already places something keeps that arrangement and only\n";
   print "        gets its combinational cells filled in around it.\n";
   print "\n";
-  print "        It does not legalise.  Run legalize_flat afterwards: the placer\n";
-  print "        snaps nothing to a row, so every level comes out overlapping.\n";
+  print "        It does not legalise unless given --legalize.  Without it, run\n";
+  print "        legalize_flat afterwards: the placer snaps nothing to a row.\n";
   return;
 }
 for (my $i = 0; $i < $noOfArguments; $i++) {
@@ -297,6 +704,14 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
                                          $cellsPlacer = $GLOBAL->dbfGlobalGetElectronHome . "/3RDBIN/hier_place_qp";
                                        } }
   elsif ($_[$i] eq "--free_flops")   { $freeFlops = 1; }
+  elsif ($_[$i] eq "--legalize")     { $legalize = 1; }
+  elsif ($_[$i] eq "-whitespace")    { $whitespace = $_[$i+1]; }
+  elsif ($_[$i] eq "-sizing")        { $sizing = $_[$i+1]; }
+  elsif ($_[$i] eq "-mixed_whitespace") { $mixedWs = $_[$i+1]; }
+  elsif ($_[$i] eq "-macro_halo")    { $macroHalo = $_[$i+1]; }
+  elsif ($_[$i] eq "-metrics")       { $metricsFile = $_[$i+1]; }
+  elsif ($_[$i] eq "--no_metrics")   { $metricsFile = ""; }
+  elsif ($_[$i] eq "--slice_blocks") { $sliceBlocks = 1; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
@@ -365,11 +780,86 @@ if ( $reportOnly ) {
 # Place, one module at a time, parents first
 #--------------------------------------------------------------------------
 my ($doneCnt, $keptCnt, $failCnt) = (0, 0, 0);
+my %wsMemo = ();
+my %wsSize = ();        #<!-- module => [w, h] that -whitespace gave it -->
+my %sliceShape = ();    #<!-- module => [w, h] a slicing fixed -->
+my $wsSiteUm = 0;
+my $budget = ( $sizing eq "budget" ) ? 1 : 0;
+if ( $sizing ne "" && ! $budget ) {
+  print "WARN-TST-HR_PL_ALL : 029 : -sizing $sizing is not known; budget is the one there is\n";
+}
+my ($bU, $bPack, $bHalo) = (0, 1 - $mixedWs / 100, $macroHalo / 100);
+if ( $whitespace > 0 || $budget || $sliceBlocks ) {
+  my $tfp = $FLOORPLAN_LOOKUP{"$top/_self_"};
+  if ( defined $tfp && exists $FLOORPLAN_ALREADY{$tfp} ) {
+    my $tdbu = $FLOORPLAN_ALREADY{$tfp}->dbFlplanGetDBUnit;
+    $tdbu = $GLOBAL->dbfGlobalGetDBU unless ( defined $tdbu && $tdbu > 0 );
+    foreach my $tag ( $FLOORPLAN_ALREADY{$tfp}->dbFlplanGetRows ) {
+      my @f = split(/\s+/, $tag);
+      if ( @f >= 8 && $f[7] > 0 ) { $wsSiteUm = $f[7] / $tdbu; last; }
+    }
+  }
+}
+#<!-- -sizing budget: the one cell utilization at which the whole tree, sized
+#     by the budget model, fills the top's box -- the die set_floorplan made.
+#     The loosest that fits: the top's slack spread to every level, rather
+#     than every level packed at edit_module's 70% and the slack left at the
+#     top.  Bisection; the box only grows as u falls. -->
+if ( $budget ) {
+  my ($tw, $th) = &dbfTstgenHierPseudoSize($top);
+  my $target = 0.97 * $tw * $th;
+  my $fits = sub { return &dbfTstgenHierBudgetArea($top, $_[0], $bPack, $bHalo, {}) <= $target; };
+  if ( $fits->(0.95) ) {
+    my ($lo, $hi) = (0.05, 0.95);
+    for ( my $k = 0 ; $k < 40 ; $k++ ) {
+      my $mid = ($lo + $hi) / 2;
+      if ( $fits->($mid) ) { $hi = $mid; } else { $lo = $mid; }
+    }
+    $bU = $hi;
+    printf("INFO-TST-HR_PL_ALL : 030 : -sizing budget: cells at %.1f%% utilization fill %s's %.1f x %.1f um; mixed levels keep %g%% free, macros a %g%% halo\n",
+           100 * $bU, $top, $tw, $th, $mixedWs, $macroHalo);
+  }
+  else {
+    $bU = 0.95;
+    my $need = &dbfTstgenHierBudgetArea($top, $bU, $bPack, $bHalo, {});
+    printf("WARN-TST-HR_PL_ALL : 031 : -sizing budget: %s does not fit its %.1f x %.1f um even at 95%%; it needs %.0f um2 of the %.0f there is\n",
+           $top, $tw, $th, $need, $tw * $th);
+  }
+}
+
+#<!-- metrics: how many times each module is instantiated, a run id, the file -->
+my %copies = ();
+{
+  #<!-- top down by depth, so a module's count is complete before its
+  #     children take theirs from it (a module reached at two different
+  #     depths is counted from the order the walk has it in) -->
+  $copies{$top} = 1;
+  foreach my $r ( sort { $a->[1] <=> $b->[1] } @order ) {
+    my $m = $r->[0];
+    next unless ( exists $MODULE_ALREADY{$m} && exists $copies{$m} );
+    foreach my $inst ( $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+      my $ref = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($inst);
+      next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+      $copies{$ref} += $copies{$m};
+    }
+  }
+}
+my $runId = sprintf("%d-%d", time(), $$);
+my $metricsFh;
+if ( defined $metricsFile && $metricsFile ne "" ) {
+  unless ( open($metricsFh, ">>", $metricsFile) ) {
+    print "WARN-TST-HR_PL_ALL : 032 : cannot append to $metricsFile, no metrics written\n";
+    undef $metricsFh;
+  }
+}
+my $metricsCnt = 0;
+
 my $step = 0;
 
 foreach my $rec ( @order ) {
   my ($mod, $depth, $path) = @{$rec};
   $step++;
+  my %mrec = ();
 
   #<!-- Don't reopen a module that is already open with a size.
   #
@@ -394,6 +884,16 @@ foreach my $rec ( @order ) {
     &editModule(@editArgs);
   }
 
+  #<!-- edit_module reloads the module's pseudo model and sizes it again: from
+  #     its own floorplan, else its parent's, else its cell area at 70%.  The
+  #     parent route gives up for a module instantiated more than once (it
+  #     sees one parent per instance), so a block -whitespace resized came
+  #     back here at the old estimate and its whitespaced children did not
+  #     fit -- 108% of a 16-copy column.  Put back the size its parent placed. -->
+  if ( exists $wsSize{$mod} && exists $PSEUDO_MODULE_ALREADY{$mod} ) {
+    $PSEUDO_MODULE_ALREADY{$mod}->dbaTstgenSetSize(0, 0, @{$wsSize{$mod}});
+  }
+
   unless ( exists $PSEUDO_MODULE_ALREADY{$mod} ) {
     print "WARN-TST-HR_PL_ALL : 009 : $mod could not be opened for edit, skipping it\n";
     $failCnt++;
@@ -416,6 +916,75 @@ foreach my $rec ( @order ) {
 
   printf("INFO-TST-HR_PL_ALL : 013 : [%d/%d] %s, %.3f x %.3f um at depth %d\n",
          $step, $modCnt, $mod, $w, $h, $depth);
+  %mrec = ( run => $runId, top => $top, module => $mod, depth => $depth,
+            copies => ( exists $copies{$mod} ? $copies{$mod} : 1 ),
+            box_w => $w, box_h => $h,
+            features => &dbfTstgenHierModuleFeatures($mod, $GLOBAL->dbGlobalGetRowHeight),
+            sizing => ( $budget ? "budget" : ( $whitespace > 0 ? "whitespace" : "edit_module" ) ),
+            util => ( $budget ? $bU : ( ( defined $util && $util > 0 ) ? $util / 100 : 0.70 ) ),
+            pack => ( $budget ? &dbfTstgenHierPack($mod, $bPack)
+                              : ( $whitespace > 0 ? 1 - $whitespace / 100 : 1 ) ),
+            options => { whitespace => $whitespace, mixed_whitespace => $mixedWs,
+                         macro_halo => $macroHalo, free_flops => $freeFlops,
+                         legalize => $legalize, batch => $batch, cells_batch => $cellsBatch,
+                         extra => $extra } );
+
+  #<!-- -whitespace: resize this module's child modules before its block pass
+  #     places them.  Square, rounded up to whole sites and an even number of
+  #     rows, so a child can be dropped onto the row grid without losing a row
+  #     (legalize_module snaps blocks to even rows).  The parent's own box was
+  #     set when ITS parent was placed, so this is the last moment the size of
+  #     a child can still change. -->
+  if ( ( $whitespace > 0 || $budget ) && ! $keepExisting ) {
+    my $pack = $budget ? &dbfTstgenHierPack($mod, $bPack) : 1 - $whitespace / 100;
+    my $u = ( defined $util && $util > 0 ) ? $util / 100 : 0.70;
+    my $rowHum = $GLOBAL->dbGlobalGetRowHeight;
+    my $siteUm = $wsSiteUm;
+    my %seen = ();
+    my $sumBox = 0;
+    my $nResized = 0;
+    foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$mod}} ) {
+      next if ( $inst eq "PIN" );
+      my $ref = $PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBGetInstCellref;
+      next unless ( defined $ref && exists $PSEUDO_MODULE_ALREADY{$ref} );
+      my $side = $budget ? sqrt( &dbfTstgenHierBudgetArea($ref, $bU, $bPack, $bHalo, \%wsMemo) )
+                         : sqrt( &dbfTstgenHierEffArea($ref, $pack, \%wsMemo) / $u );
+      my $bw = ( $siteUm > 0 ) ? POSIX::ceil( $side / $siteUm - 1e-9 ) * $siteUm : $side;
+      my $bh = ( $rowHum > 0 ) ? POSIX::ceil( $side / (2 * $rowHum) - 1e-9 ) * 2 * $rowHum : $side;
+      $sumBox += $bw * $bh;
+      #<!-- the instance box too, not just the module: the block pass takes a
+      #     block's size from its instance box, which edit_module filled in
+      #     when this module was opened, and reads the module's size only for
+      #     an instance that has none.  Resizing only the module changed
+      #     nothing.  The lower left stays where it was. -->
+      my @bb = &dbfTstgenBboxFromCoords($PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBGetInstRelBbox);
+      my ($bx, $by) = ( @bb >= 2 && defined $bb[1] ) ? ($bb[0], $bb[1]) : (0, 0);
+      $PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBSetInstRelBbox($bx, $by, $bx + $bw, $by + $bh);
+      next if ( $seen{$ref}++ );
+      $PSEUDO_MODULE_ALREADY{$ref}->dbaTstgenSetSize(0, 0, $bw, $bh);
+      $wsSize{$ref} = [ $bw, $bh ];
+      $nResized++;
+    }
+    if ( $nResized > 0 ) {
+      my $fill = $sumBox / ( $w * $h );
+      printf("INFO-TST-HR_PL_ALL : 026 : %s: %d child module(s) resized, their blocks fill %.1f%% of %s\n",
+             $budget ? "-sizing budget" : "-whitespace $whitespace", $nResized, 100 * $fill, $mod);
+      @mrec{qw(children_resized children_box_fill)} = ($nResized, $fill);
+      if ( $budget && $fill > $pack + 0.02 ) {
+        printf("WARN-TST-HR_PL_ALL : 033 : %s's blocks fill %.1f%% of it, more than the %.0f%% the budget allows\n",
+               $mod, 100 * $fill, 100 * $pack);
+      }
+      if ( ! $budget && $fill > $pack + 1e-6 ) {
+        #<!-- the die utilization at which this module's contents would fit:
+        #     its raw cell area over the box its whitespaced area asks for -->
+        my $raw = &dbfTstgenHierEffArea($mod, 1, {});
+        my $need = 100 * $raw * $u / &dbfTstgenHierEffArea($mod, $pack, \%wsMemo);
+        printf("WARN-TST-HR_PL_ALL : 027 : that leaves less than %g%% free: %s's own box is too small for\n", $whitespace, $mod);
+        printf("WARN-TST-HR_PL_ALL : 028 : its contents with this whitespace -- at the top, set_floorplan at about %.0f%% utilization\n",
+               $need * 0.95);
+      }
+    }
+  }
 
   if ( $keepExisting ) {
     print "INFO-TST-HR_PL_ALL : 014 : $mod is already placed, keeping that arrangement\n";
@@ -450,6 +1019,21 @@ foreach my $rec ( @order ) {
       }
     }
     &hier_place(@placeArgs);
+    $mrec{blocks_after_block_pass} = &dbfTstgenHierBlockFit($mod, $w, $h);
+    if ( $sliceBlocks ) {
+      my $sum = &dbfTstgenHierSliceBlocks($mod, $w, $h, $wsSiteUm, $GLOBAL->dbGlobalGetRowHeight,
+                                          \%sliceShape, \%wsSize);
+      if ( $sum->{blocks} > 0 ) {
+        $mrec{slice} = $sum;
+        $mrec{blocks_after_slice} = &dbfTstgenHierBlockFit($mod, $w, $h);
+        printf("INFO-TST-HR_PL_ALL : 035 : %d block(s) in %d group(s) of %s sliced: overlap %.1f%% -> %.1f%%, worst aspect %.2f%s\n",
+               $sum->{blocks}, $sum->{groups}, $mod,
+               100 * $mrec{blocks_after_block_pass}{overlap_frac}, 100 * $mrec{blocks_after_slice}{overlap_frac},
+               $sum->{worst_aspect},
+               $sum->{hard_misses} ? ", $sum->{hard_misses} fixed shape(s) did not fit" : "");
+      }
+    }
+    $mrec{seq_left_to_cell_pass} = ( grep { $_ eq "--block_anchors" } @placeArgs ) ? 1 : 0;
   }
 
   #<!-- The second pass, and it runs for a hand placed module too: that is the
@@ -466,6 +1050,7 @@ foreach my $rec ( @order ) {
     push(@cellArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
     push(@cellArgs, "--keep") if ( $keepFiles );
     &hier_place_cells(@cellArgs);
+    $mrec{cell_pass} = $HIER_PLACE_CELL_STATS{$mod} if ( exists $HIER_PLACE_CELL_STATS{$mod} );
   }
 
   #<!-- Commit before descending.  The child's size is read out of this
@@ -476,7 +1061,23 @@ foreach my $rec ( @order ) {
   #     --physical_only: this places, it does not rewrite netlists.  A full
   #     commit would rebuild the module's conn lines out of the pseudo
   #     database, which is a lot of risk for no placement. -->
+  #<!-- --legalize: the module's own cells onto rows inside its box, its
+  #     blocks snapped to the row grid first, before the commit copies it all
+  #     into the floorplan the children and hier2flat read -->
+  if ( $legalize ) {
+    %LEGAL_STATS = ();
+    &legalize_module("-module", $mod);
+    $mrec{legalize} = { %LEGAL_STATS } if ( %LEGAL_STATS );
+  }
+
   &commitModule("-module", $mod, "--physical_only");
+
+  #<!-- one line per module per run: what it was, what was decided, what came
+  #     of it -- the record a sizing model will be trained on -->
+  if ( defined $metricsFh ) {
+    print $metricsFh JSON->new->canonical->encode(\%mrec), "\n";
+    $metricsCnt++;
+  }
   $doneCnt++;
 
   #<!-- A frame, after the commit rather than before it: the commit is what
@@ -543,6 +1144,10 @@ if ( $GLOBAL->dbGlobalGetGuiStatus == 1 && defined $hier_canvas ) {
   print "INFO-TST-HR_PL_ALL : 020 : the Hier-View has been redrawn on $top\n";
 }
 
+if ( defined $metricsFh ) {
+  close($metricsFh);
+  print "INFO-TST-HR_PL_ALL : 034 : $metricsCnt module record(s) appended to $metricsFile, run $runId\n";
+}
 print "INFO-TST-HR_PL_ALL : 016 : $doneCnt module(s) placed";
 print ", $keptCnt kept as found" if ( $keptCnt > 0 );
 print ", $failCnt skipped" if ( $failCnt > 0 );
@@ -550,7 +1155,7 @@ print "\n";
 if ( $failCnt > 0 ) {
   print "WARN-TST-HR_PL_ALL : 017 : $failCnt module(s) were skipped and are not placed, see above\n";
 }
-unless ( $noFlatten ) {
+unless ( $noFlatten || $legalize ) {
   print "INFO-TST-HR_PL_ALL : 018 : the placement is not legal; run legalize_flat to snap it to rows\n";
 }
 
