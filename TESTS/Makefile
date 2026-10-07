@@ -75,6 +75,22 @@ nangate_recurse:
 	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_recurse.tcl
 
+# nangate_recurse with the analytic cell pass (3RDBIN/hier_place_qp), the flops
+# placed with the logic, and identical sibling blocks laid out on a grid.  Fails
+# unless the new placer ran for all eleven modules, they were all placed, and
+# legalize_flat got through.  ELECTRON_HOME is set because the container image
+# bakes in the main checkout's, and -cells_placer qp resolves the placer from
+# it: a branch would otherwise be tested against master's 3RDBIN.
+QP_EXPECT = grep -q "$(1)" workarea/recurse_qp.log || { echo "nangate_recurse_qp: expected \"$(1)\" in workarea/recurse_qp.log"; exit 1; }
+nangate_recurse_qp:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_recurse_qp.tcl > recurse_qp.log 2>&1
+	test `grep -c "^hier_place_qp: \(wrote\|no movable\)" workarea/recurse_qp.log` -eq 11 || { echo "nangate_recurse_qp: hier_place_qp did not run for all 11 modules"; exit 1; }
+	$(call QP_EXPECT,HR_PL_ALL : 016 : 11 module(s) placed)
+	$(call QP_EXPECT,INFO-ALG-LEGAL : 018 : legalized)
+	@echo "nangate_recurse_qp: all expected results"
+
 # The same run left running: no exit at the end, so it stops at the electron
 # prompt with the placed design in memory.  Type "gui" there for the window --
 # Hier-View for the blocks, FlatView plus Refresh GUI for all 4233 cells --
@@ -165,7 +181,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_rtl_hier nangate_dead_logic nangate_print
+nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_rtl_hier nangate_dead_logic nangate_print
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

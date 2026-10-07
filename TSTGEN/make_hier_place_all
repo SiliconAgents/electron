@@ -232,6 +232,9 @@ my $cellsBatch;
 my $maxDepth = -1;
 my $util;
 my $placer;
+my $cellsPlacer;
+my $freeFlops = 0;
+my $seqAnchorLimit = 2000;
 my $fanoutLimit = 0;
 my $extra = "";
 my ($noCells, $noFlatten, $skipPlaced, $reportOnly, $keepFiles) = (0, 0, 0, 0, 0);
@@ -249,6 +252,14 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                       -depth <levels>         0 is the top only, unset is the whole tree\n";
   print "                       -util <percent>         for a module with no parent box to inherit\n";
   print "                       -placer <path>          defaults to ELECTRON_HOME/3RDBIN/hier_place\n";
+  print "                       -cells_placer <path>|qp the cell pass only, default -placer.  qp\n";
+  print "                                               is ELECTRON_HOME/3RDBIN/hier_place_qp,\n";
+  print "                                               the analytic one: seconds where\n";
+  print "                                               hier_place takes hours on a big module\n";
+  print "                       --free_flops            the cell pass places the flops too\n";
+  print "                       -seq_anchor_limit <n>   with --free_flops, a module with more\n";
+  print "                                               than n flops and latches leaves them out\n";
+  print "                                               of its block pass (default 2000)\n";
   print "                       -snapshot <prefix>      write <prefix>NNN.hiercells after every\n";
   print "                                               module: the whole chip as the walk has it\n";
   print "                                               so far, for 3RDBIN/def_raster --cells\n";
@@ -281,6 +292,12 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-depth")         { $maxDepth = $_[$i+1]; }
   elsif ($_[$i] eq "-util")          { $util = $_[$i+1]; }
   elsif ($_[$i] eq "-placer")        { $placer = $_[$i+1]; }
+  elsif ($_[$i] eq "-cells_placer")  { $cellsPlacer = $_[$i+1];
+                                       if ( $cellsPlacer eq "qp" ) {
+                                         $cellsPlacer = $GLOBAL->dbfGlobalGetElectronHome . "/3RDBIN/hier_place_qp";
+                                       } }
+  elsif ($_[$i] eq "--free_flops")   { $freeFlops = 1; }
+  elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
   elsif ($_[$i] eq "--skip_placed")  { $skipPlaced = 1; }
@@ -410,6 +427,28 @@ foreach my $rec ( @order ) {
     push(@placeArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
     push(@placeArgs, "-args", $extra) if ( defined $extra && $extra ne "" );
     push(@placeArgs, "--keep") if ( $keepFiles );
+    #<!-- With --free_flops the cell pass places the flops anyway, so a module
+    #     with thousands of them leaves them out of this pass: carried as nodes
+    #     they cost 20 and 37 minutes on a tile's top level and on a latch-array
+    #     register bank, for positions the cell pass then moves.  Below the
+    #     limit they stay: on a design whose block passes take seconds,
+    #     dropping them everywhere cost 7% wirelength, because the pins and
+    #     blocks lose what the flops say about where they belong. -->
+    if ( $freeFlops ) {
+      my $seqCnt = 0;
+      foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$mod}} ) {
+        next if ( $inst eq "PIN" );
+        my $ref = $PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBGetInstCellref;
+        next unless ( defined $ref && $ref ne "" );
+        next if ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} );
+        $seqCnt++ if ( &dbfFlatNodeType($ref) eq "seq" );
+      }
+      if ( $seqCnt > $seqAnchorLimit ) {
+        print "INFO-TST-HR_PL_ALL : 024 : $mod has $seqCnt flops and latches, more than $seqAnchorLimit:\n";
+        print "INFO-TST-HR_PL_ALL : 025 : the block pass leaves them to the cell pass\n";
+        push(@placeArgs, "--block_anchors");
+      }
+    }
     &hier_place(@placeArgs);
   }
 
@@ -419,7 +458,11 @@ foreach my $rec ( @order ) {
   #     holds still while the combinational logic arranges itself around it. -->
   unless ( $noCells ) {
     my @cellArgs = ("-module", $mod, "-batch", $cellsBatch);
-    push(@cellArgs, "-placer", $placer) if ( defined $placer && $placer ne "" );
+    #<!-- -cells_placer, when given, replaces the placer for this pass only:
+    #     the block pass is still hier_place, which is what it was built for -->
+    my $cp = ( defined $cellsPlacer && $cellsPlacer ne "" ) ? $cellsPlacer : $placer;
+    push(@cellArgs, "-placer", $cp) if ( defined $cp && $cp ne "" );
+    push(@cellArgs, "--free_flops") if ( $freeFlops );
     push(@cellArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
     push(@cellArgs, "--keep") if ( $keepFiles );
     &hier_place_cells(@cellArgs);

@@ -306,6 +306,14 @@ if ( exists $PSEUDO_MODULE_ALREADY{$cellref} || exists $MODULE_ALREADY{$cellref}
   return (1);
 }
 my $type = &dbfFlatNodeType($cellref);
+#<!-- --block_anchors: flops are not anchors, they collapse into the cones like
+#     the logic between them.  For a block pass whose cell pass places the
+#     flops itself (hier_place_all --free_flops), where carrying 10k flops and
+#     latches as nodes cost twenty minutes a module for positions the cell pass
+#     then discarded. -->
+if ( $type eq "seq" && $TSTGEN_BLOCK_ANCHORS ) {
+  return (0);
+}
 if ( $type eq "seq" || $type eq "mem" || $type eq "block" ) {
   return (1);
 }
@@ -539,6 +547,7 @@ my $origin = "lower_left";
 my $fanoutLimit = 0;
 my ($writeOnly, $reportOnly, $keepFiles, $noSize, $noPorts) = (0, 0, 0, 0, 0);
 my $hierOnly = 0;
+my $blockAnchors = 0;
 my $batch = 0;
 my $extra = "";
 
@@ -567,6 +576,9 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                         write the graph and stop\n";
   print "                   --no_size    do not apply reshaped block sizes\n";
   print "                   --no_ports   do not apply pin locations\n";
+  print "                   --block_anchors\n";
+  print "                                 blocks, memories and ports only; flops collapse\n";
+  print "                                 into the cones (for a cell pass that places them)\n";
   print "                   --hier_only\n";
   print "                         the old graph: hierarchical instances only, with\n";
   print "                         every net that runs through a leaf cell dropped\n";
@@ -597,6 +609,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--no_size")      { $noSize = 1; }
   elsif ($_[$i] eq "--no_ports")     { $noPorts = 1; }
   elsif ($_[$i] eq "--hier_only")    { $hierOnly = 1; }
+  elsif ($_[$i] eq "--block_anchors"){ $blockAnchors = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HIER_PL : 001 : invalid option $_[$i]\n"; }
 }
@@ -647,7 +660,8 @@ if ( -e $inFile ) {
 #     turns each cone of combinational logic between them into one hyperedge --
 #     the same reduction anchor_hypergraph.py does for the flat flow. -->
 my @writeArgs = ("-module", $module, "-nodefile", $nodeFile,
-                 "-graph", $graphFile, ($hierOnly ? "--hier_only" : "--anchors"));
+                 "-graph", $graphFile, ($hierOnly ? "--hier_only" :
+                                        $blockAnchors ? "--block_anchors" : "--anchors"));
 if ( $fanoutLimit > 0 ) {
   push(@writeArgs, "-fanout_limit", $fanoutLimit);
 }
@@ -1144,6 +1158,8 @@ my $nodeFileOnly = 0;
 my $hierOnly = 0;
 my $anchorMode = 0;
 my $fixPlaced = 0;
+my $fixBlocksOnly = 0;
+my $blockAnchors = 0;
 my $fixedCnt = 0;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
@@ -1169,6 +1185,13 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                 whole module there.  Give neither --anchors nor\n";
   print "                                 --hier_only with this and every leaf cell becomes\n";
   print "                                 a node, which is what hier_place_cells does.\n";
+  print "                           --block_anchors\n";
+  print "                                 --anchors, but flops are collapsed with the logic:\n";
+  print "                                 only blocks, memories and ports are nodes\n";
+  print "                           --fix_blocks\n";
+  print "                                 --fix_anchors, except that flops stay free and start\n";
+  print "                                 where they were placed: for a cell placer that\n";
+  print "                                 places them with the logic (hier_place_qp)\n";
   print "                           --nodefile_only\n";
   return;
 }
@@ -1179,7 +1202,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "--hier_only")    { $hierOnly = 1; }
   elsif ($_[$i] eq "--anchors")      { $anchorMode = 1; }
+  elsif ($_[$i] eq "--block_anchors"){ $anchorMode = 1; $blockAnchors = 1; }
   elsif ($_[$i] eq "--fix_anchors")  { $fixPlaced = 1; }
+  elsif ($_[$i] eq "--fix_blocks")   { $fixPlaced = 1; $fixBlocksOnly = 1; }
   elsif ($_[$i] eq "--nodefile_only"){ $nodeFileOnly = 1; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-WR_PS_GRPH : 001 : invalid option $_[$i]\n"; }
 }
@@ -1188,6 +1213,8 @@ unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$modu
   print "ERR-TST-WR_PS_GRPH : 002 : module $module is not being edited, run edit_module first\n";
   return;
 }
+#<!-- read by dbfTstgenPseudoIsAnchor; set for this call only -->
+$TSTGEN_BLOCK_ANCHORS = $blockAnchors;
 unless ( defined $nodeFile && $nodeFile ne "" ) { $nodeFile = "$module.pseudo.nodefile"; }
 unless ( defined $graphFile && $graphFile ne "" ) { $graphFile = "$module.pseudo.txt"; }
 
@@ -1380,8 +1407,13 @@ foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
     #     everything PLACED pinned the entire module at the origin and the
     #     placer had nothing left to move.  An anchor is what hier_place
     #     actually placed: a hierarchical block, a flop, a memory. -->
+    #<!-- --fix_blocks holds the blocks and leaves the flops free.  An analytic
+    #     cell placer (hier_place_qp) places the flops better together with the
+    #     logic between them than around positions the block pass fixed first;
+    #     they start where that pass put them. -->
     my $holdIt = ( $fixPlaced && $status eq "PLACED" &&
-                   &dbfTstgenPseudoIsAnchor($module, $inst) );
+                   &dbfTstgenPseudoIsAnchor($module, $inst) &&
+                   !( $fixBlocksOnly && &dbfFlatNodeType($cellref) eq "seq" ) );
     my $st = $holdIt ? "FIXED" : $status;
     $line .= "$st $x $y";
     $fixedCnt++ if ( $st eq "FIXED" );
@@ -3362,7 +3394,7 @@ my $placer;
 my $batch = 400;
 my $fanoutLimit = 0;
 my $extra = "";
-my ($writeOnly, $keepFiles, $noBlockage) = (0, 0, 0);
+my ($writeOnly, $keepFiles, $noBlockage, $freeFlops) = (0, 0, 0, 0);
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : hier_place_cells -module <module name>\n";
@@ -3371,6 +3403,9 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                         -fanout_limit <n>    high fan out threshold for the graph\n";
   print "                         -args <extra>        passed straight to hier_place\n";
   print "                         --no_blockage        let cells sit inside a block\n";
+  print "                         --free_flops         hold only blocks and ports; the flops\n";
+  print "                                              move with the logic (for -placer\n";
+  print "                                              3RDBIN/hier_place_qp)\n";
   print "                         --write_only         write the graph and stop\n";
   print "                         --keep               keep the graph files\n";
   print "\n";
@@ -3397,6 +3432,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
                                        $extra =~ s/["']//g;
                                        $extra =~ s/\s*,\s*/ /g; }
   elsif ($_[$i] eq "--no_blockage")  { $noBlockage = 1; }
+  elsif ($_[$i] eq "--free_flops")   { $freeFlops = 1; }
   elsif ($_[$i] eq "--write_only")   { $writeOnly = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_CL : 001 : invalid option $_[$i]\n"; }
@@ -3421,7 +3457,7 @@ unlink($placedFile) if ( -e $placedFile );
 #<!-- Neither --anchors nor --hier_only, so every leaf cell is a node, and
 #     --fix_placed so the first pass's work is held still. -->
 my @writeArgs = ("-module", $module, "-nodefile", $nodeFile,
-                 "-graph", $graphFile, "--fix_anchors");
+                 "-graph", $graphFile, ($freeFlops ? "--fix_blocks" : "--fix_anchors"));
 push(@writeArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
 &write_pseudo_graph(@writeArgs);
 

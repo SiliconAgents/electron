@@ -1735,7 +1735,11 @@ sub get_location_of_flat_inst_from_pseudo_db
       return @{$hier_inst_abs_location{$curr_inst_hier_name}};
     }else {
       my $curr_inst_name = $curr_inst_hier_name ;
-      $curr_inst_name =~ s/$temp_parent_inst_name\/// ;
+      #<!-- quoted and anchored: a path is not a pattern.  A parent with an
+      #     escaped name stopped the run on "\g"; one with gen_x[3] in it made
+      #     [3] a character class, the strip silently failed, the instance was
+      #     not found in its parent's floorplan and came back at ( 0 0 ). -->
+      $curr_inst_name =~ s/^\Q$temp_parent_inst_name\E\/// ;
       my $curr_inst_x_val = 0;
       my $curr_inst_y_val = 0;
       my @curr_inst_rel_loc_and_orient = (0,0,"UND");
@@ -2209,7 +2213,7 @@ sub get_hier_instance_full_path_name_given_module
     if(length($temp_full_path_name) >0){
       return $temp_full_path_name;
     }
-    $parent_instance_full_path_name =~ s/$inst$//g;
+    $parent_instance_full_path_name =~ s/\Q$inst\E$//;
     $parent_instance_full_path_name =~ s/\/$//g;
   }
   return "";
