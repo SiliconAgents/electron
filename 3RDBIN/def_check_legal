@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Independent legality check of a placed DEF, in integer DBU.
+
+  def_check_legal <def> <lef or load_lefs.tcl> [...]
+
+Sizes come from the LEF MACRO SIZE records -- give the LEF files, or the
+load_lefs.tcl a run wrote (its read_lef lines are followed).  Reports cells off
+a row boundary, off the site grid, outside the die, the overlapping pairs and
+the cells involved, and single-height cells whose orientation does not match
+their row.  A row is every row band a cell covers, so a double-height cell is
+checked in both.  Exits 1 when anything is illegal.
+
+Written to check a legalizer's work without trusting its own report: a float
+checker comparing y + h against the next row's y reported 682 overlaps that did
+not exist, which is why everything here stays in DBU.
+"""
+import sys, re, collections
+
+
+def lef_files(args):
+    for a in args:
+        if a.endswith(".tcl"):
+            for m in re.finditer(r"read_lef\s+-lef\s+(\S+)", open(a).read()):
+                yield m.group(1)
+        else:
+            yield a
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(__doc__)
+        return 2
+    deff = sys.argv[1]
+    size = {}
+    for lf in lef_files(sys.argv[2:]):
+        cur = None
+        for line in open(lf, errors="replace"):
+            s = line.split()
+            if not s:
+                continue
+            if s[0] == "MACRO":
+                cur = s[1]
+            elif s[0] == "SIZE" and cur and cur not in size:
+                size[cur] = (float(s[1]), float(s[3]))
+            elif s[0] == "END" and len(s) > 1 and s[1] == cur:
+                cur = None
+    dbu = None; die = None; rows = []; comps = []; inc = False; cur = None
+    for line in open(deff):
+        if line.startswith("UNITS"):
+            dbu = int(line.split()[3])
+        elif line.startswith("DIEAREA"):
+            die = list(map(int, re.findall(r"-?\d+", line)))
+        elif line.startswith("ROW "):
+            p = line.split()
+            rows.append((int(p[3]), int(p[4]), int(p[7]), int(p[11]), p[5]))
+        elif line.startswith("COMPONENTS"):
+            inc = True
+        elif line.startswith("END COMPONENTS"):
+            break
+        elif inc:
+            s = line.strip()
+            if s.startswith("- "):
+                cur = s.split()[1:3]
+            m = re.search(r"\+ (PLACED|FIXED) \( (-?\d+) (-?\d+) \) (\S+)", s)
+            if m and cur:
+                comps.append((cur[0], cur[1], int(m.group(2)), int(m.group(3)), m.group(4)))
+                cur = None
+    if not rows:
+        print("def_check_legal: the DEF has no ROWs")
+        return 2
+    rowys = sorted({r[1] for r in rows})
+    pitch = rowys[1] - rowys[0] if len(rowys) > 1 else 1
+    x0 = rows[0][0]; step = rows[0][3]
+    rowori = {r[1]: r[4] for r in rows}
+    missing = collections.Counter(c[1] for c in comps if c[1] not in size)
+    offrow = offgrid = outside = badori = multi = 0
+    byrow = collections.defaultdict(list)
+    for name, cell, x, y, ori in comps:
+        if cell not in size:
+            continue
+        w = round(size[cell][0] * dbu); h = round(size[cell][1] * dbu)
+        if ori in ("E", "W", "FE", "FW"):
+            w, h = h, w
+        if (y - rowys[0]) % pitch:
+            offrow += 1
+        if (x - x0) % step:
+            offgrid += 1
+        if x < die[0] or y < die[1] or x + w > die[2] or y + h > die[3]:
+            outside += 1
+        nr = max(1, round(h / pitch))
+        if nr > 1:
+            multi += 1
+        elif y in rowori:
+            want = ("N", "FN") if rowori[y] in ("N", "FN") else ("FS", "S")
+            if ori not in want:
+                badori += 1
+        for k in range(nr):                     # every row band the cell covers
+            byrow[y + k * pitch].append((x, x + w, name))
+    over = 0; overcells = set()
+    for y, cells in byrow.items():
+        cells.sort()
+        end = endn = None
+        for b0, b1, bn in cells:                # against the furthest right edge so far
+            if end is not None and b0 < end:
+                over += 1; overcells.add(bn); overcells.add(endn)
+            if end is None or b1 > end:
+                end, endn = b1, bn
+    print(f"DBU {dbu}, die {die}, {len(rowys)} rows of {pitch}, site step {step}")
+    print(f"{len(comps)} placed component(s), {multi} taller than one row; "
+          f"no LEF size for {sum(missing.values())} {dict(missing.most_common(3))}")
+    print(f"off row boundary {offrow}, off site grid {offgrid}, outside die {outside}, "
+          f"overlapping pairs {over} ({len(overcells)} cells), wrong orientation for row {badori}")
+    bad = offrow + offgrid + outside + over + badori + sum(missing.values())
+    print("LEGAL" if bad == 0 else "NOT LEGAL")
+    return 0 if bad == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

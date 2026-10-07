@@ -1,0 +1,226 @@
+#<!-- legalize_module: legalize one module's own cells, inside its own box.
+#
+#     WHY
+#
+#     A hierarchy is placed module by module, and every instance of a module
+#     shares its one arrangement -- that is what makes hier_place_all cheap.
+#     Legalizing the FLAT result afterwards throws that away: on a tile of
+#     6.7M cells it is 6.7M cells of work, and every copy of a module comes
+#     out different.  The tile has ~230k distinct cells.  Legalized here, per
+#     module, before the commit, hier2flat copies a legal arrangement into
+#     every instance, and the flat result is legal without a flat pass.
+#
+#     WHAT IT DOES
+#
+#     The module must be open (edit_module).  Its box is (0 0) to its size;
+#     rows are laid over it at the row height, on the top floorplan's site,
+#     alternating orientation the way the top's rows do.  The cells of the
+#     module itself are the movable ones; its child blocks, and any fixed or
+#     non-core cell, are obstacles.  The solving is legalize_flat's, unchanged:
+#     this only hands it the problem (LEGAL_SOURCE) and takes the answer back
+#     (LEGAL_SINK).  Options it does not use itself go through to legalize_flat
+#     (-rows, -dbin, --no_dbin, -max_disp ...).
+#
+#     WHY THE BLOCKS ARE SNAPPED
+#
+#     hier2flat puts a child's cells at the child's position plus their own,
+#     with no mirroring.  A child legalized against rows N FS N FS ... from its
+#     own origin is only legal in the parent if it sits on an even row and on
+#     the site grid -- an odd row offset flips every row orientation, and the
+#     power rails with it.  So each child block is moved to the nearest such
+#     spot first (--no_snap_blocks to leave them), and its contents follow.
+#
+#     WHAT IT DOES NOT DO
+#
+#     It does not separate blocks that overlap each other: their contents are
+#     each legal and the overlap is between them.  A module whose blocks are
+#     packed with no room (sized at the same utilisation as their parent) will
+#     show exactly that. -->
+sub legalize_module {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my $noOfArguments = @_;
+my $module = $TOP_MODULE;
+my $snapBlocks = 1;
+my @pass = ();
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : legalize_module -module <module>    default: the module being edited\n";
+  print "                        --no_snap_blocks    leave child blocks off the row grid\n";
+  print "                        <legalize_flat options>, e.g. -rows 6 --no_dbin\n";
+  print "\n";
+  print "        Legalizes the module's own cells inside its box, on rows laid over\n";
+  print "        it, with its child blocks as obstacles -- legalize_flat's solver on\n";
+  print "        one module.  Run with the module open (edit_module), before the\n";
+  print "        commit; hier2flat then copies the legal arrangement into every\n";
+  print "        instance.  hier_place_all --legalize does this for every module.\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-module")          { $module = $_[$i+1]; $i++; }
+  elsif ($_[$i] eq "--no_snap_blocks") { $snapBlocks = 0; }
+  else                                 { push(@pass, $_[$i]); }
+}
+
+unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$module} ) {
+  print "ERR-ALG-LEG_MOD : 001 : module $module is not being edited, run edit_module first\n";
+  return;
+}
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+my $rowHum = $GLOBAL->dbGlobalGetRowHeight;
+unless ( defined $dbu && $dbu > 0 && defined $rowHum && $rowHum > 0 ) {
+  print "ERR-ALG-LEG_MOD : 002 : database units or row height are not set\n";
+  return;
+}
+my $rowH = int( $rowHum * $dbu + 0.5 );
+
+#<!-- the site and the row orientation pattern, from the top's own rows -->
+my $top = $GLOBAL->dbfGlobalGetTOP;
+my $topFp = $FLOORPLAN_LOOKUP{"$top/_self_"};
+unless ( defined $topFp && exists $FLOORPLAN_ALREADY{$topFp} ) {
+  print "ERR-ALG-LEG_MOD : 003 : the top $top has no floorplan to take the rows from\n";
+  return;
+}
+my ($site, $siteX) = ("", 0);
+my %orientAt = ();      #<!-- row index from the die origin, mod 2 => orientation -->
+{
+  my @tags = $FLOORPLAN_ALREADY{$topFp}->dbFlplanGetRows;
+  my @r = ();
+  foreach my $tag ( @tags ) {
+    my @f = split(/\s+/, $tag);
+    next unless ( @f >= 8 );
+    push(@r, [ $f[3], $f[4], $f[1], $f[7] ]);
+  }
+  unless ( @r ) {
+    print "ERR-ALG-LEG_MOD : 004 : the top $top has no ROWs, run set_floorplan first\n";
+    return;
+  }
+  @r = sort { $a->[0] <=> $b->[0] } @r;
+  ($site, $siteX) = ($r[0][2], $r[0][3]);
+  my $y0 = $r[0][0];
+  foreach my $row ( @r ) {
+    my $k = int( ($row->[0] - $y0) / $rowH + 0.5 );
+    $orientAt{$k % 2} = $row->[1] unless ( exists $orientAt{$k % 2} );
+  }
+  $orientAt{0} = "N"  unless ( exists $orientAt{0} );
+  $orientAt{1} = "FS" unless ( exists $orientAt{1} );
+}
+unless ( $siteX > 0 ) {
+  print "ERR-ALG-LEG_MOD : 005 : the top's rows have no site width\n";
+  return;
+}
+
+my ($Wum, $Hum) = &dbfTstgenHierPseudoSize($module);
+unless ( $Wum > 0 && $Hum > 0 ) {
+  print "ERR-ALG-LEG_MOD : 006 : $module has no size\n";
+  return;
+}
+my $W = int( $Wum * $dbu + 0.5 );
+my $H = int( $Hum * $dbu + 0.5 );
+my $nRows = int( $H / $rowH );
+my $numX = int( $W / $siteX );
+my @rows = ();
+for ( my $k = 0 ; $k < $nRows ; $k++ ) {
+  push(@rows, "LM_ROW_$k $site 0 " . ($k * $rowH) . " $orientAt{$k % 2} $numX 1 $siteX 0");
+}
+
+#<!-- child blocks onto the grid: site in x, an even number of rows in y -->
+my $vinst = $PSEUDO_VINST_ALREADY{$module};
+my @obs = ();
+my @mov = ();
+my ($snapped, $fixedCnt, $noCellCnt) = (0, 0, 0);
+my %pinsOf = ();
+foreach my $inst ( sort keys %$vinst ) {
+  next if ( $inst eq "PIN" );
+  my $p = $vinst->{$inst};
+  my $cellref = $p->dbPimDBGetInstCellref;
+  next unless ( defined $cellref && $cellref ne "" );
+  my @bb = &dbfTstgenBboxFromCoords($p->dbPimDBGetInstRelBbox);
+  my $status = $p->dbPimDBGetInstStatus;
+  $status = "" unless ( defined $status );
+  if ( exists $PSEUDO_MODULE_ALREADY{$cellref} || exists $MODULE_ALREADY{$cellref} ) {
+    next unless ( @bb >= 4 && defined $bb[3] );
+    my ($bw, $bh) = ( $bb[2] - $bb[0], $bb[3] - $bb[1] );
+    if ( $snapBlocks ) {
+      my $pitchY = 2 * $rowH;
+      my $x = int( $bb[0] * $dbu / $siteX + 0.5 ) * $siteX;
+      my $y = int( $bb[1] * $dbu / $pitchY + 0.5 ) * $pitchY;
+      #<!-- inside the box where it can be, still on the grid -->
+      my $maxX = $W - int( $bw * $dbu + 0.5 );
+      my $maxY = $H - int( $bh * $dbu + 0.5 );
+      $x -= $siteX  while ( $x > $maxX && $x - $siteX  >= 0 );
+      $y -= $pitchY while ( $y > $maxY && $y - $pitchY >= 0 );
+      $x = 0 if ( $x < 0 );
+      $y = 0 if ( $y < 0 );
+      if ( abs($x - $bb[0] * $dbu) > 0.5 || abs($y - $bb[1] * $dbu) > 0.5 ) {
+        $p->dbPimDBSetInstRelLoc($x / $dbu, $y / $dbu);
+        $snapped++;
+      }
+      @bb = ( $x / $dbu, $y / $dbu, $x / $dbu + $bw, $y / $dbu + $bh );
+    }
+    push(@obs, [ map { int($_ * $dbu + 0.5) } @bb[0..3] ]);
+    next;
+  }
+  unless ( exists $PLDB{$cellref} ) { $noCellCnt++; next; }
+  my @size = $PLDB{$cellref}->dbMdbGetSize;
+  next unless ( @size >= 2 && $size[0] > 0 && $size[1] > 0 );
+  my ($w, $h) = ( int($size[0] * $dbu + 0.5), int($size[1] * $dbu + 0.5) );
+  my ($x, $y) = ( @bb >= 2 ) ? ( int($bb[0] * $dbu + 0.5), int($bb[1] * $dbu + 0.5) ) : (0, 0);
+  my $class = $PLDB{$cellref}->dbMdbGetClass;
+  $class = "" unless ( defined $class );
+  if ( $status eq "FIXED" || $class !~ m/^CORE/ ) {
+    push(@obs, [ $x, $y, $x + $w, $y + $h ]);
+    $fixedCnt++;
+    next;
+  }
+  unless ( exists $pinsOf{$cellref} ) {
+    my $np = 0;
+    foreach my $pin ( $PLDB{$cellref}->dbMdbGetPins ) {
+      next if ( $PLDB{$cellref}->dbMdbGetPinIsPower($pin) );
+      next if ( $PLDB{$cellref}->dbMdbGetPinIsGround($pin) );
+      $np++;
+    }
+    $pinsOf{$cellref} = $np;
+  }
+  push(@mov, [ $inst, $w, $h, $x, $y, $pinsOf{$cellref}, $w ]);
+}
+printf("INFO-ALG-LEG_MOD : 007 : %s: %.3f x %.3f um, %d row(s), %d cell(s) to legalize, %d block(s)%s\n",
+       $module, $Wum, $Hum, $nRows, scalar(@mov), scalar(@obs) - $fixedCnt,
+       $snapBlocks ? ", $snapped moved onto the row grid" : "");
+if ( $noCellCnt > 0 ) {
+  print "WARN-ALG-LEG_MOD : 008 : $noCellCnt instance(s) have no cell in the library and were skipped\n";
+}
+unless ( @mov ) {
+  print "INFO-ALG-LEG_MOD : 009 : nothing of $module's own to legalize\n";
+  return;
+}
+
+my $applied = 0;
+$LEGAL_SOURCE = { die => [0, 0, $W, $H], rowH => $rowHum, rows => \@rows,
+                  mov => \@mov, obs => \@obs };
+$LEGAL_SINK = sub {
+  my ($newLoc, $rowOrient) = @_;
+  foreach my $n ( @$newLoc ) {
+    my ($inst, $x, $y) = @$n;
+    my $p = $vinst->{$inst};
+    $p->dbPimDBSetInstRelLoc($x / $dbu, $y / $dbu);
+    $p->dbPimDBSetInstStatus("PLACED");
+    if ( exists $rowOrient->{$y} ) {
+      $p->dbPimDBSetInstOrient(&dbfLegalOrientForRow($p->dbPimDBGetInstOrient, $rowOrient->{$y}));
+    }
+    $applied++;
+  }
+};
+&legalize_flat(@pass);
+$LEGAL_SOURCE = undef;
+$LEGAL_SINK = undef;
+print "INFO-ALG-LEG_MOD : 010 : $applied cell(s) of $module placed on its rows\n";
+
+my $t1 = new Benchmark;
+print "Command legalize_module took:",timestr(timediff($t1,$t0)),"\n";
+
+}# sub legalize_module
+
+1;

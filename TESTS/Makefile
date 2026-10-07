@@ -91,6 +91,20 @@ nangate_recurse_qp:
 	$(call QP_EXPECT,INFO-ALG-LEGAL : 018 : legalized)
 	@echo "nangate_recurse_qp: all expected results"
 
+# nangate_recurse_qp legalized module by module (hier_place_all --legalize) and
+# repaired with legalize_flat --incremental instead of a full flat pass.  Fails
+# unless every module was legalized, the repair ran, and 3RDBIN/def_check_legal
+# finds nothing illegal in the result.
+HL_EXPECT = grep -q "$(1)" workarea/recurse_hl.log || { echo "nangate_recurse_hl: expected \"$(1)\" in workarea/recurse_hl.log"; exit 1; }
+nangate_recurse_hl:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_recurse_hl.tcl > recurse_hl.log 2>&1
+	test `grep -c "LEG_MOD : 010" workarea/recurse_hl.log` -eq 11 || { echo "nangate_recurse_hl: legalize_module did not run for all 11 modules"; exit 1; }
+	$(call HL_EXPECT,INFO-ALG-LEGAL : 054 : --incremental)
+	cd workarea ; $(ELECTRON)/3RDBIN/def_check_legal vedic_16x16.hl.legal.def load_lefs.tcl > recurse_hl.check || { cat recurse_hl.check; echo "nangate_recurse_hl: vedic_16x16.hl.legal.def is not legal"; exit 1; }
+	@echo "nangate_recurse_hl: all expected results"
+
 # The same run left running: no exit at the end, so it stops at the electron
 # prompt with the placed design in memory.  Type "gui" there for the window --
 # Hier-View for the blocks, FlatView plus Refresh GUI for all 4233 cells --
@@ -181,7 +195,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_rtl_hier nangate_dead_logic nangate_print
+nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
