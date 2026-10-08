@@ -181,6 +181,14 @@ if ( defined $blackbox && $blackbox ne "" ) {
   }
   $bbArg = "--blackbox $blackbox";
 }
+elsif ( defined $LIBCFG_CELL_STUBS && $LIBCFG_CELL_STUBS ne "" ) {
+  #<!-- The config carries a prebuilt file for this node.  Preferred over
+  #     building our own: one file for every design on the node, and the
+  #     several hundred LEFs are read once rather than once per design. -->
+  $blackbox = $LIBCFG_CELL_STUBS;
+  $bbArg    = "--blackbox $blackbox";
+  print "INFO-PAR-HR_SYN : 053 : cell stubs from the config: $blackbox\n";
+}
 elsif ( defined $LIBCFG_FILE && $LIBCFG_FILE ne "" ) {
   #<!-- Built from the same config, foundry, node and layer read_library_config
   #     was given.  A netlist that instantiates library cells directly needs

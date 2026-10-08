@@ -68,6 +68,7 @@ my $config = parse_config($config_file);
     $ROW_SITE_NAME     = "";
     my $families = [];
     my $group = &dbfConfigFileGroup($config, $foundry, $tech_node, $layer);
+    $LIBCFG_CELL_STUBS = &dbfConfigCellStubs($group);
     if ( $cell_family ne "" ) {
         $families = &dbfConfigCellFamilies($group || {}, $cell_family);
         return unless ( defined $families );
@@ -420,6 +421,27 @@ sub dbfConfigFileGroup {
     return undef;
 }
 #------------------------------------------------------------------------------------------#
+#<!-- A "cell-stubs" file, when the config names one: verilog blackboxes for
+#     every cell on this node, built once by 3RDBIN/lef_blackbox and shared.
+#     hier_synthesis would otherwise build its own from several hundred LEFs
+#     per design, and two designs on one node would get two copies that can
+#     drift apart.  Empty string when the config has none, or when what it
+#     names is not there -- the caller falls back to building its own, which
+#     is what every config without the key already does. -->
+sub dbfConfigCellStubs {
+    my ($group) = @_;
+    return "" unless ( defined $group && defined $group->{'cell-stubs'} );
+    my $stubs = $group->{'cell-stubs'};
+    $stubs = $stubs->[0] if ( ref($stubs) eq 'ARRAY' );
+    return "" unless ( defined $stubs && $stubs ne "" );
+    unless ( -f $stubs ) {
+        print "WARN-PAR-CONFIG : 015 : the config names cell stubs $stubs and it is not there;\n";
+        print "WARN-PAR-CONFIG : 015 :   hier_synthesis will build its own from the LEFs\n";
+        return "";
+    }
+    return $stubs;
+}
+#------------------------------------------------------------------------------------------#
 #<!-- Files a "std-cell-libs" entry into %STDCELL_LIB_ALREADY and says how many
 #     it filed.  The entry is either a hash keyed by VT flavour or a bare list,
 #     and both shapes appear in the configs in use.  Nothing is opened here.
@@ -512,6 +534,7 @@ $LIBCFG_FILE    = $config_file;
 $LIBCFG_FOUNDRY = $foundry;
 $LIBCFG_NODE    = $tech_node;
 $LIBCFG_LAYER   = $layer;
+$LIBCFG_CELL_STUBS = &dbfConfigCellStubs(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer));
 
 if ( $cell_family ne "" ) {
   my $families = &dbfConfigCellFamilies(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer) || {},
