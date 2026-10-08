@@ -114,6 +114,75 @@ write_verilog -noattr {dest}
 """
 
 
+# BUFFERING AND SIZING -- --abc-delay.  Plain `abc -liberty` MAPS and does
+# nothing else: no fanout buffering, no gate sizing, every gate the smallest
+# that implements its function.  yosys runs abc's `buffer; upsize; dnsize`
+# only when abc is given a constraints file (-constr: the cell driving the
+# module's inputs and the load on its outputs), and sizes toward -D when one
+# is given.  On a 1.4M-instance design without it, one minimum-size gate drove
+# 6,112 pins inside a single module and STA put 107 ns on that one stage.
+#
+# abc sees one module's combinational logic at a time, so this cannot buffer a
+# net that fans out through a module port, and it knows nothing about where
+# the loads will be placed.  It is the logical half of the job; a buffer tree
+# that follows the placement is the other.
+def liberty_buffer_and_load(path):
+    """(driver, load_fF): a buffer of about twice the smallest buffer's area,
+    and four median input pins, both read from the liberty itself."""
+    op = gzip.open if path.endswith(".gz") else open
+    unit = 1000.0                                   # pF -> fF unless told
+    bufs, caps = [], []
+    cell = area = None
+    pins, depth, cell_depth, pin, dont_use = {}, 0, None, None, False
+    cell_re = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
+    pin_re = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
+    kv_re = re.compile(r'^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;')
+    with op(path, "rt", errors="replace") as fh:
+        for line in fh:
+            if "capacitive_load_unit" in line:
+                m = re.search(r"\(\s*([\d.]+)\s*,\s*(\w+)", line)
+                if m:
+                    unit = float(m.group(1)) * {"pf": 1000.0, "ff": 1.0}.get(m.group(2).lower(), 1000.0)
+            m = cell_re.match(line)
+            if m and cell is None:
+                cell, area, pins, cell_depth, dont_use = m.group(1), None, {}, depth, False
+            elif cell is not None:
+                m = pin_re.match(line)
+                if m and pin is None:
+                    pin = m.group(1); pins[pin] = {}
+                else:
+                    m = kv_re.match(line)
+                    if m:
+                        k, v = m.group(1), m.group(2).strip()
+                        if pin is not None and k in ("direction", "function", "capacitance"):
+                            pins[pin].setdefault(k, v)
+                        elif pin is None and k == "area":
+                            area = float(v)
+                        elif pin is None and k == "dont_use" and v == "true":
+                            dont_use = True
+            depth += line.count("{") - line.count("}")
+            if pin is not None and cell is not None and depth <= cell_depth + 1:
+                pin = None
+            if cell is not None and depth <= cell_depth:
+                ins = [n for n, d in pins.items() if d.get("direction") == "input"]
+                outs = [n for n, d in pins.items() if d.get("direction") == "output"]
+                for n in ins:
+                    if "capacitance" in pins[n]:
+                        caps.append(float(pins[n]["capacitance"]) * unit)
+                if (len(ins) == 1 and len(outs) == 1 and area and not dont_use
+                        and pins[outs[0]].get("function", "").strip("() ") == ins[0]):
+                    bufs.append((area, cell))
+                cell = None
+    if not bufs:
+        sys.exit(f"yosys_bottom_up: --abc-delay needs a buffer in {path} and found none")
+    bufs.sort()
+    want = 2 * bufs[0][0]
+    driver = min(bufs, key=lambda b: (abs(b[0] - want), b[0]))[1]
+    caps.sort()
+    load = 4 * caps[len(caps) // 2] if caps else 1.0
+    return driver, load
+
+
 def read_design(levels_dir):
     """canonical -> (level, copies, cells, {child: instances}) from DESIGN.tsv."""
     out = {}
@@ -255,7 +324,7 @@ def run_one(job):
                            top=name, liberty=args.liberty, dest=dest,
                            latchmap=(f"techmap -map {args.latchmap}"
                                      if args.latchmap else ""),
-                           abc="-fast " if args.abc_fast else "")
+                           abc=args.abc_opts)
     t = time.time()
     p = subprocess.run([args.yosys, "-p", script], capture_output=True, text=True)
     with open(log, "w") as fh:
@@ -301,6 +370,17 @@ def main():
                     help="map with `abc -fast`. DO NOT, unless you are timing "
                          "something: on a large design it cost 44%% of the cell "
                          "count and saves nothing (see the note on SCRIPT)")
+    ap.add_argument("--abc-delay", type=float, metavar="PS",
+                    help="buffer high-fanout nets and size gates toward this "
+                         "delay target (abc -constr -D), in picoseconds. Off "
+                         "by default: plain abc maps and does neither")
+    ap.add_argument("--abc-driver", metavar="CELL",
+                    help="with --abc-delay: the cell driving each module's "
+                         "inputs (default: a buffer of about twice the "
+                         "smallest buffer's area, from the liberty)")
+    ap.add_argument("--abc-load", type=float, metavar="FF",
+                    help="with --abc-delay: the load on each module's outputs, "
+                         "in fF (default: four median input pins)")
     ap.add_argument("--verify", action="store_true",
                     help="reload every netlist afterwards and let yosys walk "
                          "the hierarchy for the real cell count")
@@ -308,6 +388,23 @@ def main():
                     help="carry on past a level with failures (the next level "
                          "will fail too, but it reports every break at once)")
     args = ap.parse_args()
+    args.abc_opts = "-fast " if args.abc_fast else ""
+    if args.abc_delay:
+        driver, load = args.abc_driver, args.abc_load
+        if driver is None or load is None:
+            t0 = time.time()
+            d, l = liberty_buffer_and_load(args.liberty)
+            driver = driver or d
+            load = load if load is not None else l
+            print(f"yosys_bottom_up: read buffer and pin loads from the liberty in "
+                  f"{time.time() - t0:.1f}s")
+        os.makedirs(args.out, exist_ok=True)
+        constr = os.path.abspath(os.path.join(args.out, "abc.constr"))
+        with open(constr, "w") as fh:
+            fh.write(f"set_driving_cell {driver}\nset_load {load:.4f}\n")
+        args.abc_opts += f"-constr {constr} -D {args.abc_delay:g} "
+        print(f"yosys_bottom_up: buffering and sizing on: -D {args.abc_delay:g} ps, "
+              f"inputs driven by {driver}, outputs loaded {load:.3f} fF")
 
     levels = sorted(
         (int(d[3:]), os.path.join(args.levels, d))

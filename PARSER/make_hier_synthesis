@@ -34,6 +34,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-jobs <n>] [-flatten_below <cells>]\n";
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
   print "                       [-patch <rules.py>] [-latchmap <file>]\n";
+  print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
   print "                       [--no_latchmap] [--no_verify] [--no_run]\n";
   print "\n";
   print "        -rtl            an RTL filelist, as the front end reads it: +incdir+ and\n";
@@ -60,6 +61,14 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        netlists stay in <out>/netlists either way.\n";
   print "        --read          read that netlist back with read_verilog and elaborate\n";
   print "        -jobs           modules synthesised at once, default 8\n";
+  print "        -abc_delay      buffer high-fanout nets and size gates toward this\n";
+  print "                        delay, in PICOSECONDS whatever the liberty's unit\n";
+  print "                        (abc -constr -D).  Off by default: abc then maps\n";
+  print "                        with minimum-size gates and buffers nothing.\n";
+  print "        -abc_driver     with -abc_delay, the cell driving module inputs\n";
+  print "                        (default: a buffer from the liberty)\n";
+  print "        -abc_load       with -abc_delay, the load on module outputs in fF\n";
+  print "                        (default: four median input pins)\n";
   print "        -flatten_below  keep a module as a hierarchy boundary only when its\n";
   print "                        subtree is at least this many cells, default 2000.\n";
   print "                        0 keeps every module, which costs area: a boundary is a\n";
@@ -84,6 +93,9 @@ my $blackbox;
 my $latchmap;
 my $jobs = 8;
 my $flattenBelow = 2000;
+my $abcDelay = "";
+my $abcDriver = "";
+my $abcLoad = "";
 my $noLatchmap = 0;
 my $noVerify = 0;
 my $noRun = 0;
@@ -104,6 +116,9 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-latchmap"){$latchmap = $_[$i+1];}
   if($_[$i] eq "-jobs"){$jobs = $_[$i+1];}
   if($_[$i] eq "-flatten_below"){$flattenBelow = $_[$i+1];}
+  if($_[$i] eq "-abc_delay"){$abcDelay = $_[$i+1];}
+  if($_[$i] eq "-abc_driver"){$abcDriver = $_[$i+1];}
+  if($_[$i] eq "-abc_load"){$abcLoad = $_[$i+1];}
   if($_[$i] eq "-liberty"){ push(@libFiles, split(/\s*\,\s*/, $_[$i+1])); }
   if($_[$i] eq "--no_latchmap"){$noLatchmap = 1;}
   if($_[$i] eq "--no_verify"){$noVerify = 1;}
@@ -431,6 +446,15 @@ my $inner = "python3 -u $beehome/3RDBIN/yosys_bottom_up" .
             " --levels $levelDir --liberty $liberty $bbArg" .
             " --out $netDir --jobs $jobs --flatten-below $flattenBelow" .
             " $latchArg $verifyArg";
+#<!-- -abc_delay: abc's buffer / upsize / dnsize run only with a constraints
+#     file, so without it every gate is the smallest that does the job and
+#     nothing splits a high fanout.  yosys_bottom_up has the details. -->
+if ( $abcDelay ne "" ) {
+  $inner .= " --abc-delay $abcDelay";
+  $inner .= " --abc-driver $abcDriver" if ( $abcDriver ne "" );
+  $inner .= " --abc-load $abcLoad"     if ( $abcLoad ne "" );
+  print "INFO-PAR-HR_SYN : 068 : buffering and sizing toward $abcDelay ps\n";
+}
 
 if ( $noRun == 1 ) {
   print "INFO-PAR-HR_SYN : 021 : --no_run, so nothing was started\n";
