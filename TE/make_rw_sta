@@ -412,61 +412,215 @@ my @outputPort = $PLACE{$TOP_MODULE}->dbPlaceGetOutPortList;
 }# sub dbBuildTimingGraph
 
 ##############################################################################################################
-################################ report static timing analysis using "vesta" #################################
-##############################################################################################################
-sub report_sta_vesta{
+#<!-- report_sta: a timing report from OpenSTA, written to a file.
+#
+#     It REPLACES report_sta_vesta, which shelled out to qflow's vesta at
+#     /usr/local/share/qflow/bin/vesta.  qflow is not in the image -- only
+#     qrouter is -- so that command produced an empty report and said nothing
+#     about why.
+#
+#     Nothing is read back.  electron writes the inputs, OpenSTA writes the
+#     report, and whatever wants the numbers reads the report.  The Perl timer
+#     above stays as it is; it charges a fixed delay per arc and is not the
+#     same kind of answer.
+#
+#     THE LIBERTY.  OpenSTA cannot parse the CCS/LVF liberties a modern PDK
+#     ships, for the same reason yosys cannot, so the slimmed NLDM files the
+#     config lists are the right input -- which is what get_std_cell_libs
+#     --set already leaves behind.
+#
+#     THE BINARY.  The image builds OpenSTA and does not install it, so "sta"
+#     is not on PATH; dbfStaBinary finds it anyway.  -->
+#<!-- Where sta is, here, now.  In order: told explicitly, on PATH, where the
+#     image's build leaves it uninstalled.  undef when none of those is
+#     runnable from this process, which is the signal to go through the
+#     container.
+#
+#     The third entry is why this exists.  The image builds OpenSTA and never
+#     runs "make install", so "sta" is on nobody's PATH even inside it -- and
+#     a session started with "make app" is already inside, where wrapping the
+#     call in apptainer again fails with "apptainer: not found". -->
+sub dbfStaBinary {
+  if ( defined $ENV{ELECTRON_STA} && $ENV{ELECTRON_STA} ne "" ) {
+    return $ENV{ELECTRON_STA} if ( -x $ENV{ELECTRON_STA} );
+    print "WARN-TE-RPT_STA : 018 : ELECTRON_STA=$ENV{ELECTRON_STA} is not executable; ignored\n";
+  }
+  my $onPath = `which sta 2>/dev/null`;
+  chomp($onPath);
+  return $onPath if ( $onPath ne "" && -x $onPath );
+  return '/root/OpenSTA/build/sta' if ( -x '/root/OpenSTA/build/sta' );
+  return undef;
+}
+
+sub report_sta {
   use Benchmark;
   my $t0 = new Benchmark;
-  my $noOfArg = @_;
+  my $noOfArguments = @_;
 
-  if($noOfArg < 4 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP"){ 
-     print "Usage : report_sta_vesta -v <verilog netlist> \n";
-     print "                         -lib  <liberty file> \n";
-     print "                         -period  <period> \n";
-     print "                         -out  <sta report file> \n";
-  }else{
-     my ($verilogFile, $staOutFile, $period) = ("", "sta.rpt", 4000);
-     my @libertyFiles = ();
-     for(my $i = 0; $i < $noOfArg; $i++){
-  	 if($_[$i] eq "-v")  {$verilogFile = $_[$i+1];}
-  	 if($_[$i] eq "-period")  {$period = $_[$i+1];}
-  	 if($_[$i] eq "-lib"){
-            my $libFileStr = $_[$i+1]; 
-            $libFileStr =~ s/\{(.*)\}/\1/; 
-            @libertyFiles = split(/\,/, $libFileStr);
-         }
-  	 if($_[$i] eq "-out"){
-            $staOutFile = $_[$i+1]; 
-            if($staOutFile eq ""){
-               $staOutFile = "sta.rpt";
-            }
-         }
-     }#foreach my arg
+  if ( $noOfArguments == 0 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP" ) {
+    print "Usage : report_sta -netlist <gate netlist>\n";
+    print "                   [-top <module>] [-liberty <lib,lib>] \n";
+    print "                   [-sdc <file> | -period <in the liberty's time unit>]\n";
+    print "                   [-spef <file>] [-paths <n>] [-out <report>] [--no_run]\n";
+    print "\n";
+    print "        -netlist   gate level verilog.  Default <TOP_MODULE>.v\n";
+    print "        -top       default TOP_MODULE\n";
+    print "        -liberty   comma separated.  Omitted, the list left by\n";
+    print "                   get_std_cell_libs --set is used.  NLDM only: OpenSTA\n";
+    print "                   does not parse CCS/LVF, so point it at the slimmed ones.\n";
+    print "        -sdc       constraints.  Without one, -period makes a single clock\n";
+    print "                   on every clock pin the design has.\n";
+    print "        -period    clock period, in whatever time unit the liberty declares\n";
+    print "        -spef      parasitics.  Without them the delays are optimistic,\n";
+    print "                   and on a large block that is the biggest error there is.\n";
+    print "        -paths     paths in the report, default 100\n";
+    print "        -out       report file, default <TOP_MODULE>.sta.rpt\n";
+    print "        --no_run   write the script and stop\n";
+    return;
+  }
 
-     if(!-e $verilogFile){ print "WARN : file $verilogFile does not exists !\n"; return;}
-     foreach my $libFile(@libertyFiles){
-        if(!-e $libFile){ 
-           print "WARN : file $libFile does not exists !\n"; 
-           return;
-        }
-     }
+  my ($netlist, $top, $sdc, $spef, $out) = ("", "", "", "", "");
+  my ($period, $paths, $noRun) = (0, 100, 0);
+  my @libFiles = ();
+  for ( my $i = 0; $i < $noOfArguments; $i++ ) {
+    if ( $_[$i] eq "-netlist" ) { $netlist = $_[$i+1]; }
+    if ( $_[$i] eq "-v" )       { $netlist = $_[$i+1]; }
+    if ( $_[$i] eq "-top" )     { $top     = $_[$i+1]; }
+    if ( $_[$i] eq "-sdc" )     { $sdc     = $_[$i+1]; }
+    if ( $_[$i] eq "-spef" )    { $spef    = $_[$i+1]; }
+    if ( $_[$i] eq "-out" )     { $out     = $_[$i+1]; }
+    if ( $_[$i] eq "-period" )  { $period  = $_[$i+1]; }
+    if ( $_[$i] eq "-paths" )   { $paths   = $_[$i+1]; }
+    if ( $_[$i] eq "--no_run" ) { $noRun   = 1; }
+    if ( $_[$i] eq "-liberty" || $_[$i] eq "-lib" ) {
+      my $s = $_[$i+1];
+      $s =~ s/^\{(.*)\}$/$1/;
+      push(@libFiles, split(/\s*\,\s*/, $s));
+    }
+  }#for
 
-     if($staOutFile !~ /\.rpt/){
-        $staOutFile .= ".rpt";
-     }
+  $top     = $TOP_MODULE        if ( $top eq "" );
+  $netlist = "$top.v"           if ( $netlist eq "" );
+  $out     = "$top.sta.rpt"     if ( $out eq "" );
 
-     #my $result = system("/usr/local/share/qflow/bin/vesta --long $verilogFile @libertyFiles > $staOutFile"); 
-     my $result = `/usr/local/share/qflow/bin/vesta --period $period --long $verilogFile @libertyFiles > $staOutFile`; 
-     print "\n$result\n";
-     print "report file is $staOutFile\n";
-   
-  }#if correct no. of inputs
+  if ( $top eq "" ) {
+    print "ERROR-TE-RPT_STA : 001 : no -top and TOP_MODULE is not set\n";
+    return;
+  }
+  unless ( -f $netlist ) {
+    print "ERROR-TE-RPT_STA : 002 : netlist $netlist does not exist\n";
+    print "ERROR-TE-RPT_STA : 003 :   write_verilog -output $netlist --overwrite\n";
+    return;
+  }
+
+  #<!-- Same liberty synthesize and hier_synthesis use. -->
+  unless ( @libFiles ) {
+    @libFiles = @SYNTH_LIBERTY_LIST if ( @SYNTH_LIBERTY_LIST );
+  }
+  unless ( @libFiles ) {
+    print "ERROR-TE-RPT_STA : 004 : no -liberty, and get_std_cell_libs --set has not run\n";
+    return;
+  }
+  foreach my $l ( @libFiles ) {
+    unless ( -f $l ) {
+      print "ERROR-TE-RPT_STA : 005 : liberty $l does not exist\n";
+      return;
+    }
+  }
+  if ( $sdc ne "" && ! -f $sdc ) {
+    print "ERROR-TE-RPT_STA : 006 : sdc $sdc does not exist\n";
+    return;
+  }
+  if ( $spef ne "" && ! -f $spef ) {
+    print "ERROR-TE-RPT_STA : 007 : spef $spef does not exist\n";
+    return;
+  }
+  if ( $sdc eq "" && $period <= 0 ) {
+    print "ERROR-TE-RPT_STA : 008 : give -sdc <file>, or -period to constrain every clock pin\n";
+    return;
+  }
+
+  my $script = "$top.sta.tcl";
+  my $logFile = "$top.sta.log";
+  open(STA, ">$script") || do {
+    print "ERROR-TE-RPT_STA : 009 : cannot write $script\n";
+    return;
+  };
+  print STA "# Written by electron's report_sta.  Rerun by hand with:\n";
+  print STA "#   sta -no_init -exit $script\n";
+  foreach my $l ( @libFiles ) { print STA "read_liberty $l\n"; }
+  print STA "read_verilog $netlist\n";
+  print STA "link_design $top\n";
+  if ( $sdc ne "" ) {
+    print STA "read_sdc $sdc\n";
+  }
+  else {
+    #<!-- No constraints to hand, so make the least wrong ones that report
+    #     something: one clock of the given period on every register clock
+    #     pin, and zero IO delay against it so combinational paths are timed
+    #     too -- a design with no registers at all would otherwise produce an
+    #     empty report.  This is a smoke test, not constraints: it says
+    #     nothing about clock relationships, false paths or real IO budgets.
+    #     Use -sdc for anything that matters. -->
+    print STA "# -period, not -sdc: generated constraints, see report_sta -h\n";
+    print STA "set _clkpins [all_registers -clock_pins]\n";
+    print STA "if { [llength \$_clkpins] > 0 } {\n";
+    print STA "  create_clock -name gen_clk -period $period \$_clkpins\n";
+    print STA "} else {\n";
+    print STA "  create_clock -name gen_clk -period $period\n";
+    print STA "}\n";
+    print STA "set_input_delay  0 -clock gen_clk [all_inputs]\n";
+    print STA "set_output_delay 0 -clock gen_clk [all_outputs]\n";
+  }
+  print STA "read_spef $spef\n" if ( $spef ne "" );
+  print STA "report_checks -path_delay max -group_path_count $paths -digits 4 > $out\n";
+  print STA "report_tns -digits 4 >> $out\n";
+  print STA "report_wns -digits 4 >> $out\n";
+  print STA "report_check_types -max_slew -max_capacitance -max_fanout -violators -digits 4 >> $out\n";
+  close(STA);
+
+  print "INFO-TE-RPT_STA : 010 : script $script\n";
+  print "INFO-TE-RPT_STA : 011 : liberty " . join(", ", @libFiles) . "\n";
+  print "WARN-TE-RPT_STA : 012 : no -spef, so the net delays are wire load only\n" if ( $spef eq "" );
+
+  #<!-- Runnable from here -- this process is already inside the image, or
+  #     someone installed it -- so call it straight.  Only when it is not do
+  #     we go through the container, and there the same search runs again in
+  #     the shell inside it. -->
+  my $cmd;
+  my $bin = &dbfStaBinary();
+  if ( defined $bin ) {
+    $cmd = "( \"$bin\" -no_init -exit $script ) 2>&1 | tee $logFile";
+  }
+  else {
+    my $inner = "STA=\$(command -v sta 2>/dev/null || echo /root/OpenSTA/build/sta) ; " .
+                "\"\$STA\" -no_init -exit $script";
+    $cmd = &dbfElectronToolCommand("sta", $inner, $logFile);
+  }
+  unless ( defined $cmd ) {
+    print "ERROR-TE-RPT_STA : 013 : no sta on PATH and no container image to run it in\n";
+    print "ERROR-TE-RPT_STA : 019 :   the image builds OpenSTA at /root/OpenSTA/build/sta\n";
+    print "ERROR-TE-RPT_STA : 019 :   and does not install it; ELECTRON_STA overrides\n";
+    return;
+  }
+
+  if ( $noRun == 1 ) {
+    print "INFO-TE-RPT_STA : 014 : --no_run, so nothing was started\n";
+    print "INFO-TE-RPT_STA : 015 : $cmd\n";
+    return;
+  }
+
+  system($cmd);
+  unless ( -f $out ) {
+    print "ERROR-TE-RPT_STA : 016 : no report written; see $logFile\n";
+    return;
+  }
+  print "INFO-TE-RPT_STA : 017 : report written to $out\n";
 
   my $t1 = new Benchmark;
   my $td = timediff($t1, $t0);
-  #print "Command report_sta_vesta took:",timestr($td),"\n";
-  print "report static timing analysis took:",timestr($td),"\n";
-}#sub report_sta_vesta
+  print "Command report_sta took:", timestr($td), "\n";
+}#sub report_sta
 
 ##############################################################################################################
 

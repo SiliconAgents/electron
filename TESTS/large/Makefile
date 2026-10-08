@@ -201,6 +201,17 @@ mxu_1024-interactive:
 	mkdir -p workarea
 	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu1024_hier_interactive.tcl
 
+# Static timing on the netlist mxu_1024 left behind, through OpenSTA.  Reads
+# nothing back: the report is written for whatever wants to consume it, in
+# workarea/mxu_1024.sta.rpt, with the script and OpenSTA's own log beside it.
+#
+# Needs the netlist, so run mxu_1024 first.  It does not depend on it, because
+# that is 25 minutes and this is not -- the point of a separate target is to
+# re-time a netlist you already have.
+mxu_1024_sta:
+	test -f workarea/synth1024/mxu_1024.vg || { echo "mxu_1024_sta: no workarea/synth1024/mxu_1024.vg, run make mxu_1024 first"; exit 1; }
+	cd workarea ; PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../mxu1024_sta.tcl
+
 # The set, for the scaling comparison the header describes.  Four times the
 # instances per step and one more distinct module per step.
 mxu_both:  mxu_64 mxu_256
@@ -216,4 +227,4 @@ app:
 clean:
 	rm -rf workarea
 
-.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_256-interactive mxu_1024 mxu_1024-interactive mxu_both mxu_scale app clean
+.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_256-interactive mxu_1024 mxu_1024-interactive mxu_1024_sta mxu_both mxu_scale app clean

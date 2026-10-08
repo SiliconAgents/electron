@@ -2638,12 +2638,12 @@ sub delete_filler_popup {
 }#sub delete_filler_popup
 
 ##############################################################################################################
-################################ popup to run static timing analysis (vesta) #################################
+################################ popup to run static timing analysis (OpenSTA) #################################
 ##############################################################################################################
-sub run_vesta_sta_popup {
+sub run_sta_popup {
   my $subWin = MainWindow->new();
   my $image = $subWin->Getimage('folder');
-  $subWin->title ("Run static timing analysis (vesta)");
+  $subWin->title ("Run static timing analysis (OpenSTA)");
   $subWin->geometry("350x150+1000+300"); 
 
   my @libertyFiles = $GLOBAL->dbGlobalGetLibFiles;
@@ -2664,9 +2664,9 @@ sub run_vesta_sta_popup {
 
   $rmodeFrame->Checkbutton(-text =>"Open Report", -variable =>\$openRpt, -onvalue =>1, -offvalue=>0, -font=>"Times 8 bold")->pack(-side =>"left");
 
-  $buttonFrame->Button(-text=>'Run',-command =>sub {&write_verilog(-output, $verilogFile, '--overwrite');&report_sta_vesta(-v, $verilogFile, -lib, join(",", @libertyFiles), -period, $period, -out, $staOutFile);$subWin->destroy; if($openRpt == 1){system("gvim $staOutFile");}})->pack(-side=>"left");
+  $buttonFrame->Button(-text=>'Run',-command =>sub {&write_verilog(-output, $verilogFile, '--overwrite');&report_sta(-netlist, $verilogFile, -lib, join(",", @libertyFiles), -period, $period, -out, $staOutFile);$subWin->destroy; if($openRpt == 1){system("gvim $staOutFile");}})->pack(-side=>"left");
   $buttonFrame->Button(-text=>'Cancel',-command =>sub {$subWin->destroy;})->pack(-side=>"left");
-}#sub run_vesta_sta_popup
+}#sub run_sta_popup
 
 sub popup_write_sta {
   my @types = (["Config Files", '.rpt'],

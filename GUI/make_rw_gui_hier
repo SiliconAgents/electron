@@ -661,8 +661,8 @@ $timingbutton->configure(-menu=>$timingmenu);
 #    -label => "load",
 #    -underline => 0); # L in Lef
 #$timingmenu->separator;
-     $timingmenu->command(-command => \&run_vesta_sta_popup,
-    -label => "Vesta",
+     $timingmenu->command(-command => \&run_sta_popup,
+    -label => "OpenSTA",
     -underline => 0); # L in Lef
 $timingmenu->separator;
      $timingmenu->command(
