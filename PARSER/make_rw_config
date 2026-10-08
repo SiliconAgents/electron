@@ -69,6 +69,7 @@ my $config = parse_config($config_file);
     my $families = [];
     my $group = &dbfConfigFileGroup($config, $foundry, $tech_node, $layer);
     $LIBCFG_CELL_STUBS = &dbfConfigCellStubs($group);
+    &dbfConfigStaLibs($group);
     if ( $cell_family ne "" ) {
         $families = &dbfConfigCellFamilies($group || {}, $cell_family);
         return unless ( defined $families );
@@ -428,6 +429,59 @@ sub dbfConfigFileGroup {
 #     drift apart.  Empty string when the config has none, or when what it
 #     names is not there -- the caller falls back to building its own, which
 #     is what every config without the key already does. -->
+#<!-- The corner libraries a timer needs, filed by corner name.
+#
+#     Two keys, both optional and both shaped for one lookup:
+#
+#       "std-cell-sta-libs": { <corner>: { <vt>: [ lib, ... ] } }
+#       "macro-sta-libs":    { <corner>: [ lib, ... ] }
+#
+#     Separate from "std-cell-synth-libs" on purpose.  That one is one corner,
+#     uncompressed, and slimmed down to what yosys will parse; these are the
+#     PDK's own NLDM, gzipped, several corners, and a timer reads them as they
+#     are.  Pointing one command at the other's files is a mistake either way
+#     round -- 1.3GB against 37MB per corner, and the slimmed ones have had
+#     the LVF sigma tables cut out of them.
+#
+#     The macro list is not optional in practice: a design with memories in it
+#     and no memory liberty has a hole in the timing graph at every one of
+#     them, and the timer will not say so. -->
+sub dbfConfigStaLibs {
+    my ($group) = @_;
+    %STA_LIB_ALREADY       = ();
+    %STA_MACRO_LIB_ALREADY = ();
+    return unless ( defined $group );
+
+    my $std = $group->{'std-cell-sta-libs'};
+    if ( ref($std) eq 'HASH' ) {
+        foreach my $corner ( keys %$std ) {
+            next unless ( ref($std->{$corner}) eq 'HASH' );
+            foreach my $vt ( keys %{$std->{$corner}} ) {
+                my $v = $std->{$corner}{$vt};
+                my @l = ( ref($v) eq 'ARRAY' ) ? @$v : ( $v );
+                $STA_LIB_ALREADY{$corner}{$vt} = [ @l ];
+            }
+        }
+    }
+    my $mac = $group->{'macro-sta-libs'};
+    if ( ref($mac) eq 'HASH' ) {
+        foreach my $corner ( keys %$mac ) {
+            my $v = $mac->{$corner};
+            my @l = ( ref($v) eq 'ARRAY' ) ? @$v : ( $v );
+            $STA_MACRO_LIB_ALREADY{$corner} = [ @l ];
+        }
+    }
+
+    my @corners = sort keys %STA_LIB_ALREADY;
+    return unless ( @corners || keys %STA_MACRO_LIB_ALREADY );
+    my $n = 0;
+    foreach my $c ( @corners ) { foreach my $vt ( keys %{$STA_LIB_ALREADY{$c}} ) { $n += scalar(@{$STA_LIB_ALREADY{$c}{$vt}}); } }
+    my $m = 0;
+    foreach my $c ( keys %STA_MACRO_LIB_ALREADY ) { $m += scalar(@{$STA_MACRO_LIB_ALREADY{$c}}); }
+    print "INFO-PAR-CONFIG : 016 : sta corner(s) " . join(", ", @corners) .
+          ": $n std cell and $m macro liberty path(s) noted, not read\n";
+}
+#------------------------------------------------------------------------------------------#
 sub dbfConfigCellStubs {
     my ($group) = @_;
     return "" unless ( defined $group && defined $group->{'cell-stubs'} );
@@ -535,6 +589,7 @@ $LIBCFG_FOUNDRY = $foundry;
 $LIBCFG_NODE    = $tech_node;
 $LIBCFG_LAYER   = $layer;
 $LIBCFG_CELL_STUBS = &dbfConfigCellStubs(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer));
+&dbfConfigStaLibs(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer));
 
 if ( $cell_family ne "" ) {
   my $families = &dbfConfigCellFamilies(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer) || {},

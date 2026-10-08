@@ -459,15 +459,25 @@ sub report_sta {
 
   if ( $noOfArguments == 0 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP" ) {
     print "Usage : report_sta -netlist <gate netlist>\n";
-    print "                   [-top <module>] [-liberty <lib,lib>] \n";
+    print "                   [-top <module>] [-liberty <lib,lib>]\n";
+    print "                   [-corners <tt,ss,ff>] [-vt <flavour>] [--no_macros]\n";
     print "                   [-sdc <file> | -period <in the liberty's time unit>]\n";
     print "                   [-spef <file>] [-paths <n>] [-out <report>] [--no_run]\n";
     print "\n";
     print "        -netlist   gate level verilog.  Default <TOP_MODULE>.v\n";
     print "        -top       default TOP_MODULE\n";
-    print "        -liberty   comma separated.  Omitted, the list left by\n";
+    print "        -corners   corner names from the config's std-cell-sta-libs, e.g.\n";
+    print "                   tt,ss,ff.  Each becomes an OpenSTA corner, so one run\n";
+    print "                   reports them all.  Omitted, one corner from -liberty\n";
+    print "                   or from get_std_cell_libs --set.\n";
+    print "        -vt        VT flavour within a corner, default every one the\n";
+    print "                   config lists for it.  Only meaningful with -corners.\n";
+    print "        --no_macros  leave the config's macro-sta-libs out.  A design with\n";
+    print "                   memories then has a hole in the timing graph at each of\n";
+    print "                   them, and nothing will say so.\n";
+    print "        -liberty   comma separated, one corner.  Omitted, the list left by\n";
     print "                   get_std_cell_libs --set is used.  NLDM only: OpenSTA\n";
-    print "                   does not parse CCS/LVF, so point it at the slimmed ones.\n";
+    print "                   does not parse CCS/LVF.\n";
     print "        -sdc       constraints.  Without one, -period makes a single clock\n";
     print "                   on every clock pin the design has.\n";
     print "        -period    clock period, in whatever time unit the liberty declares\n";
@@ -479,9 +489,10 @@ sub report_sta {
     return;
   }
 
-  my ($netlist, $top, $sdc, $spef, $out) = ("", "", "", "", "");
-  my ($period, $paths, $noRun) = (0, 100, 0);
+  my ($netlist, $top, $sdc, $spef, $out, $vt) = ("", "", "", "", "", "");
+  my ($period, $paths, $noRun, $noMacros) = (0, 100, 0, 0);
   my @libFiles = ();
+  my @corners  = ();
   for ( my $i = 0; $i < $noOfArguments; $i++ ) {
     if ( $_[$i] eq "-netlist" ) { $netlist = $_[$i+1]; }
     if ( $_[$i] eq "-v" )       { $netlist = $_[$i+1]; }
@@ -489,9 +500,16 @@ sub report_sta {
     if ( $_[$i] eq "-sdc" )     { $sdc     = $_[$i+1]; }
     if ( $_[$i] eq "-spef" )    { $spef    = $_[$i+1]; }
     if ( $_[$i] eq "-out" )     { $out     = $_[$i+1]; }
+    if ( $_[$i] eq "-vt" )      { $vt      = $_[$i+1]; }
     if ( $_[$i] eq "-period" )  { $period  = $_[$i+1]; }
     if ( $_[$i] eq "-paths" )   { $paths   = $_[$i+1]; }
     if ( $_[$i] eq "--no_run" ) { $noRun   = 1; }
+    if ( $_[$i] eq "--no_macros" ) { $noMacros = 1; }
+    if ( $_[$i] eq "-corners" ) {
+      my $s = $_[$i+1];
+      $s =~ s/^\{(.*)\}$/$1/;
+      push(@corners, split(/\s*\,\s*/, $s));
+    }
     if ( $_[$i] eq "-liberty" || $_[$i] eq "-lib" ) {
       my $s = $_[$i+1];
       $s =~ s/^\{(.*)\}$/$1/;
@@ -513,20 +531,62 @@ sub report_sta {
     return;
   }
 
-  #<!-- Same liberty synthesize and hier_synthesis use. -->
-  unless ( @libFiles ) {
-    @libFiles = @SYNTH_LIBERTY_LIST if ( @SYNTH_LIBERTY_LIST );
-  }
-  unless ( @libFiles ) {
-    print "ERROR-TE-RPT_STA : 004 : no -liberty, and get_std_cell_libs --set has not run\n";
-    return;
-  }
-  foreach my $l ( @libFiles ) {
-    unless ( -f $l ) {
-      print "ERROR-TE-RPT_STA : 005 : liberty $l does not exist\n";
+  #<!-- Either several corners from the config, or one from -liberty / the
+  #     list get_std_cell_libs --set left.  %cornerLibs holds what each named
+  #     corner reads; the single-corner path uses one unnamed entry, so the
+  #     script writer below has one shape to deal with. -->
+  my %cornerLibs;
+  if ( @corners ) {
+    unless ( keys %STA_LIB_ALREADY ) {
+      print "ERROR-TE-RPT_STA : 020 : -corners, but the config has no std-cell-sta-libs\n";
+      print "ERROR-TE-RPT_STA : 021 :   read_config_file or read_library_config first,\n";
+      print "ERROR-TE-RPT_STA : 021 :   and the group needs a std-cell-sta-libs key\n";
       return;
     }
+    foreach my $c ( @corners ) {
+      unless ( exists $STA_LIB_ALREADY{$c} ) {
+        print "ERROR-TE-RPT_STA : 022 : no corner $c in the config; it has " .
+              join(", ", sort keys %STA_LIB_ALREADY) . "\n";
+        return;
+      }
+      my @vts = ( $vt ne "" ) ? ( $vt ) : ( sort keys %{$STA_LIB_ALREADY{$c}} );
+      my @l   = ();
+      foreach my $v ( @vts ) {
+        unless ( exists $STA_LIB_ALREADY{$c}{$v} ) {
+          print "ERROR-TE-RPT_STA : 023 : corner $c has no VT $v; it has " .
+                join(", ", sort keys %{$STA_LIB_ALREADY{$c}}) . "\n";
+          return;
+        }
+        push(@l, @{$STA_LIB_ALREADY{$c}{$v}});
+      }
+      #<!-- The memories, at the matching corner.  Left out and a design with
+      #     memories in it times with a hole at every one. -->
+      if ( $noMacros == 0 && exists $STA_MACRO_LIB_ALREADY{$c} ) {
+        push(@l, @{$STA_MACRO_LIB_ALREADY{$c}});
+      }
+      $cornerLibs{$c} = [ @l ];
+    }
   }
+  else {
+    unless ( @libFiles ) {
+      @libFiles = @SYNTH_LIBERTY_LIST if ( @SYNTH_LIBERTY_LIST );
+    }
+    unless ( @libFiles ) {
+      print "ERROR-TE-RPT_STA : 004 : no -corners, no -liberty, and get_std_cell_libs --set has not run\n";
+      return;
+    }
+    $cornerLibs{""} = [ @libFiles ];
+  }
+
+  foreach my $c ( sort keys %cornerLibs ) {
+    foreach my $l ( @{$cornerLibs{$c}} ) {
+      unless ( -f $l ) {
+        print "ERROR-TE-RPT_STA : 005 : liberty $l does not exist\n";
+        return;
+      }
+    }
+  }
+  @libFiles = map { @{$cornerLibs{$_}} } sort keys %cornerLibs;
   if ( $sdc ne "" && ! -f $sdc ) {
     print "ERROR-TE-RPT_STA : 006 : sdc $sdc does not exist\n";
     return;
@@ -548,7 +608,18 @@ sub report_sta {
   };
   print STA "# Written by electron's report_sta.  Rerun by hand with:\n";
   print STA "#   sta -no_init -exit $script\n";
-  foreach my $l ( @libFiles ) { print STA "read_liberty $l\n"; }
+  if ( @corners ) {
+    #<!-- Named corners, so one run reports all of them: define_corners first,
+    #     then every liberty read against the corner it belongs to. -->
+    print STA "define_corners " . join(" ", @corners) . "\n";
+    foreach my $c ( @corners ) {
+      print STA "# corner $c\n";
+      foreach my $l ( @{$cornerLibs{$c}} ) { print STA "read_liberty -corner $c $l\n"; }
+    }
+  }
+  else {
+    foreach my $l ( @libFiles ) { print STA "read_liberty $l\n"; }
+  }
   print STA "read_verilog $netlist\n";
   print STA "link_design $top\n";
   if ( $sdc ne "" ) {
@@ -573,14 +644,41 @@ sub report_sta {
     print STA "set_output_delay 0 -clock gen_clk [all_outputs]\n";
   }
   print STA "read_spef $spef\n" if ( $spef ne "" );
-  print STA "report_checks -path_delay max -group_path_count $paths -digits 4 > $out\n";
-  print STA "report_tns -digits 4 >> $out\n";
-  print STA "report_wns -digits 4 >> $out\n";
-  print STA "report_check_types -max_slew -max_capacitance -max_fanout -violators -digits 4 >> $out\n";
+  if ( @corners ) {
+    #<!-- Per corner, each section headed so the report says which is which.
+    #     -corner names the one to report; without it OpenSTA reports the
+    #     worst over all of them and the reader cannot tell them apart. -->
+    #<!-- Tcl file I/O for the headings, not echo: OpenSTA's interpreter has
+    #     no echo, and ">" there is its own redirection on its own commands,
+    #     not a shell. -->
+    my $mode = "w";
+    foreach my $c ( @corners ) {
+      print STA "set _h [open $out $mode] ; puts \$_h \"\\n================ corner $c ================\" ; close \$_h\n";
+      $mode = "a";
+      print STA "report_checks -corner $c -path_delay max -group_path_count $paths -digits 4 >> $out\n";
+      print STA "report_tns -corner $c -digits 4 >> $out\n";
+      print STA "report_wns -corner $c -digits 4 >> $out\n";
+      print STA "report_check_types -corner $c -max_slew -max_capacitance -max_fanout -violators -digits 4 >> $out\n";
+    }
+  }
+  else {
+    print STA "report_checks -path_delay max -group_path_count $paths -digits 4 > $out\n";
+    print STA "report_tns -digits 4 >> $out\n";
+    print STA "report_wns -digits 4 >> $out\n";
+    print STA "report_check_types -max_slew -max_capacitance -max_fanout -violators -digits 4 >> $out\n";
+  }
   close(STA);
 
   print "INFO-TE-RPT_STA : 010 : script $script\n";
-  print "INFO-TE-RPT_STA : 011 : liberty " . join(", ", @libFiles) . "\n";
+  if ( @corners ) {
+    foreach my $c ( @corners ) {
+      print "INFO-TE-RPT_STA : 025 : corner $c : " . scalar(@{$cornerLibs{$c}}) . " liberty file(s)\n";
+    }
+    print "WARN-TE-RPT_STA : 024 : --no_macros, so memories are not modelled\n" if ( $noMacros == 1 );
+  }
+  else {
+    print "INFO-TE-RPT_STA : 011 : liberty " . join(", ", @libFiles) . "\n";
+  }
   print "WARN-TE-RPT_STA : 012 : no -spef, so the net delays are wire load only\n" if ( $spef eq "" );
 
   #<!-- Runnable from here -- this process is already inside the image, or
