@@ -32,7 +32,8 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-liberty <lib>] [-blackbox <cells.v>]\n";
   print "                       [-out <dir>] [-netlist <file>] [--read]\n";
   print "                       [-jobs <n>] [-flatten_below <cells>]\n";
-  print "                       [-slang_args <args>] [-latchmap <file>]\n";
+  print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
+  print "                       [-patch <rules.py>] [-latchmap <file>]\n";
   print "                       [--no_latchmap] [--no_verify] [--no_run]\n";
   print "\n";
   print "        -rtl            an RTL filelist, as the front end reads it: +incdir+ and\n";
@@ -42,6 +43,13 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "        -top            top module.  Required with -rtl.\n";
   print "        -rtlil          skip elaboration and start from a dump written earlier.\n";
   print "        -slang_args     extra options for read_slang, appended to the defaults.\n";
+  print "        -slang_plugin   the yosys-slang plugin to elaborate with.  Omitted:\n";
+  print "                        \$ELECTRON_SLANG_PLUGIN, else INSTALL/slang/slang.so when\n";
+  print "                        make slang-plugin has built it, else the image's own.\n";
+  print "        -patch          rewrite constructs the front end will not elaborate,\n";
+  print "                        in copies, before elaborating: a python file of\n";
+  print "                        PATCHES, see 3RDBIN/rtl_patch.  A rule that no longer\n";
+  print "                        matches is an error.  Needs -rtl.\n";
   print "        -liberty        liberty for dfflibmap and abc.  Omitted, the list left\n";
   print "                        by get_std_cell_libs --set is used.\n";
   print "        -blackbox       standard cell stubs.  Omitted, they are built from the\n";
@@ -67,6 +75,8 @@ my $rtlil;
 my $rtlList;
 my $topModule;
 my $slangArgs = "";
+my $slangPlugin = "";
+my $patchRules = "";
 my $netlistOut;
 my $readBack = 0;
 my $outDir = "hier_synthesis";
@@ -85,6 +95,8 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-top"){$topModule = $_[$i+1];}
   if($_[$i] eq "-top_module"){$topModule = $_[$i+1];}
   if($_[$i] eq "-slang_args"){$slangArgs = $_[$i+1];}
+  if($_[$i] eq "-slang_plugin"){$slangPlugin = $_[$i+1];}
+  if($_[$i] eq "-patch"){$patchRules = $_[$i+1];}
   if($_[$i] eq "-netlist"){$netlistOut = $_[$i+1];}
   if($_[$i] eq "--read"){$readBack = 1;}
   if($_[$i] eq "-out"){$outDir = $_[$i+1];}
@@ -119,6 +131,20 @@ elsif ( defined $rtlil && $rtlil ne "" ) {
 else {
   print "ERROR-PAR-HR_SYN : 001 : give -rtl <filelist> -top <module>, or -rtlil <dump>\n";
   print "ERROR-PAR-HR_SYN : 002 : -rtlil wants what yosys writes after read_slang --keep-hierarchy\n";
+  return;
+}
+if ( $patchRules ne "" ) {
+  unless ( defined $rtlList && $rtlList ne "" ) {
+    print "ERROR-PAR-HR_SYN : 060 : -patch rewrites RTL, so it needs -rtl, not -rtlil\n";
+    return;
+  }
+  unless ( -f $patchRules ) {
+    print "ERROR-PAR-HR_SYN : 061 : patch rules $patchRules do not exist\n";
+    return;
+  }
+}
+if ( $slangPlugin ne "" && $slangPlugin ne "slang" && ! -f $slangPlugin ) {
+  print "ERROR-PAR-HR_SYN : 062 : slang plugin $slangPlugin does not exist\n";
   return;
 }
 
@@ -237,16 +263,85 @@ if ( $liberty =~ /\.gz$/ ) {
 #     because a vendor IP in a real filelist stopped the front end dead: an
 #     identifier used before its declaration, an SVA, a duplicate definition, a
 #     loop that outruns the unroll limit. -slang_args appends more. -->
+#
+#     Which plugin.  The suite's own build cannot do $clog2 of a procedural
+#     variable or an escaped instance name under --keep-hierarchy, and each of
+#     those had been costing a patched copy of somebody's RTL; make
+#     slang-plugin builds one that can (INSTALL/slang/build_plugin.sh).  An
+#     image rebuilt since carries it as plain "slang".
+#
+#     --ignore-unknown-modules is gone from upstream: an instantiated module
+#     with no definition is now an error, which is the right answer -- the
+#     flag had been turning a missing file into an empty box.  So it is
+#     passed only to a plugin that still takes it, found out by asking. -->
 if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
   $rtlil = "$outDir/design.il" unless ( defined $rtlil && $rtlil ne "" );
   unless ( -f $rtlil ) {
+    if ( $slangPlugin eq "" ) {
+      if ( defined $ENV{ELECTRON_SLANG_PLUGIN} && $ENV{ELECTRON_SLANG_PLUGIN} ne "" ) {
+        $slangPlugin = $ENV{ELECTRON_SLANG_PLUGIN};
+      }
+      elsif ( -f "$beehome/INSTALL/slang/slang.so" ) {
+        $slangPlugin = "$beehome/INSTALL/slang/slang.so";
+      }
+      else { $slangPlugin = "slang"; }
+    }
+    print "INFO-PAR-HR_SYN : 063 : yosys-slang plugin: $slangPlugin\n";
+
+    #<!-- -patch: the copies and the list that points at them go in the work
+    #     directory; the RTL itself is never touched. -->
+    my $elabList = $rtlList;
+    if ( $patchRules ne "" ) {
+      my $patchDir = "$outDir/rtl";
+      my $base = $rtlList; $base =~ s/.*\///;
+      unlink("$patchDir/$base");
+      my $inner = "python3 $beehome/3RDBIN/rtl_patch --filelist $rtlList" .
+                  " --rules $patchRules --out $patchDir";
+      my $cmd = &dbfElectronToolCommand("python3", $inner, "$outDir/patch.log");
+      unless ( defined $cmd ) {
+        print "ERROR-PAR-HR_SYN : 064 : no python3 on PATH and no container image to run it in\n";
+        return;
+      }
+      print "INFO-PAR-HR_SYN : 065 : patching $rtlList by $patchRules\n";
+      system($cmd);
+      unless ( -f "$patchDir/$base" ) {
+        print "ERROR-PAR-HR_SYN : 066 : patching failed; see $outDir/patch.log\n";
+        return;
+      }
+      $elabList = "$patchDir/$base";
+    }
+
+    my $probe = "$outDir/slang_probe.sv";
+    open(my $pf, ">", $probe);
+    print $pf "module slang_probe; endmodule\n";
+    close($pf);
+    my $probeCmd = &dbfElectronToolCommand("yosys",
+        "yosys -m $slangPlugin -p \"read_slang --ignore-unknown-modules $probe\"",
+        "$outDir/slang_probe.log");
+    #<!-- Not -q: that hides the diagnostic naming the flag and leaves only
+    #     "elaboration failed", which says nothing about why. -->
+    my $unknownFlag = " --ignore-unknown-modules";
+    if ( defined $probeCmd ) {
+      system("$probeCmd > /dev/null");
+      if ( open(my $pl, "<", "$outDir/slang_probe.log") ) {
+        while ( <$pl> ) {
+          if ( /ignore-unknown-modules.*no longer supported/ ) { $unknownFlag = ""; last; }
+        }
+        close($pl);
+      }
+    }
+    if ( $unknownFlag eq "" ) {
+      print "INFO-PAR-HR_SYN : 067 : this plugin requires a definition for every module;" .
+            " a missing one is an error, not an empty box\n";
+    }
+
     my $elabLog = "$outDir/elaborate.log";
-    my $flags = "--keep-hierarchy --single-unit --ignore-unknown-modules" .
+    my $flags = "--keep-hierarchy --single-unit$unknownFlag" .
                 " --ignore-assertions --allow-use-before-declare" .
                 " --allow-hierarchical-const --relax-enum-conversions --compat vcs" .
                 " --unroll-limit 200000 --error-limit 50" .
                 " -Wno-range-width-oob -Wno-duplicate-definition";
-    my $inner = "yosys -m slang -p \"read_slang -F $rtlList $blackbox --top $topModule" .
+    my $inner = "yosys -m $slangPlugin -p \"read_slang -F $elabList $blackbox --top $topModule" .
                 " $flags $slangArgs ; hierarchy -check -top $topModule ;" .
                 " stat -top $topModule ; write_rtlil $rtlil.part\"" .
                 " && mv $rtlil.part $rtlil";
@@ -255,7 +350,7 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
       print "ERROR-PAR-HR_SYN : 042 : no yosys on PATH and no container image to run it in\n";
       return;
     }
-    print "INFO-PAR-HR_SYN : 043 : elaborating $rtlList, top $topModule\n";
+    print "INFO-PAR-HR_SYN : 043 : elaborating $elabList, top $topModule\n";
     system($cmd);
   }
   unless ( -f $rtlil ) {

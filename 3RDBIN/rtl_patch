@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""Rewrite RTL constructs the front end will not elaborate, in copies.
+
+    rtl_patch --filelist rtl.f --rules patches.py --out dir
+
+writes dir/<name of the filelist> and dir/rtl_patched/, and changes nothing
+else: the RTL is somebody else's and usually read-only.  hier_synthesis
+-patch runs this before elaborating; it is also usable on its own.
+
+THE RULES FILE is python, so a pattern can be a raw string and a replacement
+can span lines.  It defines one list:
+
+    PATCHES = [
+        # (file, pattern, replacement, why)
+        ("jtag_reg.sv",
+         r"q <= ~rst_n \\? .* : q;",
+         "if (~rst_n) q <= '0;\\n  else if (en) q <= d;",
+         "async reset as a ternary chain"),
+    ]
+
+`file` is matched against the END of each path in the filelist, so a bare
+basename works until two files share it, and "clk/div2.sv" settles it
+then.  `pattern` is a python regex applied with re.sub to the whole file.
+
+STRICT ON PURPOSE.  Each of these is an error, not a warning:
+
+    a rule whose file is not in the filelist
+    a rule whose file matches more than one entry
+    a rule whose pattern matches nothing
+
+because a patch that silently stopped applying is exactly how the front end
+comes back to failing on a design nobody touched -- or, worse, how a
+rewritten construct quietly reverts.  When the RTL is fixed at its source,
+delete the rule; this will say when that has happened.
+
+A patch must not change the hardware, only how it is written.  Say why in
+`why`; it is printed, and appended to the copy as a comment at the END of
+the file so line numbers in diagnostics still match the original.
+
+WHAT ELSE MOVES.  The output list is read from another directory, so every
+relative path in it -- files and +incdir+ -- is made absolute against the
+input list's directory (read_slang -F's rule).  A patched copy no longer sits
+beside the files it `includes, so each patched file's original directory is
+added as an +incdir+ -- at the end, where it changes nothing for the files
+that were not patched.  Nested -f/-F lists pass through untouched, and a rule
+for a file inside one is reported as matching nothing.
+"""
+import argparse
+import os
+import re
+import runpy
+import sys
+
+
+def load_rules(path):
+    ns = runpy.run_path(path)
+    rules = ns.get("PATCHES")
+    if not isinstance(rules, (list, tuple)):
+        sys.exit(f"rtl_patch: {path} defines no PATCHES list")
+    out = []
+    for i, r in enumerate(rules):
+        if not (isinstance(r, (list, tuple)) and len(r) == 4):
+            sys.exit(f"rtl_patch: {path}: PATCHES[{i}] is not (file, pattern, replacement, why)")
+        f, pat, rep, why = r
+        try:
+            rx = re.compile(pat)
+        except re.error as e:
+            sys.exit(f"rtl_patch: {path}: PATCHES[{i}] ({f}): bad pattern: {e}")
+        out.append((f, rx, rep, why))
+    return out
+
+
+def absolutize(token, base):
+    return token if os.path.isabs(token) else os.path.normpath(os.path.join(base, token))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--filelist", required=True)
+    ap.add_argument("--rules", required=True)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args()
+
+    rules = load_rules(a.rules)
+    base = os.path.dirname(os.path.abspath(a.filelist))
+    out = os.path.abspath(a.out)
+    pdir = os.path.join(out, "rtl_patched")
+    if os.path.join(out, os.path.basename(a.filelist)) == os.path.abspath(a.filelist):
+        sys.exit("rtl_patch: --out is the filelist's own directory; it would overwrite the input")
+
+    lines = open(a.filelist, errors="replace").read().splitlines()
+    entries = []                       # (index into lines, absolute path)
+    new = list(lines)
+    for i, raw in enumerate(lines):
+        s = raw.strip()
+        if not s or s.startswith("//") or s.startswith("#"):
+            continue
+        if s.startswith("+incdir+"):
+            dirs = [d for d in s[len("+incdir+"):].split("+") if d]
+            new[i] = "+incdir+" + "+".join(absolutize(d, base) for d in dirs)
+        elif s.startswith("+") or s.startswith("-"):
+            continue                   # +define+, -f, -v, ...: as written
+        else:
+            p = absolutize(s, base)
+            new[i] = p
+            entries.append((i, p))
+
+    errors = []
+    by_entry = {}                      # index -> [(rx, rep, why)]
+    for f, rx, rep, why in rules:
+        hits = [(i, p) for i, p in entries if p == f or p.endswith("/" + f.lstrip("/"))]
+        if not hits:
+            errors.append(f"{f}: not in the filelist ({why})")
+        elif len(hits) > 1:
+            errors.append(f"{f}: matches {len(hits)} files; give more of the path: "
+                          + ", ".join(p for _, p in hits[:3]))
+        else:
+            by_entry.setdefault(hits[0][0], []).append((f, rx, rep, why))
+
+    os.makedirs(pdir, exist_ok=True)
+    written, incdirs = {}, []
+    for i, group in sorted(by_entry.items()):
+        src = new[i]
+        try:
+            text = open(src, errors="surrogateescape").read()
+        except OSError as e:
+            errors.append(f"{src}: {e.strerror}")
+            continue
+        applied = []
+        for f, rx, rep, why in group:
+            text, n = rx.subn(rep, text)
+            if n == 0:
+                errors.append(f"{f}: pattern matched nothing -- fixed at the source? ({why})")
+            else:
+                applied.append(f"{why} x{n}")
+        if len(applied) != len(group):
+            continue
+        name = os.path.basename(src)
+        if name in written:
+            errors.append(f"{name}: two patched files share this name ({written[name]}, {src})")
+            continue
+        dest = os.path.join(pdir, name)
+        with open(dest, "w", errors="surrogateescape") as fh:
+            fh.write(text)
+            if not text.endswith("\n"):
+                fh.write("\n")
+            fh.write(f"// rtl_patch: copy of {src}\n")
+            for w in applied:
+                fh.write(f"// rtl_patch: {w}\n")
+        written[name] = src
+        new[i] = dest
+        d = os.path.dirname(src)
+        if d not in incdirs:
+            incdirs.append(d)
+        print(f"  patched {name}: {', '.join(applied)}")
+
+    if errors:
+        for e in errors:
+            print(f"rtl_patch: ERROR {e}", file=sys.stderr)
+        return 1
+
+    # LAST, after every directory the list already names: a copy finds the
+    # headers that sat beside its original, and no unpatched file's search
+    # order changes.
+    post = [f"+incdir+{d}" for d in incdirs]
+    listout = os.path.join(out, os.path.basename(a.filelist))
+    with open(listout + ".part", "w") as fh:
+        fh.write("\n".join(new + post) + "\n")
+    os.replace(listout + ".part", listout)
+    print(f"rtl_patch: {len(written)} file(s) patched by {len(rules)} rule(s); wrote {listout}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

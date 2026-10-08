@@ -1,0 +1,31 @@
+diff --git a/src/slang_frontend.cc b/src/slang_frontend.cc
+index a43eb34..0d76ef5 100644
+--- a/src/slang_frontend.cc
++++ b/src/slang_frontend.cc
+@@ -213,7 +213,25 @@ uint64_t bitstream_member_offset(const ast::FieldSymbol &member)
+ const std::string module_type_id(const ast::InstanceBodySymbol &sym)
+ {
+ 	ast_invariant(sym, sym.parentInstance && sym.parentInstance->isModule());
+-	std::string instance = sym.getHierarchicalPath();
++	// getHierarchicalPath() writes a segment that needs escaping as SystemVerilog
++	// source would, "\name " -- backslash, name, terminating space.  That is
++	// syntax, not part of the name, and RTLIL identifiers may not contain a
++	// space.  An escaped name cannot contain whitespace, so the first space
++	// after the backslash is exactly its terminator.
++	std::string path = sym.getHierarchicalPath(), instance;
++	instance.reserve(path.size());
++	for (size_t i = 0; i < path.size(); i++) {
++		bool seg_start = i == 0 || path[i - 1] == '.' || path[i - 1] == ':';
++		if (path[i] == '\\' && seg_start) {
++			size_t end = path.find(' ', i + 1);
++			if (end == std::string::npos)
++				end = path.size();
++			instance.append(path, i + 1, end - i - 1);
++			i = end;
++		} else {
++			instance.push_back(path[i]);
++		}
++	}
+ 	if (instance == sym.name)
+ 		return std::string(sym.name);
+ 	else

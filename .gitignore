@@ -33,6 +33,10 @@ TESTS/rtls/vedic/vedic.v
 *.sif
 INSTALL/podman/oci-*.tar
 
+# The plugin make slang-plugin builds; the source is the pin and the patches
+# beside it.
+INSTALL/slang/slang.so
+
 # Python bytecode cache, e.g. from the 3RDBIN placers being imported.
 __pycache__/
 *.pyc
