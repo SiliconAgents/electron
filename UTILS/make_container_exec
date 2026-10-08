@@ -44,8 +44,11 @@ my ($tool, $innerCmd, $logFile) = @_;
 
 my $onPath = `which $tool 2>/dev/null`;
 chomp($onPath);
+#<!-- Grouped, because $innerCmd may be a chain: "yosys ... && mv a b" left
+#     bare pipes only the mv into tee, so a yosys that failed left no log at
+#     all and the error message pointed at a file that did not exist. -->
 if ( $onPath ne "" && -x $onPath ) {
-  return "$innerCmd 2>&1 | tee $logFile";
+  return "( $innerCmd ) 2>&1 | tee $logFile";
 }
 
 my $sif = &dbfElectronContainerImage();

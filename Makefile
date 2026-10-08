@@ -90,8 +90,15 @@ DOCS/electron.pdf: DOCS/electron.md DOCS/style.css
 
 docs: DOCS/electron.pdf
 
+# The yosys-slang plugin hier_synthesis prefers, built into INSTALL/slang/ in
+# the image it will be loaded in.  Upstream at a pinned revision plus our
+# patches; INSTALL/slang/build_plugin.sh says why.  A few minutes.  An image
+# rebuilt from pysparkppContainerFile carries the same plugin as its default.
+slang-plugin:
+	$(INCONTAINER) 'cd $(ELECTRON) && INSTALL/slang/build_plugin.sh'
+
 # An interactive shell in the image the checks use.
 app:
 	apptainer shell --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$$USER:/home/$$USER $(PPSIF)
 
-.PHONY: check check-load check-syntax app docs
+.PHONY: check check-load check-syntax app docs slang-plugin

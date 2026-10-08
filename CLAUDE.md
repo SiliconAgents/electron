@@ -327,6 +327,22 @@ subtree into it saves 21.6%; doing the same to a wide, shallow block saves
 something. Repeat runs of one flattened module vary by ~0.4%, so nothing under
 1% is a result.
 
+**The slang plugin is electron's own build**, not the suite's. `make
+slang-plugin` builds upstream at a pinned revision plus `INSTALL/slang/*.patch`
+into `INSTALL/slang/slang.so` (gitignored, about three minutes, in the image),
+and `hier_synthesis` prefers it; an image rebuilt from `pysparkppContainerFile`
+installs the same build over the suite's `slang.so`. The suite's build cannot
+do `$clog2` of a procedural variable or an escaped instance name under
+`--keep-hierarchy`, and each of those had been a patched copy of somebody's
+RTL. Upstream also dropped `--ignore-unknown-modules` -- a module with no
+definition is now an error -- so `hier_synthesis` probes the plugin and passes
+the flag only to one that still takes it.
+
+What the front end still cannot read goes through `hier_synthesis -patch
+<rules.py>` (`3RDBIN/rtl_patch`): rewrites in copies, never the RTL, and a rule
+that no longer matches is an error rather than a silent no-op. Before writing a
+rule, check whether a newer plugin already handles the construct.
+
 **Run this in the container like everything else.** The image carries the same
 yosys 0.64 build and the slang plugin, and `techmap` works there:
 

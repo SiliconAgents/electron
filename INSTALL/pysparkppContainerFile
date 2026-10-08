@@ -84,4 +84,21 @@ RUN yosys -V | grep -q "^Yosys 0\.64" && \
     yosys -q -p "plugin -i slang; help read_slang" > /dev/null && \
     echo "yosys 0.64 with slang installed"
 
+# yosys-slang built from upstream at a pinned revision plus electron's patches,
+# installed OVER the suite's own slang.so so that "yosys -m slang" means it
+# everywhere.  INSTALL/slang/build_plugin.sh has the why; in short, the
+# suite's build predates $clog2 of a procedural variable and cannot elaborate
+# an escaped instance name with --keep-hierarchy, and each of those had been
+# costing a patched copy of somebody's RTL.  The suite's plugin is kept beside
+# it as slang-suite.so.  Read from the repo through the bind mount podman build
+# is given, like the other electron files the images use.
+ARG ELECTRON_SRC=/proj_pd/user_dev/rsrivastava/electron
+RUN P=/opt/oss-cad-suite/share/yosys/plugins && \
+    cp $P/slang.so $P/slang-suite.so && \
+    ${ELECTRON_SRC}/INSTALL/slang/build_plugin.sh /tmp/slangplugin && \
+    mv /tmp/slangplugin/slang.so $P/slang.so && rm -rf /tmp/slangplugin && \
+    printf 'module l (input a, output y); assign y = ~a; endmodule\nmodule t (input a, output y); l \\u_l[0] (.a(a), .y(y)); endmodule\n' > /tmp/p.sv && \
+    yosys -q -m slang -p "read_slang /tmp/p.sv --top t --keep-hierarchy" && rm /tmp/p.sv && \
+    echo "yosys-slang rebuilt with electron's patches"
+
 ENV LANG=C.UTF-8
