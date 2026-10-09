@@ -35,6 +35,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
   print "                       [-patch <rules.py>] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
+  print "                       [-leaf_wrappers <glob>[,<glob>]]\n";
   print "                       [--no_latchmap] [--no_verify] [--no_run]\n";
   print "\n";
   print "        -rtl            an RTL filelist, as the front end reads it: +incdir+ and\n";
@@ -69,6 +70,10 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        (default: a buffer from the liberty)\n";
   print "        -abc_load       with -abc_delay, the load on module outputs in fF\n";
   print "                        (default: four median input pins)\n";
+  print "        -leaf_wrappers  modules that wrap library cells, e.g. 'cellwrap_*':\n";
+  print "                        elaborated once per parameter set instead of once\n";
+  print "                        per instance.  Only wrappers whose bodies hold\n";
+  print "                        nothing but library cells; see 3RDBIN/rtlil_leaf_wrappers.\n";
   print "        -flatten_below  keep a module as a hierarchy boundary only when its\n";
   print "                        subtree is at least this many cells, default 2000.\n";
   print "                        0 keeps every module, which costs area: a boundary is a\n";
@@ -94,6 +99,7 @@ my $latchmap;
 my $jobs = 8;
 my $flattenBelow = 2000;
 my $abcDelay = "";
+my $leafWrappers = "";
 my $abcDriver = "";
 my $abcLoad = "";
 my $noLatchmap = 0;
@@ -117,6 +123,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-jobs"){$jobs = $_[$i+1];}
   if($_[$i] eq "-flatten_below"){$flattenBelow = $_[$i+1];}
   if($_[$i] eq "-abc_delay"){$abcDelay = $_[$i+1];}
+  if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
   if($_[$i] eq "-abc_driver"){$abcDriver = $_[$i+1];}
   if($_[$i] eq "-abc_load"){$abcLoad = $_[$i+1];}
   if($_[$i] eq "-liberty"){ push(@libFiles, split(/\s*\,\s*/, $_[$i+1])); }
@@ -359,15 +366,50 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
     }
 
     my $elabLog = "$outDir/elaborate.log";
-    my $flags = "--keep-hierarchy --single-unit$unknownFlag" .
-                " --ignore-assertions --allow-use-before-declare" .
-                " --allow-hierarchical-const --relax-enum-conversions --compat vcs" .
-                " --unroll-limit 200000 --error-limit 50" .
-                " -Wno-range-width-oob -Wno-duplicate-definition";
+    my $common = " --single-unit$unknownFlag" .
+                 " --ignore-assertions --allow-use-before-declare" .
+                 " --allow-hierarchical-const --relax-enum-conversions --compat vcs" .
+                 " --unroll-limit 200000 --error-limit 50" .
+                 " -Wno-range-width-oob -Wno-duplicate-definition" .
+                 " -Wno-unconnected-inout-port";
+    #<!-- -Wno-unconnected-inout-port: the cell stubs carry the power pins and
+    #     RTL never connects them, so slang warns once per cell instance --
+    #     3.26 million lines, 1.9 GB, on one design, copied into every log
+    #     downstream of this one.  Nothing else ever triggered it. -->
+    my $flags = "--keep-hierarchy$common";
+
+    #<!-- -leaf_wrappers: --keep-hierarchy makes a module per INSTANCE, and a
+    #     library that wraps each hand-placed cell in a module of its own turns
+    #     every such cell into a module -- 97% of one design's 907,000, and
+    #     over half an hour of elaboration.  Blackboxed, they cost nothing
+    #     here; rtlil_leaf_wrappers then puts each parameter set's contents
+    #     back, elaborated once. -->
+    my $wrapList = "";
+    my $dumpTo = $rtlil;
+    if ( $leafWrappers ne "" ) {
+      $wrapList = "$outDir/leaf_wrappers.txt";
+      unlink($wrapList);
+      my $find = "python3 $beehome/3RDBIN/rtlil_leaf_wrappers find --filelist $elabList" .
+                 " --stubs $blackbox --pattern '$leafWrappers' --out $wrapList";
+      my $fcmd = &dbfElectronToolCommand("python3", $find, "$outDir/leaf_wrappers.log");
+      system($fcmd) if ( defined $fcmd );
+      unless ( -f $wrapList ) {
+        print "ERROR-PAR-HR_SYN : 069 : finding the leaf wrappers failed; see $outDir/leaf_wrappers.log\n";
+        return;
+      }
+      my $n = 0;
+      if ( open(my $wl, "<", $wrapList) ) {
+        while ( my $w = <$wl> ) { chomp($w); next if ( $w eq "" ); $flags .= " --blackboxed-module $w"; $n++; }
+        close($wl);
+      }
+      print "INFO-PAR-HR_SYN : 070 : $n leaf wrapper(s) matching $leafWrappers elaborated once each\n";
+      $dumpTo = "$rtlil.raw" if ( $n > 0 );
+      $wrapList = "" if ( $n == 0 );
+    }
     my $inner = "yosys -m $slangPlugin -p \"read_slang -F $elabList $blackbox --top $topModule" .
                 " $flags $slangArgs ; hierarchy -check -top $topModule ;" .
                 " stat -top $topModule ; write_rtlil $rtlil.part\"" .
-                " && mv $rtlil.part $rtlil";
+                " && mv $rtlil.part $dumpTo";
     my $cmd = &dbfElectronToolCommand("yosys", $inner, $elabLog);
     unless ( defined $cmd ) {
       print "ERROR-PAR-HR_SYN : 042 : no yosys on PATH and no container image to run it in\n";
@@ -375,6 +417,19 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
     }
     print "INFO-PAR-HR_SYN : 043 : elaborating $elabList, top $topModule\n";
     system($cmd);
+    if ( $wrapList ne "" && -f "$rtlil.raw" ) {
+      my $fill = "python3 $beehome/3RDBIN/rtlil_leaf_wrappers fill --il $rtlil.raw --out $rtlil" .
+                 " --filelist $elabList --stubs $blackbox --wrappers $wrapList --top $topModule" .
+                 " --yosys 'yosys -m $slangPlugin' --read-slang '$common $slangArgs'";
+      my $wcmd = &dbfElectronToolCommand("python3", $fill, "$outDir/leaf_wrappers_fill.log");
+      print "INFO-PAR-HR_SYN : 071 : elaborating each leaf wrapper's parameter sets once\n";
+      system($wcmd) if ( defined $wcmd );
+      if ( -f $rtlil ) { unlink("$rtlil.raw"); }
+      else {
+        print "ERROR-PAR-HR_SYN : 072 : filling the leaf wrappers failed; see $outDir/leaf_wrappers_fill.log\n";
+        return;
+      }
+    }
   }
   unless ( -f $rtlil ) {
     print "ERROR-PAR-HR_SYN : 044 : elaboration wrote no RTLIL; see $outDir/elaborate.log\n";

@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Elaborate one-cell wrapper modules once each instead of once per instance.
+
+    rtlil_leaf_wrappers find --filelist rtl.f --stubs cells.v --pattern 'cellwrap_*'
+                             --out names.txt
+        writes the leaf wrappers, one per line: the modules the pattern names
+        whose bodies instantiate nothing but library cells
+
+    rtlil_leaf_wrappers fill --il design.il --out filled.il --filelist rtl.f
+                             --stubs cells.v --wrappers names.txt --top <top>
+                             --read-slang "<read_slang options>" [--yosys yosys]
+        replaces the blackboxes `read_slang --blackboxed-module` left in
+        design.il with the wrappers' real contents, one definition per
+        parameter set
+
+WHY.  yosys-slang's --keep-hierarchy makes one module per INSTANCE.  A library
+that wraps every hand-placed cell in a module of its own -- one AOI22, one
+NAND2 -- turns each of those cells into a module: on one 907,000-module
+design, 97% of the modules held one gate, and elaboration took over half an
+hour and 32 GB.  With the wrappers blackboxed it took 3 minutes.
+
+A blackbox has no contents, so they have to come back.  `fill` collects every
+parameter set each wrapper is instantiated with, elaborates each set ONCE (one
+small yosys run, a module per set), renames instances to their set's
+definition and drops the parameters.  A wrapper used with one set keeps its
+own name.  Downstream nothing changes: rtlil_bottom_up sees small ordinary
+modules, and --flatten-below absorbs them into their parents as it did the
+per-instance copies.
+
+LEAF ONLY.  A wrapper that instantiates another user module (a wrapper of
+wrappers) is left alone by `find`: its child would come back as a blackbox
+with nothing to fill it.
+"""
+import argparse
+import fnmatch
+import os
+import re
+import subprocess
+import sys
+import time
+
+MODULE_RE = re.compile(r"^\s*module\s+(\w+)", re.M)
+INST_RE = re.compile(r"^\s*(\w+)\s*(?:#\s*\(|\\?[A-Za-z_][\w\[\]\.$]*\s*(?:\[[^\]]*\]\s*)*\()", re.M)
+KEYWORDS = set("""module endmodule input output inout wire reg logic assign always begin end
+if else for generate endgenerate case endcase function endfunction task endtask parameter
+localparam typedef genvar initial default posedge negedge or and not bit int integer""".split())
+
+
+def strip_comments(t):
+    t = re.sub(r"/\*.*?\*/", " ", t, flags=re.S)
+    return re.sub(r"//[^\n]*", "", t)
+
+
+def filelist_sources(path):
+    base = os.path.dirname(os.path.abspath(path))
+    out = []
+    for raw in open(path, errors="replace"):
+        s = raw.strip()
+        if not s or s.startswith(("//", "#", "+", "-")):
+            continue
+        out.append(s if os.path.isabs(s) else os.path.normpath(os.path.join(base, s)))
+    return out
+
+
+def stub_names(path):
+    names = set()
+    with open(path, errors="replace") as fh:
+        for line in fh:
+            if line.startswith("module "):
+                names.add(line.split()[1].split("(")[0])
+    return names
+
+
+def cmd_find(a):
+    pats = [p.strip() for p in a.pattern.split(",") if p.strip()]
+    cells = stub_names(a.stubs)
+    bodies = {}
+    for f in filelist_sources(a.filelist):
+        try:
+            t = strip_comments(open(f, errors="replace").read())
+        except OSError:
+            continue
+        for m in re.finditer(r"^\s*module\s+(\w+)(.*?)^\s*endmodule", t, re.S | re.M):
+            bodies.setdefault(m.group(1), m.group(2))
+    leaf, nested = [], []
+    for name in sorted(bodies):
+        if not any(fnmatch.fnmatchcase(name, p) for p in pats):
+            continue
+        kids = {k for k in INST_RE.findall(bodies[name]) if k not in KEYWORDS}
+        users = {k for k in kids if k in bodies and k not in cells}
+        (nested if users else leaf).append(name)
+    with open(a.out, "w") as fh:
+        fh.writelines(n + "\n" for n in leaf)
+    print(f"rtlil_leaf_wrappers: {len(leaf)} leaf wrapper(s) match {a.pattern}; wrote {a.out}")
+    if nested:
+        print(f"rtlil_leaf_wrappers: {len(nested)} wrapper(s) instantiate other modules and "
+              f"stay elaborated per instance: {' '.join(nested[:8])}"
+              + (" ..." if len(nested) > 8 else ""), file=sys.stderr)
+    return 0
+
+
+PARAM_RE = re.compile(r"^\s*parameter\s+(?:(signed|real)\s+)?(\S+)\s+(.*?)\s*$")
+
+
+def cell_param(line):
+    """(name, value) from a cell's `parameter [signed|real] \\NAME VALUE` line;
+    a signed value keeps its flag in the value so the set compares exactly."""
+    m = PARAM_RE.match(line)
+    flag, name, value = m.group(1), m.group(2).lstrip("\\"), m.group(3)
+    return name, (f"{flag} {value}" if flag else value)
+
+
+def rtlil_to_sv(v):
+    """A parameter value as RTLIL writes it, as SystemVerilog source."""
+    v = v.strip()
+    signed = v.startswith("signed ")
+    v = v.split(" ", 1)[1] if v.startswith(("signed ", "real ")) else v
+    if v.startswith('"'):
+        return v
+    m = re.fullmatch(r"(\d+)'([01xzXZ]+)", v)
+    if m:
+        return f"{m.group(1)}'{'s' if signed else ''}b{m.group(2)}"
+    if re.fullmatch(r"-?\d+", v):
+        return v
+    raise ValueError(f"parameter value {v!r} not understood")
+
+
+def specialised(name, params, many):
+    if not many:
+        return name
+    tag = "__".join(f"{p}_{re.sub(r'[^0-9A-Za-z]', '_', v)}" for p, v in params)
+    return f"{name}__{tag}" if tag else name
+
+
+def cmd_fill(a):
+    t0 = time.time()
+    wrappers = {l.strip() for l in open(a.wrappers) if l.strip()}
+
+    # pass 1: the parameter sets each wrapper is instantiated with
+    sets = {}
+    cur = None
+    with open(a.il, errors="surrogateescape") as fh:
+        for line in fh:
+            if line.startswith("  cell "):
+                s = line.split()
+                typ = s[1].lstrip("\\")
+                cur = typ if typ in wrappers else None
+                params = []
+            elif cur is not None:
+                if line.startswith("    parameter "):
+                    params.append(cell_param(line))
+                elif line.startswith("  end"):
+                    sets.setdefault(cur, set()).add(tuple(sorted(params)))
+                    cur = None
+    if not sets:
+        print("rtlil_leaf_wrappers: no wrapper is instantiated; nothing to fill")
+        os.replace(a.il, a.out) if a.il != a.out else None
+        return 0
+    names = {}
+    for w, ss in sets.items():
+        for ps in ss:
+            names[(w, ps)] = specialised(w, ps, len(ss) > 1)
+
+    # one small elaboration: a top instantiating every set once
+    work = os.path.dirname(os.path.abspath(a.out))
+    top = "rtlil_leaf_wrappers_top"
+    sv = os.path.join(work, top + ".sv")
+    idx = {}
+    with open(sv, "w") as fh:
+        fh.write(f"module {top};\n")
+        for k, ((w, ps), nm) in enumerate(sorted(names.items())):
+            pv = ", ".join(f".{p}({rtlil_to_sv(v)})" for p, v in ps)
+            fh.write(f"  {w} {'#(' + pv + ') ' if pv else ''}u_{k} ();\n")
+            idx[f"u_{k}"] = nm
+        fh.write("endmodule\n")
+    il = os.path.join(work, top + ".il")
+    script = (f"read_slang -F {a.filelist} {a.stubs} {sv} --top {top} --keep-hierarchy "
+              f"{a.read_slang} ; hierarchy -top {top} ; write_rtlil {il}")
+    log = os.path.join(work, top + ".log")
+    with open(log, "w") as lf:
+        p = subprocess.run(a.yosys.split() + ["-p", script], stdout=lf, stderr=subprocess.STDOUT)
+    if p.returncode != 0 or not os.path.isfile(il):
+        sys.exit(f"rtlil_leaf_wrappers: elaborating the wrappers failed; see {log}")
+
+    # their definitions, renamed to their set's name
+    defs, keep, body = {}, None, []
+    with open(il, errors="surrogateescape") as fh:
+        pend = []
+        for line in fh:
+            if line.startswith("attribute ") and keep is None:
+                pend.append(line)
+                continue
+            if line.startswith("module "):
+                mname = line.split()[1].lstrip("\\")
+                inst = mname.rsplit(".", 1)[-1] if f"${top}." in mname else None
+                keep = idx.get(inst) if inst and mname.count(".") == 1 else None
+                body = [l for l in pend if not l.startswith("attribute \\top")]
+                body.append(f"module \\{keep}\n" if keep else line)
+                pend = []
+                continue
+            pend = []
+            if keep is not None:
+                body.append(line)
+                if line.startswith("end"):
+                    defs[keep] = body
+                    keep = None
+    missing = sorted(set(names.values()) - set(defs))
+    if missing:
+        sys.exit(f"rtlil_leaf_wrappers: no definition came back for {', '.join(missing[:5])}; see {log}")
+    for nm, b in defs.items():
+        users = [l.split()[1] for l in b if l.startswith("  cell ") and "$" in l.split()[1]
+                 and not l.split()[1].startswith("$")]
+        if users:
+            sys.exit(f"rtlil_leaf_wrappers: {nm} instantiates another module ({users[0]}); "
+                     "it is not a leaf wrapper")
+
+    # pass 2: rewrite the design
+    tmp = a.out + ".part"
+    n_cells = 0
+    with open(a.il, errors="surrogateescape") as fi, \
+         open(tmp, "w", errors="surrogateescape") as fo:
+        pend, skip, cell, params, block = [], False, None, [], []
+        for line in fi:
+            if skip:
+                if line.startswith("end"):
+                    skip = False
+                continue
+            if line.startswith("attribute "):
+                pend.append(line)
+                continue
+            if line.startswith("module ") and line.split()[1].lstrip("\\") in wrappers:
+                skip, pend = True, []          # the blackbox; its real contents follow
+                continue
+            fo.writelines(pend)
+            pend = []
+            if cell is not None:
+                if line.startswith("    parameter "):
+                    params.append(cell_param(line))
+                    continue
+                block.append(line)
+                if line.startswith("  end"):
+                    nm = names[(cell[0], tuple(sorted(params)))]
+                    fo.write(f"  cell \\{nm} {cell[1]}\n")
+                    fo.writelines(block)
+                    cell, n_cells = None, n_cells + 1
+                continue
+            if line.startswith("  cell "):
+                s = line.split()
+                typ = s[1].lstrip("\\")
+                if typ in wrappers:
+                    cell, params, block = (typ, s[2]), [], []
+                    continue
+            fo.write(line)
+        fo.writelines(pend)
+        for nm in sorted(defs):
+            fo.write("\n")
+            fo.writelines(defs[nm])
+    os.replace(tmp, a.out)
+    print(f"rtlil_leaf_wrappers: {n_cells:,} instance(s) of {len(sets)} wrapper(s), "
+          f"{len(defs)} definition(s) elaborated once each; wrote {a.out} "
+          f"in {time.time() - t0:.0f}s")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    f = sub.add_parser("find")
+    f.add_argument("--filelist", required=True)
+    f.add_argument("--stubs", required=True)
+    f.add_argument("--pattern", required=True, help="glob(s), comma separated")
+    f.add_argument("--out", required=True)
+    g = sub.add_parser("fill")
+    g.add_argument("--il", required=True)
+    g.add_argument("--out", required=True)
+    g.add_argument("--filelist", required=True)
+    g.add_argument("--stubs", required=True)
+    g.add_argument("--wrappers", required=True)
+    g.add_argument("--top", required=True)
+    g.add_argument("--read-slang", default="", help="the read_slang options the design used")
+    g.add_argument("--yosys", default="yosys -m slang")
+    a = ap.parse_args()
+    return cmd_find(a) if a.cmd == "find" else cmd_fill(a)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
