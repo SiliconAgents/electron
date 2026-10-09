@@ -35,7 +35,8 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
   print "                       [-patch <rules.py>] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
-  print "                       [-leaf_wrappers <glob>[,<glob>]]\n";
+  print "                       [-leaf_wrappers <glob>[,<glob>] [-leaf_soft <param>=<value>]\n";
+  print "                        [-leaf_soft_mode resize|dissolve]]\n";
   print "                       [--no_latchmap] [--no_verify] [--no_run]\n";
   print "\n";
   print "        -rtl            an RTL filelist, as the front end reads it: +incdir+ and\n";
@@ -74,6 +75,16 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        elaborated once per parameter set instead of once\n";
   print "                        per instance.  Only wrappers whose bodies hold\n";
   print "                        nothing but library cells; see 3RDBIN/rtlil_leaf_wrappers.\n";
+  print "        -leaf_soft      with -leaf_wrappers: wrappers instantiated with this\n";
+  print "                        parameter value (e.g. DONT_TOUCH=0) may be optimised;\n";
+  print "                        their cell becomes its liberty function, so abc maps,\n";
+  print "                        sizes and merges it.  Repeatable.  The rest keep\n";
+  print "                        their cell exactly.\n";
+  print "        -leaf_soft_mode resize: the cell becomes the smallest interchangeable\n";
+  print "                        one -- a text edit, no extra synthesis.  dissolve: the\n";
+  print "                        cell becomes its function and abc maps it with the logic\n";
+  print "                        around it -- fewer cells, more synthesis time.  Default\n";
+  print "                        resize.\n";
   print "        -flatten_below  keep a module as a hierarchy boundary only when its\n";
   print "                        subtree is at least this many cells, default 2000.\n";
   print "                        0 keeps every module, which costs area: a boundary is a\n";
@@ -100,6 +111,8 @@ my $jobs = 8;
 my $flattenBelow = 2000;
 my $abcDelay = "";
 my $leafWrappers = "";
+my @leafSoft = ();
+my $leafSoftMode = "resize";
 my $abcDriver = "";
 my $abcLoad = "";
 my $noLatchmap = 0;
@@ -124,6 +137,8 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-flatten_below"){$flattenBelow = $_[$i+1];}
   if($_[$i] eq "-abc_delay"){$abcDelay = $_[$i+1];}
   if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
+  if($_[$i] eq "-leaf_soft"){push(@leafSoft, $_[$i+1]);}
+  if($_[$i] eq "-leaf_soft_mode"){$leafSoftMode = $_[$i+1];}
   if($_[$i] eq "-abc_driver"){$abcDriver = $_[$i+1];}
   if($_[$i] eq "-abc_load"){$abcLoad = $_[$i+1];}
   if($_[$i] eq "-liberty"){ push(@libFiles, split(/\s*\,\s*/, $_[$i+1])); }
@@ -421,6 +436,12 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
       my $fill = "python3 $beehome/3RDBIN/rtlil_leaf_wrappers fill --il $rtlil.raw --out $rtlil" .
                  " --filelist $elabList --stubs $blackbox --wrappers $wrapList --top $topModule" .
                  " --yosys 'yosys -m $slangPlugin' --read-slang '$common $slangArgs'";
+      #<!-- -leaf_soft: a wrapper the RTL marks as optimisable is a hand-placed
+      #     cell with a hard-coded drive.  Kept as a cell, abc cannot resize or
+      #     merge it: on one design 422,627 drive-4 AOI22s were nearly the whole
+      #     area gap to a commercial flow, which is free to shrink them. -->
+      foreach my $c ( @leafSoft ) { $fill .= " --soft $c"; }
+      $fill .= " --liberty $liberty --soft-mode $leafSoftMode" if ( @leafSoft );
       my $wcmd = &dbfElectronToolCommand("python3", $fill, "$outDir/leaf_wrappers_fill.log");
       print "INFO-PAR-HR_SYN : 071 : elaborating each leaf wrapper's parameter sets once\n";
       system($wcmd) if ( defined $wcmd );
