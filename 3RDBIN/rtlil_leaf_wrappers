@@ -33,6 +33,7 @@ with nothing to fill it.
 """
 import argparse
 import fnmatch
+import gzip
 import os
 import re
 import subprocess
@@ -125,6 +126,212 @@ def rtlil_to_sv(v):
     raise ValueError(f"parameter value {v!r} not understood")
 
 
+def liberty_expr_to_sv(f):
+    """A liberty `function` as a SystemVerilog expression.  Liberty: ! and a
+    postfix ' are NOT, ^ is XOR, & * or plain adjacency is AND, | + is OR,
+    binding in that order."""
+    toks = re.findall(r"[A-Za-z_][\w\[\]]*|[01]|[()!'^&*|+]", f)
+    pos = [0]
+
+    def peek():
+        return toks[pos[0]] if pos[0] < len(toks) else None
+
+    def take():
+        pos[0] += 1
+        return toks[pos[0] - 1]
+
+    def atom():
+        t = take()
+        if t == "!":
+            e = f"(~{atom()})"
+        elif t == "(":
+            e = orx()
+            if take() != ")":
+                raise ValueError(f"unbalanced function {f!r}")
+        elif t in ("0", "1"):
+            e = f"1'b{t}"
+        elif t and re.match(r"[A-Za-z_]", t):
+            e = t
+        else:
+            raise ValueError(f"function {f!r} not understood at {t!r}")
+        while peek() == "'":
+            take()
+            e = f"(~{e})"
+        return e
+
+    def xorx():
+        e = atom()
+        while peek() == "^":
+            take()
+            e = f"({e} ^ {atom()})"
+        return e
+
+    def andx():
+        e = xorx()
+        while peek() in ("&", "*") or (peek() and (re.match(r"[A-Za-z_01(!]", peek()))):
+            if peek() in ("&", "*"):
+                take()
+            e = f"({e} & {xorx()})"
+        return e
+
+    def orx():
+        e = andx()
+        while peek() in ("|", "+"):
+            take()
+            e = f"({e} | {andx()})"
+        return e
+
+    out = orx()
+    if pos[0] != len(toks):
+        raise ValueError(f"function {f!r}: trailing {toks[pos[0]:]}")
+    return out
+
+
+def liberty_logic(path, cells):
+    """{cell: verilog module} for each single-output combinational cell in
+    `cells`, from its liberty function.  Sequential or multi-output cells, and
+    cells with no function, are left out -- they stay library cells.
+
+    A cell absent from this liberty under its own name is looked for under the
+    same name less its trailing letters -- the threshold-voltage flavour, which
+    changes the timing and never the function -- so the one synthesis liberty
+    serves a design that instantiates other flavours by hand."""
+    def vt_less(n):
+        return re.sub(r"[A-Z]+$", "", n)
+    byname = {}
+    for c in cells:
+        byname.setdefault(c, set()).add(c)
+        byname.setdefault(vt_less(c), set()).add(c)
+    want, found = set(cells), {}
+    op = gzip.open if path.endswith(".gz") else open
+    cell, depth, cdepth, pin, pins, seq = None, 0, 0, None, {}, False
+    cell_re = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
+    pin_re = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
+    kv_re = re.compile(r'^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;')
+    with op(path, "rt", errors="replace") as fh:
+        for line in fh:
+            if cell is None:
+                m = cell_re.match(line)
+                if m and (m.group(1) in byname or vt_less(m.group(1)) in byname):
+                    targets = byname.get(m.group(1)) or byname.get(vt_less(m.group(1)))
+                    targets = {t for t in targets if t not in found}
+                    if targets:
+                        cell, cdepth, pins, pin, seq = m.group(1), depth, {}, None, False
+            else:
+                if re.match(r"^\s*(ff|latch|statetable|ff_bank|latch_bank)\s*\(", line):
+                    seq = True
+                m = pin_re.match(line)
+                if m and pin is None:
+                    pin = m.group(1)
+                    pins[pin] = {}
+                elif pin is not None:
+                    m = kv_re.match(line)
+                    if m and m.group(1) in ("direction", "function"):
+                        pins[pin].setdefault(m.group(1), m.group(2).strip())
+            depth += line.count("{") - line.count("}")
+            if cell is not None and pin is not None and depth <= cdepth + 1:
+                pin = None
+            if cell is not None and depth <= cdepth:
+                ins = [n for n, d in pins.items() if d.get("direction") == "input"]
+                outs = [n for n, d in pins.items() if d.get("direction") == "output"]
+                if not seq and len(outs) == 1 and pins[outs[0]].get("function"):
+                    try:
+                        expr = liberty_expr_to_sv(pins[outs[0]]["function"])
+                        for t in targets:
+                            found[t] = (f"module {t} ({', '.join(ins + outs)});\n"
+                                        + "".join(f"  input {i};\n" for i in ins)
+                                        + f"  output {outs[0]};\n  assign {outs[0]} = {expr};\nendmodule\n")
+                    except ValueError:
+                        pass
+                cell = None
+                if len(found) == len(want):
+                    break
+    return found
+
+
+# the drive strength is the last D<n> or D<n>P<m> followed by a non-digit;
+# what precedes it is the cell's function, what follows its family and flavour
+DRIVE_RE = re.compile(r"^(.*)D(\d+)(?:P(\d+))?(\D.*)?$")
+
+
+def drive_of(name):
+    m = DRIVE_RE.match(name)
+    return float(f"{m.group(2)}.{m.group(3) or 0}") if m else 0.0
+
+
+def liberty_resize(path, cells, stubs):
+    """{cell: smaller cell} for the cells in `cells` that have a smaller
+    interchangeable cell: the same function (by truth table), the same pin
+    names, not dont_use, and present in `stubs` under the original's
+    threshold-voltage flavour.  Ties on area go to the stronger drive."""
+    def vt_less(n):
+        return re.sub(r"[A-Z]+$", "", n)
+    bases = {DRIVE_RE.match(c).group(1) for c in cells if DRIVE_RE.match(c)}
+    recs = {}
+    op = gzip.open if path.endswith(".gz") else open
+    cell, depth, cdepth, pin, pins, seq, area, dont = None, 0, 0, None, {}, False, None, False
+    cell_re = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
+    pin_re = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
+    kv_re = re.compile(r'^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;')
+    with op(path, "rt", errors="replace") as fh:
+        for line in fh:
+            if cell is None:
+                m = cell_re.match(line)
+                if m:
+                    d = DRIVE_RE.match(m.group(1))
+                    if d and d.group(1) in bases:
+                        cell, cdepth, pins, pin, seq, area, dont = m.group(1), depth, {}, None, False, None, False
+            else:
+                if re.match(r"^\s*(ff|latch|statetable|ff_bank|latch_bank)\s*\(", line):
+                    seq = True
+                m = pin_re.match(line)
+                if m and pin is None:
+                    pin = m.group(1)
+                    pins[pin] = {}
+                else:
+                    m = kv_re.match(line)
+                    if m and pin is not None and m.group(1) in ("direction", "function"):
+                        pins[pin].setdefault(m.group(1), m.group(2).strip())
+                    elif m and pin is None and m.group(1) == "area":
+                        area = float(m.group(2))
+                    elif m and pin is None and m.group(1) == "dont_use" and m.group(2) == "true":
+                        dont = True
+            depth += line.count("{") - line.count("}")
+            if cell is not None and pin is not None and depth <= cdepth + 1:
+                pin = None
+            if cell is not None and depth <= cdepth:
+                ins = sorted(n for n, dd in pins.items() if dd.get("direction") == "input")
+                outs = [n for n, dd in pins.items() if dd.get("direction") == "output"]
+                if not seq and len(outs) == 1 and pins[outs[0]].get("function") and area is not None:
+                    try:
+                        expr = liberty_expr_to_sv(pins[outs[0]]["function"])
+                        py = expr.replace("1'b0", "0").replace("1'b1", "1")
+                        tt = tuple(eval(py, {}, {n: (k >> i) & 1 for i, n in enumerate(ins)}) & 1
+                                   for k in range(1 << len(ins)))
+                        recs[cell] = (DRIVE_RE.match(cell).group(1), tuple(ins), outs[0], tt, area, dont)
+                    except (ValueError, SyntaxError, NameError):
+                        pass
+                cell = None
+    byvt = {}
+    for n, r in recs.items():
+        byvt.setdefault(vt_less(n), r)
+    out = {}
+    for c in cells:
+        mine = recs.get(c) or byvt.get(vt_less(c))
+        if not mine:
+            continue
+        suffix = c[len(vt_less(c)):]
+        cands = sorted(((r[4], -drive_of(n), n) for n, r in recs.items()
+                        if r[:4] == mine[:4] and not r[5]), key=lambda t: (t[0], t[1]))
+        for _, _, n in cands:
+            new = vt_less(n) + suffix
+            if new in stubs:
+                if new != c and recs.get(n, mine)[4] < mine[4] + 1e-12:
+                    out[c] = new
+                break
+    return out
+
+
 def specialised(name, params, many):
     if not many:
         return name
@@ -214,6 +421,97 @@ def cmd_fill(a):
             sys.exit(f"rtlil_leaf_wrappers: {nm} instantiates another module ({users[0]}); "
                      "it is not a leaf wrapper")
 
+    # --soft: wrappers whose parameters say they may be optimised get their
+    # library cell replaced by its Boolean function, so abc maps, sizes and
+    # merges them with the logic around them instead of keeping a hard-coded
+    # cell and drive.  A set that matches no --soft condition, or holds a cell
+    # with no usable function, keeps its library cell exactly.
+    soft_conds = []
+    for c in a.soft:
+        p, v = c.split("=", 1)
+        soft_conds.append((p.strip(), int(v.strip(), 0)))
+
+    def const_int(v):
+        v = v.split(" ", 1)[1] if v.startswith(("signed ", "real ")) else v
+        m = re.fullmatch(r"\d+'([01]+)", v)
+        return int(m.group(1), 2) if m else (int(v) if re.fullmatch(r"-?\d+", v) else None)
+
+    soft = sorted(nm for (w, ps), nm in names.items()
+                  if soft_conds and all(any(p == sp and const_int(v) == sv for p, v in ps)
+                                        for sp, sv in soft_conds))
+    n_soft = 0
+    if soft and a.soft_mode == "resize":
+        if not a.liberty:
+            sys.exit("rtlil_leaf_wrappers: --soft needs --liberty for the cells' functions")
+        cells_used = sorted({l.split()[1].lstrip("\\") for nm in soft for l in defs[nm]
+                           if l.startswith("  cell ") and not l.split()[1].startswith("$")})
+        t1 = time.time()
+        swap = liberty_resize(a.liberty, cells_used, stub_names(a.stubs))
+        for nm in soft:
+            new, hit = [], False
+            for l in defs[nm]:
+                s2 = l.split()
+                if l.startswith("  cell ") and s2[1].lstrip("\\") in swap:
+                    l = f"  cell \\{swap[s2[1].lstrip(chr(92))]} {s2[2]}\n"
+                    hit = True
+                new.append(l)
+            defs[nm] = new
+            n_soft += hit
+        print(f"rtlil_leaf_wrappers: resized {len(swap)} of {len(cells_used)} cell type(s) in the "
+              f"soft wrappers (liberty read in {time.time() - t1:.0f}s): "
+              + ", ".join(f"{k} -> {v}" for k, v in sorted(swap.items())))
+        soft = []
+    if soft:
+        if not a.liberty:
+            sys.exit("rtlil_leaf_wrappers: --soft needs --liberty for the cells' functions")
+        cells_used = sorted({l.split()[1].lstrip("\\") for nm in soft for l in defs[nm]
+                           if l.startswith("  cell ") and not l.split()[1].startswith("$")})
+        t1 = time.time()
+        logic = liberty_logic(a.liberty, cells_used)
+        hard = [c for c in cells_used if c not in logic]
+        soft = [nm for nm in soft
+                if not any(l.startswith("  cell ") and l.split()[1].lstrip("\\") in hard
+                           for l in defs[nm])]
+        print(f"rtlil_leaf_wrappers: {len(logic)} of {len(cells_used)} cell(s) in the soft wrappers "
+              f"have a usable function (liberty read in {time.time() - t1:.0f}s)"
+              + (f"; kept as cells: {' '.join(hard)}" if hard else ""))
+    if soft:
+        sil, lv, oil = (os.path.join(work, x) for x in ("soft_in.il", "soft_logic.v", "soft_out.il"))
+        with open(sil, "w", errors="surrogateescape") as fh:
+            for nm in soft:
+                fh.writelines(defs[nm])
+                fh.write("\n")
+        with open(lv, "w") as fh:
+            fh.writelines(logic.values())
+        script = (f"read_rtlil {sil} ; read_verilog -overwrite {lv} ; flatten {' '.join(soft)} ; "
+                  f"delete t:$scopeinfo ; opt_clean ; write_rtlil {oil}")
+        slog = os.path.join(work, "soft.log")
+        with open(slog, "w") as lf:
+            p = subprocess.run(a.yosys.split() + ["-p", script], stdout=lf, stderr=subprocess.STDOUT)
+        if p.returncode != 0:
+            sys.exit(f"rtlil_leaf_wrappers: dissolving the soft wrappers failed; see {slog}")
+        want, keep, body, pend = set(soft), None, [], []
+        with open(oil, errors="surrogateescape") as fh:
+            for line in fh:
+                if line.startswith("attribute ") and keep is None:
+                    pend.append(line)
+                    continue
+                if line.startswith("module "):
+                    mname = line.split()[1].lstrip("\\")
+                    keep = mname if mname in want else None
+                    body = [l for l in pend if not l.startswith("attribute \\top")] + [line]
+                    pend = []
+                    continue
+                pend = []
+                if keep is not None:
+                    body.append(line)
+                    if line.startswith("end"):
+                        defs[keep] = body
+                        n_soft += 1
+                        keep = None
+        if n_soft != len(soft):
+            sys.exit(f"rtlil_leaf_wrappers: {len(soft) - n_soft} soft wrapper(s) did not come back; see {slog}")
+
     # pass 2: rewrite the design
     tmp = a.out + ".part"
     n_cells = 0
@@ -257,7 +555,10 @@ def cmd_fill(a):
             fo.writelines(defs[nm])
     os.replace(tmp, a.out)
     print(f"rtlil_leaf_wrappers: {n_cells:,} instance(s) of {len(sets)} wrapper(s), "
-          f"{len(defs)} definition(s) elaborated once each; wrote {a.out} "
+          f"{len(defs)} definition(s) elaborated once each"
+          + (f", {n_soft} of them {'resized' if a.soft_mode == 'resize' else 'dissolved into logic'}"
+             if n_soft else "")
+          + f"; wrote {a.out} "
           f"in {time.time() - t0:.0f}s")
     return 0
 
@@ -279,6 +580,16 @@ def main():
     g.add_argument("--top", required=True)
     g.add_argument("--read-slang", default="", help="the read_slang options the design used")
     g.add_argument("--yosys", default="yosys -m slang")
+    g.add_argument("--soft", action="append", default=[], metavar="PARAM=VALUE",
+                   help="wrappers instantiated with this parameter value may be "
+                        "optimised: their library cell becomes its liberty function "
+                        "(repeatable; all must hold)")
+    g.add_argument("--liberty", help="with --soft: where the cells' functions are read")
+    g.add_argument("--soft-mode", choices=("dissolve", "resize"), default="dissolve",
+                   help="dissolve: the cell becomes its function and abc maps it with the "
+                        "logic around it.  resize: the cell stays and becomes the smallest "
+                        "interchangeable cell (same function, same pins, same flavour); "
+                        "no extra synthesis, and per-instance sizing is left to later")
     a = ap.parse_args()
     return cmd_find(a) if a.cmd == "find" else cmd_fill(a)
 
