@@ -319,15 +319,33 @@ def run_one(job):
     # absorbed it -- the same module defined in a dozen files. The second
     # `hierarchy -top` drops what nothing references any more.
     flatten = f"flatten\nhierarchy -top {name}" if absorb else ""
-    script = SCRIPT.format(blackbox=stubs, children=children, src=src,
-                           absorb=absorb, flatten=flatten,
-                           top=name, liberty=args.liberty, dest=dest,
-                           latchmap=(f"techmap -map {args.latchmap}"
-                                     if args.latchmap else ""),
-                           abc=args.abc_opts)
+    def script(abc):
+        return SCRIPT.format(blackbox=stubs, children=children, src=src,
+                             absorb=absorb, flatten=flatten,
+                             top=name, liberty=args.liberty, dest=dest,
+                             latchmap=(f"techmap -map {args.latchmap}"
+                                       if args.latchmap else ""),
+                             abc=abc)
     t = time.time()
-    p = subprocess.run([args.yosys, "-p", script], capture_output=True, text=True)
+    # --abc-timeout: abc's timing-driven sizing (upsize/dnsize) does not scale
+    # to one very large flat module -- a 127k-cell register bank, a latch
+    # array with its read muxes, ran 25 minutes and held up every level above
+    # it where its siblings took seconds.  Past the limit the job is rerun with
+    # plain mapping and the fallback is reported; sizing such a module is left
+    # to the placement-aware step.
+    fallback = False
+    limit = args.abc_timeout if args.abc_delay else 0
+    try:
+        p = subprocess.run([args.yosys, "-p", script(args.abc_opts)], capture_output=True,
+                           text=True, timeout=limit or None)
+    except subprocess.TimeoutExpired:
+        fallback = True
+        p = subprocess.run([args.yosys, "-p", script("-fast " if args.abc_fast else "")],
+                           capture_output=True, text=True)
     with open(log, "w") as fh:
+        if fallback:
+            fh.write(f"# yosys_bottom_up: buffering and sizing passed --abc-timeout "
+                     f"{limit}s; this is the plain-mapping rerun\n")
         fh.write(p.stdout)
         fh.write(p.stderr)
     cells = 0
@@ -342,7 +360,8 @@ def run_one(job):
                 err = line
         err = err or f"rc={p.returncode}"
     return {"name": name, "copies": copies, "cells": cells, "rc": p.returncode,
-            "err": err, "secs": time.time() - t, "log": log, "dest": dest}
+            "err": err, "secs": time.time() - t, "log": log, "dest": dest,
+            "fallback": fallback}
 
 
 def main():
@@ -374,6 +393,9 @@ def main():
                     help="buffer high-fanout nets and size gates toward this "
                          "delay target (abc -constr -D), in picoseconds. Off "
                          "by default: plain abc maps and does neither")
+    ap.add_argument("--abc-timeout", type=int, metavar="SEC", default=600,
+                    help="with --abc-delay: a module whose synthesis runs longer is "
+                         "redone without buffering and sizing (default 600; 0 = no limit)")
     ap.add_argument("--abc-driver", metavar="CELL",
                     help="with --abc-delay: the cell driving each module's "
                          "inputs (default: a buffer of about twice the "
@@ -449,6 +471,7 @@ def main():
 
     done = []                      # netlists written so far, read as blackboxes
     failed_any = False
+    fallbacks = []
     grand = time.time()
     for L, d in levels:
         mods = modules_of(d, args.manifest)
@@ -481,6 +504,10 @@ def main():
         with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
             for r in ex.map(run_one, jobs):
                 rows.append(r)
+                if r.get("fallback"):
+                    fallbacks.append(r["name"])
+                    print(f"  {r['name']}: buffering and sizing passed --abc-timeout "
+                          f"{args.abc_timeout}s; mapped without them")
                 if r["rc"] != 0:
                     print(f"  FAILED {r['name']}: {r['err']}")
                     print(f"         see {r['log']}")
@@ -508,6 +535,9 @@ def main():
     if failed_any:
         return 1
     top = os.path.basename(done[-1])[:-2] if done else "?"
+    if fallbacks:
+        print(f"yosys_bottom_up: {len(fallbacks)} module(s) mapped without buffering and "
+              f"sizing (--abc-timeout {args.abc_timeout}s): {' '.join(fallbacks)}")
     print(f"yosys_bottom_up: top is {top}; the design is the whole directory, "
           f"one file per distinct module.")
     if args.verify:
@@ -540,8 +570,19 @@ def verify(args, netlists, top):
         print(f"yosys_bottom_up: VERIFY FAILED -- {err[-1] if err else p.returncode}")
         print(f"yosys_bottom_up: see {log}")
         return 1
-    tail = p.stdout.split("=== design hierarchy ===")[-1]
     ours = {os.path.basename(n)[:-2] for n in netlists}
+    # A netlist written here that the top does not reach is a module whose
+    # every instance went to another class -- the grouping put a parent of
+    # it with a parent of a different variant.  It links; it is wrong.
+    unused = sorted(m for m in re.findall(r"Removing unused module `\\?([^']+)'",
+                                          p.stdout) if m in ours)
+    if unused:
+        print(f"yosys_bottom_up: VERIFY FAILED -- {len(unused)} netlist(s) not "
+              f"reached from {top}: {' '.join(unused[:12])}"
+              f"{' ...' if len(unused) > 12 else ''}")
+        print(f"yosys_bottom_up: see {log}")
+        return 1
+    tail = p.stdout.split("=== design hierarchy ===")[-1]
     total, cells = leaf_cells(tail, ours)
     print(f"\nyosys_bottom_up: verified in {time.time() - t:.1f}s -- "
           f"{top} is {total:,} standard cell(s) of {len(cells)} type(s)")

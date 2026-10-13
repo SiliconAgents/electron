@@ -32,6 +32,7 @@ wrappers) is left alone by `find`: its child would come back as a blackbox
 with nothing to fill it.
 """
 import argparse
+import collections
 import fnmatch
 import gzip
 import os
@@ -63,6 +64,49 @@ def filelist_sources(path):
     return out
 
 
+def filelist_incdirs(path):
+    base = os.path.dirname(os.path.abspath(path))
+    out = []
+    for raw in open(path, errors="replace"):
+        s = raw.strip()
+        if s.startswith("+incdir+"):
+            for d in s[len("+incdir+"):].split("+"):
+                if d:
+                    out.append(d if os.path.isabs(d) else os.path.normpath(os.path.join(base, d)))
+    return out
+
+
+INCLUDE_RE = re.compile(r'^\s*`include\s+"([^"]+)"', re.M)
+
+
+def sources_with_includes(filelist):
+    """The filelist's files and every file they `include, transitively:
+    a module defined in an included file is as much a definition as one
+    listed directly (generated decoders are typically pulled in that way).
+    An include resolves against the including file's directory, then the
+    +incdir directories in order."""
+    incdirs = filelist_incdirs(filelist)
+    seen, order = set(), []
+    stack = list(reversed(filelist_sources(filelist)))
+    while stack:
+        f = stack.pop()
+        if f in seen:
+            continue
+        seen.add(f)
+        try:
+            t = open(f, errors="replace").read()
+        except OSError:
+            continue
+        order.append((f, t))
+        for inc in INCLUDE_RE.findall(strip_comments(t)):
+            for d in [os.path.dirname(f)] + incdirs:
+                c = os.path.normpath(os.path.join(d, inc))
+                if os.path.isfile(c):
+                    stack.append(c)
+                    break
+    return order
+
+
 def stub_names(path):
     names = set()
     with open(path, errors="replace") as fh:
@@ -76,11 +120,8 @@ def cmd_find(a):
     pats = [p.strip() for p in a.pattern.split(",") if p.strip()]
     cells = stub_names(a.stubs)
     bodies = {}
-    for f in filelist_sources(a.filelist):
-        try:
-            t = strip_comments(open(f, errors="replace").read())
-        except OSError:
-            continue
+    for f, raw in sources_with_includes(a.filelist):
+        t = strip_comments(raw)
         for m in re.finditer(r"^\s*module\s+(\w+)(.*?)^\s*endmodule", t, re.S | re.M):
             bodies.setdefault(m.group(1), m.group(2))
     leaf, nested = [], []
@@ -332,6 +373,138 @@ def liberty_resize(path, cells, stubs):
     return out
 
 
+def liberty_tables(path, max_in=6):
+    """[(cell, inputs, {output: truth table}, area)] for every combinational
+    cell, single- or multi-output, whose outputs all have a function and which
+    is not dont_use.  A truth table is a tuple over the inputs in the order
+    given, input i being bit i of the row index."""
+    out = []
+    op = gzip.open if path.endswith(".gz") else open
+    cell, depth, cdepth, pin, pins, seq, area, dont = None, 0, 0, None, {}, False, None, False
+    cell_re = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
+    pin_re = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
+    kv_re = re.compile(r'^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;')
+    with op(path, "rt", errors="replace") as fh:
+        for line in fh:
+            if cell is None:
+                m = cell_re.match(line)
+                if m:
+                    cell, cdepth, pins, pin, seq, area, dont = m.group(1), depth, {}, None, False, None, False
+            else:
+                if re.match(r"^\s*(ff|latch|statetable|ff_bank|latch_bank)\s*\(", line):
+                    seq = True
+                m = pin_re.match(line)
+                if m and pin is None:
+                    pin = m.group(1)
+                    pins[pin] = {}
+                else:
+                    m = kv_re.match(line)
+                    if m and pin is not None and m.group(1) in ("direction", "function"):
+                        pins[pin].setdefault(m.group(1), m.group(2).strip())
+                    elif m and pin is None and m.group(1) == "area":
+                        area = float(m.group(2))
+                    elif m and pin is None and m.group(1) == "dont_use" and m.group(2) == "true":
+                        dont = True
+            depth += line.count("{") - line.count("}")
+            if cell is not None and pin is not None and depth <= cdepth + 1:
+                pin = None
+            if cell is not None and depth <= cdepth:
+                ins = sorted(n for n, d in pins.items() if d.get("direction") == "input")
+                outs = sorted(n for n, d in pins.items() if d.get("direction") == "output")
+                if (not seq and not dont and area is not None and outs and len(ins) <= max_in
+                        and all(pins[o].get("function") for o in outs)):
+                    try:
+                        tts = {}
+                        for o in outs:
+                            py = liberty_expr_to_sv(pins[o]["function"]).replace("1'b0", "0").replace("1'b1", "1")
+                            tts[o] = tuple(eval(py, {}, {n: (k >> i) & 1 for i, n in enumerate(ins)}) & 1
+                                           for k in range(1 << len(ins)))
+                        out.append((cell, tuple(ins), tts, area))
+                    except (ValueError, SyntaxError, NameError):
+                        pass
+                cell = None
+    return out
+
+
+_GATES = {"$_BUF_": lambda a: a["A"], "$_NOT_": lambda a: 1 - a["A"],
+          "$_AND_": lambda a: a["A"] & a["B"], "$_OR_": lambda a: a["A"] | a["B"],
+          "$_XOR_": lambda a: a["A"] ^ a["B"], "$_XNOR_": lambda a: 1 - (a["A"] ^ a["B"]),
+          "$_NAND_": lambda a: 1 - (a["A"] & a["B"]), "$_NOR_": lambda a: 1 - (a["A"] | a["B"]),
+          "$_ANDNOT_": lambda a: a["A"] & (1 - a["B"]), "$_ORNOT_": lambda a: a["A"] | (1 - a["B"]),
+          "$_MUX_": lambda a: a["B"] if a["S"] else a["A"]}
+
+
+def module_tables(mod):
+    """(inputs, {output: truth table}) of one module of a yosys JSON netlist
+    holding only fine-grained gates, or None if it holds anything else or a
+    port wider than one bit."""
+    ins, outs = [], []
+    for n, p in mod["ports"].items():
+        if len(p["bits"]) != 1 or p["direction"] not in ("input", "output"):
+            return None
+        (ins if p["direction"] == "input" else outs).append((n, p["bits"][0]))
+    if not ins or not outs:
+        return None
+    cells = list(mod["cells"].values())
+    if any(c["type"] not in _GATES for c in cells):
+        return None
+    ins.sort()
+    outs.sort()
+    tts = {o: [] for o, _ in outs}
+    for k in range(1 << len(ins)):
+        v = {"0": 0, "1": 1}
+        for i, (_, b) in enumerate(ins):
+            v[b] = (k >> i) & 1
+        pending = cells
+        while pending:
+            left = []
+            for c in pending:
+                args = {pn: c["connections"][pn][0] for pn, d in c["port_directions"].items() if d == "input"}
+                if all(b in v for b in args.values()):
+                    y = [pn for pn, d in c["port_directions"].items() if d == "output"][0]
+                    v[c["connections"][y][0]] = _GATES[c["type"]]({pn: v[b] for pn, b in args.items()})
+                else:
+                    left.append(c)
+            if len(left) == len(pending):
+                return None                      # a loop, or an undriven net
+            pending = left
+        for o, b in outs:
+            if b not in v:
+                return None
+            tts[o].append(v[b])
+    return [n for n, _ in ins], {o: tuple(t) for o, t in tts.items()}
+
+
+def match_cell(ins, tts, lib):
+    """(cell, {module port: cell pin}) for the smallest library cell computing
+    the same outputs as `tts` under some assignment of the module's inputs to
+    its inputs and outputs to its outputs; None if none does."""
+    import itertools
+    k, m = len(ins), len(tts)
+    best = None
+    for cell, cins, ctts, area in lib:
+        if len(cins) != k or len(ctts) != m or (best and area >= best[2]):
+            continue
+        for perm in itertools.permutations(range(k)):
+            # module input i is cell input perm[i]; row r of the cell table is
+            # row idx[r] of the module table
+            idx = [sum(((r >> perm[i]) & 1) << i for i in range(k)) for r in range(1 << k)]
+            pins, used = {}, set()
+            for o, t in tts.items():
+                want = tuple(t[idx[r]] for r in range(1 << k))
+                hit = [co for co, ct in ctts.items() if ct == want and co not in used]
+                if not hit:
+                    break
+                pins[o] = hit[0]
+                used.add(hit[0])
+            else:
+                pins.update({ins[i]: cins[perm[i]] for i in range(k)})
+                if not best or area < best[2] or (area == best[2] and len(cell) < len(best[0])):
+                    best = (cell, pins, area)
+                break
+    return best and (best[0], best[1])
+
+
 def specialised(name, params, many):
     if not many:
         return name
@@ -343,22 +516,117 @@ def cmd_fill(a):
     t0 = time.time()
     wrappers = {l.strip() for l in open(a.wrappers) if l.strip()}
 
-    # pass 1: the parameter sets each wrapper is instantiated with
+    # --drop: wrappers matching these globs whose outputs nothing reads are
+    # deleted, not filled.  Logic the design never looks at -- a decoder
+    # producing instruction names as text for a simulation-only trace, say --
+    # still has to be converted before synthesis can find it dead, and that is
+    # where the time goes.  Conservative: an output is read if its wire is
+    # named anywhere else in the parent module, or is one of its ports.
+    drop_pats = [g.strip() for g in a.drop.split(",") if g.strip()] if a.drop else []
+    droppable = {w for w in wrappers if any(fnmatch.fnmatchcase(w, g) for g in drop_pats)}
+    outs = {}                                   # droppable wrapper -> its output ports
+    if droppable:
+        cur = None
+        with open(a.il, errors="surrogateescape") as fh:
+            for line in fh:
+                if line.startswith("module "):
+                    n = line.split()[1].lstrip("\\")
+                    cur = n if n in droppable else None
+                    if cur:
+                        outs[cur] = set()
+                elif cur is not None:
+                    if line.startswith("  wire ") and " output " in line:
+                        outs[cur].add(line.split()[-1])
+                    elif line.startswith("end"):
+                        cur = None
+
+    TOK = re.compile(r"[\\$][^\s{}]+")
+
+    def dead_cells(mod_lines):
+        """(cell name) of droppable cells in one module whose outputs nothing reads."""
+        uses = collections.Counter()
+        ports = set()
+        for l in mod_lines:
+            if l.startswith("  wire "):
+                if " input " in l or " output " in l or " inout " in l:
+                    ports.add(l.split()[-1])
+                continue
+            uses.update(TOK.findall(l))
+        out, cell, block = [], None, []
+        for l in mod_lines:
+            if l.startswith("  cell "):
+                t = l.split()
+                cell = (t[1].lstrip("\\"), t[2]) if t[1].lstrip("\\") in droppable else None
+                block = [l]
+            elif cell is not None:
+                block.append(l)
+                if l.startswith("  end"):
+                    own = collections.Counter(t for b in block for t in TOK.findall(b))
+                    read = False
+                    for b in block:
+                        c = b.split(None, 2)
+                        if len(c) == 3 and c[0] == "connect" and c[1] in outs.get(cell[0], ()):
+                            for w in TOK.findall(c[2]):
+                                if w in ports or uses[w] - own[w] > 0:
+                                    read = True
+                    if not read:
+                        out.append(cell[1])
+                    cell = None
+        return out
+
+    # pass 1: the parameter sets each wrapper is instantiated with, and which
+    # droppable instances nothing reads
     sets = {}
-    cur = None
+    dead = set()
+    cur, mod, mod_lines = None, None, []
     with open(a.il, errors="surrogateescape") as fh:
         for line in fh:
+            if droppable:
+                if line.startswith("module "):
+                    mod, mod_lines = line.split()[1], []
+                elif line.startswith("end"):
+                    if mod is not None and any(l.startswith("  cell ") and l.split()[1].lstrip("\\") in droppable
+                                               for l in mod_lines):
+                        dead.update((mod, c) for c in dead_cells(mod_lines))
+                    mod = None
+                elif mod is not None:
+                    mod_lines.append(line)
             if line.startswith("  cell "):
                 s = line.split()
                 typ = s[1].lstrip("\\")
-                cur = typ if typ in wrappers else None
+                cur = (typ, s[2]) if typ in wrappers else None
                 params = []
             elif cur is not None:
                 if line.startswith("    parameter "):
                     params.append(cell_param(line))
                 elif line.startswith("  end"):
-                    sets.setdefault(cur, set()).add(tuple(sorted(params)))
+                    sets.setdefault(cur[0], []).append((cur[1], tuple(sorted(params))))
                     cur = None
+    # attribute each parameter set to the instances that survive the drop
+    live = {}
+    if dead:
+        # dead is keyed by (module, cell); sets by cell name only, so recount
+        cur, mod = None, None
+        with open(a.il, errors="surrogateescape") as fh:
+            for line in fh:
+                if line.startswith("module "):
+                    mod = line.split()[1]
+                elif line.startswith("  cell "):
+                    s2 = line.split()
+                    typ = s2[1].lstrip("\\")
+                    cur = (typ, s2[2]) if typ in wrappers and (mod, s2[2]) not in dead else None
+                    params = []
+                elif cur is not None:
+                    if line.startswith("    parameter "):
+                        params.append(cell_param(line))
+                    elif line.startswith("  end"):
+                        live.setdefault(cur[0], set()).add(tuple(sorted(params)))
+                        cur = None
+        sets = live
+        print(f"rtlil_leaf_wrappers: dropping {len(dead):,} instance(s) whose outputs nothing reads; "
+              f"{len(droppable - set(live))} wrapper type(s) left with no instance are not elaborated")
+    else:
+        sets = {w: {ps for _, ps in v} for w, v in sets.items()}
     if not sets:
         print("rtlil_leaf_wrappers: no wrapper is instantiated; nothing to fill")
         os.replace(a.il, a.out) if a.il != a.out else None
@@ -381,8 +649,17 @@ def cmd_fill(a):
             idx[f"u_{k}"] = nm
         fh.write("endmodule\n")
     il = os.path.join(work, top + ".il")
-    script = (f"read_slang -F {a.filelist} {a.stubs} {sv} --top {top} --keep-hierarchy "
-              f"{a.read_slang} ; hierarchy -top {top} ; write_rtlil {il}")
+    # Processes are lowered here rather than by read_slang, and without
+    # proc_rmdead.  That pass prunes unreachable case branches by comparing
+    # patterns pairwise, and on a generated instruction decoder -- a casez of
+    # thousands of overlapping wildcard patterns -- it ran past twelve minutes
+    # on one file that the remaining passes lower in three.  It is an early
+    # optimisation only: the logic is the same, and synthesis removes the dead
+    # branches later anyway.
+    script = (f"read_slang -F {a.filelist} {a.stubs} {sv} --top {top} --keep-hierarchy --no-proc "
+              f"{a.read_slang} ; hierarchy -top {top} ; "
+              f"proc_clean ; proc_prune ; proc_init ; proc_arst ; proc_rom ; proc_mux ; "
+              f"proc_dlatch ; proc_dff ; proc_memwr ; proc_clean ; write_rtlil {il}")
     log = os.path.join(work, top + ".log")
     with open(log, "w") as lf:
         p = subprocess.run(a.yosys.split() + ["-p", script], stdout=lf, stderr=subprocess.STDOUT)
@@ -512,13 +789,84 @@ def cmd_fill(a):
         if n_soft != len(soft):
             sys.exit(f"rtlil_leaf_wrappers: {len(soft) - n_soft} soft wrapper(s) did not come back; see {slog}")
 
+    # --harden: a wrapper the RTL writes as plain logic -- a full adder as XORs
+    # and ANDs -- where the designer meant one library cell.  Left as logic,
+    # abc rebuilds it from a carry cell and separate XORs, and the
+    # multi-output cell it stands for is one abc cannot choose at all (its
+    # mapper takes single-output cells only).  Each matching definition is
+    # replaced by the smallest library cell with the same truth table, under
+    # any assignment of its pins; one with no such cell is left as it was.
+    n_hard = 0
+    hard_pats = [g.strip() for g in a.harden.split(",") if g.strip()] if a.harden else []
+    hard = sorted(nm for (w, ps), nm in names.items()
+                  if any(fnmatch.fnmatchcase(w, g) for g in hard_pats)
+                  and not any(l.startswith("  cell ") and not l.split()[1].startswith("$")
+                              for l in defs[nm]))
+    if hard:
+        if not a.liberty:
+            sys.exit("rtlil_leaf_wrappers: --harden needs --liberty for the cells' functions")
+        import json
+        hil, hjs = (os.path.join(work, x) for x in ("harden_in.il", "harden.json"))
+        with open(hil, "w", errors="surrogateescape") as fh:
+            for nm in hard:
+                fh.writelines(defs[nm])
+                fh.write("\n")
+        script = (f"read_rtlil {hil} ; proc ; flatten ; techmap ; opt_clean ; "
+                  f"delete t:$scopeinfo ; write_json {hjs}")
+        hlog = os.path.join(work, "harden.log")
+        with open(hlog, "w") as lf:
+            p = subprocess.run(a.yosys.split() + ["-p", script], stdout=lf, stderr=subprocess.STDOUT)
+        if p.returncode != 0:
+            sys.exit(f"rtlil_leaf_wrappers: reading the --harden wrappers failed; see {hlog}")
+        mods = json.load(open(hjs))["modules"]
+        t1 = time.time()
+        lib = liberty_tables(a.liberty)
+        stubs = stub_names(a.stubs)
+        lib = [r for r in lib if r[0] in stubs]
+        done = []
+        for nm in hard:
+            mt = module_tables(mods.get(nm, {"ports": {}, "cells": {}}))
+            hit = mt and match_cell(mt[0], mt[1], lib)
+            if not hit:
+                print(f"rtlil_leaf_wrappers: --harden: no library cell computes {nm}; left as logic")
+                continue
+            cell, pins = hit
+            head = [l for l in defs[nm] if not l.startswith((" ", "end"))]
+            ports = [l for l in defs[nm] if l.startswith("  wire ") and
+                     (" input " in l or " output " in l)]
+            body = head + ports + [f"  cell \\{cell} \\u_{cell.lower()}\n"]
+            body += [f"    connect \\{pins[pn]} \\{pn}\n" for pn in sorted(pins)]
+            body += ["  end\n", "end\n"]
+            defs[nm] = body
+            done.append(f"{nm} -> {cell}")
+            n_hard += 1
+        print(f"rtlil_leaf_wrappers: hardened {n_hard} of {len(hard)} wrapper definition(s) "
+              f"(liberty read in {time.time() - t1:.0f}s)" + (": " + ", ".join(done) if done else ""))
+
     # pass 2: rewrite the design
     tmp = a.out + ".part"
     n_cells = 0
+    n_dropped = 0
     with open(a.il, errors="surrogateescape") as fi, \
          open(tmp, "w", errors="surrogateescape") as fo:
         pend, skip, cell, params, block = [], False, None, [], []
+        cattr, drop_cell, mod = [], False, None
         for line in fi:
+            if drop_cell:
+                if line.startswith("  end"):
+                    drop_cell = False
+                continue
+            if line.startswith("module "):
+                mod = line.split()[1]
+            if dead and line.startswith("  attribute ") and cell is None:
+                cattr.append(line)
+                continue
+            if dead and line.startswith("  cell ") and (mod, line.split()[2]) in dead:
+                cattr, drop_cell, n_dropped = [], True, n_dropped + 1
+                continue
+            if cattr:
+                fo.writelines(cattr)
+                cattr = []
             if skip:
                 if line.startswith("end"):
                     skip = False
@@ -558,6 +906,8 @@ def cmd_fill(a):
           f"{len(defs)} definition(s) elaborated once each"
           + (f", {n_soft} of them {'resized' if a.soft_mode == 'resize' else 'dissolved into logic'}"
              if n_soft else "")
+          + (f", {n_hard} hardened into one library cell" if n_hard else "")
+          + (f", {n_dropped:,} unread instance(s) dropped" if n_dropped else "")
           + f"; wrote {a.out} "
           f"in {time.time() - t0:.0f}s")
     return 0
@@ -585,6 +935,12 @@ def main():
                         "optimised: their library cell becomes its liberty function "
                         "(repeatable; all must hold)")
     g.add_argument("--liberty", help="with --soft: where the cells' functions are read")
+    g.add_argument("--harden", metavar="GLOBS",
+                   help="wrappers matching these globs whose body is plain logic become the "
+                        "smallest library cell with the same truth table (needs --liberty)")
+    g.add_argument("--drop", metavar="GLOBS",
+                   help="wrappers matching these globs (comma separated) whose outputs "
+                        "nothing reads are deleted instead of filled")
     g.add_argument("--soft-mode", choices=("dissolve", "resize"), default="dissolve",
                    help="dissolve: the cell becomes its function and abc maps it with the "
                         "logic around it.  resize: the cell stays and becomes the smallest "

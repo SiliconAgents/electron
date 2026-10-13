@@ -84,6 +84,8 @@ def scan(path):
     mods = []
     name = None
     body, kids, pend = [], collections.Counter(), []
+    order = []                  # user child types in body order, for resolve
+    local, children = {}, {}
     canon = None
     depth = 0
     start = 0
@@ -110,6 +112,7 @@ def scan(path):
                 if not attrs:
                     start = pos
                 name, body, kids, depth = nm, [], collections.Counter(), 0
+                order = []
                 canon = _yd.Canon()
                 continue
             if name is None:
@@ -118,11 +121,14 @@ def scan(path):
             if s == "end" and depth == 0:
                 fp = hashlib.sha1("\n".join(body).encode()).hexdigest()
                 mods.append(Module(name, fp, kids, start, fh.tell()))
+                local[name], children[name] = fp, order
                 name = None
                 continue
             p = s.split()
             if p and p[0] == "cell" and len(p) >= 2:
                 kids[p[1]] += 1
+                if p[1].startswith("\\"):
+                    order.append(p[1])
             if s.startswith(("cell ", "process ", "switch ", "case ", "sync ")):
                 depth += 1
             elif s == "end":
@@ -130,6 +136,12 @@ def scan(path):
             n = _yd.normalise(line, canon)
             if n:
                 body.append(n)
+    # the body hash forgets which variant of each child a module holds; see
+    # yosys_dedup's resolve -- without it a parent of one variant and a
+    # parent of another were one class, and the second variant was orphaned
+    fps = _yd.resolve(local, children)
+    for m in mods:
+        m.fp = fps[m.name]
     return mods, bbox
 
 
@@ -145,6 +157,25 @@ def classify(mods, bbox):
     # is a leaf.
     kids = {fp: {name2fp[k] for k in v[0].kids if k not in bbox and k in name2fp}
             for fp, v in cls.items()}
+
+    # Every member must hold the same child CLASSES as the representative,
+    # because the representative's text is what all of them get.  resolve()
+    # makes this true by construction; this is the check that a later change
+    # to the fingerprint cannot quietly undo.  A fingerprint that once forgot
+    # the child's variant merged parents of different children, and the only
+    # trace was a netlist with seven modules nothing instantiated.
+    def held(m):
+        c = collections.Counter()
+        for k, n in m.kids.items():
+            if k in name2fp and k not in bbox:
+                c[name2fp[k]] += n
+        return c
+    for fp, v in cls.items():
+        want = held(v[0])
+        for m in v[1:]:
+            if held(m) != want:
+                sys.exit(f"rtlil_bottom_up: INTERNAL -- {m.name} and {v[0].name} "
+                         f"share a fingerprint but hold different child modules")
 
     level = {}
     sys.setrecursionlimit(100000)
@@ -352,6 +383,18 @@ def main():
         # the PRE-synthesis one -- generic cells and standard cells together --
         # which is the only size available before anything is mapped.
         kids, _ = contents(cls, name2fp, bbox)
+        # ONE ROOT.  A class that nothing instantiates, beside the top, means
+        # a parent was merged into a class whose representative holds a
+        # different variant -- that variant's copies would be synthesised
+        # with the wrong logic, and the netlist would still link.  No
+        # DESIGN.tsv is written, so hier_synthesis stops here.
+        child_of = {c for k in kids.values() for c in k}
+        roots = sorted((canon[fp] for fp in cls if fp not in child_of))
+        if len(roots) > 1:
+            print(f"rtlil_bottom_up: ERROR -- {len(roots)} module classes are "
+                  f"instantiated by nothing; a design has one top: "
+                  f"{' '.join(roots[:12])}{' ...' if len(roots) > 12 else ''}")
+            return 3
         design = os.path.join(args.extract, "DESIGN.tsv")
         os.makedirs(args.extract, exist_ok=True)
         with open(design, "w") as fh:

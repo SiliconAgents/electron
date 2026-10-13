@@ -37,7 +37,16 @@ The body, with three normalisations, hashed.
   what a first attempt at this concluded.
 
   the serial numbers yosys puts in the names it invents are renumbered by
-  order of first appearance.  See Canon: without it the count comes out 6,522
+  order of first appearance.
+
+  ...and then each child is put back as ITS OWN fingerprint.  Stripping the
+  suffix forgets which variant of the child a module holds: two parents that
+  differ only in a parameter of their child -- a core and the same core
+  configured differently -- hash alike once both children read "\\core".
+  They merged, every copy got the representative's child, and the other
+  variant was left in the netlist with nothing instantiating it.  So the hash
+  is computed bottom up (resolve): the module's own normalised body, then, in
+  order, the fingerprint of every child module it instantiates.  See Canon: without it the count comes out 6,522
   instead of 111.
 
 Each of the three was, on its own, the difference between "nothing can be
@@ -140,8 +149,34 @@ def normalise(line, canon):
     return canon(" ".join(parts))
 
 
-def modules(path):
-    """Yield (name, fingerprint) for each non-blackbox module in an RTLIL file.
+def resolve(local, children):
+    """name -> fingerprint, each child module standing for its own fingerprint.
+
+    local: name -> hash of the normalised body (child types stripped).
+    children: name -> the raw types of its user cells, in body order.  A type
+    that is not a module here -- a standard cell, a blackbox -- is already in
+    the body as itself and adds nothing.
+    """
+    memo = {}
+
+    def fp(n, stack=()):
+        if n in memo:
+            return memo[n]
+        if n in stack:                   # a real hierarchy is a DAG; be safe
+            return local[n]
+        kids = [fp(c, stack + (n,)) for c in children[n] if c in local]
+        memo[n] = (hashlib.sha1((local[n] + "|" + ",".join(kids)).encode()).hexdigest()
+                   if kids else local[n])
+        return memo[n]
+
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 100000))
+    return {n: fp(n) for n in local}
+
+
+def local_modules(path):
+    """Yield (name, body hash, child types) for each non-blackbox module.
+
+    The body hash is NOT the fingerprint -- see resolve.
 
     BLACKBOXES ARE NEVER MERGED, and that is a correctness requirement rather
     than a nicety. A blackbox has no body, so two of them fingerprint on their
@@ -150,7 +185,7 @@ def modules(path):
     A library of 14,490 cells makes that a certainty, not a risk.
     """
     name = None
-    body = []
+    body, kids = [], []
     canon = Canon()
     pending_attrs = []
     depth = 0           # nesting inside the module, carried not recomputed
@@ -167,7 +202,7 @@ def modules(path):
                     name = None          # skip it entirely
                     continue
                 name = s.split()[1]
-                body = []
+                body, kids = [], []
                 depth = 0
                 canon = Canon()          # counters restart with each module
                 continue
@@ -176,19 +211,29 @@ def modules(path):
                 continue
             if s == "end" and depth == 0:
                 h = hashlib.sha1("\n".join(body).encode()).hexdigest()
-                yield name, h
-                name, body = None, []
+                yield name, h, kids
+                name, body, kids = None, [], []
                 continue
             # Rescanning the body on every "end" to find the module's own end is
             # quadratic in the module's size: invisible on a toy design, and it
             # does not finish on a real one.
             if s.startswith(("cell ", "process ", "switch ", "case ", "sync ")):
                 depth += 1
+                if s.startswith("cell \\"):
+                    kids.append(s.split()[1])
             elif s == "end":
                 depth -= 1
             n = normalise(line, canon)
             if n:
                 body.append(n)
+
+
+def modules(path):
+    """Yield (name, fingerprint) for each non-blackbox module in an RTLIL file."""
+    local, children = {}, {}
+    for name, h, kids in local_modules(path):
+        local[name], children[name] = h, kids
+    yield from resolve(local, children).items()
 
 
 def main():
