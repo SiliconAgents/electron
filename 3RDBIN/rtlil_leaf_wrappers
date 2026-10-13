@@ -834,7 +834,11 @@ def cmd_fill(a):
             head = [l for l in defs[nm] if not l.startswith((" ", "end"))]
             ports = [l for l in defs[nm] if l.startswith("  wire ") and
                      (" input " in l or " output " in l)]
-            body = head + ports + [f"  cell \\{cell} \\u_{cell.lower()}\n"]
+            # tagged, so yosys_bottom_up gives this cell type a stub without
+            # (* keep *): it is logic, not a hand-placed cell, and an instance
+            # whose outputs nothing reads must be free to go
+            body = head + ports + ["  attribute \\electron_hardened 1\n",
+                                   f"  cell \\{cell} \\u_{cell.lower()}\n"]
             body += [f"    connect \\{pins[pn]} \\{pn}\n" for pn in sorted(pins)]
             body += ["  end\n", "end\n"]
             defs[nm] = body

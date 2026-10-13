@@ -279,13 +279,29 @@ def prune_stubs(stub_file, il, dest):
     job sees exactly what it saw in the full file -- only fewer of them.
     """
     used, own = set(), set(il)
+    hard = set()                 # types instantiated only by --harden
+    soft = set()
     for path in il.values():
         with open(path, errors="replace") as fh:
+            tagged = False
             for line in fh:
                 s = line.split()
+                if len(s) >= 2 and s[0] == "attribute":
+                    tagged = tagged or s[1] == "\\electron_hardened"
+                    continue
                 if len(s) >= 2 and s[0] == "cell" and not s[1].startswith("$"):
-                    used.add(s[1].lstrip("\\"))
+                    t = s[1].lstrip("\\")
+                    used.add(t)
+                    (hard if tagged else soft).add(t)
+                tagged = False
     want = used - own
+    # A stub carries (* keep *) so that no pass deletes a hand-placed cell.
+    # A cell rtlil_leaf_wrappers --harden put there is logic that happens to
+    # be one library cell, and keep would hold on to every instance whose
+    # outputs nothing reads, and the flops feeding it: 4,096 flops and 66
+    # dead full adders per lane on one design.  Only a type that is never
+    # hand-placed loses it -- one stub serves every instance.
+    unkeep = hard - soft
     kept, pend, cur, keep = [], [], [], False
     with open(stub_file, errors="replace") as fh:
         for line in fh:
@@ -293,7 +309,11 @@ def prune_stubs(stub_file, il, dest):
                 pend.append(line)
                 continue
             if line.startswith("module "):
-                keep = line.split()[1].split("(")[0] in want
+                name = line.split()[1].split("(")[0]
+                keep = name in want
+                if name in unkeep:
+                    pend = [p.replace("(* keep *)", "").rstrip() + "\n" for p in pend]
+                    pend = [p for p in pend if p.strip()]
                 cur = pend + [line] if keep else []
                 pend = []
                 continue
@@ -306,7 +326,8 @@ def prune_stubs(stub_file, il, dest):
     with open(dest, "w") as fh:
         fh.write("".join(kept))
     print(f"yosys_bottom_up: {len(kept)} of the stub file's cells are instantiated "
-          f"by the RTL ({len(want)} named); jobs read {dest}")
+          f"by the RTL ({len(want)} named); jobs read {dest}"
+          + (f"; {len(unkeep & want)} hardened cell type(s) without keep" if unkeep & want else ""))
     return dest
 
 
