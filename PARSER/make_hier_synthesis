@@ -72,6 +72,9 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        (default: a buffer from the liberty)\n";
   print "        -abc_load       with -abc_delay, the load on module outputs in fF\n";
   print "                        (default: four median input pins)\n";
+  print "        -abc_timeout    with -abc_delay, seconds a module may spend; past it\n";
+  print "                        the module is mapped without buffering and sizing\n";
+  print "                        (default 600; 0 = no limit)\n";
   print "        -leaf_wrappers  modules that wrap library cells, e.g. 'cellwrap_*':\n";
   print "                        elaborated once per parameter set instead of once\n";
   print "                        per instance.  Only wrappers whose bodies hold\n";
@@ -118,6 +121,7 @@ my $latchmap;
 my $jobs = 8;
 my $flattenBelow = 2000;
 my $abcDelay = "";
+my $abcTimeout = "";
 my $leafWrappers = "";
 my @leafSoft = ();
 my $leafSoftMode = "resize";
@@ -146,6 +150,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-jobs"){$jobs = $_[$i+1];}
   if($_[$i] eq "-flatten_below"){$flattenBelow = $_[$i+1];}
   if($_[$i] eq "-abc_delay"){$abcDelay = $_[$i+1];}
+  if($_[$i] eq "-abc_timeout"){$abcTimeout = $_[$i+1];}
   if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
   if($_[$i] eq "-leaf_soft"){push(@leafSoft, $_[$i+1]);}
   if($_[$i] eq "-leaf_soft_mode"){$leafSoftMode = $_[$i+1];}
@@ -548,6 +553,7 @@ if ( $abcDelay ne "" ) {
   $inner .= " --abc-delay $abcDelay";
   $inner .= " --abc-driver $abcDriver" if ( $abcDriver ne "" );
   $inner .= " --abc-load $abcLoad"     if ( $abcLoad ne "" );
+  $inner .= " --abc-timeout $abcTimeout" if ( $abcTimeout ne "" );
   print "INFO-PAR-HR_SYN : 068 : buffering and sizing toward $abcDelay ps\n";
 }
 
