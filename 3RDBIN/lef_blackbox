@@ -121,7 +121,27 @@ def paths_from_config(cfg, foundry, node, layer):
             out += val
         elif isinstance(val, str):
             out.append(val)
-    return [p for p in out if re.search(r"\.s?lef(\.gz)?$", p)]
+    return [expand(p) for p in out if re.search(r"\.s?lef(\.gz)?$", p)]
+
+
+def expand(path):
+    """$VAR and ${VAR} in a config path, as electron's own config reader
+    expands them (dbfConfigExpandVars): ELECTRON_HOME falls back to the
+    checkout this script lives in, and a name that resolves to nothing is left
+    as it is, so the "missing" message names it.
+
+    Without this the repository's own config -- whose LEFs are
+    $ELECTRON_HOME/TESTS/library/... -- gave zero stubs, every library cell was
+    unknown to the verify step, and nothing noticed because a failed verify
+    did not stop hier_synthesis."""
+    home = os.environ.get("ELECTRON_HOME") or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))
+
+    def sub(m):
+        name = m.group(1) or m.group(2)
+        val = home if name == "ELECTRON_HOME" else os.environ.get(name)
+        return val if val else m.group(0)
+    return re.sub(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", sub, path)
 
 
 DIRWORD = {"INPUT": "input ", "OUTPUT": "output", "INOUT": "inout "}
