@@ -470,6 +470,10 @@ unless ( $noRun == 1 ) {
     return;
   }
   print "INFO-PAR-HR_SYN : 012 : grouping $rtlil into distinct modules\n";
+  #<!-- A DESIGN.tsv left by an earlier run would hide a grouping that refused
+  #     to write one -- rtlil_bottom_up does that when the classes have more
+  #     than one root, which means the netlist would be wrong. -->
+  unlink("$levelDir/DESIGN.tsv");
   system($cmd);
   unless ( -f "$levelDir/DESIGN.tsv" ) {
     print "ERROR-PAR-HR_SYN : 013 : extraction wrote no DESIGN.tsv; see $extractLog\n";
@@ -549,6 +553,22 @@ system($cmd);
 unless ( -d $netDir ) {
   print "ERROR-PAR-HR_SYN : 025 : no netlists written; see $synthLog\n";
   return;
+}
+
+#<!-- The netlists exist even when they do not compose, or when one of them is
+#     reached by nothing; joining and reading them anyway hands the placer a
+#     design that links and is wrong. -->
+if ( open(my $sl, "<", $synthLog) ) {
+  my $failed = "";
+  while ( my $line = <$sl> ) {
+    $failed = $1 if ( $line =~ /yosys_bottom_up: (VERIFY FAILED.*)$/ );
+  }
+  close($sl);
+  if ( $failed ne "" ) {
+    print "ERROR-PAR-HR_SYN : 073 : $failed\n";
+    print "ERROR-PAR-HR_SYN : 074 : no netlist joined or read; see $synthLog\n";
+    return;
+  }
 }
 
 &dbfHierSynthReport($synthLog, $netDir, $levelDir);

@@ -540,8 +540,19 @@ def verify(args, netlists, top):
         print(f"yosys_bottom_up: VERIFY FAILED -- {err[-1] if err else p.returncode}")
         print(f"yosys_bottom_up: see {log}")
         return 1
-    tail = p.stdout.split("=== design hierarchy ===")[-1]
     ours = {os.path.basename(n)[:-2] for n in netlists}
+    # A netlist written here that the top does not reach is a module whose
+    # every instance went to another class -- the grouping put a parent of
+    # it with a parent of a different variant.  It links; it is wrong.
+    unused = sorted(m for m in re.findall(r"Removing unused module `\\?([^']+)'",
+                                          p.stdout) if m in ours)
+    if unused:
+        print(f"yosys_bottom_up: VERIFY FAILED -- {len(unused)} netlist(s) not "
+              f"reached from {top}: {' '.join(unused[:12])}"
+              f"{' ...' if len(unused) > 12 else ''}")
+        print(f"yosys_bottom_up: see {log}")
+        return 1
+    tail = p.stdout.split("=== design hierarchy ===")[-1]
     total, cells = leaf_cells(tail, ours)
     print(f"\nyosys_bottom_up: verified in {time.time() - t:.1f}s -- "
           f"{top} is {total:,} standard cell(s) of {len(cells)} type(s)")
