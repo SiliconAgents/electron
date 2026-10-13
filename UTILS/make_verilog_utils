@@ -181,8 +181,9 @@ sub array_of_blasted_expr
    #     "[" split \gen_x[3].y.z[9:3] into the name \gen_x and a garbage
    #     range: the width came out wrong, the assign was skipped as a width
    #     mismatch (WARN-PAR-VERI 007), and every net behind it lost its
-   #     driver.  183 assigns on one design. -->
-   if ( $conn =~ /^(.*)\[\s*([0-9]+)\s*\:\s*([0-9]+)\s*\]$/ ) {
+   #     driver.  183 assigns on one design.  The bounds may be negative:
+   #     yosys keeps a declared [135:-8] and writes s[-1:-8]. -->
+   if ( $conn =~ /^(.*)\[\s*(-?[0-9]+)\s*\:\s*(-?[0-9]+)\s*\]$/ ) {
      my ($name,$from,$to) = ($1,$2,$3);
      if ( $from <= $to ) {
        for ( my $xx = $from ; $xx <= $to ; $xx++ ){
