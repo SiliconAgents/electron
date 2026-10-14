@@ -36,10 +36,9 @@ sub write_sgraph {
                   $drvCellref = $CADB{$drv}->dbCadbGetCellref;
 		  if(exists $PLDB{$drvCellref}){
 		     my $cellFunc = $PLDB{$drvCellref}->dbMdbGetFunction;
-	             if($cellFunc eq "flop"){
+	             if($cellFunc eq "flop" || $cellFunc eq "latch"){
 		        my $isClock = $PLDB{$drvCellref}->dbMdbGetPinIsClock($drvPin);
 		        if($isClock == 1 || $drvPin eq "SI" || $drvPin eq "SE"){
-		           print "drv:$drv func:$cellFunc pin:$drvPin\n";
 		           next;
 		        }
 		     }
@@ -57,10 +56,9 @@ sub write_sgraph {
                       $sinkCellref = $CADB{$sink}->dbCadbGetCellref;
 		      if(exists $PLDB{$sinkCellref}){
 		         my $cellFunc = $PLDB{$sinkCellref}->dbMdbGetFunction;
-			 if($cellFunc eq "flop"){
+			 if($cellFunc eq "flop" || $cellFunc eq "latch"){
 			    my $isClock = $PLDB{$sinkCellref}->dbMdbGetPinIsClock($sinkPin);
 			    if($isClock == 1 || $sinkPin eq "SI" || $sinkPin eq "SE"){
-		               print "sink:$sink func:$cellFunc pin:$sinkPin\n";
 			       next;
 			    }
 			 }
@@ -69,7 +67,7 @@ sub write_sgraph {
                    }elsif(exists $PORTS_ALREADY{$TOP_MODULE}{$sink}){
                       @sinkLoc = $PORTS_ALREADY{$TOP_MODULE}{$sink}->dbPortGetLoc;
                    }    
-                   print WRITE "NETS $net $drv $drvCellref @drvLoc $sink $sinkCellref @sinkLoc\n"; 
+                   print WRITE "NETS $net $drv $drvCellref $drvPin @drvLoc $sink $sinkCellref $sinkPin @sinkLoc\n"; 
                    #print "NETS $net drv:$drv sink:$sink\n"; 
                }
             }
