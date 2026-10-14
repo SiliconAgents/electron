@@ -31,90 +31,128 @@ sub write_sgraph {
        print WRITE "DIEAREA @die_coords \n";
     }
 
+    #<!-- WHY THIS DOES NOT CALL getNetSink
+    #
+    #     getNetSink rediscovers, for every instance on a net, which of its
+    #     pins is the one connected: it fetches the cell's ENTIRE pin list
+    #     from PLDB and scans it comparing each pin's net to this one.  That
+    #     is four passes on a 4-input gate and six on a flop, to recover
+    #     something %NETS_ALREADY already holds directly -- and it calls
+    #     getNetDriver again on the way in, so the driver scan runs twice per
+    #     net.  Walking %NETS_ALREADY here instead is the same answer without
+    #     any of that.
+    #
+    #     The per-cellref facts are memoised.  dbMdbGetFunction and
+    #     dbMdbGetPinIsClock depend only on (cellref, pin), and a real design
+    #     has 400 to 800 distinct cellrefs against sixteen million edges, so
+    #     those were tens of millions of method dispatches for a few hundred
+    #     distinct answers.  Likewise an instance's cellref, status and
+    #     location: average fanout is about three, so each was fetched three
+    #     times.
+    #
+    #     Measured before this: 18us per edge, flat across four designs from
+    #     4M to 17M edges -- per-edge overhead, not anything algorithmic. -->
+    my %cutPin   = ();   # cellref -> pin -> 1 when it is a clock or scan pin
+    my %instInfo = ();   # inst    -> [cellref, status, x, y]
+
+    #<!-- A clock or scan pin of a sequential cell is where a timing segment
+    #     ends; everything else on the cell is data. -->
+    my $isCut = sub {
+        my ($ref, $pin) = @_;
+        my $c = $cutPin{$ref};
+        unless ( defined $c ) {
+            $c = $cutPin{$ref} = {};
+            if ( exists $PLDB{$ref} ) {
+                my $f = $PLDB{$ref}->dbMdbGetFunction;
+                if ( defined $f && ($f eq "flop" || $f eq "latch") ) {
+                    foreach my $pn ( $PLDB{$ref}->dbMdbGetPins ) {
+                        $c->{$pn} = 1 if ( $PLDB{$ref}->dbMdbGetPinIsClock($pn) );
+                    }
+                    $c->{SI} = 1; $c->{SE} = 1;
+                }
+            }
+        }
+        return $c->{$pin};
+    };
+
+    #<!-- cellref, status and location for one object, looked up once. -->
+    my $info = sub {
+        my ($o) = @_;
+        my $i = $instInfo{$o};
+        return $i if ( defined $i );
+        if ( exists $COMP_ALREADY{$o} ) {
+            my $ref = $CADB{$o}->dbCadbGetCellref;
+            my $st  = $CADB{$o}->dbCadbGetStatus;
+            $st = "UNPLACED" if ( !defined $st || $st eq "" );
+            my @l = $CADB{$o}->dbCadbGetLoc;
+            if ( @l >= 2 && defined $l[0] && defined $l[1] ) { $i = [$ref, $st, $l[0], $l[1]]; }
+            else { $i = [$ref, "UNPLACED", "UND", "UND"]; }
+        }
+        elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$o} ) {
+            #<!-- PORT, not PLACED: PortDB::new defaults to (0,0) so a port
+            #     reports a location whether or not anyone placed it. -->
+            my @l = $PORTS_ALREADY{$TOP_MODULE}{$o}->dbPortGetLoc;
+            $i = ["PIN", "PORT", (@l >= 2 ? ($l[0], $l[1]) : ("UND","UND"))];
+        }
+        else { $i = ["PIN", "UNPLACED", "UND", "UND"]; }
+        return $instInfo{$o} = $i;
+    };
+
+    #<!-- Rows are accumulated and written in blocks.  One interpolated print
+    #     per edge is sixteen million syscall-ish round trips on a big
+    #     design. -->
+    my @buf = ();
+
     #------------------------------------------------NETS SECTION---------------------------------------------#
     foreach my $net (keys %NETS_ALREADY){
       if(exists $NADB{$net}){
          my $netType = $NADB{$net}->dbNadbGetNetType;
          if($netType == 0){
             my @driverInst = &getNetDriver($net);
-            my @sinkInst = &getNetSink($net);
             if(@driverInst > 1){
-               my $drv = $driverInst[0];
-	       my $drvPin = $driverInst[1];
-               my $drvCellref = "PIN";
-               #<!-- Status and location are ALWAYS emitted, so every row has
-               #     the same number of fields.  They did not used to be:
-               #     "@drvLoc" interpolates to nothing when a location was
-               #     never set, so a row was 12 fields placed, 8 unplaced, and
-               #     10 when one end was a port -- a port gets (0,0) from
-               #     dbPortGetLoc while an unplaced instance gets nothing.  A
-               #     reader keyed on the field count then drops the odd width
-               #     silently; it cost 12,138 rows and every output port as a
-               #     timing endpoint before anyone noticed. -->
-               my $drvStatus = "UNPLACED";
-               my @drvLoc = ("UND","UND");
-               if(exists $COMP_ALREADY{$drv}){
-                  $drvCellref = $CADB{$drv}->dbCadbGetCellref;
-		  if(exists $PLDB{$drvCellref}){
-		     my $cellFunc = $PLDB{$drvCellref}->dbMdbGetFunction;
-	             if($cellFunc eq "flop" || $cellFunc eq "latch"){
-		        my $isClock = $PLDB{$drvCellref}->dbMdbGetPinIsClock($drvPin);
-		        if($isClock == 1 || $drvPin eq "SI" || $drvPin eq "SE"){
-		           next;
-		        }
-		     }
-		  }
-                  $drvStatus = $CADB{$drv}->dbCadbGetStatus;
-                  $drvStatus = "UNPLACED" if ( !defined $drvStatus || $drvStatus eq "" );
-                  #<!-- Take the location only if there actually IS one.  The
-                  #     status reads PLACED on a design that was elaborated and
-                  #     never placed, and dbCadbGetLoc then returns an EMPTY
-                  #     list -- assigned straight into @drvLoc that wipes the
-                  #     UND UND default and the row goes narrow again, which is
-                  #     the very thing this is here to stop. -->
-                  my @l = $CADB{$drv}->dbCadbGetLoc;
-                  if ( @l >= 2 && defined $l[0] && defined $l[1] ) { @drvLoc = @l[0,1]; }
-                  else { $drvStatus = "UNPLACED"; }
-               }elsif(exists $PORTS_ALREADY{$TOP_MODULE}{$drv}){
-                  #<!-- PORT rather than PLACED: PortDB::new defaults to (0,0),
-                  #     so a port reports a location whether or not anyone
-                  #     placed it, and a reader should know not to trust it. -->
-                  $drvStatus = "PORT";
-                  @drvLoc = $PORTS_ALREADY{$TOP_MODULE}{$drv}->dbPortGetLoc;
-               }    
-               for(my $i=0; $i<$#sinkInst; $i=$i+2){
-                   my $sink = $sinkInst[$i];
-		   my $sinkPin = $sinkInst[$i+1];
-                   my $sinkCellref = "PIN";
-                   my $sinkStatus = "UNPLACED";
-                   my @sinkLoc = ("UND","UND");
-                   if(exists $COMP_ALREADY{$sink}){
-                      $sinkCellref = $CADB{$sink}->dbCadbGetCellref;
-		      if(exists $PLDB{$sinkCellref}){
-		         my $cellFunc = $PLDB{$sinkCellref}->dbMdbGetFunction;
-			 if($cellFunc eq "flop" || $cellFunc eq "latch"){
-			    my $isClock = $PLDB{$sinkCellref}->dbMdbGetPinIsClock($sinkPin);
-			    if($isClock == 1 || $sinkPin eq "SI" || $sinkPin eq "SE"){
-			       next;
-			    }
-			 }
-		      }
-                      $sinkStatus = $CADB{$sink}->dbCadbGetStatus;
-                      $sinkStatus = "UNPLACED" if ( !defined $sinkStatus || $sinkStatus eq "" );
-                      my @sl = $CADB{$sink}->dbCadbGetLoc;
-                      if ( @sl >= 2 && defined $sl[0] && defined $sl[1] ) { @sinkLoc = @sl[0,1]; }
-                      else { $sinkStatus = "UNPLACED"; }
-                   }elsif(exists $PORTS_ALREADY{$TOP_MODULE}{$sink}){
-                      $sinkStatus = "PORT";
-                      @sinkLoc = $PORTS_ALREADY{$TOP_MODULE}{$sink}->dbPortGetLoc;
-                   }    
-                   print WRITE "NETS $net $drv $drvCellref $drvPin $drvStatus @drvLoc $sink $sinkCellref $sinkPin $sinkStatus @sinkLoc\n"; 
-                   #print "NETS $net drv:$drv sink:$sink\n"; 
+               my $drv    = $driverInst[0];
+               my $drvPin = $driverInst[1];
+               my $di = $info->($drv);
+               next if ( &$isCut($di->[0], $drvPin) );
+
+               my $head = "NETS $net $drv $di->[0] $drvPin $di->[1] $di->[2] $di->[3]";
+
+               #<!-- %NETS_ALREADY{$net} lists the objects on the net, and
+               #     %COMP_ALREADY{$inst} is that instance's own pin -> net
+               #     map.  Scanning the instance's map rather than the cell's
+               #     pin list from PLDB keeps the one case that matters --
+               #     an instance with TWO pins on the same net is two sinks --
+               #     without the cellref lookup and the pin-list fetch per
+               #     pin that getNetSink does.
+               #
+               #     %NETS_ALREADY{$net}{$inst} alone is not enough: it holds
+               #     ONE pin per instance, and nothing usable for a port.
+               #     Using it dropped every "flop Q -> output port" edge and
+               #     invented a self-edge on every input port. -->
+               foreach my $sink ( keys %{$NETS_ALREADY{$net}} ) {
+                   if ( exists $COMP_ALREADY{$sink} ) {
+                       my $si = $info->($sink);
+                       my $pins = $COMP_ALREADY{$sink};
+                       foreach my $sinkPin ( keys %$pins ) {
+                           next unless ( defined $pins->{$sinkPin} && $pins->{$sinkPin} eq $net );
+                           next if ( $sink eq $drv && $sinkPin eq $drvPin );
+                           next if ( &$isCut($si->[0], $sinkPin) );
+                           push(@buf, "$head $sink $si->[0] $sinkPin $si->[1] $si->[2] $si->[3]\n");
+                       }
+                   }
+                   elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$sink} ) {
+                       #<!-- A port's pin is itself; it cannot be its own sink -->
+                       next if ( $sink eq $drv );
+                       my $si = $info->($sink);
+                       push(@buf, "$head $sink $si->[0] PIN $si->[1] $si->[2] $si->[3]\n");
+                   }
                }
+               if ( @buf > 20000 ) { print WRITE @buf; @buf = (); }
             }
          }
       }
     }
+    print WRITE @buf if ( @buf );
     close(WRITE);
     my $t1 = new Benchmark;
     my $td = timediff($t1, $t0);
