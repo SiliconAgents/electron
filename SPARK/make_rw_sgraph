@@ -105,8 +105,13 @@ sub write_sgraph {
 
     #------------------------------------------------NETS SECTION---------------------------------------------#
     foreach my $net (keys %NETS_ALREADY){
-      if(exists $NADB{$net}){
-         my $netType = $NADB{$net}->dbNadbGetNetType;
+      #<!-- A net with no %NADB entry is a signal net, not a net to skip.
+      #     %NADB is only what read_def or the flat placer recorded about a
+      #     net -- its type among them -- and after hier_place_all it holds
+      #     none of them, so this used to write the die area and not one edge:
+      #     the graph of every hierarchically placed design was empty. -->
+      {
+         my $netType = exists $NADB{$net} ? $NADB{$net}->dbNadbGetNetType : 0;
          if($netType == 0){
             my @driverInst = &getNetDriver($net);
             if(@driverInst > 1){
