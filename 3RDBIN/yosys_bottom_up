@@ -39,6 +39,7 @@ stops on every one of them.
 
 import argparse
 import concurrent.futures as cf
+import fnmatch
 import gzip
 import os
 import re
@@ -214,7 +215,7 @@ def subtree_cells(design, name, memo=None, stack=frozenset()):
     return v
 
 
-def choose_boundaries(design, threshold, top):
+def choose_boundaries(design, threshold, top, flatten=()):
     """The modules that stay hierarchy boundaries; the rest get flattened in.
 
     Size is the criterion because it is also the placement criterion: a block
@@ -230,6 +231,10 @@ def choose_boundaries(design, threshold, top):
     """
     memo = {}
     keep = {m for m in design if subtree_cells(design, m, memo) >= threshold}
+    # --flatten-modules: absorbed whatever their size.  A purely combinational
+    # helper -- a priority tree, a mux -- can pass the threshold and still be no
+    # block a floorplanner wants, only a wall around logic abc should see whole.
+    keep = {m for m in keep if not any(fnmatch.fnmatchcase(m, g) for g in flatten)}
     keep.add(top)
     return keep, memo
 
@@ -401,6 +406,11 @@ def main():
                          "rest into their parents. Fewer, better-optimised "
                          "modules and a netlist whose boundaries are the ones "
                          "a floorplanner can use (try 2000)")
+    ap.add_argument("--flatten-modules", metavar="GLOBS", default="",
+                    help="with --flatten-below: modules matching these globs "
+                         "(comma separated, against the distinct-module names, "
+                         "e.g. 'ffs__*') are never boundaries, whatever their "
+                         "size; they are absorbed by their parents")
     ap.add_argument("--latchmap", metavar="FILE",
                     help="a techmap from 3RDBIN/liberty_latchmap. WITHOUT IT A "
                          "LATCH REACHES THE NETLIST UNMAPPED: dfflibmap maps "
@@ -479,7 +489,8 @@ def main():
         design = read_design(args.levels)
     if args.flatten_below:
         top_name = max(design, key=lambda m: design[m][0])
-        boundaries, memo = choose_boundaries(design, args.flatten_below, top_name)
+        flat_globs = [g.strip() for g in args.flatten_modules.split(",") if g.strip()]
+        boundaries, memo = choose_boundaries(design, args.flatten_below, top_name, flat_globs)
         # Named by their own cell count, NOT their subtree size: the top's
         # subtree is the whole design, and reporting that as the size of a
         # boundary suggests a run that is not about to happen.

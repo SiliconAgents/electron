@@ -31,7 +31,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "Usage : hier_synthesis -rtl <filelist> -top <module> | -rtlil <design.il>\n";
   print "                       [-liberty <lib>] [-blackbox <cells.v>]\n";
   print "                       [-out <dir>] [-netlist <file>] [--read]\n";
-  print "                       [-jobs <n>] [-flatten_below <cells>]\n";
+  print "                       [-jobs <n>] [-flatten_below <cells>] [-flatten <glob>[,<glob>]]\n";
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
   print "                       [-patch <rules.py>] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
@@ -100,6 +100,10 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        subtree is at least this many cells, default 2000.\n";
   print "                        0 keeps every module, which costs area: a boundary is a\n";
   print "                        wall abc cannot optimise across.\n";
+  print "        -flatten        modules matching these globs are never boundaries,\n";
+  print "                        whatever their size; their parents absorb them.\n";
+  print "                        Matched against the distinct-module names, so\n";
+  print "                        'ffs*' takes every parameterisation of ffs.\n";
   print "        --no_latchmap   do not map latches to library cells.  They will reach\n";
   print "                        the netlist as \$_DLATCH_ and nothing will say so.\n";
   print "        --no_verify     skip reloading the netlists to check they compose\n";
@@ -120,6 +124,7 @@ my $blackbox;
 my $latchmap;
 my $jobs = 8;
 my $flattenBelow = 2000;
+my $flattenModules = "";
 my $abcDelay = "";
 my $abcTimeout = "";
 my $leafWrappers = "";
@@ -149,6 +154,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-latchmap"){$latchmap = $_[$i+1];}
   if($_[$i] eq "-jobs"){$jobs = $_[$i+1];}
   if($_[$i] eq "-flatten_below"){$flattenBelow = $_[$i+1];}
+  if($_[$i] eq "-flatten"){$flattenModules = $_[$i+1];}
   if($_[$i] eq "-abc_delay"){$abcDelay = $_[$i+1];}
   if($_[$i] eq "-abc_timeout"){$abcTimeout = $_[$i+1];}
   if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
@@ -546,6 +552,7 @@ my $inner = "python3 -u $beehome/3RDBIN/yosys_bottom_up" .
             " --levels $levelDir --liberty $liberty $bbArg" .
             " --out $netDir --jobs $jobs --flatten-below $flattenBelow" .
             " $latchArg $verifyArg";
+$inner .= " --flatten-modules '$flattenModules'" if ( $flattenModules ne "" );
 #<!-- -abc_delay: abc's buffer / upsize / dnsize run only with a constraints
 #     file, so without it every gate is the smallest that does the job and
 #     nothing splits a high fanout.  yosys_bottom_up has the details. -->
