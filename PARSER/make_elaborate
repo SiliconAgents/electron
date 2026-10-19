@@ -1407,7 +1407,11 @@ if ( $MODULE_ALREADY{$cellName}->dbVNOMHasHierInst($inst) ) {
                              my $temp_inst_hash_key = $TEMP_PATH[$xx] ;
                              $temp_inst_hash_key = $temp_inst_hash_key."_".$xx;
                              my @key_list = keys %{$TEMP_HIER_PORT_NET_MAP{$temp_inst_hash_key}};
-                             my @return_key = grep(/$netName/, @key_list);
+                             #<!-- \Q..\E: the name is a string to find, not a pattern.  An
+                             #     escaped identifier starts with a backslash, and
+                             #     /_tmpslvr_param_\gen_x[0].y/ is a regex Perl refuses
+                             #     ("Unterminated \g..."), which killed electron on read-back. -->
+                             my @return_key = grep(/\Q$netName\E/, @key_list);
                              if($#return_key >=0){
                                my $key_str = $return_key[0];
                                my $net_vl = $TEMP_HIER_PORT_NET_MAP{$temp_inst_hash_key}{$key_str}; 
