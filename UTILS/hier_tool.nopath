@@ -621,6 +621,7 @@ require "$BEEHOME/FLEX_COMMANDS/make_timing_browser";
 ###### SPARK ############
 require "$BEEHOME/SPARK/make_rw_sdef";
 require "$BEEHOME/SPARK/make_rw_sgraph";
+require "$BEEHOME/SPARK/make_photon_query";
 
 ######## PADFRAME #########
 require "$BEEHOME/PADFRAME/make_padframe";
