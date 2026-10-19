@@ -73,3 +73,7 @@ DOCS/*.pdf
 # for whoever next deletes and re-adds one.
 /*.gif
 /*.tcl.log
+# the Nangate liberty in TESTS/library as a Spark arc store, built by
+# make -C TESTS nangate_store; the format is pyspark_cad's, so it is built, not kept
+TESTS/library/nangate_arcs/
+TESTS/library/nangate_arcs.sca

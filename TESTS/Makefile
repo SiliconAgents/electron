@@ -1,4 +1,5 @@
 ELECTRON = $(abspath ..)
+include $(ELECTRON)/INSTALL/sparksta.mk
 
 # pysparkpp is pysparkplusbuild plus qrouter.  Build it with
 #   cd $(ELECTRON)/INSTALL/podman && make qrouter
@@ -195,9 +196,44 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print
+nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
 app:
 	apptainer shell --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$$USER:/home/$$USER $(PPSIF)
+
+#-----------------------------------------------------------------------------
+# Timing graphs.  Synthesis writes one (nangate_rtl_hier), and so does every
+# placement that ends legalized (nangate_flat, nangate_recurse): the same
+# write_sgraph, before and after, so segment timing can run at both points.
+#
+#   nangate_sgraph    checks the graphs exist and that placement put real
+#                     locations in them; part of nangate_all, costs nothing
+#   nangate_store     the Nangate library as a Spark arc store, built once where
+#                     CONFIG/library.config's sta-arc-store says, in seconds
+#   nangate_sparksta  segment timing on Spark of the synthesis graph and the
+#                     placed one; needs PYSPARK=<pyspark_cad checkout>
+#-----------------------------------------------------------------------------
+NG_LIB   = $(ELECTRON)/TESTS/library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib
+NG_STORE = $(call SPARKSTA_STORE_OF,$(ELECTRON)/CONFIG/library.config,nangate,45nm,6)
+NG_PERIOD ?= 20
+
+nangate_sgraph:
+	test -s workarea/vedic_16x16.synth.sgraph || { echo "nangate_sgraph: no synthesis graph from nangate_rtl_hier"; exit 1; }
+	grep -q "^NETS" workarea/vedic_16x16.synth.sgraph || { echo "nangate_sgraph: synthesis graph has no edges"; exit 1; }
+	for f in place recurse; do \
+	  test -s workarea/vedic_16x16.$$f.sgraph || { echo "nangate_sgraph: no vedic_16x16.$$f.sgraph"; exit 1; }; \
+	  grep -v " UND" workarea/vedic_16x16.$$f.sgraph | grep -q "^NETS" || { echo "nangate_sgraph: vedic_16x16.$$f.sgraph has no placed rows"; exit 1; }; \
+	done
+	@echo "nangate_sgraph: synthesis and placement graphs written, placement carries locations"
+
+nangate_store: $(NG_STORE)/arcs
+
+$(NG_STORE)/arcs:
+	mkdir -p workarea && echo $(NG_LIB) > workarea/nangate_libs.txt
+	$(call SPARKSTA_STORE_FROM,workarea/nangate_libs.txt,$(NG_STORE))
+
+nangate_sparksta: nangate_store
+	$(call SPARKSTA,workarea/vedic_16x16.synth.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/vedic_16x16.synth.seg.tsv)
+	$(call SPARKSTA,workarea/vedic_16x16.place.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/vedic_16x16.place.seg.tsv)

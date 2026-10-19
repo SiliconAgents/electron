@@ -97,4 +97,8 @@ write_def -output vedic_16x16.recurse.def --overwrite
 legalize_flat
 write_def -output vedic_16x16.recurse.legal.def --overwrite
 
+#<!-- The timing graph again, now with every cell's location, for timing after
+#     placement. -->
+write_sgraph -output vedic_16x16.recurse.sgraph
+
 exit
