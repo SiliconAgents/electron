@@ -331,4 +331,75 @@ my @sink_list = &getNetSink($net);
 }#else 
 }#sub print_clock_tree_info_cmd
 
+
+#<!-- A pin's net expression in a connection line, "cell inst (.A(n), ...) ;",
+#     and replacing it.  Every legal form: a plain name, a bit select, a
+#     concatenation, and an escaped name -- "\a.b[1].c " -- whose terminating
+#     space is part of it and which may itself hold ( ) and , characters.  So
+#     the closing parenthesis is found by scanning, skipping escaped names,
+#     not by a regex that stops at the first ")".  Synthesis writes escaped
+#     names for every net a flatten builds from a generate scope or an
+#     absorbed child (thousands per design); the regexes they replaced
+#     silently skipped them.
+#
+#     dbfConnPinSpan($line, $pin) -> (start, end) of the text between the
+#     parentheses, or () when the line has no such pin.
+#     dbfConnPinExpr($line, $pin) -> that text, trimmed, an escaped name keeping
+#     its one terminating space; undef when there is no such pin.
+#     dbfConnSetPinExpr($line, $pin, $expr) -> the line with it replaced.
+#     dbfConnExprIsNet($expr) -> 1 for one net (name, bit select, escaped
+#     name), 0 for anything else (a concatenation, a constant, a part select). -->
+sub dbfConnPinSpan {
+  my ($line, $pin) = @_;
+  my ($i, $n) = (0, length($line));
+  my $want = "." . $pin;
+  while ( $i < $n ) {
+    my $c = substr($line, $i, 1);
+    if ( $c eq "\\" ) {                       # an escaped name: skip to its end
+      $i++ while ( $i < $n && substr($line, $i, 1) !~ /\s/ );
+      next;
+    }
+    if ( $c eq "." && substr($line, $i, length($want)) eq $want ) {
+      my $j = $i + length($want);
+      $j++ while ( $j < $n && substr($line, $j, 1) =~ /\s/ );
+      if ( $j < $n && substr($line, $j, 1) eq "(" ) {
+        my ($start, $depth, $k) = ($j + 1, 1, $j + 1);
+        while ( $k < $n ) {
+          my $d = substr($line, $k, 1);
+          if ( $d eq "\\" ) { $k++ while ( $k < $n && substr($line, $k, 1) !~ /\s/ ); next; }
+          if ( $d eq "(" ) { $depth++; }
+          elsif ( $d eq ")" ) { $depth--; return ($start, $k) if ( $depth == 0 ); }
+          $k++;
+        }
+        return ();
+      }
+    }
+    $i++;
+  }
+  return ();
+}
+sub dbfConnPinExpr {
+  my ($line, $pin) = @_;
+  my ($s, $e) = &dbfConnPinSpan($line, $pin);
+  return undef unless ( defined $s );
+  my $x = substr($line, $s, $e - $s);
+  $x =~ s/^\s+//;
+  $x =~ s/\s+$//;
+  $x .= " " if ( $x =~ /(^|[\s,{])\\\S+$/ );
+  return $x;
+}
+sub dbfConnSetPinExpr {
+  my ($line, $pin, $expr) = @_;
+  my ($s, $e) = &dbfConnPinSpan($line, $pin);
+  return $line unless ( defined $s );
+  return substr($line, 0, $s) . $expr . substr($line, $e);
+}
+sub dbfConnExprIsNet {
+  my ($x) = @_;
+  return 0 unless ( defined $x );
+  return 1 if ( $x =~ /^[A-Za-z_][\w\$]*(\[\d+\])?$/ );
+  return 1 if ( $x =~ /^\\\S+ (\[\d+\])?$/ );
+  return 0;
+}
+
 1;
