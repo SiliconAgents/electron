@@ -184,8 +184,10 @@ nangate_dead_logic:
 # rtls/print/print.sv has both kinds, in the top and in a child instantiated
 # twice; hier_synthesis and synthesize must each write a netlist with no
 # initial, always or $write, and without the XOR that only fed the $display.
+# From an empty directory: hier_synthesis resumes from an hs/design.il and an
+# hs/cells.v it finds, so a stale one would be tested instead of the code.
 nangate_print:
-	mkdir -p workarea/print
+	mkdir -p workarea/print && find workarea/print -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
 	cd workarea/print && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../print/print.tcl > run.log 2>&1
 	for f in workarea/print/print_hier.v workarea/print/flat/print_top.vg; do \
 	  test -s $$f || { echo "nangate_print: $$f was not written"; exit 1; }; \

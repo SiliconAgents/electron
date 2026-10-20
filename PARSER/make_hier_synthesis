@@ -404,7 +404,14 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
     }
 
     my $elabLog = "$outDir/elaborate.log";
-    my $common = " --single-unit$unknownFlag" .
+    #<!-- -D SYNTHESIS: yosys's own read_verilog defines it, and so does every
+    #     commercial flow; read_slang does not.  Without it the RTL's
+    #     `ifdef SYNTHESIS branches are skipped and the simulation side is
+    #     built instead: a clock gate came out as a data latch and an AND, not
+    #     the library clock-gate cell, and synchronisers as their random-delay
+    #     models -- 42-44 files of each of five front-end filelists test it.  Add
+    #     project defines with -slang_args "-D NAME". -->
+    my $common = " -D SYNTHESIS --single-unit$unknownFlag" .
                  " --ignore-assertions --allow-use-before-declare" .
                  " --allow-hierarchical-const --relax-enum-conversions --compat vcs" .
                  " --unroll-limit 200000 --error-limit 50" .
