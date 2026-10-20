@@ -832,6 +832,14 @@ if ( exists $MODULE_ALREADY{$cell} ) {
                                         if ( $netName =~ /\\/ ) {# escaped identifier
                                           if ( $netName =~ /\s+\[\s*[0-9]+\s*\]/ ) {# bit select
                                           }else {
+                                            #<!-- the [n] is inside the escaped name (\g_drv[0].en_r): one
+                                            #     scalar net, not a bit select.  It was skipped here and so never
+                                            #     declared -- 257 of 257 on one netlist, which a reader under
+                                            #     `default_nettype none rejects. -->
+                                            if ( $netName =~ /^\s*(\\\S+)\s*$/ ) {
+                                              my $name = $1;
+                                              $wires{$name} = "" unless ( exists $wires{$name} || exists $MODULE_ALREADY{$moduleName}->{ins}{$name} || exists $MODULE_ALREADY{$moduleName}->{outs}{$name} || exists $MODULE_ALREADY{$moduleName}->{bidis}{$name} );
+                                            }
                                             next ;
                                           }
                                         }
@@ -872,6 +880,14 @@ if ( exists $MODULE_ALREADY{$cell} ) {
                                         if ( $netNameExpr =~ /\\/ ) {# escaped identifier
                                           if ( $netNameExpr =~ /\s+\[\s*[0-9]+\s*\]/ ) {# bit select
                                           }else {
+                                            #<!-- the [n] is inside the escaped name (\g_drv[0].en_r): one
+                                            #     scalar net, not a bit select.  It was skipped here and so never
+                                            #     declared -- 257 of 257 on one netlist, which a reader under
+                                            #     `default_nettype none rejects. -->
+                                            if ( $netNameExpr =~ /^\s*(\\\S+)\s*$/ ) {
+                                              my $name = $1;
+                                              $wires{$name} = "" unless ( exists $wires{$name} || exists $MODULE_ALREADY{$moduleName}->{ins}{$name} || exists $MODULE_ALREADY{$moduleName}->{outs}{$name} || exists $MODULE_ALREADY{$moduleName}->{bidis}{$name} );
+                                            }
                                             next ;
                                           }
                                         }
@@ -954,6 +970,14 @@ elsif ( exists $PLDB{$cell}) {
                                         if ( $netName =~ /\\/ ) {# escaped identifier
                                           if ( $netName =~ /\s+\[\s*[0-9]+\s*\]/ ) {# bit select
                                           }else {
+                                            #<!-- the [n] is inside the escaped name (\g_drv[0].en_r): one
+                                            #     scalar net, not a bit select.  It was skipped here and so never
+                                            #     declared -- 257 of 257 on one netlist, which a reader under
+                                            #     `default_nettype none rejects. -->
+                                            if ( $netName =~ /^\s*(\\\S+)\s*$/ ) {
+                                              my $name = $1;
+                                              $wires{$name} = "" unless ( exists $wires{$name} || exists $MODULE_ALREADY{$moduleName}->{ins}{$name} || exists $MODULE_ALREADY{$moduleName}->{outs}{$name} || exists $MODULE_ALREADY{$moduleName}->{bidis}{$name} );
+                                            }
                                             next ;
                                           }
                                         }
@@ -994,6 +1018,14 @@ elsif ( exists $PLDB{$cell}) {
                                         if ( $netNameExpr =~ /\\/ ) {# escaped identifier
                                           if ( $netNameExpr =~ /\s+\[\s*[0-9]+\s*\]/ ) {# bit select
                                           }else {
+                                            #<!-- the [n] is inside the escaped name (\g_drv[0].en_r): one
+                                            #     scalar net, not a bit select.  It was skipped here and so never
+                                            #     declared -- 257 of 257 on one netlist, which a reader under
+                                            #     `default_nettype none rejects. -->
+                                            if ( $netNameExpr =~ /^\s*(\\\S+)\s*$/ ) {
+                                              my $name = $1;
+                                              $wires{$name} = "" unless ( exists $wires{$name} || exists $MODULE_ALREADY{$moduleName}->{ins}{$name} || exists $MODULE_ALREADY{$moduleName}->{outs}{$name} || exists $MODULE_ALREADY{$moduleName}->{bidis}{$name} );
+                                            }
                                             next ;
                                           }
                                         }

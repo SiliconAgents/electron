@@ -572,7 +572,7 @@ foreach my $m ( sort keys %plan ) {
     if ( defined $inst && exists $rewire{$inst} ) {
       foreach my $pin ( keys %{$rewire{$inst}} ) {
         my $new = $rewire{$inst}{$pin};
-        $line =~ s/\.\Q$pin\E\s*\(\s*[^()]*?\s*\)/.$pin($new)/;
+        $line = &dbfConnSetPinExpr($line, $pin, $new);
       }
     }
     push(@keep, $line);

@@ -179,6 +179,103 @@ nangate_dead_logic:
 	cd workarea/dl_hier && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire htop.hier.v; hierarchy -check -top htop" > yosys.log 2>&1 || { echo "nangate_dead_logic hier: write_verilog --hier output does not parse, see workarea/dl_hier/yosys.log"; exit 1; }
 	@echo "nangate_dead_logic: all expected results"
 
+# Escaped names, end to end.  Synthesis writes every net a flatten builds from
+# a generate scope or an absorbed child as an escaped name, "\\g_lane[3].u.n ";
+# no other test has one, and three commands mishandled them before it existed.
+# Checked: the synthesised netlist has them; repair_drive buffers the
+# overloaded enable, one of whose nets is escaped; the repaired netlist reads
+# back to the same instance count with no driver left over its limit; yosys
+# parses it.  The sizing table is built here from the test liberty.
+NG_SIZING = library/nangate.sizing.tsv
+$(NG_SIZING): library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib $(ELECTRON)/3RDBIN/liberty_sizing
+	python3 $(ELECTRON)/3RDBIN/liberty_sizing -o $@ -j 1 $<
+
+nangate_escaped: $(NG_SIZING)
+	mkdir -p workarea/escaped && find workarea/escaped -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/escaped && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../escaped/escaped.tcl > run.log 2>&1
+	grep -qF '\' workarea/escaped/esc_hier.v || { echo "nangate_escaped: no escaped name in the synthesised netlist -- the test no longer tests anything"; exit 1; }
+	grep -qE "RP_DRV : 008 : .* [1-9][0-9]* buffer" workarea/escaped/run.log || { echo "nangate_escaped: repair_drive added no buffer, see workarea/escaped/run.log"; exit 1; }
+	grep -qE "repdrv_buf_[0-9]+ *\\(.*\\\\" workarea/escaped/esc_repaired.v || { echo "nangate_escaped: no buffer drives an escaped net"; exit 1; }
+	cd workarea/escaped && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../escaped/escaped_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/escaped/readback.log || { echo "nangate_escaped: the repaired netlist still has drivers over their limit, see workarea/escaped/readback.log"; exit 1; }
+	a=$$(grep "Instance count" workarea/escaped/run.log | tail -1 | grep -oE "[0-9]+$$"); b=$$(grep "Instance count" workarea/escaped/readback.log | tail -1 | grep -oE "[0-9]+$$"); \
+	  [ -n "$$a" ] && [ "$$a" = "$$b" ] || { echo "nangate_escaped: repaired $$a instance(s), read back $$b"; exit 1; }
+	cd workarea/escaped && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire esc_repaired.v; hierarchy -check -top esc_top" > yosys.log 2>&1 || { echo "nangate_escaped: the repaired netlist does not parse, see workarea/escaped/yosys.log"; exit 1; }
+	@echo "nangate_escaped: escaped names survive synthesis, repair, write and read-back"
+
+# Buffer trees, port-local.  A select fans out to 256 gates inside a child
+# module that is instantiated twice and kept as its own module (-flatten_below
+# 0); -margin 0.1 makes that load need a tree.  The tree must be built inside
+# the shared child definition, on its sel port, so both copies have it and the
+# top's driver sees only the tree inputs, and the child's clock, the same
+# fanout through a port, is left for CTS.  Checked: the tree is reported and
+# is in bt_bank; the repaired netlist reads back to the same instance count
+# with no driver left over its limit; yosys parses it.
+nangate_buftree: $(NG_SIZING)
+	mkdir -p workarea/buftree && find workarea/buftree -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/buftree && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree.tcl > run.log 2>&1
+	awk -F'\t' '$$1=="tree" && $$2=="bt_bank" && $$3=="sel" && $$4 ~ /^256 load/' workarea/buftree/repair.rpt | grep -q . || { echo "nangate_buftree: no tree on bt_bank's sel port, see workarea/buftree/repair.rpt"; exit 1; }
+	[ "$$(awk '/^module bt_bank/,/^endmodule/' workarea/buftree/bt_repaired.v | grep -c repdrv_tb_)" -gt 1 ] || { echo "nangate_buftree: the tree is not inside bt_bank"; exit 1; }
+	awk -F'\t' '$$1=="tree" && $$3 ~ /clk/' workarea/buftree/repair.rpt | grep -q . && { echo "nangate_buftree: a clock net was given a buffer tree"; exit 1; } || true
+	grep -q "RP_DRV : 012 : 2 clock net" workarea/buftree/run.log || { echo "nangate_buftree: the two clock nets (bt_bank.clk and the top clk feeding it) were not both recognised, see workarea/buftree/run.log"; exit 1; }
+	cd workarea/buftree && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/buftree/readback.log || { echo "nangate_buftree: the repaired netlist still has drivers over their limit, see workarea/buftree/readback.log"; exit 1; }
+	a=$$(grep "Instance count" workarea/buftree/run.log | tail -1 | grep -oE "[0-9]+$$"); b=$$(grep "Instance count" workarea/buftree/readback.log | tail -1 | grep -oE "[0-9]+$$"); \
+	  [ -n "$$a" ] && [ "$$a" = "$$b" ] || { echo "nangate_buftree: repaired $$a instance(s), read back $$b"; exit 1; }
+	cd workarea/buftree && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire bt_repaired.v; hierarchy -check -top bt_top" > yosys.log 2>&1 || { echo "nangate_buftree: the repaired netlist does not parse, see workarea/buftree/yosys.log"; exit 1; }
+	@echo "nangate_buftree: a port-local tree in the shared child, read back clean"
+
+# Buffer trees with mixed loads.  A reset reaches 128 flops in the parent and,
+# through their rst ports, 4 copies of a child with 64 flops each.  repair_drive
+# must upsize before it builds trees (the child's reset inverters grow, which
+# lifts the child's port load over the tree threshold, so the child builds its
+# own port-local tree) and give each tree group a buffer that carries it.
+# Before both fixes the read-back found 19 inserted buffers over their limit:
+# trees sized on pre-upsize loads, and a "largest buffer" that a lexical $b
+# turned into the smallest.  Checked: the child's tree, a clean read-back with
+# the same instance count, and a netlist yosys parses.
+nangate_buftree_mixed: $(NG_SIZING)
+	mkdir -p workarea/buftree2 && find workarea/buftree2 -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/buftree2 && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree2.tcl > run.log 2>&1
+	awk -F'\t' '$$1=="tree" && $$2=="bt2_child" && $$3=="rst"' workarea/buftree2/repair.rpt | grep -q . || { echo "nangate_buftree_mixed: no port-local tree on bt2_child's rst, see workarea/buftree2/repair.rpt"; exit 1; }
+	cd workarea/buftree2 && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree2_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/buftree2/readback.log || { echo "nangate_buftree_mixed: the repaired netlist still has drivers over their limit, see workarea/buftree2/readback.log"; exit 1; }
+	cd workarea/buftree2 && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire bt2_repaired.v; hierarchy -check -top bt2_top" > yosys.log 2>&1 || { echo "nangate_buftree_mixed: the repaired netlist does not parse, see workarea/buftree2/yosys.log"; exit 1; }
+	@echo "nangate_buftree_mixed: upsize first, a port-local tree in the child, read back clean"
+
+# A gate whose load is behind assigns.  read_verilog holds an assign as a
+# buffer instance and write_verilog writes it back as the assign, so counting
+# it as a cell undercounts the load.  The read-back is of the repaired netlist
+# flattened by yosys, which merges the assigns into plain nets -- electron's
+# own read-back would hold them as buffers again and repeat the mistake.  The
+# committed code before the fix saw no violator here; this read-back found one.
+nangate_assignload: $(NG_SIZING)
+	mkdir -p workarea/assignload && find workarea/assignload -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/assignload && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/assignload.tcl > run.log 2>&1
+	[ "$$(grep -c '^\s*assign' workarea/assignload/al_repaired.v)" -gt 0 ] || { echo "nangate_assignload: no assign in the netlist -- the test no longer tests anything"; exit 1; }
+	awk -F'\t' '$$1=="resize" && $$2=="al_src"' workarea/assignload/repair.rpt | grep -q . || { echo "nangate_assignload: the gate behind the assigns was not upsized, see workarea/assignload/repair.rpt"; exit 1; }
+	cd workarea/assignload && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire al_repaired.v; hierarchy -check -top al_top; flatten; opt_clean -purge; write_verilog -noattr al_flat.v" > yosys.log 2>&1 || { echo "nangate_assignload: the repaired netlist does not flatten, see workarea/assignload/yosys.log"; exit 1; }
+	cd workarea/assignload && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/assignload_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/assignload/readback.log || { echo "nangate_assignload: flattened, the repaired netlist still has a driver over its limit, see workarea/assignload/readback.log"; exit 1; }
+	@echo "nangate_assignload: the load behind assigns counted, clean once they are merged"
+
+# fix_multiple_port_nets on the same design: the child's seven port-to-port
+# aliases and its feedthrough become buffers, the written child has no assign
+# left, and the netlist reads back to the same instances with nothing over its
+# limit.
+nangate_mpn: $(NG_SIZING)
+	mkdir -p workarea/mpn && find workarea/mpn -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/mpn && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/mpn.tcl > run.log 2>&1
+	[ "$$(awk -F'\t' '$$6=="port to port"' workarea/mpn/mpn.rpt | wc -l)" -eq 7 ] && [ "$$(awk -F'\t' '$$6=="feedthrough"' workarea/mpn/mpn.rpt | wc -l)" -eq 1 ] || { echo "nangate_mpn: expected 7 port-to-port assigns and 1 feedthrough made buffers, see workarea/mpn/mpn.rpt"; exit 1; }
+	[ "$$(awk '/^module al_src/,/^endmodule/' workarea/mpn/al_mpn.v | grep -c '^\s*assign')" -eq 0 ] || { echo "nangate_mpn: al_src still has assigns, see workarea/mpn/al_mpn.v"; exit 1; }
+	[ "$$(awk '/^module al_src/,/^endmodule/' workarea/mpn/al_mpn.v | grep -c fmpn_buf_)" -eq 8 ] || { echo "nangate_mpn: al_src does not have the 8 buffers, see workarea/mpn/al_mpn.v"; exit 1; }
+	cd workarea/mpn && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/mpn_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/mpn/readback.log || { echo "nangate_mpn: the netlist read back has a driver over its limit, see workarea/mpn/readback.log"; exit 1; }
+	a=$$(grep "Instance count" workarea/mpn/run.log | tail -1 | grep -oE "[0-9]+$$"); b=$$(grep "Instance count" workarea/mpn/readback.log | tail -1 | grep -oE "[0-9]+$$"); \
+	  [ -n "$$a" ] && [ "$$a" = "$$b" ] || { echo "nangate_mpn: wrote $$a instance(s), read back $$b"; exit 1; }
+	cd workarea/mpn && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire al_mpn.v; hierarchy -check -top al_top" > yosys.log 2>&1 || { echo "nangate_mpn: the netlist does not parse, see workarea/mpn/yosys.log"; exit 1; }
+	@echo "nangate_mpn: port assigns made buffers, written as cells, read back clean"
+
 # $display / $write in RTL must not reach a gate netlist.  yosys keeps them as
 # $print cells through every pass and write_verilog puts them back as initial
 # or always blocks; a clocked one also keeps alive the logic its arguments read.
@@ -198,7 +295,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
+nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

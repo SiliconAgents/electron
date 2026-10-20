@@ -69,6 +69,7 @@ my $config = parse_config($config_file);
     my $families = [];
     my $group = &dbfConfigFileGroup($config, $foundry, $tech_node, $layer);
     $LIBCFG_CELL_STUBS = &dbfConfigCellStubs($group);
+    $LIBCFG_CELL_SIZING = &dbfConfigCellSizing($group);
     &dbfConfigStaLibs($group);
     if ( $cell_family ne "" ) {
         $families = &dbfConfigCellFamilies($group || {}, $cell_family);
@@ -482,6 +483,22 @@ sub dbfConfigStaLibs {
           ": $n std cell and $m macro liberty path(s) noted, not read\n";
 }
 #------------------------------------------------------------------------------------------#
+#<!-- A "cell-sizing" table, when the config names one: per cell its area,
+#     leakage, interchangeability class and pin capacitances and limits, from
+#     3RDBIN/liberty_sizing.  repair_drive reads it.  Empty when absent. -->
+sub dbfConfigCellSizing {
+    my ($group) = @_;
+    return "" unless ( defined $group && defined $group->{'cell-sizing'} );
+    my $t = $group->{'cell-sizing'};
+    $t = $t->[0] if ( ref($t) eq 'ARRAY' );
+    return "" unless ( defined $t && $t ne "" );
+    unless ( -f $t ) {
+        print "WARN-PAR-CONFIG : 017 : the config names a cell-sizing table $t and it is not there\n";
+        return "";
+    }
+    return $t;
+}
+#------------------------------------------------------------------------------------------#
 sub dbfConfigCellStubs {
     my ($group) = @_;
     return "" unless ( defined $group && defined $group->{'cell-stubs'} );
@@ -589,6 +606,7 @@ $LIBCFG_FOUNDRY = $foundry;
 $LIBCFG_NODE    = $tech_node;
 $LIBCFG_LAYER   = $layer;
 $LIBCFG_CELL_STUBS = &dbfConfigCellStubs(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer));
+$LIBCFG_CELL_SIZING = &dbfConfigCellSizing(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer));
 &dbfConfigStaLibs(&dbfConfigFileGroup($config, $foundry, $tech_node, $layer));
 
 if ( $cell_family ne "" ) {
