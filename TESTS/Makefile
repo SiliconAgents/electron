@@ -203,6 +203,46 @@ nangate_escaped: $(NG_SIZING)
 	cd workarea/escaped && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire esc_repaired.v; hierarchy -check -top esc_top" > yosys.log 2>&1 || { echo "nangate_escaped: the repaired netlist does not parse, see workarea/escaped/yosys.log"; exit 1; }
 	@echo "nangate_escaped: escaped names survive synthesis, repair, write and read-back"
 
+# Buffer trees, port-local.  A select fans out to 256 gates inside a child
+# module that is instantiated twice and kept as its own module (-flatten_below
+# 0); -margin 0.1 makes that load need a tree.  The tree must be built inside
+# the shared child definition, on its sel port, so both copies have it and the
+# top's driver sees only the tree inputs, and the child's clock, the same
+# fanout through a port, is left for CTS.  Checked: the tree is reported and
+# is in bt_bank; the repaired netlist reads back to the same instance count
+# with no driver left over its limit; yosys parses it.
+nangate_buftree: $(NG_SIZING)
+	mkdir -p workarea/buftree && find workarea/buftree -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/buftree && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree.tcl > run.log 2>&1
+	awk -F'\t' '$$1=="tree" && $$2=="bt_bank" && $$3=="sel" && $$4 ~ /^256 load/' workarea/buftree/repair.rpt | grep -q . || { echo "nangate_buftree: no tree on bt_bank's sel port, see workarea/buftree/repair.rpt"; exit 1; }
+	[ "$$(awk '/^module bt_bank/,/^endmodule/' workarea/buftree/bt_repaired.v | grep -c repdrv_tb_)" -gt 1 ] || { echo "nangate_buftree: the tree is not inside bt_bank"; exit 1; }
+	awk -F'\t' '$$1=="tree" && $$3 ~ /clk/' workarea/buftree/repair.rpt | grep -q . && { echo "nangate_buftree: a clock net was given a buffer tree"; exit 1; } || true
+	grep -q "RP_DRV : 012 : 2 clock net" workarea/buftree/run.log || { echo "nangate_buftree: the two clock nets (bt_bank.clk and the top clk feeding it) were not both recognised, see workarea/buftree/run.log"; exit 1; }
+	cd workarea/buftree && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/buftree/readback.log || { echo "nangate_buftree: the repaired netlist still has drivers over their limit, see workarea/buftree/readback.log"; exit 1; }
+	a=$$(grep "Instance count" workarea/buftree/run.log | tail -1 | grep -oE "[0-9]+$$"); b=$$(grep "Instance count" workarea/buftree/readback.log | tail -1 | grep -oE "[0-9]+$$"); \
+	  [ -n "$$a" ] && [ "$$a" = "$$b" ] || { echo "nangate_buftree: repaired $$a instance(s), read back $$b"; exit 1; }
+	cd workarea/buftree && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire bt_repaired.v; hierarchy -check -top bt_top" > yosys.log 2>&1 || { echo "nangate_buftree: the repaired netlist does not parse, see workarea/buftree/yosys.log"; exit 1; }
+	@echo "nangate_buftree: a port-local tree in the shared child, read back clean"
+
+# Buffer trees with mixed loads.  A reset reaches 128 flops in the parent and,
+# through their rst ports, 4 copies of a child with 64 flops each.  repair_drive
+# must upsize before it builds trees (the child's reset inverters grow, which
+# lifts the child's port load over the tree threshold, so the child builds its
+# own port-local tree) and give each tree group a buffer that carries it.
+# Before both fixes the read-back found 19 inserted buffers over their limit:
+# trees sized on pre-upsize loads, and a "largest buffer" that a lexical $b
+# turned into the smallest.  Checked: the child's tree, a clean read-back with
+# the same instance count, and a netlist yosys parses.
+nangate_buftree_mixed: $(NG_SIZING)
+	mkdir -p workarea/buftree2 && find workarea/buftree2 -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/buftree2 && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree2.tcl > run.log 2>&1
+	awk -F'\t' '$$1=="tree" && $$2=="bt2_child" && $$3=="rst"' workarea/buftree2/repair.rpt | grep -q . || { echo "nangate_buftree_mixed: no port-local tree on bt2_child's rst, see workarea/buftree2/repair.rpt"; exit 1; }
+	cd workarea/buftree2 && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../buftree/buftree2_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/buftree2/readback.log || { echo "nangate_buftree_mixed: the repaired netlist still has drivers over their limit, see workarea/buftree2/readback.log"; exit 1; }
+	cd workarea/buftree2 && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire bt2_repaired.v; hierarchy -check -top bt2_top" > yosys.log 2>&1 || { echo "nangate_buftree_mixed: the repaired netlist does not parse, see workarea/buftree2/yosys.log"; exit 1; }
+	@echo "nangate_buftree_mixed: upsize first, a port-local tree in the child, read back clean"
+
 # $display / $write in RTL must not reach a gate netlist.  yosys keeps them as
 # $print cells through every pass and write_verilog puts them back as initial
 # or always blocks; a clocked one also keeps alive the logic its arguments read.
@@ -222,7 +262,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_escaped nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
+nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

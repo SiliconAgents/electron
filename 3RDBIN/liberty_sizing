@@ -18,7 +18,9 @@ One row per cell:
            output's truth table, so two cells share one only when either can
            replace the other; a sequential or multi-output cell's is its stem
            and pin names
-    pins   pin:dir:cap[:maxcap[:maxtran]] separated by ';', dir i or o;
+    pins   pin:dir:cap[:maxcap[:maxtran]] separated by ';', dir i, o, or k for an
+           input the liberty marks `clock : true` -- a load like any input, but
+           a net that reaches one is a clock net, which is CTS's to buffer;
            capacitance and max_capacitance in the library's load unit (header),
            max_transition in its time unit; an output with no max_transition of
            its own takes the default_max_transition of the liberty the cell
@@ -121,7 +123,7 @@ def read_one(path):
                     if m:
                         k, v = m.group(1), m.group(2).strip()
                         if pin is not None and k in ("direction", "function", "capacitance",
-                                                     "max_capacitance", "max_transition"):
+                                                     "max_capacitance", "max_transition", "clock"):
                             pins[pin].setdefault(k, v)
                         elif pin is None and k == "area":
                             area = float(v)
@@ -160,7 +162,8 @@ def row(cell, vt, area, leak, dont, seq, pins, dflt_tran=""):
     fields = []
     for n in ins + outs:
         p = pins[n]
-        f = f"{n}:{'i' if n in ins else 'o'}:{p.get('capacitance', '')}"
+        d = ("k" if p.get("clock") == "true" else "i") if n in ins else "o"
+        f = f"{n}:{d}:{p.get('capacitance', '')}"
         if n in outs:
             # an output with no max_transition of its own takes its own
             # library's default -- the defaults differ between libraries

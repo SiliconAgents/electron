@@ -123,6 +123,16 @@ my ($bufClass) = sort { scalar(@{$CLS{$b}}) <=> scalar(@{$CLS{$a}}) }
                  grep { /^BUFF?\|[^|,]+\|[^|,]+\|2$/ } keys %CLS;
 #<!-- its pins, from the class: stem|in|out|truth table -->
 my ($bufIn, $bufOut) = defined $bufClass ? ( split(/\|/, $bufClass) )[1, 2] : ("", "");
+#<!-- the allowed buffer that carries the most -->
+my $largestBuf = sub {
+  my ($big, $bc) = (undef, -1);
+  foreach my $c ( @{$CLS{$bufClass} || []} ) {
+    next unless ( ( $anyVt || $vtOK{$SZ{$c}{vt}} ) && exists $PLDB{$c} );
+    my $mc = $SZ{$c}{pins}{$bufOut}[2];
+    ($big, $bc) = ($c, $mc) if ( defined $mc && $mc > $bc );
+  }
+  return $big;
+};
 
 #<!-- where each module is instantiated, as remove_dead_logic -hier walks it -->
 my (%pathMod, %modPaths) = ();
@@ -147,12 +157,21 @@ my $split = sub {
 };
 my $cost = sub { my ($c) = @_; return $SZ{$c}{area} + $leakW * $SZ{$c}{leak}; };
 
-#<!-- the cheapest allowed cell of $class whose every output carries $need{pin} -->
+#<!-- Vt by speed, slowest first; a low-leakage variant just below its base -->
+my %vtRank = ( "" => 0, svt => 0, lvtll => 1, lvt => 2, ulvtll => 3, ulvt => 4, elvt => 5 );
+#<!-- the cheapest allowed cell of $class whose every output carries $need{pin}.
+#     With $cur, the cell being replaced: its own Vt is always allowed and no
+#     slower Vt is -- a repair must not trade a cell's speed for its load.
+#     Without that, -vts svt,lvt moved 232 ulvt cells to svt on one design and
+#     reported the leakage it saved as a gain. -->
 my $choose = sub {
-  my ($class, $need) = @_;
+  my ($class, $need, $cur) = @_;
   my ($best, $bc) = (undef, 0);
+  my ($curVt, $curRank) = defined $cur ? ($SZ{$cur}{vt}, $vtRank{$SZ{$cur}{vt}} || 0) : ("", -1);
   foreach my $c ( @{$CLS{$class} || []} ) {
-    next unless ( ( $anyVt || $vtOK{$SZ{$c}{vt}} ) && exists $PLDB{$c} );
+    my $vt = $SZ{$c}{vt};
+    next unless ( ( $anyVt || $vtOK{$vt} || ( defined $cur && $vt eq $curVt ) ) && exists $PLDB{$c} );
+    next if ( defined $cur && ( $vtRank{$vt} || 0 ) < $curRank );
     my $ok = 1;
     foreach my $po ( keys %$need ) {
       my $mc = $SZ{$c}{pins}{$po}[2];
@@ -173,6 +192,270 @@ my ($nResize, $nSwap, $nBuf, $nStuck, $nSkip, $dArea, $dLeak) = (0, 0, 0, 0, 0, 
 my %stuck = ();
 my $bufSeq = 0;
 
+#<!-- PHASE 1: buffer trees, port-local, one module definition at a time.
+#     A net whose load is more than the largest allowed buffer carries -- the
+#     read selects of a latch array, 10,000 pins on one net -- gets a tree,
+#     and it is built in the definition where those loads are: loads inside a
+#     child, reached through its input port, get their tree inside the child,
+#     so every copy of the child has it and the parent then sees only the
+#     tree's inputs on that port.  Definitions bottom up, children first.
+#     Loads are grouped in name order (the best stand-in for locality before
+#     placement), each group within one tree buffer's limit, and levels added
+#     until the top fits one buffer's limit too; whatever drives the net is then
+#     sized by the per-driver pass below.  Every edit is replayed in the flat
+#     database under every instance path. -->
+my ($nTreeNets, $nTreeBufs, $nClkSkip) = (0, 0, 0);
+my $treePhase = sub {
+if ( defined $bufClass && !$dry ) {
+  my @bufs = grep { ( $anyVt || $vtOK{$SZ{$_}{vt}} ) && exists $PLDB{$_} && defined $SZ{$_}{pins}{$bufOut}[2] }
+             @{$CLS{$bufClass}};
+  my ($bigCap) = sort { $b <=> $a } map { $SZ{$_}{pins}{$bufOut}[2] } @bufs;
+  my $treeAt = $margin * ( $bigCap || 0 );
+  #<!-- the tree's buffer: the cheapest that carries half of what a net may
+  #     load before it needs a tree.  $choose applies -margin itself, so the
+  #     request is in the same terms as $treeAt; asking for half of $bigCap
+  #     found no buffer at all under any margin below 1. -->
+  my $tb = $choose->($bufClass, { $bufOut => 0.5 * $treeAt });
+  my $grp = defined $tb ? $margin * $SZ{$tb}{pins}{$bufOut}[2] : 0;
+  my $pack = 0.85 * $grp;       # headroom for what the second driver pass upsizes
+  my $tbIn = defined $tb ? $SZ{$tb}{pins}{$bufIn}[1] : 0;
+
+  #<!-- one definition's local nets: loads (leaf input pins, child input ports)
+  #     and what drives them -->
+  my %local = ();
+  my $parse = sub {
+    my ($m) = @_;
+    my (%loads, %driven, %clk) = ();
+    foreach my $line ( $MODULE_ALREADY{$m}->dbVNOMGetConn ) {
+      my ($cell, $inst) = ( split(/\s+/, $line) )[0, 1];
+      next unless ( defined $inst );
+      my $leaf = $MODULE_ALREADY{$m}->dbVNOMHasLeafInst($inst);
+      my $hier = !$leaf && exists $MODULE_ALREADY{$cell};
+      next unless ( $leaf || $hier );
+      foreach my $pe ( &dbfConnPins($line) ) {
+        my ($pin, $x) = @$pe;
+        next unless ( &dbfConnExprIsNet($x) );
+        if ( $leaf ) {
+          next unless ( exists $SZ{$cell} && exists $SZ{$cell}{pins}{$pin} );
+          if ( $SZ{$cell}{pins}{$pin}[0] ne "o" ) {
+            push(@{$loads{$x}}, ["L", $inst, $pin, $cell]);
+            $clk{$x} = 1 if ( $SZ{$cell}{pins}{$pin}[0] eq "k" );
+          }
+          else { $driven{$x} = $cell; }
+        } elsif ( exists $MODULE_ALREADY{$cell}->{ins}{$pin} ) {
+          push(@{$loads{$x}}, ["H", $inst, $pin, $cell]);
+        } else {
+          $driven{$x} = "";
+        }
+      }
+    }
+    return { loads => \%loads, driven => \%driven, clk => \%clk };
+  };
+  #<!-- a clock net: one that reaches a clock pin, here or through a child's
+  #     port.  A clock entering a module by a port has no driver inside it, so
+  #     the driver's class could not say; on one design that missed four clock
+  #     ports with 826 to 11,762 loads each, and data buffers went into them.
+  #     Clock nets are CTS's: clock buffers, balanced skew. -->
+  my (%clkMemo, $isClk) = ();
+  $isClk = sub {
+    my ($m, $x) = @_;
+    return $clkMemo{"$m\t$x"} if ( exists $clkMemo{"$m\t$x"} );
+    $clkMemo{"$m\t$x"} = 0;
+    $local{$m} = $parse->($m) unless ( exists $local{$m} );
+    my $v = $local{$m}{clk}{$x} ? 1 : 0;
+    unless ( $v ) {
+      foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) {
+        next unless ( $ld->[0] eq "H" );
+        if ( $isClk->($ld->[3], $ld->[2]) ) { $v = 1; last; }
+      }
+    }
+    return $clkMemo{"$m\t$x"} = $v;
+  };
+  my (%plMemo, $portLoad, $netLoad) = ();
+  $netLoad = sub {
+    my ($m, $x) = @_;
+    my $l = 0;
+    foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) {
+      $l += ( $ld->[0] eq "L" ) ? $SZ{$ld->[3]}{pins}{$ld->[2]}[1] : $portLoad->($ld->[3], $ld->[2]);
+    }
+    return $l;
+  };
+  $portLoad = sub {
+    my ($c, $p) = @_;
+    return $plMemo{"$c\t$p"} if ( exists $plMemo{"$c\t$p"} );
+    $local{$c} = $parse->($c) unless ( exists $local{$c} );
+    return $plMemo{"$c\t$p"} = $netLoad->($c, $p);
+  };
+  #<!-- a leaf input pin on $x somewhere under $m: [relative path, pin] -- how
+  #     the flat net of $x is found under each instance path -->
+  my $rep;
+  $rep = sub {
+    my ($m, $x) = @_;
+    $local{$m} = $parse->($m) unless ( exists $local{$m} );
+    foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) { return ($ld->[1], $ld->[2]) if ( $ld->[0] eq "L" ); }
+    foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) {
+      my ($r, $pp) = $rep->($ld->[3], $ld->[2]);
+      return ("$ld->[1]/$r", $pp) if ( defined $r );
+    }
+    return ();
+  };
+  my $move = sub {
+    my ($fi, $pin, $from, $to) = @_;
+    $COMP_ALREADY{$fi}{$pin} = $to;
+    my ($other) = grep { defined $COMP_ALREADY{$fi}{$_} && $COMP_ALREADY{$fi}{$_} eq $from } keys %{$COMP_ALREADY{$fi}};
+    if ( defined $other ) { $NETS_ALREADY{$from}{$fi} = $other; } else { delete $NETS_ALREADY{$from}{$fi}; }
+    $NETS_ALREADY{$to}{$fi} = $pin;
+    unless ( exists $NADB{$to} ) { $NADB{$to} = NetsAttrDB::new(); $NADB{$to}->dbNadbSetNetType(0); }
+  };
+  my (%height, $hgt) = ();
+  $hgt = sub {
+    my ($m) = @_;
+    return $height{$m} if ( exists $height{$m} );
+    my $h = 0;
+    foreach my $hi ( $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+      my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($hi);
+      next unless ( exists $modPaths{$c} );
+      my $ch = $hgt->($c) + 1;
+      $h = $ch if ( $ch > $h );
+    }
+    return $height{$m} = $h;
+  };
+  $hgt->($_) foreach ( keys %modPaths );
+
+  foreach my $m ( ( defined $tb && $grp > 0 ) ? sort { $height{$a} <=> $height{$b} || $a cmp $b } keys %modPaths : () ) {
+    $local{$m} = $parse->($m);
+    my $mod = $MODULE_ALREADY{$m};
+    my $n = scalar(@{$modPaths{$m}});
+    my (%rw, @add) = ();
+    my $addArea = 0;
+    my @plans = ();
+    foreach my $x ( sort keys %{$local{$m}{loads}} ) {
+      next unless ( $netLoad->($m, $x) > $treeAt );
+      my $d = $local{$m}{driven}{$x};
+      next if ( defined $d && $d ne "" && exists $SZ{$d} && $SZ{$d}{class} =~ /^CK/ );   # clocks: CTS
+      if ( $isClk->($m, $x) ) { $nClkSkip++; next; }
+      my @cur = map { { kind => $_->[0], inst => $_->[1], pin => $_->[2], cell => $_->[3],
+                        cap => ( $_->[0] eq "L" ? $SZ{$_->[3]}{pins}{$_->[2]}[1] : $portLoad->($_->[3], $_->[2]) ) } }
+                sort { $a->[1] cmp $b->[1] || $a->[2] cmp $b->[2] } @{$local{$m}{loads}{$x}};
+      my @loads = @cur;
+      my @tbufs = ();
+      my $levels = 0;
+      while ( 1 ) {
+        my ($tot, $g, $gc) = (0, [], 0);
+        my @groups = ();
+        $tot += $_->{cap} foreach ( @cur );
+        last if ( $levels > 0 && $tot <= $grp );
+        foreach my $it ( @cur ) {
+          if ( @$g && $gc + $it->{cap} > $pack ) { push(@groups, $g); ($g, $gc) = ([], 0); }
+          push(@$g, $it); $gc += $it->{cap};
+        }
+        push(@groups, $g) if ( @$g );
+        last if ( $levels > 0 && @groups == scalar(@cur) );   # no progress: stop
+        my @next = ();
+        foreach my $gl ( @groups ) {
+          #<!-- each group's own buffer: the cheapest that carries it.  One
+          #     load can be more than the packing size -- a child port with
+          #     0.026 pF behind it, below the tree threshold so the child built
+          #     none, above one mid-size buffer's limit -- and a buffer sized
+          #     for the packing was overloaded by it -->
+          my $gl_cap = 0; $gl_cap += $_->{cap} foreach ( @$gl );
+          my $gb = $choose->($bufClass, { $bufOut => $gl_cap }) || $largestBuf->();
+          $bufSeq++;
+          my $bi = { kind => "B", inst => "repdrv_tb_$bufSeq", pin => $bufIn, cell => $gb,
+                     cap => $SZ{$gb}{pins}{$bufIn}[1], out => "repdrv_tn_$bufSeq" };
+          $_->{net} = $bi->{out} foreach ( @$gl );
+          push(@tbufs, $bi); push(@next, $bi);
+        }
+        @cur = @next;
+        $levels++;
+      }
+      $_->{net} = $x foreach ( @cur );
+      my ($r, $rp) = $rep->($m, $x);
+      push(@plans, [$x, \@loads, \@tbufs, $levels, $r, $rp]);
+      foreach my $it ( @loads ) { $rw{$it->{inst}}{$it->{pin}} = $it->{net}; }
+      my %used = ();
+      foreach my $bi ( @tbufs ) {
+        push(@add, "$bi->{cell} $bi->{inst} (.$bufIn($bi->{net}), .$bufOut($bi->{out})) ;");
+        $mod->dbVNOMAddLeafInst($bi->{inst});
+        $mod->dbVNOMSetLeafInstCell($bi->{inst}, $bi->{cell});
+        my @s = exists $PLDB{$bi->{cell}} ? $PLDB{$bi->{cell}}->dbMdbGetSize : (0, 0);
+        $addArea += $s[0] * $s[1];
+        $dArea += $n * $SZ{$bi->{cell}}{area};
+        $dLeak += $n * $SZ{$bi->{cell}}{leak};
+        $used{$bi->{cell}}++;
+      }
+      $nTreeNets++;
+      $nTreeBufs += scalar(@tbufs);
+      print $fh "tree\t$m\t$x\t" . scalar(@loads) . " load(s)\t" .
+                join(",", map { "$used{$_} $_" } sort keys %used) . "\t$levels level(s)\tx$n\n" if ( $fh );
+    }
+    next unless ( @plans );
+    #<!-- the definition -->
+    my @lines = ();
+    foreach my $line ( $mod->dbVNOMGetConn ) {
+      my ($cell, $inst) = ( split(/\s+/, $line) )[0, 1];
+      if ( defined $inst && exists $rw{$inst} ) {
+        $line = &dbfConnSetPinExpr($line, $_, $rw{$inst}{$_}) foreach ( sort keys %{$rw{$inst}} );
+      }
+      push(@lines, $line);
+    }
+    $mod->{conn} = [@lines, @add];
+    $mod->dbVNOMSetArea($mod->dbVNOMGetArea + $addArea);
+    #<!-- the flat database, under every path -->
+    foreach my $pp ( @{$modPaths{$m}} ) {
+      my $pre = ( $pp eq "" ) ? "" : "$pp/";
+      foreach my $pl ( @plans ) {
+        my ($x, $loads, $tbufs, $levels, $r, $rp) = @$pl;
+        next unless ( defined $r && exists $COMP_ALREADY{"$pre$r"} );
+        my $F = $COMP_ALREADY{"$pre$r"}{$rp};
+        next unless ( defined $F && exists $NETS_ALREADY{$F} );
+        foreach my $it ( @$loads ) {
+          my $to = "$pre$it->{net}";
+          if ( $it->{kind} eq "L" ) {
+            $move->("$pre$it->{inst}", $it->{pin}, $F, $to) if ( exists $COMP_ALREADY{"$pre$it->{inst}"} );
+          } else {
+            my $under = "$pre$it->{inst}/";
+            foreach my $fi ( grep { index($_, $under) == 0 } keys %{$NETS_ALREADY{$F}} ) {
+              foreach my $pin ( grep { defined $COMP_ALREADY{$fi}{$_} && $COMP_ALREADY{$fi}{$_} eq $F } keys %{$COMP_ALREADY{$fi}} ) {
+                $move->($fi, $pin, $F, $to);
+              }
+            }
+          }
+        }
+        foreach my $bi ( @$tbufs ) {
+          my $fb = "$pre$bi->{inst}";
+          my $in = ( $bi->{net} eq $x ) ? $F : "$pre$bi->{net}";
+          my $out = "$pre$bi->{out}";
+          $CADB{$fb} = CompAttDB::new();
+          $CADB{$fb}->dbCadbSetCellref($bi->{cell});
+          $COMP_ALREADY{$fb}{$bufIn} = $in;
+          $COMP_ALREADY{$fb}{$bufOut} = $out;
+          $NETS_ALREADY{$in}{$fb} = $bufIn;
+          $NETS_ALREADY{$out}{$fb} = $bufOut;
+          foreach my $nn ( $in, $out ) {
+            unless ( exists $NADB{$nn} ) { $NADB{$nn} = NetsAttrDB::new(); $NADB{$nn}->dbNadbSetNetType(0); }
+          }
+        }
+      }
+    }
+    #<!-- what a parent sees on this definition's ports has changed -->
+    $local{$m} = $parse->($m);
+    delete $plMemo{$_} foreach ( grep { /^\Q$m\E\t/ } keys %plMemo );
+  }
+  print "INFO-PAR-RP_DRV : 011 : $nTreeNets net(s) over " . sprintf("%.4g", $treeAt) . " given buffer trees: " .
+        "$nTreeBufs buffer(s) in module definitions\n" if ( $nTreeNets );
+  print "INFO-PAR-RP_DRV : 012 : $nClkSkip clock net(s) over that load left for CTS\n" if ( $nClkSkip );
+}
+};
+
+#<!-- the per-driver pass.  Run twice around the trees: first with no
+#     buffering, so every overloaded driver is upsized before the trees are
+#     built and they see the loads' final input capacitance -- a tree sized on
+#     the old capacitances was overloaded again the moment its loads were
+#     upsized, and the second pass buffered its buffers; then with buffering,
+#     for what no cell of its class can carry. -->
+my $driverPass = sub {
+my ($allowBuf, $pass) = @_;
 for ( my $it = 1; $it <= $iters; $it++ ) {
   #<!-- loads on the flat nets, and the driving pins -->
   my (%load, %drv) = ();
@@ -183,7 +466,7 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
       my $net = $COMP_ALREADY{$inst}{$pin};
       next if ( !defined $net || $net eq "" || $net =~ /^1'b[01]$/ );
       next unless ( defined $sz && exists $sz->{pins}{$pin} );
-      if ( $sz->{pins}{$pin}[0] eq "i" ) { $load{$net} += $sz->{pins}{$pin}[1]; }
+      if ( $sz->{pins}{$pin}[0] ne "o" ) { $load{$net} += $sz->{pins}{$pin}[1]; }
       else { $drv{$inst}{$pin} = $net; }
     }
   }
@@ -211,7 +494,7 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
       }
     }
   }
-  print "INFO-PAR-RP_DRV : 006 : iteration $it: $nViol driver(s) over max_capacitance in " .
+  print "INFO-PAR-RP_DRV : 006 : ${pass}iteration $it: $nViol driver(s) over max_capacitance in " .
         scalar(keys %need) . " module definition(s)\n";
   last unless ( keys %need );
 
@@ -221,25 +504,28 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
     foreach my $l ( keys %{$need{$m}} ) {
       my $cell = $MODULE_ALREADY{$m}->dbVNOMGetLeafInstCell($l);
       next unless ( defined $cell && exists $SZ{$cell} );
-      my $c = $choose->($SZ{$cell}{class}, $need{$m}{$l});
+      my $c = $choose->($SZ{$cell}{class}, $need{$m}{$l}, $cell);
       if ( defined $c ) {
         $newCell{$m}{$l} = $c if ( $c ne $cell );
         next;
       }
+      next unless ( $allowBuf );
       #<!-- nothing in the class carries it: a buffer on each output that is
       #     over the limit -- a flop's Q, say, while its QN is fine -->
       my @over = grep { my $mc = $SZ{$cell}{pins}{$_}[2];
                         defined $mc && $need{$m}{$l}{$_} > $margin * $mc } keys %{$need{$m}{$l}};
       if ( !@over || !defined $bufClass ) { $stuck{"$m\t$l"} = 1; next; }
       foreach my $po ( sort @over ) {
-        my $b = $choose->($bufClass, { $bufOut => $need{$m}{$l}{$po} });
-        unless ( defined $b ) {
+        #<!-- not $b: a lexical $b hides sort's own, and the "largest buffer"
+        #     below came back as an arbitrary one -- the smallest, on one
+        #     design, put in front of a reset tree at 3.2 ns -->
+        my $bcell = $choose->($bufClass, { $bufOut => $need{$m}{$l}{$po} });
+        unless ( defined $bcell ) {
           #<!-- more than the largest buffer: the largest, and say so -->
-          ($b) = sort { $SZ{$b}{pins}{$bufOut}[2] <=> $SZ{$a}{pins}{$bufOut}[2] }
-                 grep { ( $anyVt || $vtOK{$SZ{$_}{vt}} ) && exists $PLDB{$_} } @{$CLS{$bufClass}};
+          $bcell = $largestBuf->();
           $stuck{"$m\t$l"} = 1;
         }
-        push(@{$bufAt{$m}{$l}}, [$po, $b]) if ( defined $b );
+        push(@{$bufAt{$m}{$l}}, [$po, $bcell]) if ( defined $bcell );
       }
     }
   }
@@ -284,7 +570,7 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
         }
       }
       foreach my $bp ( ( defined $inst && exists $bufAt{$m}{$inst} ) ? @{$bufAt{$m}{$inst}} : () ) {
-        my ($po, $b) = @$bp;
+        my ($po, $bcell) = @$bp;
         #<!-- one net: a plain name, a bit select or an escaped name (which
         #     keeps its terminating space); UTILS/gen_net_func reads it -->
         my $expr = &dbfConnPinExpr($line, $po);
@@ -294,16 +580,16 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
           $bufSeq++;
           my ($bn, $nn) = ("repdrv_buf_$bufSeq", "repdrv_net_$bufSeq");
           $line = &dbfConnSetPinExpr($line, $po, $nn);
-          push(@add, "$b $bn (.$bufIn($nn), .$bufOut($expr)) ;");
+          push(@add, "$bcell $bn (.$bufIn($nn), .$bufOut($expr)) ;");
           $mod->dbVNOMAddLeafInst($bn);
-          $mod->dbVNOMSetLeafInstCell($bn, $b);
-          my @s = exists $PLDB{$b} ? $PLDB{$b}->dbMdbGetSize : (0, 0);
+          $mod->dbVNOMSetLeafInstCell($bn, $bcell);
+          my @s = exists $PLDB{$bcell} ? $PLDB{$bcell}->dbMdbGetSize : (0, 0);
           $area += $s[0] * $s[1];
-          $dArea += $n * $SZ{$b}{area};
-          $dLeak += $n * $SZ{$b}{leak};
+          $dArea += $n * $SZ{$bcell}{area};
+          $dLeak += $n * $SZ{$bcell}{leak};
           $nBuf++;
-          print $fh "buffer\t$m\t$inst\t$po\t$b\t$bn\tx$n\n" if ( $fh );
-          @$bp = ($po, $b, $bn, $nn);
+          print $fh "buffer\t$m\t$inst\t$po\t$bcell\t$bn\tx$n\n" if ( $fh );
+          @$bp = ($po, $bcell, $bn, $nn);
         }
       }
       push(@lines, $line);
@@ -313,7 +599,7 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
     #<!-- the flat side of the buffers -->
     foreach my $inst ( keys %{$bufAt{$m} || {}} ) {
      foreach my $bp ( @{$bufAt{$m}{$inst}} ) {
-      my ($po, $b, $bn, $nn) = @$bp;
+      my ($po, $bcell, $bn, $nn) = @$bp;
       next unless ( defined $bn );
       foreach my $pp ( @{$modPaths{$m}} ) {
         my $pre = ( $pp eq "" ) ? "" : "$pp/";
@@ -326,7 +612,7 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
         if ( defined $other ) { $NETS_ALREADY{$old}{$fi} = $other; } else { delete $NETS_ALREADY{$old}{$fi}; }
         $NETS_ALREADY{$old}{$fb} = $bufOut;
         $CADB{$fb} = CompAttDB::new();
-        $CADB{$fb}->dbCadbSetCellref($b);
+        $CADB{$fb}->dbCadbSetCellref($bcell);
         $COMP_ALREADY{$fb}{$bufIn} = $fn;
         $COMP_ALREADY{$fb}{$bufOut} = $old;
         $NADB{$fn} = NetsAttrDB::new();
@@ -341,6 +627,15 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
     $MODULE_ALREADY{$m}->dbVNOMSetLeafArea(0);
     $MODULE_ALREADY{$m}->dbVNOMSetHierArea(0);
   }
+}
+};
+
+if ( $dry ) {
+  $driverPass->(1, "");
+} else {
+  $driverPass->(0, "upsize pass, ");
+  $treePhase->();
+  $driverPass->(1, "");
 }
 $nStuck = scalar(keys %stuck);
 close($fh) if ( defined $fh );
