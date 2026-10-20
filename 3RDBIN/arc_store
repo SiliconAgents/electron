@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""Print the Spark arc store a library config names for one foundry/node/layer.
+
+    arc_store --config library.config --foundry nangate --node 45nm --layer 6
+
+The store is the node's liberty converted to Parquet for segment timing on
+Spark (pyspark_cad's libertyToArcs); the config records where it lives under
+"sta-arc-store", beside "cell-stubs", so every flow reads one store instead of
+building its own.  $VAR and ${VAR} expand as electron's config reader expands
+them, with ELECTRON_HOME falling back to this checkout.
+
+Prints nothing and exits 1 when the config names no store.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+
+def expand(path):
+    home = os.environ.get("ELECTRON_HOME") or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))
+
+    def sub(m):
+        name = m.group(1) or m.group(2)
+        val = home if name == "ELECTRON_HOME" else os.environ.get(name)
+        return val if val else m.group(0)
+    return re.sub(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", sub, path)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--foundry", required=True)
+    ap.add_argument("--node", required=True)
+    ap.add_argument("--layer", required=True)
+    a = ap.parse_args()
+    c = json.load(open(a.config))
+    for n in c.get(a.foundry, {}).get("node", []):
+        if n.get("type") != a.node:
+            continue
+        for f in n.get("files", []):
+            if str(f.get("layer")) == str(a.layer) and f.get("sta-arc-store"):
+                print(expand(f["sta-arc-store"]))
+                return 0
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

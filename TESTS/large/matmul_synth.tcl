@@ -36,4 +36,10 @@ get_std_cell_libs --first --set
 synthesize -rtl ../rtls/matmul/matmul.f -top matmul_4x4 -out synth --read
 report_design
 
+#<!-- The timing graph of the synthesized netlist, for segment timing on Spark
+#     (INSTALL/sparksta.mk).  Written from the database already in memory, so
+#     it costs no second read of the netlist.  Every row is UND for location:
+#     nothing is placed yet. -->
+write_sgraph -output matmul_4x4.synth.sgraph
+
 exit

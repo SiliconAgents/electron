@@ -52,6 +52,10 @@ write_def -output vedic_16x16.placed.def --overwrite
 legalize_flat
 write_def -output vedic_16x16.legal.def --overwrite
 
+#<!-- The timing graph again, now with every cell's location, for timing after
+#     placement. -->
+write_sgraph -output vedic_16x16.place.sgraph
+
 #<!-- -lef matters.  Left to itself qroute writes a LEF from the database with
 #     write_lef, and that drops the per layer OFFSET and the second PITCH
 #     value, so the track grid lands in the wrong place and pins sit between

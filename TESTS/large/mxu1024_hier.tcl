@@ -60,6 +60,12 @@ get_std_cell_libs --first --set
 synthesize -rtl ../rtls/mxu/mxu.f -top mxu_1024 -out synth1024 --read
 report_design
 
+#<!-- The timing graph of the synthesized netlist, for segment timing on Spark
+#     (INSTALL/sparksta.mk).  Written from the database already in memory, so
+#     it costs no second read of the netlist.  Every row is UND for location:
+#     nothing is placed yet. -->
+write_sgraph -output mxu_1024.synth.sgraph
+
 #-----------------------------------------------------------------------------
 # Floorplan.  set_floorplan rather than edit_module -util, because
 # legalize_flat needs the ROWs only set_floorplan creates.
@@ -86,5 +92,9 @@ write_def -output mxu_1024.recurse.def --overwrite
 #-----------------------------------------------------------------------------
 legalize_flat
 write_def -output mxu_1024.legal.def --overwrite
+
+#<!-- The timing graph again, now with every cell's location, for timing after
+#     placement. -->
+write_sgraph -output mxu_1024.place.sgraph
 
 exit

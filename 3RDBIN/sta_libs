@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Print the liberty files a library config gives for timing one corner.
+
+    sta_libs --config library.config --foundry nangate --node 45nm --layer 6 --corner tt
+
+"std-cell-sta-libs" is a map corner -> flavour -> files; every flavour of the
+corner is printed, one path per line.  A config without that key (Nangate)
+falls back to "std-cell-libs".  $VAR and ${VAR} expand as electron's config
+reader expands them.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+
+
+def expand(path):
+    home = os.environ.get("ELECTRON_HOME") or os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))
+
+    def sub(m):
+        name = m.group(1) or m.group(2)
+        val = home if name == "ELECTRON_HOME" else os.environ.get(name)
+        return val if val else m.group(0)
+    return re.sub(r"\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*)", sub, path)
+
+
+def flat(v):
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        return [x for e in v for x in flat(e)]
+    if isinstance(v, dict):
+        return [x for e in v.values() for x in flat(e)]
+    return []
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    for k in ("config", "foundry", "node", "layer"):
+        ap.add_argument("--" + k, required=True)
+    ap.add_argument("--corner", default="tt")
+    a = ap.parse_args()
+    c = json.load(open(a.config))
+    for n in c.get(a.foundry, {}).get("node", []):
+        if n.get("type") != a.node:
+            continue
+        for f in n.get("files", []):
+            if str(f.get("layer")) != str(a.layer):
+                continue
+            sta = f.get("std-cell-sta-libs")
+            paths = flat(sta.get(a.corner, {})) if isinstance(sta, dict) else flat(f.get("std-cell-libs", []))
+            for p in dict.fromkeys(paths):
+                print(expand(p))
+            return 0 if paths else 1
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

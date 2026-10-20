@@ -1,0 +1,77 @@
+#-----------------------------------------------------------------------------#
+# photon_query: ask a running Photon session about paths.
+#
+# A Photon session (pyspark_cad's timer, started as a server) loads a design's
+# timing graph and its library once, times it once keeping every pin's arrival,
+# slew and predecessor, and then answers questions in milliseconds instead of
+# re-reading a 2 GB graph for each one.  This is the client: it sends one
+# request per line over TCP and prints the reply, which ends with a line ".".
+#
+# The server writes "host port" to a file when it is ready; -endpoint names
+# that file (default $PHOTON_ENDPOINT, else ./photon.endpoint), or -server
+# gives host:port directly.
+#
+# Requests: info | top [N] | worst <inst|inst/pin> | from <inst> [N] |
+#           between <startInst> <endInst|endInst/pin> | shutdown
+#-----------------------------------------------------------------------------#
+sub photon_query {
+  my $noOfArguments = @_;
+  if ( $noOfArguments < 1 || $_[0] eq "-h" || $_[0] eq "-help" ) {
+    print "Usage : photon_query [-server <host:port> | -endpoint <file>] [-timeout <s>] <request ...>\n";
+    print "        requests: info | top [N] | worst <endpoint> | from <start> [N] |\n";
+    print "                  between <start> <end> | shutdown\n";
+    print "        several requests in one call: separate them with ';'\n";
+    print "        e.g. photon_query worst u_core/u_alu/U123/D\n";
+    return;
+  }
+  my ( $server, $epFile, $timeout ) = ( "", "", 120 );
+  my @words = ();
+  for ( my $i = 0 ; $i < $noOfArguments ; $i++ ) {
+    if    ( $_[$i] eq "-server" )   { $server  = $_[ ++$i ]; }
+    elsif ( $_[$i] eq "-endpoint" ) { $epFile  = $_[ ++$i ]; }
+    elsif ( $_[$i] eq "-timeout" )  { $timeout = $_[ ++$i ]; }
+    else                            { push( @words, $_[$i] ); }
+  }
+  my ( $host, $port );
+  if ( $server ne "" ) {
+    ( $host, $port ) = split( /:/, $server );
+  } else {
+    $epFile = $ENV{PHOTON_ENDPOINT} if ( $epFile eq "" && defined $ENV{PHOTON_ENDPOINT} );
+    $epFile = "photon.endpoint" if ( $epFile eq "" );
+    unless ( open( my $fh, "<", $epFile ) ) {
+      print "ERROR-SPK-PH_QRY : 001 : no Photon session: $epFile not found (give -server host:port or -endpoint <file>)\n";
+      return;
+    } else {
+      my $l = <$fh>; close($fh);
+      ( $host, $port ) = split( ' ', $l ) if ( defined $l );
+    }
+  }
+  unless ( defined $host && defined $port && $port =~ /^\d+$/ ) {
+    print "ERROR-SPK-PH_QRY : 002 : cannot tell host and port of the Photon session\n";
+    return;
+  }
+  require IO::Socket::INET;
+  my $sock = IO::Socket::INET->new( PeerAddr => $host, PeerPort => $port, Proto => "tcp", Timeout => 10 );
+  unless ($sock) {
+    print "ERROR-SPK-PH_QRY : 003 : cannot reach the Photon session at $host:$port ($!)\n";
+    return;
+  }
+  $sock->autoflush(1);
+  foreach my $req ( split( /\s*;\s*/, join( " ", @words ) ) ) {
+    next if ( $req eq "" );
+    print $sock "$req\n";
+    my $deadline = time() + $timeout;
+    while ( defined( my $line = <$sock> ) ) {
+      $line =~ s/\r?\n$//;
+      last if ( $line eq "." );
+      print "$line\n";
+      if ( time() > $deadline ) {
+        print "ERROR-SPK-PH_QRY : 004 : no complete reply from $host:$port within $timeout s\n";
+        last;
+      }
+    }
+  }
+  print $sock "quit\n";
+  close($sock);
+}#photon_query
+1;

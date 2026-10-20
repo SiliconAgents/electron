@@ -1,0 +1,67 @@
+#-----------------------------------------------------------------------------
+# Segment timing on Spark, for a design flow's Makefile.
+#
+#   include $(ELECTRON)/INSTALL/sparksta.mk
+#   mydesign_sta_synth: workarea/synth/top.synth.sgraph
+#   	$(call SPARKSTA,workarea/synth/top.synth.sgraph,$(STORE),$(CORNER),0.312,workarea/sta/top.synth.seg.tsv)
+#
+# The sgraph is what electron's write_sgraph writes at the end of synthesis
+# and again at the end of placement (that one carries coordinates).  The
+# engine is pyspark_cad's Photon (photon.sca and build/photon.jar); set PYSPARK to that
+# checkout.  Without it the targets say so and do nothing.
+#
+# Only the engine is READ from pyspark_cad.  The script spark-shell runs is
+# written next to the output, never into PYSPARK: its own Makefile keeps one
+# .work/sta.sca, so two designs timed at once would overwrite each other's,
+# and that tree is a shared checkout.
+#
+# The arc store is the Parquet library a corner was converted into.  The
+# designs on one node share one; SPARKSTA_STORE_FROM builds one from a list of liberty
+# files into a directory of your choosing (a Nangate store takes seconds), and
+# SPARKSTA_STORE_OF reads where a library config says it is.
+#-----------------------------------------------------------------------------
+PYSPARK        ?=
+SPARKSTA_SIF   ?= $(ELECTRON)/INSTALL/podman/pysparkpp.sif
+SPARKSTA_BINDS ?= --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /tmp:/tmp
+SPARKSTA_MASTER?= local[*]
+SPARKSTA_MEM   ?= 32g
+
+# Already inside the image (TESTS run there: "make app" first) spark-shell is
+# simply on PATH, and apptainer is not; outside it, go in.
+SPARKSTA_EXEC  ?= $(if $(APPTAINER_CONTAINER),bash -c,apptainer exec $(SPARKSTA_BINDS) $(SPARKSTA_SIF) bash -c)
+
+SPARKSTA_SPARK = $(SPARKSTA_EXEC) \
+  "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_MEM) \
+   --jars $(PYSPARK)/scala/build/photon.jar -i $(1)" 2>&1 \
+  | grep -vE '^[0-9]{2}/[0-9]{2}/[0-9]{2}|^Using Spark|^Setting default|^Welcome to|^ +/|^ +\\|^Spark context|^Spark session|^Type in expr|^scala>|^WARNING|^To adjust'
+
+# The store a library config names for a node: its "sta-arc-store", beside
+# "cell-stubs", so every flow reads one copy instead of building its own.
+# $(call SPARKSTA_STORE_OF,config,foundry,node,layer)
+SPARKSTA_STORE_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/arc_store --config $(1) --foundry $(2) --node $(3) --layer $(4))
+
+# $(call SPARKSTA,sgraph,store,corner,period_ns,out.tsv)
+# period 0 means arrival only: no required time, no slack.
+define SPARKSTA
+	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to time $(1)"; exit 0; fi; \
+	 test -f "$(1)" || { echo "sparksta: $(1) does not exist -- run the synthesis or placement first"; exit 1; }; \
+	 test -d "$(2)/arcs" || { echo "sparksta: no arc store at $(2)"; exit 1; }; \
+	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
+	 mkdir -p $(dir $(5)); rm -f $(5); \
+	 cat $(PYSPARK)/scala/photon.sca > $(5).sca; \
+	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4))' >> $(5).sca; \
+	 echo 'System.exit(0)' >> $(5).sca
+	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|rror|xception'; \
+	 test -s "$(5)" || { echo "sparksta: no $(5), see $(5).log"; exit 1; }; fi
+endef
+
+# $(call SPARKSTA_STORE_FROM,list_of_liberty_paths_file,store_dir)
+define SPARKSTA_STORE_FROM
+	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to build $(2)"; exit 0; fi; \
+	 mkdir -p $(2); \
+	 cat $(PYSPARK)/scala/libertyToArcs.sca > $(2).sca; \
+	 echo 'convert(pathsFromFile("$(abspath $(1))"), "$(abspath $(2))", 8)' >> $(2).sca; \
+	 echo 'System.exit(0)' >> $(2).sca
+	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(2)).sca) | grep -E '^libertyToArcs|rror|xception'; \
+	 test -d "$(2)/arcs" || { echo "sparksta: store $(2) was not written"; exit 1; }; fi
+endef

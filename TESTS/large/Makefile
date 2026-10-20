@@ -131,6 +131,8 @@
 # has no scipy.
 
 ELECTRON = $(abspath ../..)
+include $(ELECTRON)/INSTALL/sparksta.mk
+include $(ELECTRON)/INSTALL/opensta.mk
 
 # pysparkpp is pysparkplusbuild plus qrouter.  Build it with
 #   cd $(ELECTRON)/INSTALL/podman && make qrouter
@@ -227,4 +229,54 @@ app:
 clean:
 	rm -rf workarea
 
-.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_256-interactive mxu_1024 mxu_1024-interactive mxu_1024_sta mxu_both mxu_scale app clean
+.PHONY: matmul_synth matmul_hier matmul_hier-interactive mxu_64 mxu_256 mxu_256-interactive mxu_1024 mxu_1024-interactive mxu_1024_sta mxu_both mxu_scale mxu_64_sparksta mxu_256_sparksta mxu_1024_sparksta matmul_sparksta ng_store mxu_64_opensta mxu_256_opensta mxu_1024_opensta matmul_opensta app clean
+
+#-----------------------------------------------------------------------------
+# Segment timing on Spark, after synthesis and after placement.  Each flow's
+# script writes <top>.synth.sgraph when synthesis is read back and
+# <top>.place.sgraph after legalize_flat; these time both.  The Nangate arc
+# store is the one CONFIG/library.config names, built once if missing.
+# Needs PYSPARK=<pyspark_cad checkout>; see INSTALL/sparksta.mk.
+#-----------------------------------------------------------------------------
+NG_LIB    = $(ELECTRON)/TESTS/library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib
+NG_STORE  = $(call SPARKSTA_STORE_OF,$(ELECTRON)/CONFIG/library.config,nangate,45nm,6)
+NG_PERIOD ?= 20
+
+ng_store: $(NG_STORE)/arcs
+
+$(NG_STORE)/arcs:
+	mkdir -p workarea && echo $(NG_LIB) > workarea/nangate_libs.txt
+	$(call SPARKSTA_STORE_FROM,workarea/nangate_libs.txt,$(NG_STORE))
+
+# $(call NG_SPARKSTA,top)
+define NG_SPARKSTA
+	$(call SPARKSTA,workarea/$(1).synth.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/$(1).synth.seg.tsv)
+	$(call SPARKSTA,workarea/$(1).place.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/$(1).place.seg.tsv)
+endef
+
+mxu_64_sparksta: ng_store
+	$(call NG_SPARKSTA,mxu_tile64)
+mxu_256_sparksta: ng_store
+	$(call NG_SPARKSTA,mxu_256)
+mxu_1024_sparksta: ng_store
+	$(call NG_SPARKSTA,mxu_1024)
+matmul_sparksta: ng_store
+	$(call NG_SPARKSTA,matmul_4x4)
+
+# OpenSTA on the synthesized netlist, the reference for the above: clock on
+# port clk, ideal, the Nangate liberty, NG_PERIOD.  See INSTALL/opensta.mk.
+NG_LIBS = workarea/nangate_sta_libs.txt
+$(NG_LIBS):
+	mkdir -p workarea && ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/sta_libs --config $(ELECTRON)/CONFIG/library.config --foundry nangate --node 45nm --layer 6 > $@
+
+# $(call NG_OPENSTA,top,synth_dir)
+NG_OPENSTA = $(call OPENSTA,workarea/$(2)/$(1)_filter.vg,$(1),$(NG_LIBS),clk,$(NG_PERIOD),workarea/sta/$(1).opensta)
+
+mxu_64_opensta: $(NG_LIBS)
+	$(call NG_OPENSTA,mxu_tile64,synth64)
+mxu_256_opensta: $(NG_LIBS)
+	$(call NG_OPENSTA,mxu_256,synth256)
+mxu_1024_opensta: $(NG_LIBS)
+	$(call NG_OPENSTA,mxu_1024,synth1024)
+matmul_opensta: $(NG_LIBS)
+	$(call NG_OPENSTA,matmul_4x4,synth)
