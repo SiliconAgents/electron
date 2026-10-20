@@ -243,6 +243,22 @@ nangate_buftree_mixed: $(NG_SIZING)
 	cd workarea/buftree2 && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire bt2_repaired.v; hierarchy -check -top bt2_top" > yosys.log 2>&1 || { echo "nangate_buftree_mixed: the repaired netlist does not parse, see workarea/buftree2/yosys.log"; exit 1; }
 	@echo "nangate_buftree_mixed: upsize first, a port-local tree in the child, read back clean"
 
+# A gate whose load is behind assigns.  read_verilog holds an assign as a
+# buffer instance and write_verilog writes it back as the assign, so counting
+# it as a cell undercounts the load.  The read-back is of the repaired netlist
+# flattened by yosys, which merges the assigns into plain nets -- electron's
+# own read-back would hold them as buffers again and repeat the mistake.  The
+# committed code before the fix saw no violator here; this read-back found one.
+nangate_assignload: $(NG_SIZING)
+	mkdir -p workarea/assignload && find workarea/assignload -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/assignload && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/assignload.tcl > run.log 2>&1
+	[ "$$(grep -c '^\s*assign' workarea/assignload/al_repaired.v)" -gt 0 ] || { echo "nangate_assignload: no assign in the netlist -- the test no longer tests anything"; exit 1; }
+	awk -F'\t' '$$1=="resize" && $$2=="al_src"' workarea/assignload/repair.rpt | grep -q . || { echo "nangate_assignload: the gate behind the assigns was not upsized, see workarea/assignload/repair.rpt"; exit 1; }
+	cd workarea/assignload && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire al_repaired.v; hierarchy -check -top al_top; flatten; opt_clean -purge; write_verilog -noattr al_flat.v" > yosys.log 2>&1 || { echo "nangate_assignload: the repaired netlist does not flatten, see workarea/assignload/yosys.log"; exit 1; }
+	cd workarea/assignload && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/assignload_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/assignload/readback.log || { echo "nangate_assignload: flattened, the repaired netlist still has a driver over its limit, see workarea/assignload/readback.log"; exit 1; }
+	@echo "nangate_assignload: the load behind assigns counted, clean once they are merged"
+
 # $display / $write in RTL must not reach a gate netlist.  yosys keeps them as
 # $print cells through every pass and write_verilog puts them back as initial
 # or always blocks; a clocked one also keeps alive the logic its arguments read.
@@ -262,7 +278,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
+nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

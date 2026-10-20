@@ -156,6 +156,16 @@ my $split = sub {
   return ($pathMod{$p}, $p, $l);
 };
 my $cost = sub { my ($c) = @_; return $SZ{$c}{area} + $leakW * $SZ{$c}{leak}; };
+#<!-- an assign: read_verilog holds "assign out = in" as a buffer instance,
+#     bt_assign_buf_N, and write_verilog writes it back as the assign.  So it
+#     is a wire, not a cell: whatever its output net carries is load on its
+#     input net, and it is never sized.  Taken as a cell, a NAND driving one
+#     was sized for one buffer input while STA saw the 0.05 pF behind it, 739%
+#     over its limit; on another design a flop drove 386 assigns of one bit.
+#     With set_write_assign_as_buffer they are written as cells, and stay so. -->
+my $asWire = ( $GLOBAL->dbfGlobalGetWriteAssignAsBuffer == 0 ) ? 1 : 0;
+my ($aIn, $aOut) = ( $GLOBAL->dbfGlobalGetBufForAssignIn, $GLOBAL->dbfGlobalGetBufForAssignOut );
+my $isAssign = sub { my ($l) = @_; return $asWire && $GLOBAL->dbfGlobalCheckAssignInstance($l) ? 1 : 0; };
 
 #<!-- Vt by speed, slowest first; a low-leakage variant just below its base -->
 my %vtRank = ( "" => 0, svt => 0, lvtll => 1, lvt => 2, ulvtll => 3, ulvt => 4, elvt => 5 );
@@ -232,6 +242,13 @@ if ( defined $bufClass && !$dry ) {
       my $leaf = $MODULE_ALREADY{$m}->dbVNOMHasLeafInst($inst);
       my $hier = !$leaf && exists $MODULE_ALREADY{$cell};
       next unless ( $leaf || $hier );
+      #<!-- an assign: a load of everything behind its output, ["A", ..., out] -->
+      if ( $leaf && $isAssign->($inst) ) {
+        my ($in, $out) = ( &dbfConnPinExpr($line, $aIn), &dbfConnPinExpr($line, $aOut) );
+        push(@{$loads{$in}}, ["A", $inst, $aIn, $cell, $out])
+          if ( defined $in && defined $out && &dbfConnExprIsNet($in) && &dbfConnExprIsNet($out) );
+        next;
+      }
       foreach my $pe ( &dbfConnPins($line) ) {
         my ($pin, $x) = @$pe;
         next unless ( &dbfConnExprIsNet($x) );
@@ -265,19 +282,26 @@ if ( defined $bufClass && !$dry ) {
     my $v = $local{$m}{clk}{$x} ? 1 : 0;
     unless ( $v ) {
       foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) {
-        next unless ( $ld->[0] eq "H" );
-        if ( $isClk->($ld->[3], $ld->[2]) ) { $v = 1; last; }
+        next if ( $ld->[0] eq "L" );
+        if ( $ld->[0] eq "A" ? $isClk->($m, $ld->[4]) : $isClk->($ld->[3], $ld->[2]) ) { $v = 1; last; }
       }
     }
     return $clkMemo{"$m\t$x"} = $v;
   };
-  my (%plMemo, $portLoad, $netLoad) = ();
+  my (%plMemo, %nlBusy, $portLoad, $netLoad, $ldCap) = ();
+  $ldCap = sub {
+    my ($m, $ld) = @_;
+    return $SZ{$ld->[3]}{pins}{$ld->[2]}[1] if ( $ld->[0] eq "L" );
+    return $netLoad->($m, $ld->[4]) if ( $ld->[0] eq "A" );
+    return $portLoad->($ld->[3], $ld->[2]);
+  };
   $netLoad = sub {
     my ($m, $x) = @_;
+    return 0 if ( $nlBusy{"$m\t$x"} );      # a loop of assigns
+    $nlBusy{"$m\t$x"} = 1;
     my $l = 0;
-    foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) {
-      $l += ( $ld->[0] eq "L" ) ? $SZ{$ld->[3]}{pins}{$ld->[2]}[1] : $portLoad->($ld->[3], $ld->[2]);
-    }
+    $l += $ldCap->($m, $_) foreach ( @{$local{$m}{loads}{$x} || []} );
+    delete $nlBusy{"$m\t$x"};
     return $l;
   };
   $portLoad = sub {
@@ -292,7 +316,7 @@ if ( defined $bufClass && !$dry ) {
   $rep = sub {
     my ($m, $x) = @_;
     $local{$m} = $parse->($m) unless ( exists $local{$m} );
-    foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) { return ($ld->[1], $ld->[2]) if ( $ld->[0] eq "L" ); }
+    foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) { return ($ld->[1], $ld->[2]) if ( $ld->[0] ne "H" ); }
     foreach my $ld ( @{$local{$m}{loads}{$x} || []} ) {
       my ($r, $pp) = $rep->($ld->[3], $ld->[2]);
       return ("$ld->[1]/$r", $pp) if ( defined $r );
@@ -335,7 +359,7 @@ if ( defined $bufClass && !$dry ) {
       next if ( defined $d && $d ne "" && exists $SZ{$d} && $SZ{$d}{class} =~ /^CK/ );   # clocks: CTS
       if ( $isClk->($m, $x) ) { $nClkSkip++; next; }
       my @cur = map { { kind => $_->[0], inst => $_->[1], pin => $_->[2], cell => $_->[3],
-                        cap => ( $_->[0] eq "L" ? $SZ{$_->[3]}{pins}{$_->[2]}[1] : $portLoad->($_->[3], $_->[2]) ) } }
+                        cap => $ldCap->($m, $_) } }
                 sort { $a->[1] cmp $b->[1] || $a->[2] cmp $b->[2] } @{$local{$m}{loads}{$x}};
       my @loads = @cur;
       my @tbufs = ();
@@ -411,7 +435,7 @@ if ( defined $bufClass && !$dry ) {
         next unless ( defined $F && exists $NETS_ALREADY{$F} );
         foreach my $it ( @$loads ) {
           my $to = "$pre$it->{net}";
-          if ( $it->{kind} eq "L" ) {
+          if ( $it->{kind} ne "H" ) {
             $move->("$pre$it->{inst}", $it->{pin}, $F, $to) if ( exists $COMP_ALREADY{"$pre$it->{inst}"} );
           } else {
             my $under = "$pre$it->{inst}/";
@@ -458,8 +482,13 @@ my $driverPass = sub {
 my ($allowBuf, $pass) = @_;
 for ( my $it = 1; $it <= $iters; $it++ ) {
   #<!-- loads on the flat nets, and the driving pins -->
-  my (%load, %drv) = ();
+  my (%load, %drv, %alias) = ();
   foreach my $inst ( keys %COMP_ALREADY ) {
+    if ( $isAssign->( ( $inst =~ m{([^/]+)$} )[0] ) ) {
+      my ($in, $out) = ( $COMP_ALREADY{$inst}{$aIn}, $COMP_ALREADY{$inst}{$aOut} );
+      push(@{$alias{$in}}, $out) if ( defined $in && defined $out && $in ne "" && $out ne "" );
+      next;
+    }
     my $cell = exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : "";
     my $sz = $SZ{$cell};
     foreach my $pin ( keys %{$COMP_ALREADY{$inst}} ) {
@@ -470,6 +499,16 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
       else { $drv{$inst}{$pin} = $net; }
     }
   }
+  #<!-- a net's load and that of every net assigned from it -->
+  my (%eff, $effLoad) = ();
+  $effLoad = sub {
+    my ($n) = @_;
+    return $eff{$n} if ( exists $eff{$n} );
+    $eff{$n} = $load{$n} || 0;            # a loop of assigns stops here
+    my $l = $eff{$n};
+    $l += $effLoad->($_) foreach ( @{$alias{$n} || []} );
+    return $eff{$n} = $l;
+  };
   #<!-- violators, gathered per module definition: the worst load over every
   #     instance of the module is what its one cell must carry -->
   my %need = ();          # m -> l -> pin -> load
@@ -479,7 +518,7 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
     my $over = 0;
     foreach my $po ( keys %{$drv{$inst}} ) {
       my $mc = $SZ{$cell}{pins}{$po}[2];
-      $over = 1 if ( defined $mc && ( $load{$drv{$inst}{$po}} || 0 ) > $margin * $mc );
+      $over = 1 if ( defined $mc && $effLoad->($drv{$inst}{$po}) > $margin * $mc );
     }
     next unless ( $over );
     $nViol++;
@@ -489,7 +528,7 @@ for ( my $it = 1; $it <= $iters; $it++ ) {
     foreach my $pp ( @{$modPaths{$m}} ) {
       my $fi = ( $pp eq "" ) ? $l : "$pp/$l";
       foreach my $po ( keys %{$drv{$fi} || {}} ) {
-        my $ld = $load{$drv{$fi}{$po}} || 0;
+        my $ld = $effLoad->($drv{$fi}{$po});
         $need{$m}{$l}{$po} = $ld if ( !exists $need{$m}{$l}{$po} || $ld > $need{$m}{$l}{$po} );
       }
     }
