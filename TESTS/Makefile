@@ -185,6 +185,30 @@ nangate_dead_logic:
 # rtls/print/print.sv has both kinds, in the top and in a child instantiated
 # twice; hier_synthesis and synthesize must each write a netlist with no
 # initial, always or $write, and without the XOR that only fed the $display.
+# Escaped names, end to end.  Synthesis writes every net a flatten builds from
+# a generate scope or an absorbed child as an escaped name, "\\g_lane[3].u.n ";
+# no other test has one, and three commands mishandled them before it existed.
+# Checked: the synthesised netlist has them; repair_drive buffers the
+# overloaded enable, one of whose nets is escaped; the repaired netlist reads
+# back to the same instance count with no driver left over its limit; yosys
+# parses it.  The sizing table is built here from the test liberty.
+NG_SIZING = library/nangate.sizing.tsv
+$(NG_SIZING): library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib $(ELECTRON)/3RDBIN/liberty_sizing
+	python3 $(ELECTRON)/3RDBIN/liberty_sizing -o $@ -j 1 $<
+
+nangate_escaped: $(NG_SIZING)
+	mkdir -p workarea/escaped && find workarea/escaped -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/escaped && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../escaped/escaped.tcl > run.log 2>&1
+	grep -qF '\' workarea/escaped/esc_hier.v || { echo "nangate_escaped: no escaped name in the synthesised netlist -- the test no longer tests anything"; exit 1; }
+	grep -qE "RP_DRV : 008 : .* [1-9][0-9]* buffer" workarea/escaped/run.log || { echo "nangate_escaped: repair_drive added no buffer, see workarea/escaped/run.log"; exit 1; }
+	grep -qE "repdrv_buf_[0-9]+ *\\(.*\\\\" workarea/escaped/esc_repaired.v || { echo "nangate_escaped: no buffer drives an escaped net"; exit 1; }
+	cd workarea/escaped && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../escaped/escaped_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/escaped/readback.log || { echo "nangate_escaped: the repaired netlist still has drivers over their limit, see workarea/escaped/readback.log"; exit 1; }
+	a=$$(grep "Instance count" workarea/escaped/run.log | tail -1 | grep -oE "[0-9]+$$"); b=$$(grep "Instance count" workarea/escaped/readback.log | tail -1 | grep -oE "[0-9]+$$"); \
+	  [ -n "$$a" ] && [ "$$a" = "$$b" ] || { echo "nangate_escaped: repaired $$a instance(s), read back $$b"; exit 1; }
+	cd workarea/escaped && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire esc_repaired.v; hierarchy -check -top esc_top" > yosys.log 2>&1 || { echo "nangate_escaped: the repaired netlist does not parse, see workarea/escaped/yosys.log"; exit 1; }
+	@echo "nangate_escaped: escaped names survive synthesis, repair, write and read-back"
+
 # From an empty directory: hier_synthesis resumes from an hs/design.il and an
 # hs/cells.v it finds, so a stale one would be tested instead of the code.
 nangate_print:
@@ -198,7 +222,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
+nangate_all:  nangate_escaped nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

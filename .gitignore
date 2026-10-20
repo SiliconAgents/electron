@@ -78,3 +78,5 @@ DOCS/*.pdf
 # make -C TESTS nangate_store; the format is pyspark_cad's, so it is built, not kept
 TESTS/library/nangate_arcs/
 TESTS/library/nangate_arcs.sca
+# the test liberty as a repair_drive sizing table, built by make -C TESTS nangate_escaped
+TESTS/library/nangate.sizing.tsv
