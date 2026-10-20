@@ -655,6 +655,23 @@ def verify(args, netlists, top):
     # it with a parent of a different variant.  It links; it is wrong.
     unused = sorted(m for m in re.findall(r"Removing unused module `\\?([^']+)'",
                                           p.stdout) if m in ours)
+    # ...except a module with no output ports: a coverage monitor, say, whose
+    # pre-synthesis size passed --flatten-below and made it a boundary.  It
+    # synthesises to nothing and its parent's clean -purge drops the instance,
+    # as it should -- an instance that drives nothing is dead.  Its netlist is
+    # renamed out of the way so the join, which takes every .v here, leaves it
+    # out too.  One such module, 0 cells, had failed a whole design here.
+    dead = [m for m in unused
+            if not re.search(r"^\s*output\b",
+                             open(os.path.join(args.out, m + ".v")).read(), re.M)]
+    for m in dead:
+        v = os.path.join(args.out, m + ".v")
+        os.replace(v, v + ".dropped")
+    if dead:
+        print(f"yosys_bottom_up: {len(dead)} netlist(s) with no output port, dropped by "
+              f"their parents and left out: {' '.join(dead[:12])}"
+              f"{' ...' if len(dead) > 12 else ''}")
+    unused = [m for m in unused if m not in dead]
     if unused:
         print(f"yosys_bottom_up: VERIFY FAILED -- {len(unused)} netlist(s) not "
               f"reached from {top}: {' '.join(unused[:12])}"
