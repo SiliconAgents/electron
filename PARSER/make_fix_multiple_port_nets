@@ -1,0 +1,189 @@
+#<!-- fix_multiple_port_nets: make the assigns on output ports real buffers.
+#
+#     read_verilog holds "assign out = in" as a buffer instance, bt_assign_buf_N,
+#     and write_verilog writes it back as the assign: in the written netlist it
+#     is a wire.  Synthesis writes many -- 11,717 on a 1.5M-cell design, 52,597
+#     on a 3.1M-cell one -- most of them output port bits aliased to one
+#     another: one design's flop drove 386 port bits through assigns of one
+#     bit, a net with nothing to drive it but that flop.  Back-end tools want
+#     each port on a net of its own, with a driver of its own that placement can
+#     put near the port and optimisation can size; this is FC's
+#     set_fix_multiple_port_nets, done in the database so that placement,
+#     write_sgraph, repair_drive and write_verilog all see the same cells.
+#
+#     An assign onto an output port becomes a buffer when its input is
+#       an input port         a feedthrough
+#       another output port   two ports on one net
+#       shared                it feeds more than one output port
+#     -all makes every assign a buffer.  Every other assign stays a wire: an
+#     alias inside a module costs nothing as an assign and a buffer delay as a
+#     cell.  Constants already are cells (bt_assign_tie_N).
+#
+#     The buffer is the assign's own instance renamed (the set of assign
+#     instances is keyed by name), in the module definition and under every
+#     instance path in the flat database.  Its cell is the assign buffer's
+#     (set_buffer_for_assign) unless -cell says otherwise; repair_drive sizes
+#     it afterwards.  Run after remove_dead_logic and before repair_drive. -->
+#------------------------------------------------------------------------------------------#
+sub fix_multiple_port_nets {
+
+my $all = 0;
+my $cell = "";
+my $report = "";
+my $dry = 0;
+
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && ( $_[0] eq '-h' || $_[0] eq '-help' ) ) {
+  print "Usage : fix_multiple_port_nets [-all] [-cell <buffer>] [-report <file>] [-dry_run]\n";
+  print "        Makes real buffers of the assigns that put an output port on a net\n";
+  print "        it shares: with an input port (a feedthrough), with another output\n";
+  print "        port, or with several.  Edits the module definitions and the flat\n";
+  print "        database; write_verilog then writes them as cells.\n";
+  print "        -all      every assign, not only those\n";
+  print "        -cell     the buffer cell (default: set_buffer_for_assign's)\n";
+  print "        -report   write every assign made a buffer\n";
+  print "        -dry_run  report what would change, change nothing\n";
+  return;
+}
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-all"){$all = 1;}
+  if($_[$i] eq "-cell"){$cell = $_[$i+1];}
+  if($_[$i] eq "-report"){$report = $_[$i+1];}
+  if($_[$i] eq "-dry_run"){$dry = 1;}
+}
+unless ( exists $MODULE_ALREADY{$TOP_MODULE} ) {
+  print "ERROR-PAR-FX_MPN : 001 : no hierarchical netlist; read_verilog and elaborate first\n";
+  return;
+}
+if ( $GLOBAL->dbfGlobalGetWriteAssignAsBuffer != 0 ) {
+  print "INFO-PAR-FX_MPN : 002 : set_write_assign_as_buffer is on: every assign is written as a buffer already\n";
+  return;
+}
+if ( $cell ne "" && !exists $PLDB{$cell} ) {
+  print "ERROR-PAR-FX_MPN : 003 : $cell is not a cell of the libraries read\n";
+  return;
+}
+my ($aIn, $aOut) = ( $GLOBAL->dbfGlobalGetBufForAssignIn, $GLOBAL->dbfGlobalGetBufForAssignOut );
+
+#<!-- where each module is instantiated, as repair_drive walks it -->
+my %modPaths = ();
+my $walk;
+$walk = sub {
+  my ($m, $p) = @_;
+  push(@{$modPaths{$m}}, $p);
+  foreach my $h ( sort $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+    my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($h);
+    next unless ( exists $MODULE_ALREADY{$c} );
+    next if ( $MODULE_ALREADY{$c}->dbVNOMGetClass == 11 );
+    $walk->($c, ( $p eq "" ? $h : "$p/$h" ));
+  }
+};
+$walk->($TOP_MODULE, "");
+
+#<!-- the port a net expression names: "y[3]", "\a.b [3]" and "y" are bits of
+#     port y or \a.b; "" when it is not a port -->
+my $portOf = sub {
+  my ($mod, $x, $dir) = @_;
+  my $base = $x;
+  $base =~ s/\s*\[\d+\]$//;
+  $base =~ s/\s+$//;
+  foreach my $n ( $base, ( $base =~ /^\\(.*)$/ ) ) {
+    return $n if ( $dir eq "o" ? $mod->dbVNOMHasOutput($n) : $mod->dbVNOMHasInput($n) );
+  }
+  return "";
+};
+
+my $fh;
+if ( $report ne "" ) {
+  open($fh, ">", $report) or do { print "ERROR-PAR-FX_MPN : 004 : cannot write $report : $!\n"; return; };
+}
+my ($nAssign, $nDef, $nBuf, $nMod, $seq) = (0, 0, 0, 0, 0);
+my %why = ();
+foreach my $m ( sort keys %modPaths ) {
+  my $mod = $MODULE_ALREADY{$m};
+  #<!-- this definition's assigns: [inst, cell, in, out] -->
+  my (@asg, %toPorts) = ();
+  foreach my $line ( $mod->dbVNOMGetConn ) {
+    my ($c, $inst) = ( split(/\s+/, $line) )[0, 1];
+    next unless ( defined $inst && $mod->dbVNOMHasLeafInst($inst) && $GLOBAL->dbfGlobalCheckAssignInstance($inst) );
+    my ($in, $out) = ( &dbfConnPinExpr($line, $aIn), &dbfConnPinExpr($line, $aOut) );
+    next unless ( defined $in && defined $out );
+    push(@asg, [$inst, $c, $in, $out]);
+    $toPorts{$in}++ if ( $portOf->($mod, $out, "o") ne "" );
+  }
+  $nAssign += scalar(@asg);
+  my %ren = ();
+  foreach my $a ( @asg ) {
+    my ($inst, $c, $in, $out) = @$a;
+    my $w = "";
+    if ( $all ) { $w = "all"; }
+    elsif ( $portOf->($mod, $out, "o") ne "" ) {
+      if    ( $portOf->($mod, $in, "i") ne "" ) { $w = "feedthrough"; }
+      elsif ( $portOf->($mod, $in, "o") ne "" ) { $w = "port to port"; }
+      elsif ( $toPorts{$in} > 1 )               { $w = "shared"; }
+    }
+    next if ( $w eq "" );
+    my $new;
+    do { $seq++; $new = "fmpn_buf_$seq"; } while ( $mod->dbVNOMHasLeafInst($new) );
+    $ren{$inst} = [$new, ( $cell ne "" ? $cell : $c ), $c];
+    $why{$w} += scalar(@{$modPaths{$m}});
+    print $fh "buffer\t$m\t$inst\t$new\t$out = $in\t$w\tx" . scalar(@{$modPaths{$m}}) . "\n" if ( $fh );
+  }
+  next unless ( keys %ren );
+  $nMod++;
+  $nDef += scalar(keys %ren);
+  $nBuf += scalar(keys %ren) * scalar(@{$modPaths{$m}});
+  next if ( $dry );
+  #<!-- the definition -->
+  my @lines = ();
+  foreach my $line ( $mod->dbVNOMGetConn ) {
+    my ($c, $inst) = ( split(/\s+/, $line) )[0, 1];
+    if ( defined $inst && exists $ren{$inst} ) {
+      my ($new, $nc) = @{$ren{$inst}};
+      $line =~ s/^(\s*)\Q$c\E(\s+)\Q$inst\E(?=\s|\()/$1$nc$2$new/;
+    }
+    push(@lines, $line);
+  }
+  $mod->{conn} = [@lines];
+  foreach my $inst ( keys %ren ) {
+    my ($new, $nc, $oc) = @{$ren{$inst}};
+    delete ${$mod->{Lchild}}{$inst};
+    $mod->dbVNOMAddLeafInst($new);
+    $mod->dbVNOMSetLeafInstCell($new, $nc);
+    if ( $nc ne $oc ) {
+      my @o = exists $PLDB{$oc} ? $PLDB{$oc}->dbMdbGetSize : (0, 0);
+      my @s = exists $PLDB{$nc} ? $PLDB{$nc}->dbMdbGetSize : (0, 0);
+      $mod->dbVNOMSetArea($mod->dbVNOMGetArea + $s[0] * $s[1] - $o[0] * $o[1]);
+    }
+    #<!-- the flat database, under every path -->
+    foreach my $pp ( @{$modPaths{$m}} ) {
+      my $pre = ( $pp eq "" ) ? "" : "$pp/";
+      my ($fo, $fn) = ("$pre$inst", "$pre$new");
+      next unless ( exists $COMP_ALREADY{$fo} );
+      $COMP_ALREADY{$fn} = delete $COMP_ALREADY{$fo};
+      foreach my $pin ( keys %{$COMP_ALREADY{$fn}} ) {
+        my $net = $COMP_ALREADY{$fn}{$pin};
+        next unless ( defined $net && exists $NETS_ALREADY{$net} && exists $NETS_ALREADY{$net}{$fo} );
+        $NETS_ALREADY{$net}{$fn} = delete $NETS_ALREADY{$net}{$fo};
+      }
+      if ( exists $CADB{$fo} ) {
+        $CADB{$fn} = delete $CADB{$fo};
+        $CADB{$fn}->dbCadbSetCellref($nc);
+      }
+    }
+  }
+}
+close($fh) if ( defined $fh );
+unless ( $dry ) {
+  foreach my $m ( keys %MODULE_ALREADY ) {
+    $MODULE_ALREADY{$m}->dbVNOMSetLeafArea(0);
+    $MODULE_ALREADY{$m}->dbVNOMSetHierArea(0);
+  }
+}
+print "INFO-PAR-FX_MPN : 005 : " . ( $dry ? "dry run: " : "" ) .
+      "$nDef of $nAssign assign(s) " . ( $dry ? "would be " : "" ) . "made buffers, in $nMod module definition(s); $nBuf in the flat database" .
+      ( keys %why ? " (" . join(", ", map { "$why{$_} $_" } sort keys %why) . ")" : "" ) . "\n";
+}# sub fix_multiple_port_nets
+#------------------------------------------------------------------------------------------#
+
+1;

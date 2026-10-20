@@ -259,6 +259,23 @@ nangate_assignload: $(NG_SIZING)
 	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/assignload/readback.log || { echo "nangate_assignload: flattened, the repaired netlist still has a driver over its limit, see workarea/assignload/readback.log"; exit 1; }
 	@echo "nangate_assignload: the load behind assigns counted, clean once they are merged"
 
+# fix_multiple_port_nets on the same design: the child's seven port-to-port
+# aliases and its feedthrough become buffers, the written child has no assign
+# left, and the netlist reads back to the same instances with nothing over its
+# limit.
+nangate_mpn: $(NG_SIZING)
+	mkdir -p workarea/mpn && find workarea/mpn -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/mpn && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/mpn.tcl > run.log 2>&1
+	[ "$$(awk -F'\t' '$$6=="port to port"' workarea/mpn/mpn.rpt | wc -l)" -eq 7 ] && [ "$$(awk -F'\t' '$$6=="feedthrough"' workarea/mpn/mpn.rpt | wc -l)" -eq 1 ] || { echo "nangate_mpn: expected 7 port-to-port assigns and 1 feedthrough made buffers, see workarea/mpn/mpn.rpt"; exit 1; }
+	[ "$$(awk '/^module al_src/,/^endmodule/' workarea/mpn/al_mpn.v | grep -c '^\s*assign')" -eq 0 ] || { echo "nangate_mpn: al_src still has assigns, see workarea/mpn/al_mpn.v"; exit 1; }
+	[ "$$(awk '/^module al_src/,/^endmodule/' workarea/mpn/al_mpn.v | grep -c fmpn_buf_)" -eq 8 ] || { echo "nangate_mpn: al_src does not have the 8 buffers, see workarea/mpn/al_mpn.v"; exit 1; }
+	cd workarea/mpn && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../assignload/mpn_rb.tcl > readback.log 2>&1
+	grep -q "iteration 1: 0 driver(s) over max_capacitance" workarea/mpn/readback.log || { echo "nangate_mpn: the netlist read back has a driver over its limit, see workarea/mpn/readback.log"; exit 1; }
+	a=$$(grep "Instance count" workarea/mpn/run.log | tail -1 | grep -oE "[0-9]+$$"); b=$$(grep "Instance count" workarea/mpn/readback.log | tail -1 | grep -oE "[0-9]+$$"); \
+	  [ -n "$$a" ] && [ "$$a" = "$$b" ] || { echo "nangate_mpn: wrote $$a instance(s), read back $$b"; exit 1; }
+	cd workarea/mpn && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire al_mpn.v; hierarchy -check -top al_top" > yosys.log 2>&1 || { echo "nangate_mpn: the netlist does not parse, see workarea/mpn/yosys.log"; exit 1; }
+	@echo "nangate_mpn: port assigns made buffers, written as cells, read back clean"
+
 # $display / $write in RTL must not reach a gate netlist.  yosys keeps them as
 # $print cells through every pass and write_verilog puts them back as initial
 # or always blocks; a clocked one also keeps alive the logic its arguments read.
@@ -278,7 +295,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
+nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
