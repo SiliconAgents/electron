@@ -179,12 +179,6 @@ nangate_dead_logic:
 	cd workarea/dl_hier && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire htop.hier.v; hierarchy -check -top htop" > yosys.log 2>&1 || { echo "nangate_dead_logic hier: write_verilog --hier output does not parse, see workarea/dl_hier/yosys.log"; exit 1; }
 	@echo "nangate_dead_logic: all expected results"
 
-# $display / $write in RTL must not reach a gate netlist.  yosys keeps them as
-# $print cells through every pass and write_verilog puts them back as initial
-# or always blocks; a clocked one also keeps alive the logic its arguments read.
-# rtls/print/print.sv has both kinds, in the top and in a child instantiated
-# twice; hier_synthesis and synthesize must each write a netlist with no
-# initial, always or $write, and without the XOR that only fed the $display.
 # Escaped names, end to end.  Synthesis writes every net a flatten builds from
 # a generate scope or an absorbed child as an escaped name, "\\g_lane[3].u.n ";
 # no other test has one, and three commands mishandled them before it existed.
@@ -209,6 +203,12 @@ nangate_escaped: $(NG_SIZING)
 	cd workarea/escaped && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire esc_repaired.v; hierarchy -check -top esc_top" > yosys.log 2>&1 || { echo "nangate_escaped: the repaired netlist does not parse, see workarea/escaped/yosys.log"; exit 1; }
 	@echo "nangate_escaped: escaped names survive synthesis, repair, write and read-back"
 
+# $display / $write in RTL must not reach a gate netlist.  yosys keeps them as
+# $print cells through every pass and write_verilog puts them back as initial
+# or always blocks; a clocked one also keeps alive the logic its arguments read.
+# rtls/print/print.sv has both kinds, in the top and in a child instantiated
+# twice; hier_synthesis and synthesize must each write a netlist with no
+# initial, always or $write, and without the XOR that only fed the $display.
 # From an empty directory: hier_synthesis resumes from an hs/design.il and an
 # hs/cells.v it finds, so a stale one would be tested instead of the code.
 nangate_print:
