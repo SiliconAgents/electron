@@ -92,6 +92,16 @@ import time
 # gate netlist, which electron's read_verilog took for an instance of a cell
 # called "initial".  A clocked one also keeps alive all the logic its arguments
 # read.  Gone here, clean -purge takes that logic with it.
+#
+# tribuf -formal: RTL that drives 'z -- a debug view that blanks an empty
+# entry, `en ? x : 'z` -- reaches yosys as tristate buffers, and with nothing
+# to map them to they reach the netlist as $_TBUF_, which no standard-cell
+# library has; --verify then fails on the first one.  A block-level netlist has
+# no use for a tristate, so every one becomes logic, its 'z a don't-care.  On
+# one module that was 65,100 of its 76,656 cells, and 12,634 after.  -formal
+# also converts buffers that drive output ports, which -logic leaves alone, and
+# adds an $assert that no two drive a net at once; deleted for the same reason
+# as $check above.  A module with no 'z is untouched.
 SCRIPT = """
 read_verilog -lib {blackbox}
 {children}
@@ -101,6 +111,8 @@ hierarchy -check -top {top}
 delete t:$print t:$check
 {flatten}
 proc
+tribuf -formal
+delete t:$assert
 opt -fast
 memory_map
 techmap
@@ -361,9 +373,19 @@ def run_one(job):
     # to the placement-aware step.
     fallback = False
     limit = args.abc_timeout if args.abc_delay else 0
+    # One retry when abc itself crashes.  yosys-abc has died on an internal
+    # assertion ("Vec_StrEntry ... failed", status 86) on a module that
+    # mapped cleanly on each of 11 replays of the same command, 8 of them in
+    # parallel; a 30-minute run should not end on that.  Only abc's failure
+    # is retried -- anything else fails the same way twice.
+    retried = False
     try:
         p = subprocess.run([args.yosys, "-p", script(args.abc_opts)], capture_output=True,
                            text=True, timeout=limit or None)
+        if p.returncode != 0 and "ABC failed" in p.stdout + p.stderr:
+            retried = True
+            p = subprocess.run([args.yosys, "-p", script(args.abc_opts)], capture_output=True,
+                               text=True, timeout=limit or None)
     except subprocess.TimeoutExpired:
         fallback = True
         p = subprocess.run([args.yosys, "-p", script("-fast " if args.abc_fast else "")],
@@ -372,6 +394,8 @@ def run_one(job):
         if fallback:
             fh.write(f"# yosys_bottom_up: buffering and sizing passed --abc-timeout "
                      f"{limit}s; this is the plain-mapping rerun\n")
+        if retried:
+            fh.write("# yosys_bottom_up: abc failed on the first attempt; this is the retry\n")
         fh.write(p.stdout)
         fh.write(p.stderr)
     cells = 0
@@ -387,7 +411,7 @@ def run_one(job):
         err = err or f"rc={p.returncode}"
     return {"name": name, "copies": copies, "cells": cells, "rc": p.returncode,
             "err": err, "secs": time.time() - t, "log": log, "dest": dest,
-            "fallback": fallback}
+            "fallback": fallback, "retried": retried}
 
 
 def main():
@@ -540,6 +564,9 @@ def main():
                     fallbacks.append(r["name"])
                     print(f"  {r['name']}: buffering and sizing passed --abc-timeout "
                           f"{args.abc_timeout}s; mapped without them")
+                if r.get("retried"):
+                    print(f"  {r['name']}: abc failed once; "
+                          f"{'retry mapped it' if r['rc'] == 0 else 'retry failed too'}")
                 if r["rc"] != 0:
                     print(f"  FAILED {r['name']}: {r['err']}")
                     print(f"         see {r['log']}")
