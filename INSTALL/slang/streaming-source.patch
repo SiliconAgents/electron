@@ -1,0 +1,41 @@
+diff --git a/src/slang_frontend.cc b/src/slang_frontend.cc
+index a43eb34..71922fe 100644
+--- a/src/slang_frontend.cc
++++ b/src/slang_frontend.cc
+@@ -1314,7 +1314,15 @@ ir::Value EvalContext::operator()(ast::Expression const &expr)
+ 
+ 			const ast::Expression *lvalue_save = lvalue;
+ 			lvalue = &assign.left();
+-			procedural->assign_rvalue(assign, ret = (*this)(assign.right()));
++			// A streaming target takes a streaming source as it is, with no
++			// conversion between them, and operator() does not accept a raw
++			// streaming expression: evaluate it as the stream it is.
++			if (assign.left().kind == ast::ExpressionKind::Streaming &&
++					assign.right().kind == ast::ExpressionKind::Streaming)
++				ret = streaming(assign.right().as<ast::StreamingConcatenationExpression>());
++			else
++				ret = (*this)(assign.right());
++			procedural->assign_rvalue(assign, ret);
+ 
+ 			// TODO: this is a fixup for a specific scenario, we need to
+ 			// check if there isn't some other general handling of return
+@@ -2591,11 +2599,17 @@ public:
+ 		if (expr.left().kind == ast::ExpressionKind::Streaming) {
+ 			auto& stream_lexpr = expr.left().as<ast::StreamingConcatenationExpression>();
+ 
+-			ir::Value rvalue = netlist.eval(expr.right());
++			// The source may itself be a streaming concatenation, as in
++			// assign {>>{a, b}} = {>>{c}}; operator() does not take one raw.
++			ir::Value rvalue = expr.right().kind == ast::ExpressionKind::Streaming
++				? netlist.eval.streaming(expr.right().as<ast::StreamingConcatenationExpression>())
++				: netlist.eval(expr.right());
+ 			VariableBits lvalue = netlist.eval.streaming_lhs(stream_lexpr);
+ 			ast_invariant(expr, (uint64_t)rvalue.size() >= lvalue.bitwidth());
+ 
+-			netlist.add_continuous_driver(lvalue, rvalue.extract(0, lvalue.bitwidth()));
++			// IEEE 1800-2017 11.4.14.3: a wider source is consumed from its left
++			// (most significant) end, as the procedural path already does.
++			netlist.add_continuous_driver(lvalue, rvalue.extract_end(rvalue.size() - lvalue.bitwidth()));
+ 			return;
+ 		}
+ 

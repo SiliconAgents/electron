@@ -31,6 +31,7 @@ TESTS/rtls/vedic/vedic.v
 # Container images built by INSTALL/podman/Makefile.  Each pair is a couple of
 # GB: podman save writes oci-*.tar, apptainer build turns it into a .sif.
 *.sif
+*.sif.bak*
 INSTALL/podman/oci-*.tar
 
 # The plugin make slang-plugin builds; the source is the pin and the patches
