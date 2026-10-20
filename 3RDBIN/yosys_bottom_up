@@ -127,6 +127,23 @@ write_verilog -noattr {dest}
 """
 
 
+# ABC SCRIPTS.  yosys's own abc scripts, word for word, except that &fraig
+# gets a conflict limit: -C 1000 per node, where abc's default is 1,000,000.
+# &fraig is a SAT sweep that proves nodes equivalent and merges them, and on
+# one module -- 71,228 AND nodes, decoders and a popcount flattened in -- it
+# spent 734 of abc's 742 seconds there, and the module had already used up
+# --abc-timeout with sizing on.  Capped, the same input maps in 5.5 s to
+# 17,954 nodes against 17,974, area 512.15 against 512.11, delay identical:
+# the proofs past 1,000 conflicts were buying nothing.  Without &fraig at all
+# it is 5.1 s but 2.7% more area, so the sweep stays and only its tail goes.
+# {D} is yosys's: it becomes "-D <ps>" with --abc-delay and nothing without.
+# -constr still adds its read_constr in front, as it does for the default.
+ABC_PLAIN = ("+strash;&get,-n;&fraig,-x,-C,1000;&put;scorr;dc2;dretime;"
+             "strash;&get,-n;&dch,-f;&nf,{D};&put")
+ABC_SIZED = ("+strash;&get,-n;&fraig,-x,-C,1000;&put;scorr;dc2;dretime;retime,-o,{D};"
+             "strash;&get,-n;&dch,-f;&nf,{D};&put;buffer;upsize,{D};dnsize,{D};stime,-p")
+
+
 # BUFFERING AND SIZING -- --abc-delay.  Plain `abc -liberty` MAPS and does
 # nothing else: no fanout buffering, no gate sizing, every gate the smallest
 # that implements its function.  yosys runs abc's `buffer; upsize; dnsize`
@@ -388,7 +405,8 @@ def run_one(job):
                                text=True, timeout=limit or None)
     except subprocess.TimeoutExpired:
         fallback = True
-        p = subprocess.run([args.yosys, "-p", script("-fast " if args.abc_fast else "")],
+        p = subprocess.run([args.yosys, "-p", script("-fast " if args.abc_fast
+                                                     else f'-script "{ABC_PLAIN}" ')],
                            capture_output=True, text=True)
     with open(log, "w") as fh:
         if fallback:
@@ -465,7 +483,7 @@ def main():
                     help="carry on past a level with failures (the next level "
                          "will fail too, but it reports every break at once)")
     args = ap.parse_args()
-    args.abc_opts = "-fast " if args.abc_fast else ""
+    args.abc_opts = "-fast " if args.abc_fast else f'-script "{ABC_PLAIN}" '
     if args.abc_delay:
         driver, load = args.abc_driver, args.abc_load
         if driver is None or load is None:
@@ -479,6 +497,8 @@ def main():
         constr = os.path.abspath(os.path.join(args.out, "abc.constr"))
         with open(constr, "w") as fh:
             fh.write(f"set_driving_cell {driver}\nset_load {load:.4f}\n")
+        if not args.abc_fast:
+            args.abc_opts = f'-script "{ABC_SIZED}" '
         args.abc_opts += f"-constr {constr} -D {args.abc_delay:g} "
         print(f"yosys_bottom_up: buffering and sizing on: -D {args.abc_delay:g} ps, "
               f"inputs driven by {driver}, outputs loaded {load:.3f} fF")
