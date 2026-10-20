@@ -1,0 +1,359 @@
+#<!-- repair_drive: bring every driver within its liberty max_capacitance.
+#
+#     Per-module synthesis maps one module at a time and cannot see the loads
+#     below a module boundary, so a net that crosses one can be left on a
+#     minimum-size driver: on five 1.2M-3.9M-cell designs OpenSTA lists 19 to
+#     3,259 max_capacitance violators each, the worst 23x over its limit.  STA
+#     engines disagree beyond the characterised table (one extrapolates, one
+#     clamps), so until these are fixed no timing number can be trusted.
+#
+#     Drive and Vt are one choice.  A lower-Vt cell carries more load at the
+#     same area -- the smallest NAND3 carries 0.0084 pF in the highest Vt and
+#     0.0220 pF in the lowest, more than the next drive up -- and leaks 5x to
+#     80x more.  So for a driver over its limit every cell of its class (same
+#     function, same pins: 3RDBIN/liberty_sizing), in any allowed Vt and any
+#     drive, is a candidate; the feasible one with the least
+#         area + leak_weight * leakage
+#     is chosen.  Where no cell of the class can carry the load, a buffer is
+#     put at the driver, chosen the same way.
+#
+#     Hierarchy, as remove_dead_logic -hier does it: edits go into the module
+#     DEFINITIONS (what write_verilog --hier writes) and are replayed in the
+#     flat database under every instance path (what write_sgraph and
+#     placement read).  A definition is shared by every instance of its
+#     module, so a cell there is sized for the worst load over all of them.
+#     Loads are summed on the flat nets, which elaborate has already joined
+#     across module boundaries -- exactly what the per-module synthesis could
+#     not see.
+#
+#     Not touched: instances whose leaf name matches -keep_pattern (default
+#     d0nt -- the RTL's hand-placed don't-touch cells), clock cells (stem
+#     CK*), cells with no row in the sizing table (macros), and drivers of a
+#     net whose local expression is not a plain name or bit select (those
+#     are counted).  Run after remove_dead_logic -const -hier and before
+#     write_verilog --hier and write_sgraph. -->
+#------------------------------------------------------------------------------------------#
+sub repair_drive {
+
+my @vts = ("svt", "lvt");
+my $leakW = 0.04;               # area units (um2) per leakage unit (nW)
+my $margin = 1.0;               # aim for load <= margin * max_capacitance
+my $iters = 2;
+my $table = "";
+my $report = "";
+my $dry = 0;
+my $keep = "d0nt";
+
+my $t0 = time();
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && ( $_[0] eq '-h' || $_[0] eq '-help' ) ) {
+  print "Usage : repair_drive [-vts <vt>[,<vt>...]] [-leak_weight <area per leakage>]\n";
+  print "                     [-margin <f>] [-iterations <n>] [-table <sizing.tsv>]\n";
+  print "                     [-keep_pattern <regex>] [-report <file>] [-dry_run]\n";
+  print "        Resizes, swaps Vt or buffers every driver whose net load exceeds its\n";
+  print "        liberty max_capacitance, summing the load across module boundaries.\n";
+  print "        Edits the hierarchical module definitions and the flat database.\n";
+  print "        -vts         the Vt flavours a repair may use (default svt,lvt)\n";
+  print "        -leak_weight the cost of one unit of leakage in units of area: the\n";
+  print "                     candidate with the least area + leak_weight * leakage\n";
+  print "                     wins (default 0.04 um2/nW; 0 = area only)\n";
+  print "        -margin      size for load <= margin * max_capacitance (default 1.0)\n";
+  print "        -iterations  re-sum and repeat; an upsize loads its own inputs more\n";
+  print "                     (default 2)\n";
+  print "        -table       a 3RDBIN/liberty_sizing table (default: the config's\n";
+  print "                     cell-sizing)\n";
+  print "        -keep_pattern instances whose leaf name matches are never changed\n";
+  print "                     (default d0nt)\n";
+  print "        -report      write every change made\n";
+  print "        -dry_run     report what would change, change nothing\n";
+  return;
+}
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-vts"){@vts = split(/,/, lc($_[$i+1]));}
+  if($_[$i] eq "-leak_weight"){$leakW = $_[$i+1];}
+  if($_[$i] eq "-margin"){$margin = $_[$i+1];}
+  if($_[$i] eq "-iterations"){$iters = $_[$i+1];}
+  if($_[$i] eq "-table"){$table = $_[$i+1];}
+  if($_[$i] eq "-keep_pattern"){$keep = $_[$i+1];}
+  if($_[$i] eq "-report"){$report = $_[$i+1];}
+  if($_[$i] eq "-dry_run"){$dry = 1;}
+}
+$table = $LIBCFG_CELL_SIZING if ( $table eq "" && defined $LIBCFG_CELL_SIZING );
+if ( !defined $table || $table eq "" || ! -f $table ) {
+  print "ERROR-PAR-RP_DRV : 001 : no sizing table; give -table, or a config with cell-sizing\n";
+  print "ERROR-PAR-RP_DRV : 001 :   (build one with 3RDBIN/liberty_sizing)\n";
+  return;
+}
+unless ( exists $MODULE_ALREADY{$TOP_MODULE} && scalar(keys %COMP_ALREADY) > 0 ) {
+  print "ERROR-PAR-RP_DRV : 002 : no hierarchical netlist and flat database; read_verilog and elaborate first\n";
+  return;
+}
+#<!-- -vts any: a library with no Vt flavours in its file names (one corner
+#     of one flavour) -- liberty_sizing leaves its vt column empty -->
+my %vtOK = map { $_ => 1 } @vts;
+my $anyVt = ( grep { $_ eq "any" } @vts ) ? 1 : 0;
+
+#<!-- the sizing table: cell -> {vt, area, leak, class, dont, pins{pin}=[dir,cap,maxcap]} -->
+my (%SZ, %CLS) = ();
+open(my $tf, "<", $table) or do { print "ERROR-PAR-RP_DRV : 003 : cannot read $table : $!\n"; return; };
+my @col = ();
+while ( my $l = <$tf> ) {
+  next if ( $l =~ /^#/ );
+  chomp($l);
+  my @f = split(/\t/, $l, -1);
+  if ( !@col ) { @col = @f; next; }
+  my %r; @r{@col} = @f;
+  my %pins = ();
+  foreach my $p ( split(/;/, $r{pins}) ) {
+    my ($n, $d, $c, $mc) = split(/:/, $p);
+    next unless ( defined $n && $n ne "" );
+    $pins{$n} = [$d, ($c eq "" ? 0 : $c), (defined $mc && $mc ne "" ? $mc : undef)];
+  }
+  $SZ{$r{cell}} = { vt => $r{vt}, area => $r{area}, leak => $r{leakage}, class => $r{class},
+                    dont => $r{dont_use}, pins => \%pins };
+  push(@{$CLS{$r{class}}}, $r{cell}) unless ( $r{dont_use} );
+}
+close($tf);
+print "INFO-PAR-RP_DRV : 004 : " . scalar(keys %SZ) . " cell(s) in $table; repairs may use " .
+      join(",", @vts) . ", leak_weight $leakW, margin $margin\n";
+
+#<!-- the buffer class: a BUFF or BUF stem, one input, one output, out = in
+#     (truth table 2) -- not a clock or delay buffer, which share the function -->
+my ($bufClass) = sort { scalar(@{$CLS{$b}}) <=> scalar(@{$CLS{$a}}) }
+                 grep { /^BUFF?\|[^|,]+\|[^|,]+\|2$/ } keys %CLS;
+#<!-- its pins, from the class: stem|in|out|truth table -->
+my ($bufIn, $bufOut) = defined $bufClass ? ( split(/\|/, $bufClass) )[1, 2] : ("", "");
+
+#<!-- where each module is instantiated, as remove_dead_logic -hier walks it -->
+my (%pathMod, %modPaths) = ();
+my $walk;
+$walk = sub {
+  my ($m, $p) = @_;
+  $pathMod{$p} = $m;
+  push(@{$modPaths{$m}}, $p);
+  foreach my $h ( sort $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+    my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($h);
+    next unless ( exists $MODULE_ALREADY{$c} );
+    next if ( $MODULE_ALREADY{$c}->dbVNOMGetClass == 11 );
+    $walk->($c, ( $p eq "" ? $h : "$p/$h" ));
+  }
+};
+$walk->($TOP_MODULE, "");
+my $split = sub {
+  my ($inst) = @_;
+  my ($p, $l) = ( $inst =~ m{^(.*)/([^/]+)$} ) ? ($1, $2) : ("", $inst);
+  return () unless ( exists $pathMod{$p} && $MODULE_ALREADY{$pathMod{$p}}->dbVNOMHasLeafInst($l) );
+  return ($pathMod{$p}, $p, $l);
+};
+my $cost = sub { my ($c) = @_; return $SZ{$c}{area} + $leakW * $SZ{$c}{leak}; };
+
+#<!-- the cheapest allowed cell of $class whose every output carries $need{pin} -->
+my $choose = sub {
+  my ($class, $need) = @_;
+  my ($best, $bc) = (undef, 0);
+  foreach my $c ( @{$CLS{$class} || []} ) {
+    next unless ( ( $anyVt || $vtOK{$SZ{$c}{vt}} ) && exists $PLDB{$c} );
+    my $ok = 1;
+    foreach my $po ( keys %$need ) {
+      my $mc = $SZ{$c}{pins}{$po}[2];
+      if ( !defined $mc || $need->{$po} > $margin * $mc ) { $ok = 0; last; }
+    }
+    next unless ( $ok );
+    my $k = $cost->($c);
+    ($best, $bc) = ($c, $k) if ( !defined $best || $k < $bc );
+  }
+  return $best;
+};
+
+my $fh;
+if ( $report ne "" ) {
+  open($fh, ">", $report) or do { print "ERROR-PAR-RP_DRV : 005 : cannot write $report : $!\n"; return; };
+}
+my ($nResize, $nSwap, $nBuf, $nStuck, $nSkip, $dArea, $dLeak) = (0, 0, 0, 0, 0, 0, 0);
+my %stuck = ();
+my $bufSeq = 0;
+
+for ( my $it = 1; $it <= $iters; $it++ ) {
+  #<!-- loads on the flat nets, and the driving pins -->
+  my (%load, %drv) = ();
+  foreach my $inst ( keys %COMP_ALREADY ) {
+    my $cell = exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : "";
+    my $sz = $SZ{$cell};
+    foreach my $pin ( keys %{$COMP_ALREADY{$inst}} ) {
+      my $net = $COMP_ALREADY{$inst}{$pin};
+      next if ( !defined $net || $net eq "" || $net =~ /^1'b[01]$/ );
+      next unless ( defined $sz && exists $sz->{pins}{$pin} );
+      if ( $sz->{pins}{$pin}[0] eq "i" ) { $load{$net} += $sz->{pins}{$pin}[1]; }
+      else { $drv{$inst}{$pin} = $net; }
+    }
+  }
+  #<!-- violators, gathered per module definition: the worst load over every
+  #     instance of the module is what its one cell must carry -->
+  my %need = ();          # m -> l -> pin -> load
+  my $nViol = 0;
+  foreach my $inst ( keys %drv ) {
+    my $cell = $CADB{$inst}->dbCadbGetCellref;
+    my $over = 0;
+    foreach my $po ( keys %{$drv{$inst}} ) {
+      my $mc = $SZ{$cell}{pins}{$po}[2];
+      $over = 1 if ( defined $mc && ( $load{$drv{$inst}{$po}} || 0 ) > $margin * $mc );
+    }
+    next unless ( $over );
+    $nViol++;
+    my ($m, $p, $l) = $split->($inst);
+    if ( !defined $m || $l =~ /$keep/ || $SZ{$cell}{class} =~ /^CK/ ) { $nSkip++ if ( $it == 1 ); next; }
+    next if ( exists $need{$m}{$l} );
+    foreach my $pp ( @{$modPaths{$m}} ) {
+      my $fi = ( $pp eq "" ) ? $l : "$pp/$l";
+      foreach my $po ( keys %{$drv{$fi} || {}} ) {
+        my $ld = $load{$drv{$fi}{$po}} || 0;
+        $need{$m}{$l}{$po} = $ld if ( !exists $need{$m}{$l}{$po} || $ld > $need{$m}{$l}{$po} );
+      }
+    }
+  }
+  print "INFO-PAR-RP_DRV : 006 : iteration $it: $nViol driver(s) over max_capacitance in " .
+        scalar(keys %need) . " module definition(s)\n";
+  last unless ( keys %need );
+
+  #<!-- decide, per definition and leaf -->
+  my (%newCell, %bufAt) = ();
+  foreach my $m ( keys %need ) {
+    foreach my $l ( keys %{$need{$m}} ) {
+      my $cell = $MODULE_ALREADY{$m}->dbVNOMGetLeafInstCell($l);
+      next unless ( defined $cell && exists $SZ{$cell} );
+      my $c = $choose->($SZ{$cell}{class}, $need{$m}{$l});
+      if ( defined $c ) {
+        $newCell{$m}{$l} = $c if ( $c ne $cell );
+        next;
+      }
+      #<!-- nothing in the class carries it: a buffer on each output that is
+      #     over the limit -- a flop's Q, say, while its QN is fine -->
+      my @over = grep { my $mc = $SZ{$cell}{pins}{$_}[2];
+                        defined $mc && $need{$m}{$l}{$_} > $margin * $mc } keys %{$need{$m}{$l}};
+      if ( !@over || !defined $bufClass ) { $stuck{"$m\t$l"} = 1; next; }
+      foreach my $po ( sort @over ) {
+        my $b = $choose->($bufClass, { $bufOut => $need{$m}{$l}{$po} });
+        unless ( defined $b ) {
+          #<!-- more than the largest buffer: the largest, and say so -->
+          ($b) = sort { $SZ{$b}{pins}{$bufOut}[2] <=> $SZ{$a}{pins}{$bufOut}[2] }
+                 grep { ( $anyVt || $vtOK{$SZ{$_}{vt}} ) && exists $PLDB{$_} } @{$CLS{$bufClass}};
+          $stuck{"$m\t$l"} = 1;
+        }
+        push(@{$bufAt{$m}{$l}}, [$po, $b]) if ( defined $b );
+      }
+    }
+  }
+  if ( $dry ) {
+    foreach my $m ( sort keys %newCell ) {
+      foreach my $l ( sort keys %{$newCell{$m}} ) {
+        print $fh "resize\t$m\t$l\t" . $MODULE_ALREADY{$m}->dbVNOMGetLeafInstCell($l) . "\t$newCell{$m}{$l}\n" if ( $fh );
+      }
+    }
+    foreach my $m ( sort keys %bufAt ) {
+      foreach my $l ( sort keys %{$bufAt{$m}} ) {
+        print $fh "buffer\t$m\t$l\t$_->[0]\t$_->[1]\n" foreach ( $fh ? @{$bufAt{$m}{$l}} : () );
+      }
+    }
+    last;
+  }
+
+  #<!-- apply: module definitions, then the flat database under every path -->
+  my %mods = map { $_ => 1 } ( keys %newCell, keys %bufAt );
+  foreach my $m ( keys %mods ) {
+    my $mod = $MODULE_ALREADY{$m};
+    my $n = scalar(@{$modPaths{$m}});
+    my $area = $mod->dbVNOMGetArea;
+    my @lines = ();
+    my @add = ();
+    foreach my $line ( $mod->dbVNOMGetConn ) {
+      my ($cell, $inst) = ( split(/\s+/, $line) )[0, 1];
+      if ( defined $inst && exists $newCell{$m}{$inst} ) {
+        my $new = $newCell{$m}{$inst};
+        $line =~ s/^\s*\Q$cell\E\b/$new/;
+        $mod->dbVNOMSetLeafInstCell($inst, $new);
+        my @o = exists $PLDB{$cell} ? $PLDB{$cell}->dbMdbGetSize : (0, 0);
+        my @s = exists $PLDB{$new} ? $PLDB{$new}->dbMdbGetSize : (0, 0);
+        $area += $s[0] * $s[1] - $o[0] * $o[1];
+        $dArea += $n * ( $SZ{$new}{area} - $SZ{$cell}{area} );
+        $dLeak += $n * ( $SZ{$new}{leak} - $SZ{$cell}{leak} );
+        if ( $SZ{$new}{vt} ne $SZ{$cell}{vt} ) { $nSwap++; } else { $nResize++; }
+        print $fh "resize\t$m\t$inst\t$cell\t$new\tx$n\n" if ( $fh );
+        foreach my $pp ( @{$modPaths{$m}} ) {
+          my $fi = ( $pp eq "" ) ? $inst : "$pp/$inst";
+          $CADB{$fi}->dbCadbSetCellref($new) if ( exists $CADB{$fi} );
+        }
+      }
+      foreach my $bp ( ( defined $inst && exists $bufAt{$m}{$inst} ) ? @{$bufAt{$m}{$inst}} : () ) {
+        my ($po, $b) = @$bp;
+        #<!-- one net: a plain name, a bit select or an escaped name (which
+        #     keeps its terminating space); UTILS/gen_net_func reads it -->
+        my $expr = &dbfConnPinExpr($line, $po);
+        if ( !&dbfConnExprIsNet($expr) ) {
+          $nSkip++;
+        } else {
+          $bufSeq++;
+          my ($bn, $nn) = ("repdrv_buf_$bufSeq", "repdrv_net_$bufSeq");
+          $line = &dbfConnSetPinExpr($line, $po, $nn);
+          push(@add, "$b $bn (.$bufIn($nn), .$bufOut($expr)) ;");
+          $mod->dbVNOMAddLeafInst($bn);
+          $mod->dbVNOMSetLeafInstCell($bn, $b);
+          my @s = exists $PLDB{$b} ? $PLDB{$b}->dbMdbGetSize : (0, 0);
+          $area += $s[0] * $s[1];
+          $dArea += $n * $SZ{$b}{area};
+          $dLeak += $n * $SZ{$b}{leak};
+          $nBuf++;
+          print $fh "buffer\t$m\t$inst\t$po\t$b\t$bn\tx$n\n" if ( $fh );
+          @$bp = ($po, $b, $bn, $nn);
+        }
+      }
+      push(@lines, $line);
+    }
+    $mod->{conn} = [@lines, @add];
+    $mod->dbVNOMSetArea($area);
+    #<!-- the flat side of the buffers -->
+    foreach my $inst ( keys %{$bufAt{$m} || {}} ) {
+     foreach my $bp ( @{$bufAt{$m}{$inst}} ) {
+      my ($po, $b, $bn, $nn) = @$bp;
+      next unless ( defined $bn );
+      foreach my $pp ( @{$modPaths{$m}} ) {
+        my $pre = ( $pp eq "" ) ? "" : "$pp/";
+        my ($fi, $fb, $fn) = ("$pre$inst", "$pre$bn", "$pre$nn");
+        next unless ( exists $COMP_ALREADY{$fi} && defined $COMP_ALREADY{$fi}{$po} );
+        my $old = $COMP_ALREADY{$fi}{$po};
+        $COMP_ALREADY{$fi}{$po} = $fn;
+        my ($other) = grep { $_ ne $po && defined $COMP_ALREADY{$fi}{$_} && $COMP_ALREADY{$fi}{$_} eq $old }
+                      keys %{$COMP_ALREADY{$fi}};
+        if ( defined $other ) { $NETS_ALREADY{$old}{$fi} = $other; } else { delete $NETS_ALREADY{$old}{$fi}; }
+        $NETS_ALREADY{$old}{$fb} = $bufOut;
+        $CADB{$fb} = CompAttDB::new();
+        $CADB{$fb}->dbCadbSetCellref($b);
+        $COMP_ALREADY{$fb}{$bufIn} = $fn;
+        $COMP_ALREADY{$fb}{$bufOut} = $old;
+        $NADB{$fn} = NetsAttrDB::new();
+        $NADB{$fn}->dbNadbSetNetType(0);
+        $NETS_ALREADY{$fn}{$fi} = $po;
+        $NETS_ALREADY{$fn}{$fb} = $bufIn;
+      }
+     }
+    }
+  }
+  foreach my $m ( keys %MODULE_ALREADY ) {
+    $MODULE_ALREADY{$m}->dbVNOMSetLeafArea(0);
+    $MODULE_ALREADY{$m}->dbVNOMSetHierArea(0);
+  }
+}
+$nStuck = scalar(keys %stuck);
+close($fh) if ( defined $fh );
+if ( $dry ) {
+  print "INFO-PAR-RP_DRV : 007 : dry run, the database is unchanged\n";
+  return;
+}
+printf("INFO-PAR-RP_DRV : 008 : %d upsize(s), %d Vt swap(s), %d buffer(s) added in module definitions; " .
+       "flat area %+.2f, leakage %+.1f; %d s\n", $nResize, $nSwap, $nBuf, $dArea, $dLeak, time() - $t0);
+print "WARN-PAR-RP_DRV : 009 : $nStuck driver(s) need more than any one cell of their class or one buffer can carry\n" if ( $nStuck );
+print "INFO-PAR-RP_DRV : 010 : $nSkip driver(s) left alone: kept by -keep_pattern, clock cells, " .
+      "outside the hierarchy walk, or a net that is not a plain name\n" if ( $nSkip );
+}# sub repair_drive
+#------------------------------------------------------------------------------------------#
+
+1;

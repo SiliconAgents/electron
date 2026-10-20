@@ -49,6 +49,18 @@ _here = os.path.dirname(os.path.abspath(__file__))
 _lw = importlib.machinery.SourceFileLoader("rtlil_leaf_wrappers",
                                            os.path.join(_here, "rtlil_leaf_wrappers")).load_module()
 liberty_expr_to_sv, DRIVE_RE, drive_of = _lw.liberty_expr_to_sv, _lw.DRIVE_RE, _lw.drive_of
+# A second naming convention: the strength as a suffix, INV_X1 / INV_X4.  Tried
+# first -- the D<n> rule reads AND2_X1 as stem "AN" with drive 2, and finds no
+# drive at all in BUF_X1, which would make every buffer a class of its own.
+X_DRIVE_RE = re.compile(r"^(.+)_X(\d+)(?:P(\d+))?$")
+
+
+def stem_and_drive(cell):
+    m = X_DRIVE_RE.match(cell)
+    if m:
+        return m.group(1), float(f"{m.group(2)}.{m.group(3) or 0}")
+    d = DRIVE_RE.match(cell)
+    return (d.group(1), drive_of(cell)) if d else (cell, 0.0)
 
 CELL_RE = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
 PIN_RE = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
@@ -133,8 +145,7 @@ def row(cell, vt, area, leak, dont, seq, pins, dflt_tran=""):
         return None
     ins = sorted(n for n, d in pins.items() if d.get("direction") == "input")
     outs = sorted(n for n, d in pins.items() if d.get("direction") == "output")
-    d = DRIVE_RE.match(cell)
-    stem = d.group(1) if d else cell
+    stem, drive = stem_and_drive(cell)
     cls = f"{stem}|{','.join(ins)}|{','.join(outs)}"
     if not seq and len(outs) == 1 and pins[outs[0]].get("function"):
         try:
@@ -155,7 +166,7 @@ def row(cell, vt, area, leak, dont, seq, pins, dflt_tran=""):
             # library's default -- the defaults differ between libraries
             f += f":{p.get('max_capacitance', '')}:{p.get('max_transition', dflt_tran)}"
         fields.append(f)
-    return [cell, vt, f"{area:g}", f"{leak:g}", f"{drive_of(cell):g}", cls,
+    return [cell, vt, f"{area:g}", f"{leak:g}", f"{drive:g}", cls,
             "1" if dont else "0", "1" if seq else "0", ";".join(fields)]
 
 
