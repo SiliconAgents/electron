@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""The library facts a drive-repair pass needs, from liberty, in one small table.
+
+    liberty_sizing -o sizing.tsv [-j N] <cells.lib> [<more.lib> ...]
+
+One row per cell:
+
+    cell  vt  area  drive  class  dont_use  seq  pins
+
+    drive  the strength in the name (D4 -> 4, D0P7 -> 0.7), 0 if none
+    class  cells with the same class are interchangeable: a single-output
+           combinational cell's class is its name stem, its pin names and its
+           output's truth table, so two cells share one only when either can
+           replace the other; a sequential or multi-output cell's is its stem
+           and pin names
+    pins   pin:dir:cap[:maxcap[:maxtran]] separated by ';', dir i or o;
+           capacitance and max_capacitance in the library's load unit (header),
+           max_transition in its time unit; an output with no max_transition of
+           its own takes the library's default_max_transition
+
+WHY.  A cell driving more than its liberty max_capacitance is outside the
+characterised table: STA tools disagree about it (OpenSTA extrapolates, others
+clamp at the edge) and placement inherits the problem.  Synthesis that maps one
+module at a time cannot see loads in the modules below, so it leaves such
+drivers on every net that crosses a boundary -- 19 to 3,259 max_cap violators
+per design on five 1.2M-3.9M-cell designs.  Repairing them needs input pin
+capacitances, output limits and which cells may replace which -- a few hundred
+kilobytes, against the gigabytes of liberty they come from.  Arc stores built
+for timing carry the capacitances but not the limits or the functions.
+
+Read once per library and kept; reading the result costs nothing.
+"""
+import argparse
+import concurrent.futures as cf
+import gzip
+import importlib.machinery
+import os
+import re
+import sys
+
+_here = os.path.dirname(os.path.abspath(__file__))
+_lw = importlib.machinery.SourceFileLoader("rtlil_leaf_wrappers",
+                                           os.path.join(_here, "rtlil_leaf_wrappers")).load_module()
+liberty_expr_to_sv, DRIVE_RE, drive_of = _lw.liberty_expr_to_sv, _lw.DRIVE_RE, _lw.drive_of
+
+CELL_RE = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
+PIN_RE = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
+KV_RE = re.compile(r'^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;')
+SEQ_RE = re.compile(r"^\s*(ff|latch|statetable|ff_bank|latch_bank)\s*\(")
+VT_RE = re.compile(r"_(svt|lvt|lvtll|ulvt|ulvtll|elvt)(?:tt|ss|ff)", re.I)
+
+
+def read_one(path):
+    """(header, [row]) for one liberty file."""
+    op = gzip.open if path.endswith(".gz") else open
+    m = VT_RE.search(os.path.basename(path))
+    vt = m.group(1).lower() if m else ""
+    hdr = {"load_unit": "", "time_unit": "", "default_max_transition": ""}
+    rows = []
+    cell, depth, cdepth, pin, pins, seq, area, dont = None, 0, 0, None, {}, False, None, False
+    with op(path, "rt", errors="replace") as fh:
+        for line in fh:
+            if cell is None:
+                if "capacitive_load_unit" in line:
+                    u = re.search(r"\(\s*([\d.]+)\s*,\s*(\w+)", line)
+                    if u:
+                        hdr["load_unit"] = f"{u.group(1)}{u.group(2).lower()}"
+                else:
+                    k = KV_RE.match(line)
+                    # default_max_transition: matched on its own, because one
+                    # vendor's files write it with no terminating semicolon
+                    t = re.match(r"^\s*default_max_transition\s*:\s*([\d.eE+-]+)", line)
+                    if k and k.group(1) == "time_unit":
+                        hdr["time_unit"] = k.group(2).strip()
+                    elif t:
+                        hdr["default_max_transition"] = t.group(1)
+                m = CELL_RE.match(line)
+                if m:
+                    cell, cdepth, pins, pin, seq, area, dont = m.group(1), depth, {}, None, False, None, False
+            else:
+                if SEQ_RE.match(line):
+                    seq = True
+                m = PIN_RE.match(line)
+                if m and pin is None:
+                    pin = m.group(1)
+                    pins.setdefault(pin, {})
+                else:
+                    m = KV_RE.match(line)
+                    if m:
+                        k, v = m.group(1), m.group(2).strip()
+                        if pin is not None and k in ("direction", "function", "capacitance",
+                                                     "max_capacitance", "max_transition"):
+                            pins[pin].setdefault(k, v)
+                        elif pin is None and k == "area":
+                            area = float(v)
+                        elif pin is None and k == "dont_use" and v == "true":
+                            dont = True
+            depth += line.count("{") - line.count("}")
+            if cell is not None and pin is not None and depth <= cdepth + 1:
+                pin = None
+            if cell is not None and depth <= cdepth:
+                rows.append(row(cell, vt, area, dont, seq, pins))
+                cell = None
+    return hdr, [r for r in rows if r]
+
+
+def row(cell, vt, area, dont, seq, pins):
+    if area is None:
+        return None
+    ins = sorted(n for n, d in pins.items() if d.get("direction") == "input")
+    outs = sorted(n for n, d in pins.items() if d.get("direction") == "output")
+    d = DRIVE_RE.match(cell)
+    stem = d.group(1) if d else cell
+    cls = f"{stem}|{','.join(ins)}|{','.join(outs)}"
+    if not seq and len(outs) == 1 and pins[outs[0]].get("function"):
+        try:
+            py = liberty_expr_to_sv(pins[outs[0]]["function"]).replace("1'b0", "0").replace("1'b1", "1")
+            tt = 0
+            for k in range(1 << len(ins)):
+                if eval(py, {}, {n: (k >> i) & 1 for i, n in enumerate(ins)}) & 1:
+                    tt |= 1 << k
+            cls += f"|{tt:x}"
+        except (ValueError, SyntaxError, NameError):
+            pass
+    fields = []
+    for n in ins + outs:
+        p = pins[n]
+        f = f"{n}:{'i' if n in ins else 'o'}:{p.get('capacitance', '')}"
+        if n in outs:
+            f += f":{p.get('max_capacitance', '')}:{p.get('max_transition', '')}"
+        fields.append(f)
+    return [cell, vt, f"{area:g}", f"{drive_of(cell):g}", cls,
+            "1" if dont else "0", "1" if seq else "0", ";".join(fields)]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("-o", "--out", required=True)
+    ap.add_argument("-j", "--jobs", type=int, default=8)
+    ap.add_argument("liberty", nargs="+")
+    a = ap.parse_args()
+    with cf.ProcessPoolExecutor(max_workers=max(1, a.jobs)) as ex:
+        results = list(ex.map(read_one, a.liberty))
+    units = {(h["load_unit"], h["time_unit"]) for h, _ in results}
+    if len(units) > 1:
+        sys.exit(f"liberty_sizing: the libraries disagree on units: {sorted(units)}")
+    hdr = results[0][0]
+    seen, out = set(), []
+    for _, rows in results:
+        for r in rows:
+            if r[0] not in seen:
+                seen.add(r[0]); out.append(r)
+    tmp = a.out + ".part"
+    with open(tmp, "w") as fh:
+        fh.write(f"# liberty_sizing: {len(out)} cell(s) from {len(a.liberty)} liberty file(s)\n")
+        fh.write(f"# load_unit {hdr['load_unit']}  time_unit {hdr['time_unit']}  "
+                 f"default_max_transition {hdr['default_max_transition']}\n")
+        for p in a.liberty:
+            fh.write(f"# from {p}\n")
+        fh.write("cell\tvt\tarea\tdrive\tclass\tdont_use\tseq\tpins\n")
+        for r in out:
+            fh.write("\t".join(r) + "\n")
+    os.replace(tmp, a.out)
+    print(f"liberty_sizing: {len(out)} cell(s) from {len(a.liberty)} file(s) -> {a.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
