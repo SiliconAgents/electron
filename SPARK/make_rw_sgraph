@@ -16,7 +16,10 @@ sub write_sgraph {
     print "\n";
     print "status is PLACED, FIXED, UNPLACED or PORT; an unplaced object has\n";
     print "UND UND for its location, and a PORT reports one whether or not it\n";
-    print "was ever placed, because PortDB defaults to (0,0).\n";  
+    print "was ever placed, because PortDB defaults to (0,0).\n";
+    print "\n";
+    print "Header lines before the rows: DIEAREA <x0 y0 x1 y1> and DBU <per micron>,\n";
+    print "the unit of every coordinate.\n";
  }else {
     my $outFile = $TOP_MODULE.".sgraph";
     for(my $i=0; $i<$noOfArguments; $i++){
@@ -30,6 +33,13 @@ sub write_sgraph {
        my @die_coords = @{$DIE_ALREADY{dieArea}};
        print WRITE "DIEAREA @die_coords \n";
     }
+    #<!-- the coordinates' unit: DBU per micron, from GLOBAL (authoritative --
+    #     $DEF_DATABASE_UNIT is overwritten mid-session).  Without it a reader
+    #     turning locations into wire lengths had to be told the DBU by hand.
+    #     "DBU <n>" as pyspark_cad's nodefile headers spell it; readers take
+    #     only NETS rows and skip it. -->
+    my $dbu = $GLOBAL->dbfGlobalGetDBU;
+    print WRITE "DBU $dbu\n" if ( defined $dbu && $dbu ne "" && $dbu > 0 );
 
     #<!-- WHY THIS DOES NOT CALL getNetSink
     #

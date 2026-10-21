@@ -325,7 +325,10 @@ nangate_sgraph:
 	  test -s workarea/vedic_16x16.$$f.sgraph || { echo "nangate_sgraph: no vedic_16x16.$$f.sgraph"; exit 1; }; \
 	  grep -v " UND" workarea/vedic_16x16.$$f.sgraph | grep -q "^NETS" || { echo "nangate_sgraph: vedic_16x16.$$f.sgraph has no placed rows"; exit 1; }; \
 	done
-	@echo "nangate_sgraph: synthesis and placement graphs written, placement carries locations"
+	for f in synth place recurse; do \
+	  grep -qE "^DBU [1-9][0-9]*$$" workarea/vedic_16x16.$$f.sgraph || { echo "nangate_sgraph: vedic_16x16.$$f.sgraph has no DBU line"; exit 1; }; \
+	done
+	@echo "nangate_sgraph: synthesis and placement graphs written, placement carries locations and its DBU"
 
 nangate_store: $(NG_STORE)/arcs
 
