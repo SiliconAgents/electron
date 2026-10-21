@@ -10,6 +10,14 @@ building its own.  $VAR and ${VAR} expand as electron's config reader expands
 them, with ELECTRON_HOME falling back to this checkout.
 
 Prints nothing and exits 1 when the config names no store.
+
+    arc_store --config library.config --foundry F --node N --wire-rc
+
+prints instead the node's wire estimate for timing from placement:
+"<ohm per um> <fF per um>", from "wire_resistance_per_micron" (ohm) and
+"wire_capacitance_per_micron" (farads, as the config stores it), so a flow
+hands Photon its own technology's numbers rather than Photon's built-in guess.
+Exits 1 when the node has neither.
 """
 import argparse
 import json
@@ -34,12 +42,19 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--foundry", required=True)
     ap.add_argument("--node", required=True)
-    ap.add_argument("--layer", required=True)
+    ap.add_argument("--layer", default="")
+    ap.add_argument("--wire-rc", action="store_true", help="print the node's wire ohm/um and fF/um")
     a = ap.parse_args()
     c = json.load(open(a.config))
     for n in c.get(a.foundry, {}).get("node", []):
         if n.get("type") != a.node:
             continue
+        if a.wire_rc:
+            r, f = n.get("wire_resistance_per_micron"), n.get("wire_capacitance_per_micron")
+            if r is None or f is None:
+                return 1
+            print(f"{float(r):g} {float(f) * 1e15:g}")
+            return 0
         for f in n.get("files", []):
             if str(f.get("layer")) == str(a.layer) and f.get("sta-arc-store"):
                 print(expand(f["sta-arc-store"]))
