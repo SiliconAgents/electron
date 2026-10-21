@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""An estimated SPEF from a placed timing graph, for timing before routing.
+
+    sgraph_spef <placed.sgraph> -o <out.spef[.gz]> --res-per-um R --cap-per-um C
+                [--dbu N] [--sizing <sizing.tsv>] [--ideal-above N]
+
+One lumped RC per net, from where its pins are:
+
+    C = HPWL(driver and sinks) x q(pins) x cap_per_um     fF, the whole tree
+    R = HPWL x res_per_um                                 ohm, one path
+
+q is the RISA factor (Cheng, ICCAD 1994): the ratio of a rectilinear Steiner
+tree to the half-perimeter of the pins' box, 1 up to three pins and rising to
+2.79 at 50 -- HPWL alone undercounts a net of many pins by up to that much.
+Pins are at their cells' placed origins; the cell's own size is not added.
+R is one driver-to-sink path, not the tree: the timer takes R x C / 2 as the
+net's wire delay, and the whole tree's resistance in that product made one
+die-wide net's delay grow with the square of its length.
+
+Left out, so the timer treats them as ideal, as it does before placement:
+  clock nets      any net reaching a pin the sizing table marks as a clock
+                  (3RDBIN/liberty_sizing, direction k) -- CTS builds them.
+                  Lumped, one design's gated clocks came out at 1.8-85 pF and
+                  every flop on them was 500 us late
+  --ideal-above   data nets of more pins than this, resets and enables that
+                  placement will buffer (default 1000; 0 keeps all)
+
+WHY, AND WHY IT IS KEPT.  Photon now makes this same estimate itself while
+it reads a placed graph (wire="auto", no SPEF given), and on a 2.93M-net
+design the two agree: WNS to 0.1 ps, per-endpoint r 0.9998.  This stays as
+the same model written to a file -- for a timer that only takes SPEF
+(OpenSTA), to test a change to the model outside Photon, or to compare
+against a routed design's real SPEF net by net.  Hand it to Photon with
+SPARKSTA_SPEF (INSTALL/sparksta.mk).  The graph's net names are the ones the
+timer keys on, so nothing has to be matched against a DEF.
+
+One difference from Photon's: ports are boxed here and left out there (a
+port never placed reports (0,0)), which is the 1-2% tail between them.
+
+Rows of the graph (write_sgraph):
+    NETS <net> <drvInst> <drvRef> <drvPin> <status> <x> <y> <snkInst> <snkRef> <snkPin> <status> <x> <y>
+an unplaced end has UND UND for its location and is left out of the box.
+"""
+import argparse
+import gzip
+import sys
+
+# RISA: Steiner / HPWL by pin count; beyond 50, +0.02616 per pin
+RISA = {1: 1.0, 2: 1.0, 3: 1.0, 4: 1.08, 5: 1.15, 6: 1.22, 7: 1.28, 8: 1.34, 9: 1.40,
+        10: 1.45, 15: 1.69, 20: 1.89, 25: 2.07, 30: 2.23, 35: 2.39, 40: 2.54, 45: 2.66, 50: 2.79}
+
+
+def risa(n):
+    if n in RISA:
+        return RISA[n]
+    if n > 50:
+        return 2.79 + 0.02616 * (n - 50)
+    lo = max(k for k in RISA if k < n)
+    hi = min(k for k in RISA if k > n)
+    return RISA[lo] + (RISA[hi] - RISA[lo]) * (n - lo) / (hi - lo)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("sgraph")
+    ap.add_argument("-o", "--out", required=True)
+    ap.add_argument("--dbu", type=float, default=0.0,
+                    help="database units per micron; default the graph's own DBU line")
+    ap.add_argument("--res-per-um", type=float, required=True, help="ohm per micron")
+    ap.add_argument("--cap-per-um", type=float, required=True, help="fF per micron")
+    ap.add_argument("--no-risa", action="store_true", help="HPWL alone")
+    ap.add_argument("--sizing", default="", help="liberty_sizing table: its clock pins mark clock nets")
+    ap.add_argument("--ideal-above", type=int, default=1000, help="leave nets of more pins ideal (0: none)")
+    a = ap.parse_args()
+
+    clkpin = set()     # (cell, pin) of every clock input
+    if a.sizing:
+        with open(a.sizing) as fh:
+            col = None
+            for line in fh:
+                if line.startswith("#"):
+                    continue
+                f = line.rstrip("\n").split("\t")
+                if col is None:
+                    col = {n: i for i, n in enumerate(f)}; continue
+                for p in f[col["pins"]].split(";"):
+                    q = p.split(":")
+                    if len(q) > 1 and q[1] == "k":
+                        clkpin.add((f[col["cell"]], q[0]))
+    clknet = set()
+    box = {}           # net -> [xmin, ymin, xmax, ymax, pins seen]
+    seen = set()       # (net, inst, pin) already in the box
+    op = gzip.open if a.sgraph.endswith(".gz") else open
+    with op(a.sgraph, "rt") as fh:
+        for line in fh:
+            if line.startswith("DBU ") and not a.dbu:
+                a.dbu = float(line.split()[1]); continue
+            if not line.startswith("NETS "):
+                continue
+            f = line.split()
+            if len(f) < 13:
+                continue
+            net = f[1]
+            if (f[9], f[10]) in clkpin:
+                clknet.add(net)
+            for inst, pin, x, y in ((f[2], f[4], f[6], f[7]), (f[8], f[10], f[12], f[13] if len(f) > 13 else "UND")):
+                if x == "UND" or y == "UND":
+                    continue
+                k = (net, inst, pin)
+                if k in seen:
+                    continue
+                seen.add(k)
+                x, y = float(x), float(y)
+                b = box.get(net)
+                if b is None:
+                    box[net] = [x, y, x, y, 1]
+                else:
+                    b[0] = min(b[0], x); b[1] = min(b[1], y)
+                    b[2] = max(b[2], x); b[3] = max(b[3], y); b[4] += 1
+    seen = None
+    if not a.dbu:
+        sys.exit("sgraph_spef: the graph has no DBU line (written before write_sgraph recorded it); give --dbu")
+
+    tot_len = 0.0
+    n_clk = n_big = 0
+    wo = gzip.open if a.out.endswith(".gz") else open
+    tmp = a.out + ".part" + (".gz" if a.out.endswith(".gz") else "")
+    with wo(tmp, "wt") as out:
+        out.write('*SPEF "IEEE 1481-1998"\n*DESIGN "estimate"\n*PROGRAM "electron sgraph_spef"\n'
+                  '*DIVIDER /\n*DELIMITER :\n*BUS_DELIMITER [ ]\n'
+                  '*T_UNIT 1 NS\n*C_UNIT 1 FF\n*R_UNIT 1 OHM\n*L_UNIT 1 HENRY\n\n')
+        for net, (x0, y0, x1, y1, n) in box.items():
+            if net in clknet:
+                n_clk += 1; continue
+            if a.ideal_above and n > a.ideal_above:
+                n_big += 1; continue
+            hp = ((x1 - x0) + (y1 - y0)) / a.dbu
+            um = hp * (1.0 if a.no_risa else risa(n))
+            tot_len += um
+            c = um * a.cap_per_um
+            r = hp * a.res_per_um
+            out.write(f"*D_NET {net} {c:.6g}\n*CAP\n1 {net}:1 {c:.6g}\n*RES\n1 {net}:1 {net}:2 {r:.6g}\n*END\n\n")
+    import os
+    os.replace(tmp, a.out)
+    print(f"sgraph_spef: {len(box) - n_clk - n_big:,} net(s), {tot_len / 1e6:.3f} m of wire "
+          f"({'HPWL' if a.no_risa else 'HPWL x RISA'}), "
+          f"{a.res_per_um:g} ohm/um, {a.cap_per_um:g} fF/um -> {a.out}")
+    print(f"sgraph_spef: left ideal: {n_clk:,} clock net(s)" +
+          ( f", {n_big:,} net(s) of more than {a.ideal_above} pins" if a.ideal_above else "" ) +
+          ( "" if a.sizing else " (no --sizing: clock nets not recognised)" ))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -25,6 +25,12 @@ SPARKSTA_SIF   ?= $(ELECTRON)/INSTALL/podman/pysparkpp.sif
 SPARKSTA_BINDS ?= --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /tmp:/tmp
 SPARKSTA_MASTER?= local[*]
 SPARKSTA_MEM   ?= 32g
+# Wire parasitics for the run, a SPEF.  Empty: a placed sgraph is timed with
+# Photon's own wire estimate from placement (it says so), an unplaced one with
+# zero-length wires.  For a real SPEF, or for a test one -- 3RDBIN/sgraph_spef
+# writes Photon's estimate to a file.
+SPARKSTA_SPEF  ?=
+_sparksta_comma := ,
 
 # Already inside the image (TESTS run there: "make app" first) spark-shell is
 # simply on PATH, and apptainer is not; outside it, go in.
@@ -49,7 +55,7 @@ define SPARKSTA
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5); \
 	 cat $(PYSPARK)/scala/photon.sca > $(5).sca; \
-	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4))' >> $(5).sca; \
+	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))"))' >> $(5).sca; \
 	 echo 'System.exit(0)' >> $(5).sca
 	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|rror|xception'; \
 	 test -s "$(5)" || { echo "sparksta: no $(5), see $(5).log"; exit 1; }; fi
