@@ -313,6 +313,8 @@ app:
 #                     CONFIG/library.config's sta-arc-store says, in seconds
 #   nangate_sparksta  segment timing on Spark of the synthesis graph and the
 #                     placed one; needs PYSPARK=<pyspark_cad checkout>
+#   nangate_advise    Photon's optimisation advisor (repeaters, sizing) on the
+#                     placed graph; needs PYSPARK
 #-----------------------------------------------------------------------------
 NG_LIB   = $(ELECTRON)/TESTS/library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib
 NG_STORE = $(call SPARKSTA_STORE_OF,$(ELECTRON)/CONFIG/library.config,nangate,45nm,6)
@@ -339,3 +341,21 @@ $(NG_STORE)/arcs:
 nangate_sparksta: nangate_store
 	$(call SPARKSTA,workarea/vedic_16x16.synth.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/vedic_16x16.synth.seg.tsv)
 	$(call SPARKSTA,workarea/vedic_16x16.place.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/vedic_16x16.place.seg.tsv)
+
+# Photon's optimisation advisor on the placed graph (needs PYSPARK too).  At
+# NG_ADVISE_PERIOD most paths fail, so there are nets to repeat and cells to
+# resize; the test library has no Vt column, hence VTS any.  Checked: every
+# advice file is written, the summary has its three timings, and sizing ran.
+NG_ADVISE_PERIOD ?= 2
+nangate_advise: SPARKSTA_CELLS = $(NG_SIZING)
+nangate_advise: SPARKSTA_VTS = any
+nangate_advise: SPARKSTA_ROUNDS = 2
+nangate_advise: SPARKSTA_ADVISE_MEM = 4g
+nangate_advise: nangate_store $(NG_SIZING)
+	$(call SPARKSTA_ADVISE,workarea/vedic_16x16.place.sgraph,$(NG_STORE),slow,$(NG_ADVISE_PERIOD),workarea/sta/vedic_16x16.advise)
+	@if [ -n "$(PYSPARK)" ]; then \
+	  for f in summary.txt nets.tsv repeaters.tsv size_rounds.txt resize.tsv; do \
+	    test -s workarea/sta/vedic_16x16.advise.$$f || { echo "nangate_advise: no vedic_16x16.advise.$$f"; exit 1; }; done; \
+	  [ "$$(grep -cE '^  (no wires|wires, unbuffered|wires, ideal repeaters) ' workarea/sta/vedic_16x16.advise.summary.txt)" -eq 3 ] || { echo "nangate_advise: summary lacks its three timings"; exit 1; }; \
+	  grep -q "^  best:" workarea/sta/vedic_16x16.advise.size_rounds.txt || { echo "nangate_advise: sizing did not finish"; exit 1; }; \
+	  echo "nangate_advise: wire plan and sizing advice written"; fi

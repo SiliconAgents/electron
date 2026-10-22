@@ -21,6 +21,14 @@ Exits 1 when the node has neither.
 
     arc_store --config library.config --foundry F --node N --wire-model
 
+    arc_store --config library.config --foundry F --node N --layer L --cell-sizing
+
+prints the layer's "cell-sizing" table (3RDBIN/liberty_sizing: which cells
+may replace which, with Vt, drive, area, leakage), which Photon's
+optimisation advisor needs.  Exits 1 when there is none.
+
+    arc_store ... --wire-model
+
 prints the node's "wire-model": a table of R and C per micron by net length
 and pin density, calibrated on routed designs, which Photon's estimate uses in
 place of the two constants above.  Exits 1 when the node has none.
@@ -51,6 +59,7 @@ def main():
     ap.add_argument("--layer", default="")
     ap.add_argument("--wire-rc", action="store_true", help="print the node's wire ohm/um and fF/um")
     ap.add_argument("--wire-model", action="store_true", help="print the node's calibrated wire model table")
+    ap.add_argument("--cell-sizing", action="store_true", help="print the layer's cell-sizing table")
     a = ap.parse_args()
     c = json.load(open(a.config))
     for n in c.get(a.foundry, {}).get("node", []):
@@ -69,6 +78,11 @@ def main():
             print(f"{float(r):g} {float(f) * 1e15:g}")
             return 0
         for f in n.get("files", []):
+            if a.cell_sizing:
+                if str(f.get("layer")) == str(a.layer) and f.get("cell-sizing"):
+                    print(expand(f["cell-sizing"]))
+                    return 0
+                continue
             if str(f.get("layer")) == str(a.layer) and f.get("sta-arc-store"):
                 print(expand(f["sta-arc-store"]))
                 return 0

@@ -38,6 +38,14 @@ SPARKSTA_WIRE_RC ?=
 # which Photon then uses instead of SPARKSTA_WIRE_RC; set it with
 # SPARKSTA_WIRE_MODEL_OF from the library config.
 SPARKSTA_WIRE_MODEL ?=
+# The optimisation advisor (SPARKSTA_ADVISE): the cell table saying which
+# cells may replace which (SPARKSTA_CELLS_OF reads it from the library config),
+# the Vts it may use ("any" for a table with no Vt column), its sizing rounds,
+# and its Spark driver memory -- a 2.9M-cell design peaked near 37 GB.
+SPARKSTA_CELLS  ?=
+SPARKSTA_VTS    ?= svt,lvt,ulvt
+SPARKSTA_ROUNDS ?= 5
+SPARKSTA_ADVISE_MEM ?= 64g
 _sparksta_comma := ,
 
 # Already inside the image (TESTS run there: "make app" first) spark-shell is
@@ -56,6 +64,9 @@ SPARKSTA_STORE_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN
 # The node's wire ohm/um and fF/um, for SPARKSTA_WIRE_RC; empty if the config has none.
 # $(call SPARKSTA_WIRE_OF,config,foundry,node)
 SPARKSTA_WIRE_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/arc_store --config $(1) --foundry $(2) --node $(3) --wire-rc)
+# The layer's cell table, for SPARKSTA_CELLS; empty if none.
+# $(call SPARKSTA_CELLS_OF,config,foundry,node,layer)
+SPARKSTA_CELLS_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/arc_store --config $(1) --foundry $(2) --node $(3) --layer $(4) --cell-sizing)
 # The node's calibrated wire model, for SPARKSTA_WIRE_MODEL; empty if none.
 # $(call SPARKSTA_WIRE_MODEL_OF,config,foundry,node)
 SPARKSTA_WIRE_MODEL_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/arc_store --config $(1) --foundry $(2) --node $(3) --wire-model)
@@ -73,6 +84,29 @@ define SPARKSTA
 	 echo 'System.exit(0)' >> $(5).sca
 	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|rror|xception'; \
 	 test -s "$(5)" || { echo "sparksta: no $(5), see $(5).log"; exit 1; }; fi
+endef
+
+# Photon's optimisation advisor on a PLACED sgraph: what long wires cost and
+# which nets to repeat, then what sizing and Vt recover on top of ideal
+# repeaters.  Writes <prefix>.summary.txt (WNS/TNS: no wires, wires, ideal
+# repeaters), .nets.tsv (ranked nets to repeat), .size_rounds.txt and
+# .resize.tsv (instance, from, to) -- advice for electron to apply.
+# $(call SPARKSTA_ADVISE,placed_sgraph,store,corner,period_ns,out_prefix)
+define SPARKSTA_ADVISE
+	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to advise on $(1)"; exit 0; fi; \
+	 test -f "$(1)" || { echo "sparksta: $(1) does not exist -- run the placement first"; exit 1; }; \
+	 test -d "$(2)/arcs" || { echo "sparksta: no arc store at $(2)"; exit 1; }; \
+	 test -n "$(SPARKSTA_CELLS)" -a -f "$(SPARKSTA_CELLS)" || { echo "sparksta: advise needs SPARKSTA_CELLS=<cell table> (got '$(SPARKSTA_CELLS)')"; exit 1; }; \
+	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
+	 mkdir -p $(dir $(5)); rm -f $(5).summary.txt; \
+	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca > $(5).advise.sca; \
+	 echo 'advise("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", rounds = $(SPARKSTA_ROUNDS)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).advise.sca; \
+	 echo 'System.exit(0)' >> $(5).advise.sca
+	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
+	   "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
+	    --jars $(PYSPARK)/scala/build/photon.jar -i $(abspath $(5)).advise.sca" > $(5).advise.log 2>&1; \
+	 grep -E '^(advise|sizeBound|wirePlan: [0-9]|  (no wires|wires|ranked|round|best|time))' $(5).advise.log; \
+	 test -s "$(5).summary.txt" || { echo "sparksta: no $(5).summary.txt, see $(5).advise.log"; exit 1; }; fi
 endef
 
 # $(call SPARKSTA_STORE_FROM,list_of_liberty_paths_file,store_dir)
