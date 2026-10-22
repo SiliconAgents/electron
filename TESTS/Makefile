@@ -407,5 +407,25 @@ nangate_repeat:
 	  $(MAKE) --no-print-directory nangate_repeat_sta && \
 	  tr '\r' '\n' < workarea/sta/vedic_16x16.repeated.seg.tsv.log | grep -E "photon: period" | tail -1; fi
 	@echo "nangate_repeat: $$(grep -oE 'AP_ADV : 011 : .*' workarea/repeat.log | cut -c16-)"
+# Photon's own trees (repeat.sca): a wire of 2000 ohm/um so that this
+# design's short nets need repeaters at all; checked like nangate_repeat once
+# electron has applied the ECO.
+nangate_photon_repeat: SPARKSTA_CELLS = $(NG_SIZING)
+nangate_photon_repeat: SPARKSTA_VTS = any
+nangate_photon_repeat: SPARKSTA_WIRE_RC = 2000 0.2
+nangate_photon_repeat: SPARKSTA_ADVISE_MEM = 4g
+nangate_photon_repeat: nangate_store $(NG_SIZING)
+	test -s workarea/vedic_16x16.legal.def || { echo "nangate_photon_repeat: no legal placement, run nangate_flat"; exit 1; }
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../apply/phys.tcl > phys.log 2>&1
+	$(call SPARKSTA_REPEAT,workarea/vedic_16x16.phys.sgraph,$(NG_STORE),slow,$(NG_ADVISE_PERIOD),workarea/sta/vedic_16x16.prep)
+	@if [ -n "$(PYSPARK)" ]; then \
+	  cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../apply/eco.tcl > eco.log 2>&1; cd ..; \
+	  b=$$(grep -c '^BUF' workarea/sta/vedic_16x16.prep.eco.tsv); \
+	  m=$$(grep -c '^MOVE' workarea/sta/vedic_16x16.prep.eco.tsv); \
+	  grep -q "AP_ECO : 004 : $$b buffer(s) added, $$m cell(s) slid aside" workarea/eco.log || { echo "nangate_photon_repeat: the ECO's $$b buffer(s) and $$m move(s) were not applied, see workarea/eco.log"; exit 1; }; \
+	  grep -q "LEGAL : 054 : --incremental: [0-9]* cell(s) already legal and kept, 0 moved" workarea/eco.log || { echo "nangate_photon_repeat: Photon placed a buffer somewhere not legal"; grep "LEGAL : 054" workarea/eco.log; exit 1; }; \
+	  python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.eco.def library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef || exit 1; \
+	  [ "$$(grep -c '^NETS' workarea/vedic_16x16.eco.sgraph)" -eq "$$(grep -c '^NETS' workarea/sta/vedic_16x16.prep.sgraph)" ] || { echo "nangate_photon_repeat: electron's graph after the ECO is not the one Photon timed"; exit 1; }; \
+	  echo "nangate_photon_repeat: $$b buffer(s) placed by Photon ($$m cell(s) slid aside), applied by electron, legal, every sink reached"; fi
 nangate_repeat_sta: nangate_store
 	$(call SPARKSTA,workarea/vedic_16x16.repeated.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/vedic_16x16.repeated.seg.tsv)
