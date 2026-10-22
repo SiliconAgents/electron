@@ -18,6 +18,12 @@ prints instead the node's wire estimate for timing from placement:
 "wire_capacitance_per_micron" (farads, as the config stores it), so a flow
 hands Photon its own technology's numbers rather than Photon's built-in guess.
 Exits 1 when the node has neither.
+
+    arc_store --config library.config --foundry F --node N --wire-model
+
+prints the node's "wire-model": a table of R and C per micron by net length
+and pin density, calibrated on routed designs, which Photon's estimate uses in
+place of the two constants above.  Exits 1 when the node has none.
 """
 import argparse
 import json
@@ -44,11 +50,18 @@ def main():
     ap.add_argument("--node", required=True)
     ap.add_argument("--layer", default="")
     ap.add_argument("--wire-rc", action="store_true", help="print the node's wire ohm/um and fF/um")
+    ap.add_argument("--wire-model", action="store_true", help="print the node's calibrated wire model table")
     a = ap.parse_args()
     c = json.load(open(a.config))
     for n in c.get(a.foundry, {}).get("node", []):
         if n.get("type") != a.node:
             continue
+        if a.wire_model:
+            m = n.get("wire-model")
+            if not m:
+                return 1
+            print(expand(m))
+            return 0
         if a.wire_rc:
             r, f = n.get("wire_resistance_per_micron"), n.get("wire_capacitance_per_micron")
             if r is None or f is None:

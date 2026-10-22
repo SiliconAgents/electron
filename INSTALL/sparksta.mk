@@ -34,6 +34,10 @@ SPARKSTA_SPEF  ?=
 # from its library config with SPARKSTA_WIRE_OF; empty leaves Photon's
 # built-in guess, which its output then says it used.
 SPARKSTA_WIRE_RC ?=
+# A calibrated wire model (R and C per micron by net length and pin density),
+# which Photon then uses instead of SPARKSTA_WIRE_RC; set it with
+# SPARKSTA_WIRE_MODEL_OF from the library config.
+SPARKSTA_WIRE_MODEL ?=
 _sparksta_comma := ,
 
 # Already inside the image (TESTS run there: "make app" first) spark-shell is
@@ -52,6 +56,9 @@ SPARKSTA_STORE_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN
 # The node's wire ohm/um and fF/um, for SPARKSTA_WIRE_RC; empty if the config has none.
 # $(call SPARKSTA_WIRE_OF,config,foundry,node)
 SPARKSTA_WIRE_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/arc_store --config $(1) --foundry $(2) --node $(3) --wire-rc)
+# The node's calibrated wire model, for SPARKSTA_WIRE_MODEL; empty if none.
+# $(call SPARKSTA_WIRE_MODEL_OF,config,foundry,node)
+SPARKSTA_WIRE_MODEL_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/arc_store --config $(1) --foundry $(2) --node $(3) --wire-model)
 
 # $(call SPARKSTA,sgraph,store,corner,period_ns,out.tsv)
 # period 0 means arrival only: no required time, no slack.
@@ -62,7 +69,7 @@ define SPARKSTA
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5); \
 	 cat $(PYSPARK)/scala/photon.sca > $(5).sca; \
-	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm=$(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm=$(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).sca; \
+	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm=$(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm=$(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel="$(abspath $(SPARKSTA_WIRE_MODEL))"))' >> $(5).sca; \
 	 echo 'System.exit(0)' >> $(5).sca
 	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|rror|xception'; \
 	 test -s "$(5)" || { echo "sparksta: no $(5), see $(5).log"; exit 1; }; fi
