@@ -19,7 +19,12 @@ sub write_sgraph {
     print "was ever placed, because PortDB defaults to (0,0).\n";
     print "\n";
     print "Header lines before the rows: DIEAREA <x0 y0 x1 y1> and DBU <per micron>,\n";
-    print "the unit of every coordinate.\n";
+    print "the unit of every coordinate.  After the rows, the physical section,\n";
+    print "for a reader that places cells (all DBU):\n";
+    print "  ROWH <h>  SITE <w>  ROW <y> <x0> <x1> <orient>   the row grid\n";
+    print "  CELL <cellref> <w> <h> <class>                  every cell type placed\n";
+    print "  INST <inst> <cellref> <status> <x> <y>          placed instances on no\n";
+    print "                                                  NETS row (they take room)\n";
  }else {
     my $outFile = $TOP_MODULE.".sgraph";
     for(my $i=0; $i<$noOfArguments; $i++){
@@ -64,6 +69,7 @@ sub write_sgraph {
     #     4M to 17M edges -- per-edge overhead, not anything algorithmic. -->
     my %cutPin   = ();   # cellref -> pin -> 1 when it is a clock or scan pin
     my %instInfo = ();   # inst    -> [cellref, status, x, y]
+    my %onRow    = ();   # inst    -> 1 once it is on a NETS row
 
     #<!-- A clock or scan pin of a sequential cell is where a timing segment
     #     ends; everything else on the cell is data. -->
@@ -131,6 +137,7 @@ sub write_sgraph {
                next if ( &$isCut($di->[0], $drvPin) );
 
                my $head = "NETS $net $drv $di->[0] $drvPin $di->[1] $di->[2] $di->[3]";
+               my $n0 = @buf;
 
                #<!-- %NETS_ALREADY{$net} lists the objects on the net, and
                #     %COMP_ALREADY{$inst} is that instance's own pin -> net
@@ -153,6 +160,7 @@ sub write_sgraph {
                            next if ( $sink eq $drv && $sinkPin eq $drvPin );
                            next if ( &$isCut($si->[0], $sinkPin) );
                            push(@buf, "$head $sink $si->[0] $sinkPin $si->[1] $si->[2] $si->[3]\n");
+                           $onRow{$sink} = 1;
                        }
                    }
                    elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$sink} ) {
@@ -162,10 +170,45 @@ sub write_sgraph {
                        push(@buf, "$head $sink $si->[0] PIN $si->[1] $si->[2] $si->[3]\n");
                    }
                }
+               $onRow{$drv} = 1 if ( @buf > $n0 );
                if ( @buf > 20000 ) { print WRITE @buf; @buf = (); }
             }
          }
       }
+    }
+    print WRITE @buf if ( @buf );
+    @buf = ();
+
+    #<!-- THE PHYSICAL SECTION.  What a reader needs to put a cell somewhere
+    #     legal: the row grid (FreeRows::flatRows, as legalize_flat reads it),
+    #     the size of every cell type placed, and the placed instances no NETS
+    #     row mentions -- tap cells, a cell with only clock pins connected --
+    #     which still take room.  Readers of the graph skip these lines. -->
+    my $rows = FreeRows::flatRows();
+    if ( $rows ) {
+        push(@buf, "ROWH $rows->{rowH}\n", "SITE $rows->{siteX}\n");
+        push(@buf, "ROW $_ $rows->{X0}{$_} $rows->{X1}{$_} $rows->{O}{$_}\n") foreach ( @{$rows->{Y}} );
+    }
+    my %refs = ();
+    foreach my $o ( keys %onRow ) { my $i = $instInfo{$o}; $refs{$i->[0]} = 1 if ( $i->[1] eq "PLACED" || $i->[1] eq "FIXED" ); }
+    foreach my $o ( keys %COMP_ALREADY ) {
+        next if ( exists $onRow{$o} || !exists $CADB{$o} );
+        my $st = $CADB{$o}->dbCadbGetStatus;
+        next unless ( defined $st && ( $st eq "PLACED" || $st eq "FIXED" ) );
+        my @l = $CADB{$o}->dbCadbGetLoc;
+        next unless ( @l >= 2 && defined $l[0] && defined $l[1] );
+        my $ref = $CADB{$o}->dbCadbGetCellref;
+        push(@buf, "INST $o $ref $st $l[0] $l[1]\n");
+        $refs{$ref} = 1;
+    }
+    foreach my $ref ( sort keys %refs ) {
+        next unless ( exists $PLDB{$ref} );
+        my @s = $PLDB{$ref}->dbMdbGetSize;
+        next unless ( @s >= 2 );
+        my $class = $PLDB{$ref}->dbMdbGetClass;
+        $class = "UNKNOWN" unless ( defined $class && $class ne "" );
+        $class =~ s/\s+/_/g;
+        printf WRITE ("CELL %s %d %d %s\n", $ref, int($s[0] * $dbu + 0.5), int($s[1] * $dbu + 0.5), $class);
     }
     print WRITE @buf if ( @buf );
     close(WRITE);
