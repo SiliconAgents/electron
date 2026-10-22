@@ -1293,11 +1293,25 @@ chomp;
 $line =~ s/^\s+//;
 if( $line =~ /-/){
  ($instance, $cellref) = (split(/\s+/, $line))[1,2];
+  #<!-- An instance the session already has -- read_def --components onto an
+  #     elaborated netlist, to restore its placement -- keeps its connectivity
+  #     and its record; only cell, status, location and orientation come from
+  #     the DEF.  The empty-session path below replaced both, which emptied
+  #     every instance's pin map: write_sgraph then wrote not one edge.  The
+  #     name is tried as written first, because elaborate keeps the escapes
+  #     (a/\b[1].c) that the stripping below removes. -->
+  my $known = ( exists $COMP_ALREADY{$instance} && exists $CADB{$instance} ) ? $instance : undef;
    $instance =~ s/\\//g;
+  $known = $instance if ( !defined $known && exists $COMP_ALREADY{$instance} && exists $CADB{$instance} );
+  if ( defined $known ) {
+    $instance = $known;
+    $CADB{$instance}->dbCadbSetCellref($cellref);
+  } else {
   %{$instance} = ();
   $CADB{$instance} = CompAttDB::new();
   $CADB{$instance}->dbCadbSetCellref($cellref);
   $COMP_ALREADY{$instance} = \%{$instance};
+  }
   print "DBG-PAR-DEF : 008 : $instance : $cellref " if ($DEBUG == 21);
 
 ##########################################################
