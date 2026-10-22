@@ -295,7 +295,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph
+nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
@@ -315,6 +315,12 @@ app:
 #                     placed one; needs PYSPARK=<pyspark_cad checkout>
 #   nangate_advise    Photon's optimisation advisor (repeaters, sizing) on the
 #                     placed graph; needs PYSPARK
+#   nangate_apply     electron applies that advice to the placed design and
+#                     writes a new graph; with PYSPARK, re-timed against the advice
+#   nangate_repeat    electron builds repeater trees on the 20 largest nets of the
+#                     legal placement, as if advised, and an independent check of
+#                     the DEF proves every sink still reached and no overlaps;
+#                     with PYSPARK, the repeated graph is timed
 #-----------------------------------------------------------------------------
 NG_LIB   = $(ELECTRON)/TESTS/library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib
 NG_STORE = $(call SPARKSTA_STORE_OF,$(ELECTRON)/CONFIG/library.config,nangate,45nm,6)
@@ -359,3 +365,47 @@ nangate_advise: nangate_store $(NG_SIZING)
 	  [ "$$(grep -cE '^  (no wires|wires, unbuffered|wires, ideal repeaters) ' workarea/sta/vedic_16x16.advise.summary.txt)" -eq 3 ] || { echo "nangate_advise: summary lacks its three timings"; exit 1; }; \
 	  grep -q "^  best:" workarea/sta/vedic_16x16.advise.size_rounds.txt || { echo "nangate_advise: sizing did not finish"; exit 1; }; \
 	  echo "nangate_advise: wire plan and sizing advice written"; fi
+
+# Applying the advice in electron: the legal placement restored onto the
+# elaborated netlist (read_def --components keeps connectivity), the resizes
+# applied to the flat database, legalize_flat --incremental, a new graph.
+# Checked: every advised resize applied; the graph has the same edges as the
+# placed one (a resize changes cells, not connectivity); and, with PYSPARK,
+# Photon's re-time of the applied design is within 50 ps of the WNS the
+# advisor predicted (the few cells legalization moves account for the rest).
+nangate_apply: nangate_advise
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../apply/apply.tcl > apply.log 2>&1
+	n=$$(grep -vc '^inst' workarea/sta/vedic_16x16.advise.resize.tsv); \
+	  grep -q "AP_ADV : 005 : $$n resize(s) applied" workarea/apply.log || { echo "nangate_apply: not every one of the $$n advised resize(s) applied, see workarea/apply.log"; exit 1; }
+	[ "$$(grep -c '^NETS' workarea/vedic_16x16.applied.sgraph)" -eq "$$(grep -c '^NETS' workarea/vedic_16x16.place.sgraph)" ] || { echo "nangate_apply: the applied graph's edges differ from the placed one"; exit 1; }
+	@if [ -n "$(PYSPARK)" ]; then \
+	  $(MAKE) --no-print-directory nangate_apply_sta; \
+	  p=$$(grep "^  best:" workarea/sta/vedic_16x16.advise.size_rounds.txt | awk '{print $$3}'); \
+	  a=$$(tr '\r' '\n' < workarea/sta/vedic_16x16.applied.seg.tsv.log | grep -oE "photon: period [0-9.]+ +WNS -?[0-9.]+" | awk '{print $$NF}'); \
+	  awk -v p=$$p -v a=$$a 'BEGIN{d=a-p; if(d<0)d=-d; exit !(d <= 0.05)}' || { echo "nangate_apply: re-timed WNS $$a ns is not within 50 ps of the predicted $$p"; exit 1; }; \
+	  echo "nangate_apply: advice applied, re-timed WNS $$a ns against $$p predicted"; \
+	else echo "nangate_apply: advice applied (set PYSPARK to re-time it)"; fi
+nangate_apply_sta: nangate_store
+	$(call SPARKSTA,workarea/vedic_16x16.applied.sgraph,$(NG_STORE),slow,$(NG_ADVISE_PERIOD),workarea/sta/vedic_16x16.applied.seg.tsv)
+
+# The advice on this design repeats nothing -- its nets are all short -- so the
+# test asks for 3 repeaters on each of its 20 largest nets, with a 40 um
+# "hpwl" (a 10 um segment) and fanout 2, to get trees several levels deep.
+nangate_repeat:
+	test -s workarea/vedic_16x16.legal.def || { echo "nangate_repeat: no legal placement, run nangate_flat"; exit 1; }
+	{ printf 'net\thpwl_um\trepeaters\trepeater_cell\n'; \
+	  awk '/^NETS/{f=1;next} /^END NETS/{f=0} \
+	       f && /^ *- /{if(n!="")print c"\t"n; n=$$2; c=0; next} f && /^\t\(/{c++} END{if(n!="")print c"\t"n}' \
+	    workarea/vedic_16x16.legal.def | sort -k1,1nr -k2,2 | head -20 | awk '{print $$2"\t40\t3\tBUF_X4"}'; \
+	} > workarea/repeat.nets.tsv
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../apply/repeat.tcl > repeat.log 2>&1
+	grep -q "AP_ADV : 011 : 20 net(s) of 20" workarea/repeat.log || { echo "nangate_repeat: not all 20 nets repeated, see workarea/repeat.log"; grep "AP_ADV" workarea/repeat.log; exit 1; }
+	python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.repeated.def \
+	  library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef
+	[ "$$(grep -c '^NETS' workarea/vedic_16x16.repeated.sgraph)" -gt "$$(grep -c '^NETS' workarea/vedic_16x16.place.sgraph)" ] || { echo "nangate_repeat: the repeated graph has no more edges than the placed one"; exit 1; }
+	@if [ -n "$(PYSPARK)" ]; then \
+	  $(MAKE) --no-print-directory nangate_repeat_sta && \
+	  tr '\r' '\n' < workarea/sta/vedic_16x16.repeated.seg.tsv.log | grep -E "photon: period" | tail -1; fi
+	@echo "nangate_repeat: $$(grep -oE 'AP_ADV : 011 : .*' workarea/repeat.log | cut -c16-)"
+nangate_repeat_sta: nangate_store
+	$(call SPARKSTA,workarea/vedic_16x16.repeated.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/vedic_16x16.repeated.seg.tsv)

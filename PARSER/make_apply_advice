@@ -1,0 +1,488 @@
+#<!-- apply_advice: apply Photon's optimisation advice to the FLAT database.
+#
+#     Photon has two modes: timing (STA) and an optimisation advisor that says
+#     what to change -- which instances to resize or move to another Vt
+#     (<prefix>.resize.tsv) and which long nets to repeat (<prefix>.nets.tsv).
+#     Photon never edits the design; this is the half that does, after
+#     placement, on the flat database, followed by legalize_flat --incremental
+#     and write_sgraph so Photon can time the result.
+#
+#     A resize changes the instance's cell and nothing else.  A cell that grows
+#     overlaps its neighbours; legalize_flat --incremental keeps every cell that
+#     is still legal where it is and re-places the rest in the nearest gap.
+#     A line is applied only when
+#       the instance is in the flat database,
+#       its cell now is the advice's "from" (else the advice is stale -- it was
+#         computed on another netlist or the cell was changed since; --force
+#         applies it anyway),
+#       the new cell is in the loaded LEF, and
+#       every pin the instance has connected exists on the new cell.
+#     Anything else is skipped and counted, by reason.
+#
+#     FLAT ONLY.  The module definitions are not touched, so write_verilog
+#     --hier does not see these changes, and hier2flat / elaborate after this
+#     rebuild the flat database from the definitions and undo them.  Run it
+#     on the placed design, then legalize, write_def and write_sgraph.
+#
+#     A repeated net (-nets) becomes a buffer tree.  Photon times a long net as
+#     ideal repeaters -- a chain, one every segment, no detours -- which says
+#     how many and how far apart but not where: a 380-pin net is not a chain.
+#     So the tree is built here: a spanning tree over the driver and the sinks
+#     is the wire, and a buffer goes wherever a segment of it, or -max_fanout
+#     loads, would otherwise hang off one driver (see apply_advice_repeat_net).
+#     The segment is the advice's segment_um, else hpwl / (repeaters + 1).
+#     The driver keeps the original net (so a port on it keeps its name);
+#     every sink moves to a new net.  An output port on the net stays on the
+#     original net, unbuffered.  New cells are PLACED at their target and left
+#     for legalize_flat to put on a row.
+#     Not repeated: nets with no driver or several, a clock or inout pin, a
+#     cell not in the LEF, or a cell not placed. -->
+#------------------------------------------------------------------------------------------#
+sub apply_advice {
+
+my $resize = "";
+my $netsFile = "";
+my $report = "";
+my $dry = 0;
+my $force = 0;
+my $repCell = "";
+my $maxFan = 16;
+
+my $t0 = time();
+my $noOfArguments = @_;
+if ( $noOfArguments < 1 || $_[0] eq '-h' || $_[0] eq '-help' ) {
+  print "Usage : apply_advice [-resize <advise.resize.tsv>] [-nets <advise.nets.tsv>]\n";
+  print "                     [-repeater <cell>] [-max_fanout <n>]\n";
+  print "                     [-report <file>] [--dry_run] [--force]\n";
+  print "        Applies Photon's optimisation advice to the placed flat database:\n";
+  print "        -nets       nets to repeat: each line with repeaters > 0 gets a buffer\n";
+  print "                    tree, a buffer per segment_um of its wire\n";
+  print "        -repeater   buffer cell to use instead of each line's repeater_cell\n";
+  print "        -max_fanout most loads one tree buffer drives (default 16)\n";
+  print "        -resize     inst / from / to cell changes (resize, Vt swap)\n";
+  print "        --force     apply a resize even when the instance's cell is no longer\n";
+  print "                    the advice's 'from'\n";
+  print "        Then: legalize_flat --incremental, write_def, write_sgraph.\n";
+  print "        Flat only: the module definitions are not changed.\n";
+  return;
+}
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-resize"){$resize = $_[$i+1];}
+  if($_[$i] eq "-nets"){$netsFile = $_[$i+1];}
+  if($_[$i] eq "-report"){$report = $_[$i+1];}
+  if($_[$i] eq "--dry_run"){$dry = 1;}
+  if($_[$i] eq "--force"){$force = 1;}
+  if($_[$i] eq "-repeater"){$repCell = $_[$i+1];}
+  if($_[$i] eq "-max_fanout"){$maxFan = $_[$i+1];}
+}
+if ( $maxFan < 2 ) {
+  print "ERROR-PAR-AP_ADV : 012 : -max_fanout must be at least 2\n";
+  return;
+}
+unless ( scalar(keys %CADB) > 0 ) {
+  print "ERROR-PAR-AP_ADV : 001 : no flat database; read the netlist, elaborate and read_def the placement first\n";
+  return;
+}
+if ( $resize eq "" && $netsFile eq "" ) {
+  print "ERROR-PAR-AP_ADV : 002 : nothing to apply; give -resize and/or -nets\n";
+  return;
+}
+my $fh;
+if ( $report ne "" ) {
+  open($fh, ">", $report) or do { print "ERROR-PAR-AP_ADV : 003 : cannot write $report : $!\n"; return; };
+}
+
+#<!-- ---- repeaters: first, so a resize line naming a cell on a repeated
+#     net still finds it (repeating moves sink pins, never changes a cell) ---- -->
+if ( $netsFile ne "" ) {
+  open(my $nf, "<", $netsFile) or do { print "ERROR-PAR-AP_ADV : 007 : cannot read $netsFile : $!\n"; return; };
+  my %col = ();
+  my @todo = ();
+  my $nLines = 0;
+  while ( my $l = <$nf> ) {
+    chomp($l);
+    next if ( $l =~ /^\s*(#|$)/ );
+    my @f = split(/\t/, $l, -1);
+    if ( !%col ) { @col{@f} = (0 .. $#f); next; }
+    $nLines++;
+    my $k = $f[$col{repeaters}] // 0;
+    next unless ( $k > 0 );
+    #<!-- the advisor's segment for this net when it gives one, else what
+    #     hpwl and the count imply -->
+    my $segUm = ( exists $col{segment_um} && ($f[$col{segment_um}] // "") ne "" ) ? $f[$col{segment_um}]
+              : $f[$col{hpwl_um}] / ($k + 1);
+    push(@todo, [ $f[$col{net}], $k, $segUm, ( $repCell ne "" ? $repCell : $f[$col{repeater_cell}] ) ]);
+  }
+  close($nf);
+  my ($nNets, $nBuf, $kAdvised, $bufArea) = (0, 0, 0, 0.0);
+  my %skip = ();
+  my %pinsOfRep = ();
+  foreach my $t ( @todo ) {
+    my ($net, $k, $segUm, $cell) = @$t;
+    if ( !exists $PLDB{$cell} ) { $skip{"repeater cell not in the loaded LEF"}++; next; }
+    $pinsOfRep{$cell} = [ &apply_advice_buffer_pins($cell) ] unless ( exists $pinsOfRep{$cell} );
+    if ( @{$pinsOfRep{$cell}} != 2 ) { $skip{"repeater cell has not exactly one input and one output"}++; next; }
+    my $r = &apply_advice_repeat_net($net, $segUm, $cell, @{$pinsOfRep{$cell}}, $maxFan, $dry);
+    if ( !ref $r ) { $skip{$r}++; next; }
+    my @s = $PLDB{$cell}->dbMdbGetSize;
+    $nNets++; $nBuf += $r->{buffers}; $kAdvised += $k; $bufArea += $r->{buffers} * $s[0] * $s[1];
+    print $fh "repeat\t$net\t$r->{buffers}\t$k\t$r->{sinks}\t$r->{on_edge}\t$r->{at_branch}\n" if ( $fh );
+  }
+  printf("INFO-PAR-AP_ADV : 011 : %s%d net(s) of %d with repeaters advised repeated from %s: %d buffer(s) inserted " .
+         "against %d advised (a tree, not a chain: max fanout %d); cell area +%.2f um2\n",
+         ( $dry ? "dry run: " : "" ), $nNets, scalar(@todo), $netsFile, $nBuf, $kAdvised, $maxFan, $bufArea);
+  foreach my $why ( sort keys %skip ) {
+    print "WARN-PAR-AP_ADV : 008 : $skip{$why} net(s) not repeated: $why\n";
+  }
+}
+
+#<!-- ---- resizes ---- -->
+if ( $resize ne "" ) {
+  open(my $rf, "<", $resize) or do { print "ERROR-PAR-AP_ADV : 004 : cannot read $resize : $!\n"; return; };
+  my %col = ();
+  my ($nApplied, $dArea) = (0, 0.0);
+  my (%skip, %trans) = ();
+  my %pinsOf = ();                    # cell -> {pin => 1}, from the LEF
+  my $pinSet = sub {
+    my ($c) = @_;
+    $pinsOf{$c} = { map { $_ => 1 } $PLDB{$c}->dbMdbGetPins } unless ( exists $pinsOf{$c} );
+    return $pinsOf{$c};
+  };
+  my $area = sub { my ($c) = @_; my @s = $PLDB{$c}->dbMdbGetSize; return $s[0] * $s[1]; };
+  while ( my $l = <$rf> ) {
+    chomp($l);
+    next if ( $l =~ /^\s*(#|$)/ );
+    my @f = split(/\t/, $l, -1);
+    if ( !%col ) { @col{@f} = (0 .. $#f); next; }
+    my ($inst, $from, $to) = @f[$col{inst}, $col{from}, $col{to}];
+    my $tag = join("->", ($f[$col{from_vt}] // ""), ($f[$col{to_vt}] // ""));
+    if ( !exists $CADB{$inst} ) { $skip{"instance not in the flat database"}++; next; }
+    my $cur = $CADB{$inst}->dbCadbGetCellref;
+    if ( $cur eq $to ) { $skip{"already that cell"}++; next; }
+    if ( $cur ne $from && !$force ) { $skip{"cell is no longer the advice's 'from' (stale advice)"}++; next; }
+    if ( !exists $PLDB{$to} ) { $skip{"new cell not in the loaded LEF"}++; next; }
+    my $have = $pinSet->($to);
+    my @missing = grep { !exists $have->{$_} } keys %{$COMP_ALREADY{$inst} || {}};
+    if ( @missing ) { $skip{"a connected pin is not on the new cell"}++; next; }
+    $dArea += $area->($to) - ( exists $PLDB{$cur} ? $area->($cur) : 0 );
+    $CADB{$inst}->dbCadbSetCellref($to) unless ( $dry );
+    $nApplied++; $trans{$tag}++;
+    print $fh "resize\t$inst\t$cur\t$to\n" if ( $fh );
+  }
+  close($rf);
+  printf("INFO-PAR-AP_ADV : 005 : %s%d resize(s) applied from %s; cell area %+.2f um2%s\n",
+         ( $dry ? "dry run: " : "" ), $nApplied, $resize, $dArea,
+         ( %trans ? "; " . join(", ", map { "$trans{$_} $_" } sort { $trans{$b} <=> $trans{$a} } keys %trans) : "" ));
+  foreach my $why ( sort keys %skip ) {
+    print "WARN-PAR-AP_ADV : 006 : $skip{$why} resize(s) skipped: $why\n";
+  }
+}
+
+close($fh) if ( defined $fh );
+print "INFO-PAR-AP_ADV : 009 : flat database only -- the module definitions are unchanged; " .
+      "run legalize_flat --incremental, write_def and write_sgraph next, and no hier2flat or elaborate after\n" unless ( $dry );
+printf("INFO-PAR-AP_ADV : 010 : apply_advice took %d s\n", time() - $t0);
+}# sub apply_advice
+#------------------------------------------------------------------------------------------#
+
+#<!-- apply_eco: apply an ECO Photon decided AND placed (repeat.sca's
+#     <prefix>.eco.tsv), with no decisions of its own and no legalizing:
+#
+#       MOVE  inst x y                                      an existing cell slid
+#                                                           aside to make room
+#       BUF   inst cell x y orient out_net in_pin out_pin   a new buffer, placed
+#       CONN  net inst pin                                  move a pin to a net
+#
+#     All DBU.  The whole file is checked before anything changes -- half an
+#     ECO is a broken netlist -- and refused if any line is wrong: a cell not
+#     in the LEF, a buffer name already taken, a pin the cell does not have,
+#     an instance or net that is neither in the design nor made by the ECO,
+#     a MOVE of a cell that is not PLACED.
+#     A pin that moves leaves its old net (and the old net's routing, which no
+#     longer describes it).  Flat only, like apply_advice.  Then write_def and
+#     write_sgraph; legalize_flat --incremental --report_only says whether
+#     anything overlaps. -->
+sub apply_eco {
+my $eco = "";
+my $t0 = time();
+my $noOfArguments = @_;
+if ( $noOfArguments < 1 || $_[0] eq '-h' || $_[0] eq '-help' ) {
+  print "Usage : apply_eco -eco <prefix.eco.tsv>\n";
+  print "        Applies an ECO Photon decided and placed (MOVE / BUF / CONN lines, DBU) to\n";
+  print "        the flat database, all or nothing.  No legalizing: the buffers come\n";
+  print "        placed.  Flat only: the module definitions are not changed.\n";
+  return;
+}
+for(my $i = 0; $i < $noOfArguments; $i++){
+  if($_[$i] eq "-eco"){$eco = $_[$i+1];}
+}
+unless ( scalar(keys %CADB) > 0 ) {
+  print "ERROR-PAR-AP_ECO : 001 : no flat database; read the netlist, elaborate and read_def the placement first\n";
+  return;
+}
+open(my $ef, "<", $eco) or do { print "ERROR-PAR-AP_ECO : 002 : cannot read $eco : $!\n"; return; };
+my (@bufs, @conns, @moves, @bad) = ();
+my %newBuf = ();
+my %newNet = ();
+while ( my $l = <$ef> ) {
+  chomp($l);
+  next if ( $l =~ /^\s*(#|$)/ );
+  my @f = split(/\t/, $l);
+  if ( $f[0] eq "BUF" && @f == 9 ) {
+    my ($b, $cell, $x, $y, $o, $net, $ip, $op) = @f[1 .. 8];
+    if ( !exists $PLDB{$cell} ) { push(@bad, "$b: cell $cell not in the loaded LEF"); next; }
+    if ( exists $CADB{$b} || exists $COMP_ALREADY{$b} || exists $newBuf{$b} ) { push(@bad, "$b: instance name already taken"); next; }
+    if ( exists $NETS_ALREADY{$net} || exists $newNet{$net} ) { push(@bad, "$b: net $net already exists"); next; }
+    my %pins = map { $_ => 1 } $PLDB{$cell}->dbMdbGetPins;
+    if ( !exists $pins{$ip} || !exists $pins{$op} ) { push(@bad, "$b: $cell has no pin $ip or $op"); next; }
+    $newBuf{$b} = $cell; $newNet{$net} = 1;
+    push(@bufs, [ $b, $cell, $x, $y, $o, $net, $op ]);
+  } elsif ( $f[0] eq "MOVE" && @f == 4 ) {
+    my ($inst, $x, $y) = @f[1 .. 3];
+    if ( !exists $CADB{$inst} ) { push(@bad, "MOVE $inst: no such instance"); next; }
+    my $st = $CADB{$inst}->dbCadbGetStatus;
+    if ( !defined $st || $st ne "PLACED" ) { push(@bad, "MOVE $inst: not PLACED"); next; }
+    push(@moves, [ $inst, $x, $y ]);
+  } elsif ( $f[0] eq "CONN" && @f == 4 ) {
+    push(@conns, [ @f[1 .. 3] ]);
+  } else {
+    push(@bad, "line $.: not a BUF or CONN record");
+  }
+}
+close($ef);
+foreach my $c ( @conns ) {
+  my ($net, $inst, $pin) = @$c;
+  push(@bad, "CONN $net $inst $pin: no such net") unless ( exists $NETS_ALREADY{$net} || exists $newNet{$net} );
+  my $cell = exists $newBuf{$inst} ? $newBuf{$inst} : ( exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : undef );
+  if ( !defined $cell ) { push(@bad, "CONN $net $inst $pin: no such instance"); next; }
+  push(@bad, "CONN $net $inst $pin: $cell has no pin $pin") unless ( exists $PLDB{$cell} && $PLDB{$cell}->dbMdbGetPinDir($pin) ne "" );
+}
+if ( @bad ) {
+  print "ERROR-PAR-AP_ECO : 003 : " . scalar(@bad) . " problem(s) in $eco, nothing applied; the first: $bad[0]\n";
+  return;
+}
+foreach my $mv ( @moves ) { $CADB{$mv->[0]}->dbCadbSetLoc($mv->[1], $mv->[2]); }
+foreach my $bf ( @bufs ) {
+  my ($b, $cell, $x, $y, $o, $net, $op) = @$bf;
+  $CADB{$b} = CompAttDB::new();
+  $CADB{$b}->dbCadbSetCellref($cell);
+  $CADB{$b}->dbCadbSetLoc($x, $y);
+  $CADB{$b}->dbCadbSetStatus("PLACED");
+  $CADB{$b}->dbCadbSetOrient($o);
+  $COMP_ALREADY{$b}{$op} = $net;
+  $NETS_ALREADY{$net}{$b} = $op;
+  $NADB{$net} = NetsAttrDB::new();
+  $NADB{$net}->dbNadbSetNetType(0);
+}
+my ($moved, $same) = (0, 0);
+foreach my $c ( @conns ) {
+  my ($net, $inst, $pin) = @$c;
+  my $old = $COMP_ALREADY{$inst}{$pin};
+  if ( defined $old && $old eq $net ) { $same++; next; }
+  $COMP_ALREADY{$inst}{$pin} = $net;
+  $NETS_ALREADY{$net}{$inst} = $pin;
+  if ( defined $old && exists $NETS_ALREADY{$old} ) {
+    my @still = grep { defined $COMP_ALREADY{$inst}{$_} && $COMP_ALREADY{$inst}{$_} eq $old } keys %{$COMP_ALREADY{$inst}};
+    if ( @still ) { $NETS_ALREADY{$old}{$inst} = $still[0]; } else { delete $NETS_ALREADY{$old}{$inst}; }
+    delete $NETS_ROUTING_ALREADY{$old};
+  }
+  $moved++;
+}
+&set_inst_box;
+printf("INFO-PAR-AP_ECO : 004 : %d buffer(s) added, %d cell(s) slid aside, %d pin(s) moved to another net, %d already there, from %s\n",
+       scalar(@bufs), scalar(@moves), $moved, $same, $eco);
+print "INFO-PAR-AP_ECO : 005 : flat database only -- the module definitions are unchanged; no hier2flat or elaborate after\n";
+printf("INFO-PAR-AP_ECO : 006 : apply_eco took %d s\n", time() - $t0);
+}# sub apply_eco
+#------------------------------------------------------------------------------------------#
+
+#<!-- a buffer's (input, output) signal pins from the LEF, or () if it has
+#     other than exactly one of each -->
+sub apply_advice_buffer_pins {
+my ($cell) = @_;
+my (@in, @out) = ();
+foreach my $p ( sort $PLDB{$cell}->dbMdbGetPins ) {
+  my $type = $PLDB{$cell}->dbMdbGetPinType($p);
+  next if ( $type == 1 || $type == 2 );
+  my $dir = $PLDB{$cell}->dbMdbGetPinDir($p);
+  if ( $dir eq "0" ) { push(@in, $p); } elsif ( $dir eq "1" ) { push(@out, $p); }
+}
+return ( @in == 1 && @out == 1 ) ? ($in[0], $out[0]) : ();
+}# sub apply_advice_buffer_pins
+
+#<!-- a new, unused name -->
+sub apply_advice_new_name {
+my ($stem) = @_;
+my $n;
+do { $n = sprintf("%s_%d", $stem, ++$APPLY_ADVICE_SERIAL); }
+  while ( exists $COMP_ALREADY{$n} || exists $CADB{$n} || exists $NETS_ALREADY{$n} );
+return $n;
+}# sub apply_advice_new_name
+
+#<!-- repeat one net with a buffer tree; see the header.  Returns a hash of
+#     counts, or the reason it was left alone.  Nothing is changed until the
+#     whole tree is planned. -->
+sub apply_advice_repeat_net {
+my ($net, $segUm, $cell, $bufIn, $bufOut, $maxFan, $dry) = @_;
+return "net not in the flat database" unless ( exists $NETS_ALREADY{$net} );
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+my $seg = $segUm * $dbu;
+return "segment length is not positive" unless ( $seg > 0 );
+my (@drv, @sinks) = ();
+my %drvPinOf = ();
+foreach my $i ( keys %{$NETS_ALREADY{$net}} ) {
+  if ( exists $COMP_ALREADY{$i} && exists $CADB{$i} ) {
+    my $c = $CADB{$i}->dbCadbGetCellref;
+    return "a cell on the net is not in the loaded LEF" unless ( exists $PLDB{$c} );
+    my $st = $CADB{$i}->dbCadbGetStatus;
+    return "a cell on the net is not placed" unless ( $st eq "PLACED" || $st eq "FIXED" );
+    my @loc = $CADB{$i}->dbCadbGetLoc;
+    my @sz = $PLDB{$c}->dbMdbGetSize;
+    my ($cx, $cy) = ( $loc[0] + $sz[0] * $dbu / 2, $loc[1] + $sz[1] * $dbu / 2 );
+    foreach my $p ( grep { $COMP_ALREADY{$i}{$_} eq $net } keys %{$COMP_ALREADY{$i}} ) {
+      my $dir = $PLDB{$c}->dbMdbGetPinDir($p);
+      return "a clock pin is on the net" if ( $PLDB{$c}->dbMdbGetPinIsClock($p) );
+      if    ( $dir eq "1" ) { push(@drv, { x => $cx, y => $cy }); $drvPinOf{$i} = $p; }
+      elsif ( $dir eq "0" ) { push(@sinks, { x => $cx, y => $cy, inst => $i, pin => $p }); }
+      else  { return "an inout pin is on the net"; }
+    }
+  } elsif ( exists $PORTS_ALREADY{$TOP_MODULE}{$i} ) {
+    my $port = $PORTS_ALREADY{$TOP_MODULE}{$i};
+    my $dir = $port->dbPortGetDir;
+    if ( $dir eq "input" ) {
+      my @loc = $port->dbPortGetLoc;
+      return "the driving port has no location" unless ( @loc >= 2 );
+      push(@drv, { x => $loc[0], y => $loc[1] });
+    } elsif ( $dir ne "output" ) {
+      return "an inout port is on the net";
+    }                                   # an output port stays on the net, unbuffered
+  } else {
+    return "something on the net is neither an instance nor a port";
+  }
+}
+return "the net has no driver" if ( @drv == 0 );
+return "the net has several drivers" if ( @drv > 1 );
+return "the net has no instance sinks" if ( @sinks == 0 );
+my ($dx, $dy) = ($drv[0]{x}, $drv[0]{y});
+
+#<!-- plan: buffers to add, and the (net, inst, pin) connections to make.
+#     A load is a sink pin or a planned buffer's input; "_top_" is the
+#     original net.
+#
+#     The wire is one spanning tree over the driver and every sink (Prim from
+#     the driver; a point takes at most -max_fanout - 1 branches, so a buffer
+#     put there drives at most -max_fanout).  Walking it from the leaves up,
+#     the wire and the loads below each point add up, and a buffer goes in
+#     only where they must: on an edge, a segment past the last buffer; at a
+#     branch point, on the heaviest branches, while the branches together
+#     carry more than a segment of wire or more than -max_fanout loads.  So a
+#     two-pin net gets what was advised, and a tree about its wirelength over
+#     the segment -- the advisor's own count.  (Clustering the sinks first and
+#     buffering every cluster built four times what was advised.) -->
+my @bufs = ();
+my @conn = ();
+my $newBuf = sub {
+  my ($x, $y, $loads) = @_;
+  my $b = { name => &apply_advice_new_name("photon_rep"), x => $x, y => $y };
+  $b->{net} = &apply_advice_new_name("photon_rep_net");
+  push(@bufs, $b);
+  push(@conn, [ $b->{net}, @$_ ]) foreach ( @$loads );
+  return [ $b->{name}, $bufIn ];
+};
+my @pt = ( { x => $dx, y => $dy }, @sinks );
+my $n = scalar(@pt);
+my $dist = sub { my ($i, $j) = @_; return abs($pt[$i]{x} - $pt[$j]{x}) + abs($pt[$i]{y} - $pt[$j]{y}); };
+my $room = sub { my ($u, $kids) = @_; return scalar(@{$kids->[$u]}) < ( $u == 0 ? $maxFan : $maxFan - 1 ); };
+my @kids = map { [] } (0 .. $n - 1);
+my @par = (-1) x $n;
+my @in = (1, (0) x ($n - 1));
+my @bp = (0) x $n;
+my @bd = map { $dist->(0, $_) } (0 .. $n - 1);
+my @order = (0);
+for ( my $done = 1; $done < $n; $done++ ) {
+  my ($v, $vd) = (-1, 0);
+  for ( my $j = 1; $j < $n; $j++ ) {
+    next if ( $in[$j] );
+    if ( !$room->($bp[$j], \@kids) ) {                       # its nearest filled up
+      my ($p, $pd) = (-1, 0);
+      for ( my $u = 0; $u < $n; $u++ ) {
+        next unless ( $in[$u] && $room->($u, \@kids) );
+        my $d = $dist->($u, $j);
+        ($p, $pd) = ($u, $d) if ( $p < 0 || $d < $pd );
+      }
+      ($bp[$j], $bd[$j]) = ($p, $pd) if ( $p >= 0 );           # none: overfill, a buffer splits it
+    }
+    ($v, $vd) = ($j, $bd[$j]) if ( $v < 0 || $bd[$j] < $vd );
+  }
+  $in[$v] = 1; $par[$v] = $bp[$v];
+  push(@{$kids[$bp[$v]]}, $v);
+  push(@order, $v);
+  for ( my $j = 1; $j < $n; $j++ ) {
+    next if ( $in[$j] );
+    my $d = $dist->($v, $j);
+    ($bp[$j], $bd[$j]) = ($v, $d) if ( $d < $bd[$j] );
+  }
+}
+my @branch = map { [] } (0 .. $n - 1);                       # [wire, [loads]] arriving at each point
+my ($onEdge, $atBranch) = (0, 0);
+foreach my $v ( reverse @order ) {
+  my @br = @{$branch[$v]};
+  my @own = ( $v == 0 ) ? () : ( [ $pt[$v]{inst}, $pt[$v]{pin} ] );
+  my ($w, $nl) = (0, scalar(@own));
+  foreach my $x ( @br ) { $w += $x->[0]; $nl += scalar(@{$x->[1]}); }
+  #<!-- too much below this point: buffer the heaviest branches here -->
+  foreach my $x ( sort { $b->[0] <=> $a->[0] || @{$b->[1]} <=> @{$a->[1]} } @br ) {
+    last unless ( $w > $seg || $nl > $maxFan );
+    next if ( $x->[0] == 0 && @{$x->[1]} == 1 );
+    $w -= $x->[0]; $nl -= scalar(@{$x->[1]}) - 1;
+    $x->[1] = [ $newBuf->($pt[$v]{x}, $pt[$v]{y}, $x->[1]) ]; $x->[0] = 0;
+    $atBranch++;
+  }
+  my @loads = ( @own, map { @{$_->[1]} } @br );
+  if ( $v == 0 ) { push(@conn, [ "_top_", @$_ ]) foreach ( @loads ); last; }
+  #<!-- up the edge to the parent: a buffer each time the wire since the
+  #     last one reaches a segment -->
+  my $u = $par[$v];
+  my $e = $dist->($v, $u);
+  my $pos = 0;
+  while ( $w + ($e - $pos) > $seg ) {
+    $pos += ( $seg - $w > 0 ) ? $seg - $w : 0;
+    my $f = ( $e > 0 ) ? $pos / $e : 0;
+    @loads = ( $newBuf->($pt[$v]{x} + ($pt[$u]{x} - $pt[$v]{x}) * $f, $pt[$v]{y} + ($pt[$u]{y} - $pt[$v]{y}) * $f, \@loads) );
+    $w = 0;
+    $onEdge++;
+  }
+  push(@{$branch[$u]}, [ $w + ($e - $pos), \@loads ]);
+}
+my %r = ( buffers => scalar(@bufs), sinks => scalar(@sinks), on_edge => $onEdge, at_branch => $atBranch );
+return \%r if ( $dry );
+
+#<!-- commit: sinks off the net, buffers in, then every planned connection -->
+foreach my $s ( @sinks ) {
+  delete $COMP_ALREADY{$s->{inst}}{$s->{pin}};
+  delete $NETS_ALREADY{$net}{$s->{inst}} unless ( exists $drvPinOf{$s->{inst}} );
+}
+my ($bw, $bh) = map { $_ * $dbu } $PLDB{$cell}->dbMdbGetSize;
+foreach my $b ( @bufs ) {
+  $CADB{$b->{name}} = CompAttDB::new();
+  $CADB{$b->{name}}->dbCadbSetCellref($cell);
+  $CADB{$b->{name}}->dbCadbSetLoc($b->{x} - $bw / 2, $b->{y} - $bh / 2);   # x, y is its centre
+  $CADB{$b->{name}}->dbCadbSetStatus("PLACED");
+  $CADB{$b->{name}}->dbCadbSetOrient("N");
+  $COMP_ALREADY{$b->{name}}{$bufOut} = $b->{net};
+  $NETS_ALREADY{$b->{net}}{$b->{name}} = $bufOut;
+  $NADB{$b->{net}} = NetsAttrDB::new();
+  $NADB{$b->{net}}->dbNadbSetNetType(0);
+}
+foreach my $c ( @conn ) {
+  my ($n, $inst, $pin) = @$c;
+  $n = $net if ( $n eq "_top_" );
+  $COMP_ALREADY{$inst}{$pin} = $n;
+  $NETS_ALREADY{$n}{$inst} = $pin unless ( $n eq $net && exists $drvPinOf{$inst} );
+}
+delete $NETS_ROUTING_ALREADY{$net};    # routing of the unsplit net, if any, is wrong now
+return \%r;
+}# sub apply_advice_repeat_net
+#------------------------------------------------------------------------------------------#
+
+1;
