@@ -1,0 +1,311 @@
+#!/bin/perl
+
+package FreeRows;
+
+#<!-- FreeRows: the free space of a set of placement rows, for putting cells
+#     one at a time into the nearest place they fit.  All integer DBU.
+#
+#     Each row is a sorted list of free intervals.  What makes it fast on a
+#     dense placement is what it leaves out: an interval narrower than
+#     -min_width (the narrowest cell that will ever be asked for) can never be
+#     used, so it is never stored, and a full row costs nothing to search.  A
+#     search carries the best cost found so far, so a row is abandoned as soon
+#     as nothing in it can beat that, and rows are visited outward from the
+#     target until the row distance alone exceeds it.  And a coarse index --
+#     the widest gap in each band of BAND rows and each column of COL sites --
+#     lets a search pass over a whole band in a few lookups when nothing near
+#     enough in it is wide enough: on a dense design the free space can be
+#     60 um away, and visiting each of the 900 rows between cost half an hour.
+#
+#       my $fr = FreeRows::new(\@rowY, \%rowX0, \%rowX1, $rowH, $siteX, $noSnapX);
+#       $fr->overlaps($r, $x0, $x1)     # before build: is [x0,x1) taken in row r
+#       $fr->occupy($r, $x0, $x1)       # before build: take it (may overlap others)
+#       $fr->build($minWidth)           # occupied -> free intervals
+#       my ($x, $r, $cost) = $fr->nearest($w, $rows, $tx, $ty, $rowWin);
+#       $fr->take($r, $x, $w, $rows)    # after build: claim what nearest gave
+#
+#     @rowY sorted ascending, one entry per row; a cell $rows tall needs rows
+#     r .. r+rows-1 to be consecutive (rowY step == rowH) and free over the
+#     same x.  Shared by legalize_flat --incremental and apply_advice. -->
+
+sub new {
+  my ($rowY, $rowX0, $rowX1, $rowH, $siteX, $noSnapX) = @_;
+  my $self = { Y => [ @$rowY ], X0 => [ map { $rowX0->{$_} } @$rowY ], X1 => [ map { $rowX1->{$_} } @$rowY ],
+               H => $rowH, S => $siteX, NS => ( $noSnapX ? 1 : 0 ),
+               OCC => [ map { [] } @$rowY ], GAP => undef, MINW => 0,
+               BAND => 64, COL => 256 * ( $siteX > 0 ? $siteX : 1 ), TMAX => [], XLO => undef };
+  bless $self, 'FreeRows';
+  return $self;
+}#sub new
+
+#<!-- the flat floorplan's rows, merged one per y as legalize_flat reads them:
+#     { rowH, siteX, Y => [sorted y], X0 => {y => x0}, X1 => {y => x1},
+#     O => {y => orient} } in DBU, or undef when there is no floorplan or row
+#     height.  Rows are stored "name site x0 y0 orient numX numY stepX stepY". -->
+sub flatRows {
+  my $dbu = $main::GLOBAL->dbfGlobalGetDBU;
+  my $id = $main::FLOORPLAN_LOOKUP{"$main::TOP_MODULE/_self_"};
+  return undef unless ( defined $dbu && $dbu > 0 && defined $id && exists $main::FLOORPLAN_ALREADY{$id} );
+  my $rowH = $main::GLOBAL->dbGlobalGetRowHeight;
+  return undef unless ( defined $rowH && $rowH > 0 );
+  my %R = ( rowH => $rowH * $dbu, siteX => 0, Y => [], X0 => {}, X1 => {}, O => {} );
+  foreach my $tag ( $main::FLOORPLAN_ALREADY{$id}->dbFlplanGetRows ) {
+    my @f = split(/\s+/, $tag);
+    next unless ( @f >= 8 );
+    my ($x0, $y, $numX, $stepX) = ($f[2], $f[3], $f[5], $f[7]);
+    my $x1 = $x0 + $numX * $stepX;
+    if ( exists $R{X0}{$y} ) {
+      $R{X0}{$y} = $x0 if ( $x0 < $R{X0}{$y} );
+      $R{X1}{$y} = $x1 if ( $x1 > $R{X1}{$y} );
+    } else {
+      push(@{$R{Y}}, $y);
+      ($R{X0}{$y}, $R{X1}{$y}) = ($x0, $x1);
+      $R{O}{$y} = ( defined $f[4] && $f[4] ne "" ) ? $f[4] : "N";
+    }
+    $R{siteX} = $stepX if ( $stepX > $R{siteX} );
+  }
+  return undef unless ( @{$R{Y}} );
+  @{$R{Y}} = sort { $a <=> $b } @{$R{Y}};
+  return \%R;
+}#sub flatRows
+
+sub rows  { my ($self) = @_; return scalar(@{$self->{Y}}); }
+sub rowY  { my ($self, $r) = @_; return $self->{Y}[$r]; }
+
+#<!-- index of the row whose band holds y, or the nearest row if outside -->
+sub rowAt {
+  my ($self, $y) = @_;
+  my $Y = $self->{Y};
+  return 0 if ( $y < $Y->[0] );
+  return $#$Y if ( $y >= $Y->[-1] );
+  my ($lo, $hi) = (0, $#$Y);
+  while ( $lo < $hi ) {
+    my $mid = int( ($lo + $hi + 1) / 2 );
+    if ( $Y->[$mid] <= $y ) { $lo = $mid; } else { $hi = $mid - 1; }
+  }
+  return $lo;
+}#sub rowAt
+
+#<!-- first interval in a sorted list whose end is past x -->
+sub firstEnd {
+  my ($list, $x) = @_;
+  my ($lo, $hi) = (0, scalar(@$list));
+  while ( $lo < $hi ) {
+    my $mid = int( ($lo + $hi) / 2 );
+    if ( $list->[$mid][1] > $x ) { $hi = $mid; } else { $lo = $mid + 1; }
+  }
+  return $lo;
+}#sub firstEnd
+
+sub overlaps {
+  my ($self, $r, $x0, $x1) = @_;
+  my $L = $self->{OCC}[$r];
+  my $i = &firstEnd($L, $x0);
+  return ( $i < @$L && $L->[$i][0] < $x1 ) ? 1 : 0;
+}#sub overlaps
+
+#<!-- occupied intervals may overlap (obstacles do); merge, never double count -->
+sub occupy {
+  my ($self, $r, $x0, $x1) = @_;
+  my $L = $self->{OCC}[$r];
+  my $i = &firstEnd($L, $x0);
+  my $j = $i;
+  while ( $j < @$L && $L->[$j][0] <= $x1 ) {
+    $x0 = $L->[$j][0] if ( $L->[$j][0] < $x0 );
+    $x1 = $L->[$j][1] if ( $L->[$j][1] > $x1 );
+    $j++;
+  }
+  splice(@$L, $i, $j - $i, [ $x0, $x1 ]);
+}#sub occupy
+
+sub build {
+  my ($self, $minW) = @_;
+  $self->{MINW} = $minW;
+  my @gap = ();
+  my ($nGap, $nDrop) = (0, 0);
+  for ( my $r = 0 ; $r < @{$self->{Y}} ; $r++ ) {
+    my @g = ();
+    my $x = $self->{X0}[$r];
+    foreach my $iv ( @{$self->{OCC}[$r]} ) {
+      if ( $iv->[0] > $x ) { if ( $iv->[0] - $x >= $minW ) { push(@g, [ $x, $iv->[0] ]); } else { $nDrop++; } }
+      $x = $iv->[1] if ( $iv->[1] > $x );
+    }
+    if ( $self->{X1}[$r] > $x ) { if ( $self->{X1}[$r] - $x >= $minW ) { push(@g, [ $x, $self->{X1}[$r] ]); } else { $nDrop++; } }
+    $nGap += @g;
+    push(@gap, \@g);
+  }
+  $self->{GAP} = \@gap;
+  $self->{OCC} = undef;
+  my $xlo; foreach my $x ( @{$self->{X0}} ) { $xlo = $x if ( !defined $xlo || $x < $xlo ); }
+  $self->{XLO} = $xlo;
+  for ( my $b = 0 ; $b * $self->{BAND} < @gap ; $b++ ) { $self->{TMAX}[$b] = []; }
+  for ( my $r = 0 ; $r < @gap ; $r++ ) {
+    my $T = $self->{TMAX}[ int($r / $self->{BAND}) ];
+    foreach my $g ( @{$gap[$r]} ) {
+      my $w = $g->[1] - $g->[0];
+      foreach my $c ( $self->col($g->[0]) .. $self->col($g->[1] - 1) ) { $T->[$c] = $w if ( !defined $T->[$c] || $w > $T->[$c] ); }
+    }
+  }
+  return ($nGap, $nDrop);
+}#sub build
+
+sub col { my ($self, $x) = @_; my $c = int( ($x - $self->{XLO}) / $self->{COL} ); return $c < 0 ? 0 : $c; }
+
+#<!-- could band b hold a cell w wide anywhere in x0 .. x1 -->
+sub bandMay {
+  my ($self, $b, $w, $x0, $x1) = @_;
+  my $T = $self->{TMAX}[$b];
+  return 0 unless ( $T );
+  my $c1 = $self->col($x1);
+  $c1 = $#$T if ( $c1 > $#$T );
+  for ( my $c = $self->col($x0) ; $c <= $c1 ; $c++ ) { return 1 if ( defined $T->[$c] && $T->[$c] >= $w ); }
+  return 0;
+}#sub bandMay
+
+#<!-- the widest gap of band b over columns c0 .. c1, again, after a take -->
+sub retile {
+  my ($self, $b, $c0, $c1) = @_;
+  my $T = $self->{TMAX}[$b];
+  my $r1 = ($b + 1) * $self->{BAND} - 1;
+  $r1 = $#{$self->{GAP}} if ( $r1 > $#{$self->{GAP}} );
+  for ( my $c = $c0 ; $c <= $c1 ; $c++ ) {
+    my ($lo, $hi) = ( $self->{XLO} + $c * $self->{COL}, $self->{XLO} + ($c + 1) * $self->{COL} );
+    my $m = 0;
+    for ( my $r = $b * $self->{BAND} ; $r <= $r1 ; $r++ ) {
+      my $L = $self->{GAP}[$r];
+      for ( my $i = &firstEnd($L, $lo) ; $i < @$L && $L->[$i][0] < $hi ; $i++ ) {
+        my $w = $L->[$i][1] - $L->[$i][0];
+        $m = $w if ( $w > $m );
+      }
+    }
+    $T->[$c] = $m;
+  }
+}#sub retile
+
+#<!-- the best x for a cell w wide, rows tall, near tx, in rows r ..; only an
+#     x whose cost |x - tx| is under $limit counts.  Returns (x, cost) or (). -->
+sub fitRow {
+  my ($self, $r, $rows, $w, $tx, $limit) = @_;
+  my $G = $self->{GAP};
+  my $base = $G->[$r];
+  my $x0row = $self->{X0}[$r];
+  my ($S, $NS) = ($self->{S}, $self->{NS});
+  my ($bestX, $bestC);
+  my $eval = sub {
+    my ($a0, $a1) = @_;
+    my @cur = ( [ $a0, $a1 ] );
+    for ( my $k = 1 ; $k < $rows && @cur ; $k++ ) {
+      my $nxt = $G->[$r + $k];
+      my @out = ();
+      my $j = &firstEnd($nxt, $cur[0][0]);
+      my $i = 0;
+      while ( $i < @cur && $j < @$nxt ) {
+        my $b0 = ( $cur[$i][0] > $nxt->[$j][0] ) ? $cur[$i][0] : $nxt->[$j][0];
+        my $b1 = ( $cur[$i][1] < $nxt->[$j][1] ) ? $cur[$i][1] : $nxt->[$j][1];
+        push(@out, [ $b0, $b1 ]) if ( $b1 - $b0 >= $w );
+        if ( $cur[$i][1] < $nxt->[$j][1] ) { $i++; } else { $j++; }
+      }
+      @cur = @out;
+    }
+    foreach my $iv ( @cur ) {
+      next if ( $iv->[1] - $iv->[0] < $w );
+      my $x = $tx;
+      $x = $iv->[0] if ( $x < $iv->[0] );
+      $x = $iv->[1] - $w if ( $x > $iv->[1] - $w );
+      unless ( $NS ) {
+        my $n = int( ($x - $x0row) / $S + 0.5 );
+        $x = $x0row + $n * $S;
+        $x += $S while ( $x < $iv->[0] );
+        $x -= $S while ( $x + $w > $iv->[1] );
+        next if ( $x < $iv->[0] );
+      }
+      my $c = abs($x - $tx);
+      if ( $c < $limit && ( ! defined $bestC || $c < $bestC || ( $c == $bestC && $x < $bestX ) ) ) { ($bestC, $bestX) = ($c, $x); }
+    }
+  };
+  my $s0 = &firstEnd($base, $tx);
+  for ( my $b = $s0 ; $b < @$base ; $b++ ) {
+    my $lb = ( $base->[$b][0] > $tx ) ? $base->[$b][0] - $tx : 0;
+    last if ( $lb >= $limit || ( defined $bestC && $lb >= $bestC ) );
+    next if ( $base->[$b][1] - $base->[$b][0] < $w );
+    $eval->( @{$base->[$b]} );
+  }
+  for ( my $b = $s0 - 1 ; $b >= 0 ; $b-- ) {
+    my $lb = $tx - ( $base->[$b][1] - $w );
+    last if ( $lb >= $limit || ( defined $bestC && $lb > $bestC ) );
+    next if ( $base->[$b][1] - $base->[$b][0] < $w );
+    $eval->( @{$base->[$b]} );
+  }
+  return defined $bestX ? ($bestX, $bestC) : ();
+}#sub fitRow
+
+#<!-- nearest place for a cell w wide and rows tall, by |dx| + |dy| from
+#     (tx, ty): rows outward from ty, stopping when the row distance alone
+#     passes the best so far.  rowWin rows each way first, then four times
+#     that, then all -- each widening only when nothing was found.  Returns
+#     (x, r, cost) or (). -->
+sub nearest {
+  my ($self, $w, $rows, $tx, $ty, $rowWin) = @_;
+  my ($Y, $H) = ($self->{Y}, $self->{H});
+  my $n = scalar(@$Y);
+  my $c0 = $self->rowAt($ty);
+  my ($pR, $pX, $pC);
+  my $from = 0;
+  my %bandNo = ();          # band -> 1 once it is known to have nothing within reach
+  foreach my $win ( $rowWin, 4 * $rowWin, $n ) {
+    for ( my $d = $from ; $d <= $win ; $d++ ) {
+      my $rowDist = ( $d > 0 ) ? ($d - 1) * $H : 0;      # a lower bound for both sides
+      last if ( defined $pC && $rowDist >= $pC );
+      foreach my $r ( ( $d == 0 ) ? ($c0) : ($c0 - $d, $c0 + $d) ) {
+        next if ( $r < 0 || $r + $rows > $n );
+        my $dy = abs($Y->[$r] - $ty);
+        next if ( defined $pC && $dy >= $pC );
+        my $b = int($r / $self->{BAND});
+        next if ( $bandNo{$b} );
+        if ( $rows == 1 ) {
+          my $reach = defined $pC ? $pC - $dy : 9e18;
+          unless ( $self->bandMay($b, $w, $tx - $reach, $tx + $w + $reach) ) { $bandNo{$b} = 1; next; }
+        }
+        my $ok = 1;
+        for ( my $k = 1 ; $k < $rows ; $k++ ) {
+          if ( $Y->[$r + $k] != $Y->[$r] + $k * $H ) { $ok = 0; last; }
+        }
+        next unless ( $ok );
+        my ($x, $cx) = $self->fitRow($r, $rows, $w, $tx, defined $pC ? $pC - $dy : 9e18);
+        next unless ( defined $x );
+        my $c = $cx + $dy;
+        if ( ! defined $pC || $c < $pC ) { ($pC, $pR, $pX) = ($c, $r, $x); }
+      }
+    }
+    last if ( defined $pC );
+    $from = $win + 1;
+  }
+  return defined $pR ? ($pX, $pR, $pC) : ();
+}#sub nearest
+
+#<!-- claim [x, x+w) in rows r .. r+rows-1; what is left of a gap narrower
+#     than the minimum width is dropped -->
+sub take {
+  my ($self, $r, $x, $w, $rows) = @_;
+  my $minW = $self->{MINW};
+  for ( my $k = 0 ; $k < $rows ; $k++ ) {
+    my $L = $self->{GAP}[$r + $k];
+    my $i = &firstEnd($L, $x);
+    my $j = $i;
+    my @rep = ();
+    while ( $j < @$L && $L->[$j][0] < $x + $w ) {
+      my $iv = $L->[$j];
+      push(@rep, [ $iv->[0], $x ]) if ( $x - $iv->[0] >= $minW );
+      push(@rep, [ $x + $w, $iv->[1] ]) if ( $iv->[1] - ($x + $w) >= $minW );
+      $j++;
+    }
+    #<!-- the band's widest gap can only have shrunk, and only over the gap
+    #     that was cut -->
+    my ($g0, $g1);
+    ($g0, $g1) = ( $L->[$i][0], $L->[$j - 1][1] ) if ( $j > $i );
+    splice(@$L, $i, $j - $i, @rep);
+    $self->retile(int(($r + $k) / $self->{BAND}), $self->col($g0), $self->col($g1 - 1)) if ( defined $g0 );
+  }
+}#sub take
+
+1;

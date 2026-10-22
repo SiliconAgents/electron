@@ -846,56 +846,14 @@ if ( $incremental ) {
   my $tInc = time();
   my %rIdx = ();
   for ( my $r = 0 ; $r < $nRows ; $r++ ) { $rIdx{$rowY[$r]} = $r; }
-  my $rowAt = sub {           #<!-- index of the row whose band holds y, or -1 -->
-    my ($y) = @_;
-    my ($lo, $hi) = (0, $nRows - 1);
-    return -1 if ( $y < $rowY[0] || $y >= $rowY[$nRows-1] + $rowH );
-    while ( $lo < $hi ) {
-      my $mid = int( ($lo + $hi + 1) / 2 );
-      if ( $rowY[$mid] <= $y ) { $lo = $mid; } else { $hi = $mid - 1; }
-    }
-    return $lo;
-  };
-  my $firstEnd = sub {
-    my ($list, $x) = @_;
-    my ($lo, $hi) = (0, scalar(@$list));
-    while ( $lo < $hi ) {
-      my $mid = int( ($lo + $hi) / 2 );
-      if ( $list->[$mid][1] > $x ) { $hi = $mid; } else { $lo = $mid + 1; }
-    }
-    return $lo;
-  };
-  #<!-- occupied intervals per row, kept sorted and disjoint-or-touching -->
-  my @occ = map { [] } (1 .. $nRows);
-  my $overlaps = sub {
-    my ($r, $x0, $x1) = @_;
-    my $L = $occ[$r];
-    my $i = $firstEnd->($L, $x0);
-    return ( $i < @$L && $L->[$i][0] < $x1 ) ? 1 : 0;
-  };
-  my $occupy = sub {
-    my ($r, $x0, $x1) = @_;
-    my $L = $occ[$r];
-    my $i = $firstEnd->($L, $x0);
-    splice(@$L, $i, 0, [ $x0, $x1 ]);
-  };
+  #<!-- the rows' free space (ALGO/PLACE_NEW/make_free_rows): obstacles and
+  #     kept cells occupy it, then it is turned into gaps for the rest -->
+  my $fr = FreeRows::new(\@rowY, \%rowX0, \%rowX1, $rowH, $siteX, $noSnapX);
   foreach my $o ( @obs ) {
-    my $ra = $rowAt->($o->[1]);
-    $ra = 0 if ( $ra < 0 && $o->[1] < $rowY[0] );
-    next if ( $ra < 0 );
+    my $ra = $fr->rowAt($o->[1]);
     for ( my $r = $ra ; $r < $nRows && $rowY[$r] < $o->[3] ; $r++ ) {
       next if ( $rowY[$r] + $rowH <= $o->[1] );
-      #<!-- obstacles may overlap each other; merge rather than double count -->
-      my $L = $occ[$r];
-      my ($x0, $x1) = ( $o->[0], $o->[2] );
-      my $i = $firstEnd->($L, $x0);
-      my $j = $i;
-      while ( $j < @$L && $L->[$j][0] <= $x1 ) {
-        $x0 = $L->[$j][0] if ( $L->[$j][0] < $x0 );
-        $x1 = $L->[$j][1] if ( $L->[$j][1] > $x1 );
-        $j++;
-      }
-      splice(@$L, $i, $j - $i, [ $x0, $x1 ]);
+      $fr->occupy($r, $o->[0], $o->[2]);
     }
   }
   my (@keep, @fix);
@@ -914,126 +872,33 @@ if ( $incremental ) {
     $ok = 0 if ( $ok && ! $noSnapX && ( ($x - $rowX0{$y}) % $siteX ) );
     if ( $ok ) {
       for ( my $k = 0 ; $k < $need ; $k++ ) {
-        if ( $overlaps->($r + $k, $x, $x + $w) ) { $ok = 0; last; }
+        if ( $fr->overlaps($r + $k, $x, $x + $w) ) { $ok = 0; last; }
       }
     }
     if ( $ok ) {
-      $occupy->($r + $_, $x, $x + $w) for ( 0 .. $need - 1 );
+      $fr->occupy($r + $_, $x, $x + $w) for ( 0 .. $need - 1 );
       push(@keep, $m);
     }
     else {
       push(@fix, [ $m, $need ]);
     }
   }
-  #<!-- the gaps: each row's extent less what is occupied -->
-  my @gap = ();
-  for ( my $r = 0 ; $r < $nRows ; $r++ ) {
-    my $y = $rowY[$r];
-    my @g = ();
-    my $x = $rowX0{$y};
-    foreach my $iv ( @{$occ[$r]} ) {
-      push(@g, [ $x, $iv->[0] ]) if ( $iv->[0] > $x );
-      $x = $iv->[1] if ( $iv->[1] > $x );
-    }
-    push(@g, [ $x, $rowX1{$y} ]) if ( $rowX1{$y} > $x );
-    $gap[$r] = \@g;
-  }
-  @occ = ();
-  #<!-- nearest x in rows r .. r+need-1, all free, on the site grid -->
-  my $fitAt = sub {
-    my ($r, $need, $w, $tx) = @_;
-    my $base = $gap[$r];
-    my $x0row = $rowX0{$rowY[$r]};
-    my ($bestX, $bestC);
-    my $evalIv = sub {
-      my ($a0, $a1) = @_;
-      my @cur = ( [ $a0, $a1 ] );
-      for ( my $k = 1 ; $k < $need && @cur ; $k++ ) {
-        my $nxt = $gap[$r + $k];
-        my @out = ();
-        my $j = $firstEnd->($nxt, $cur[0][0]);
-        my $i = 0;
-        while ( $i < @cur && $j < @$nxt ) {
-          my $b0 = ( $cur[$i][0] > $nxt->[$j][0] ) ? $cur[$i][0] : $nxt->[$j][0];
-          my $b1 = ( $cur[$i][1] < $nxt->[$j][1] ) ? $cur[$i][1] : $nxt->[$j][1];
-          push(@out, [ $b0, $b1 ]) if ( $b1 > $b0 );
-          if ( $cur[$i][1] < $nxt->[$j][1] ) { $i++; } else { $j++; }
-        }
-        @cur = @out;
-      }
-      foreach my $iv ( @cur ) {
-        next if ( $iv->[1] - $iv->[0] < $w );
-        my $x = $tx;
-        $x = $iv->[0] if ( $x < $iv->[0] );
-        $x = $iv->[1] - $w if ( $x > $iv->[1] - $w );
-        unless ( $noSnapX ) {
-          my $n = int( ($x - $x0row) / $siteX + 0.5 );
-          $x = $x0row + $n * $siteX;
-          $x += $siteX while ( $x < $iv->[0] );
-          $x -= $siteX while ( $x + $w > $iv->[1] );
-          next if ( $x < $iv->[0] );
-        }
-        my $c = abs($x - $tx);
-        if ( ! defined $bestC || $c < $bestC || ( $c == $bestC && $x < $bestX ) ) { ($bestC, $bestX) = ($c, $x); }
-      }
-    };
-    my $s0 = $firstEnd->($base, $tx);
-    for ( my $b = $s0 ; $b < @$base ; $b++ ) {
-      my $lb = ( $base->[$b][0] > $tx ) ? $base->[$b][0] - $tx : 0;
-      last if ( defined $bestC && $lb >= $bestC );
-      $evalIv->( @{$base->[$b]} );
-    }
-    for ( my $b = $s0 - 1 ; $b >= 0 ; $b-- ) {
-      my $lb = $tx - ( $base->[$b][1] - $w );
-      last if ( defined $bestC && $lb > $bestC );
-      $evalIv->( @{$base->[$b]} );
-    }
-    return ( $bestX, $bestC );
-  };
+  #<!-- a gap narrower than the narrowest cell to place is never stored: on a
+  #     dense placement that is most of them, and walking them was the cost -->
+  my $minW;
+  foreach my $fm ( @fix ) { $minW = $fm->[0][1] if ( ! defined $minW || $fm->[0][1] < $minW ); }
+  my ($nGap, $nDrop) = $fr->build( defined $minW ? $minW : 1 );
+  printf("INFO-ALG-LEGAL : 056 : --incremental: %d free gap(s) at least %.3f um wide, %d narrower dropped, %d s\n",
+         $nGap, ( defined $minW ? $minW : 0 ) / $dbu, $nDrop, time() - $tInc);
   my @moved = ();
   my ($sumD, $maxD, $maxI, $noFit) = (0, 0, "", 0);
   foreach my $fm ( sort { $b->[1] <=> $a->[1] || $a->[0][4] <=> $b->[0][4] ||
                           $a->[0][3] <=> $b->[0][3] || $a->[0][0] cmp $b->[0][0] } @fix ) {
     my ($m, $need) = @$fm;
     my ($inst, $w, $h, $tx, $ty) = @$m;
-    my $best = $rowAt->($ty);
-    $best = ( $ty < $rowY[0] ) ? 0 : $nRows - 1 if ( $best < 0 );
-    my ($pR, $pX, $pC);
-    #<!-- the usual window, then wider: a cell this pass cannot place is
-    #     one more overlap left in a placement that was nearly legal -->
-    foreach my $win ( $rowWin, 4 * $rowWin, $nRows ) {
-      for ( my $d = 0 ; $d <= $win ; $d++ ) {
-        foreach my $r ( ($best - $d), ($best + $d) ) {
-          next if ( $d > 0 && $r == $best );
-          next if ( $r < 0 || $r + $need > $nRows );
-          my $okSpan = 1;
-          for ( my $k = 1 ; $k < $need ; $k++ ) {
-            if ( $rowY[$r+$k] != $rowY[$r] + $k * $rowH ) { $okSpan = 0; last; }
-          }
-          next unless ( $okSpan );
-          my ($x, $cx) = $fitAt->($r, $need, $w, $tx);
-          next unless ( defined $x );
-          my $c = $cx + abs($rowY[$r] - $ty);
-          if ( ! defined $pC || $c < $pC ) { ($pC, $pR, $pX) = ($c, $r, $x); }
-        }
-        last if ( defined $pC && $pC <= ($d + 1) * $rowH );
-      }
-      last if ( defined $pC );
-    }
+    my ($pX, $pR) = $fr->nearest($w, $need, $tx, $ty, $rowWin);
     unless ( defined $pR ) { $noFit++; next; }
-    for ( my $k = 0 ; $k < $need ; $k++ ) {
-      my $L = $gap[$pR + $k];
-      my $i = $firstEnd->($L, $pX);
-      my $j = $i;
-      my @rep = ();
-      while ( $j < @$L && $L->[$j][0] < $pX + $w ) {
-        my $iv = $L->[$j];
-        push(@rep, [ $iv->[0], $pX ]) if ( $pX > $iv->[0] );
-        push(@rep, [ $pX + $w, $iv->[1] ]) if ( $iv->[1] > $pX + $w );
-        $j++;
-      }
-      splice(@$L, $i, $j - $i, @rep);
-    }
+    $fr->take($pR, $pX, $w, $need);
     push(@moved, [ $inst, $pX, $rowY[$pR] ]);
     my $disp = abs($pX - $tx) + abs($rowY[$pR] - $ty);
     $sumD += $disp;
