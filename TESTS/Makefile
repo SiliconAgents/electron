@@ -430,5 +430,14 @@ nangate_photon_repeat: nangate_store $(NG_SIZING)
 	  python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.eco.def library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef || exit 1; \
 	  [ "$$(grep -c '^NETS' workarea/vedic_16x16.eco.sgraph)" -eq "$$(grep -c '^NETS' workarea/sta/vedic_16x16.prep.sgraph)" ] || { echo "nangate_photon_repeat: electron's graph after the ECO is not the one Photon timed"; exit 1; }; \
 	  echo "nangate_photon_repeat: $$b buffer(s) placed and $$r cell(s) resized by Photon ($$m slid aside), applied by electron, legal, every sink reached"; fi
+# photon_server against batch Photon on nangate_photon_repeat's graph: the same
+# STA, a repeat estimate that undoes cleanly, and -- the point -- the same
+# sizing choices as place_opt (sizeBound with the footprint rule).  The server
+# decides with place_opt's own functions; this is what keeps it honest.
+nangate_photon_server: nangate_store $(NG_SIZING)
+	@if [ -z "$(PYSPARK)" ]; then echo "nangate_photon_server: set PYSPARK=<pyspark_cad checkout>"; exit 0; fi; \
+	 test -s workarea/vedic_16x16.phys.sgraph -a -s workarea/sta/vedic_16x16.prep.eco.tsv || { echo "nangate_photon_server: run nangate_photon_repeat first"; exit 1; }; \
+	 bash apply/server_parity.sh $(PYSPARK) $(NG_STORE) $(abspath $(NG_SIZING))
+
 nangate_repeat_sta: nangate_store
 	$(call SPARKSTA,workarea/vedic_16x16.repeated.sgraph,$(NG_STORE),slow,$(NG_PERIOD),workarea/sta/vedic_16x16.repeated.seg.tsv)
