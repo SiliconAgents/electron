@@ -92,6 +92,23 @@ nangate_recurse_qp:
 	$(call QP_EXPECT,INFO-ALG-LEGAL : 018 : legalized)
 	@echo "nangate_recurse_qp: all expected results"
 
+# The top of a placed hierarchy placed again, alone, from a floorplan spec with
+# --keep_shapes -- the step a fast floorplan loop repeats in one session.  Fails
+# unless every child moved as one rigid piece (its internal placement survived
+# the top's commit and hier2flat), no two children overlap, every kept shape fit
+# the spec, and the result legalizes.
+KS_EXPECT = grep -q "$(1)" workarea/keep_shapes.log || { echo "nangate_keep_shapes: expected \"$(1)\" in workarea/keep_shapes.log"; exit 1; }
+nangate_keep_shapes:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_keep_shapes.tcl > keep_shapes.log 2>&1
+	$(call KS_EXPECT,HR_PL_ALL : 046 : --keep_shapes: 10 module(s))
+	$(call KS_EXPECT,vedic_16x16 arranged by the floorplan spec: 7 block(s))
+	@! grep -q "did not fit" workarea/keep_shapes.log || { echo "nangate_keep_shapes: a kept shape did not fit the spec"; exit 1; }
+	$(call KS_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	python3 check_rigid.py workarea/ks1.def workarea/ks2.def
+	@echo "nangate_keep_shapes: all expected results"
+
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and
 # repaired with legalize_flat --incremental instead of a full flat pass.  Fails
 # unless every module was legalized, the repair ran, and 3RDBIN/def_check_legal
@@ -295,7 +312,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

@@ -565,6 +565,27 @@ if ( defined $spec ) {
   my $areaOf;
   $areaOf = sub { my ($n) = @_; return ( $n eq '*' ? $freeA : $leaf{$n}{area} ) unless ( ref $n );
                   my $A = 0; $A += $areaOf->($_) foreach ( @{$n->[1]} ); return $A; };
+  #<!-- the least room a part needs, from the blocks in it whose shape is
+  #     fixed (an earlier parent, another instance, --keep_shapes): an H row is
+  #     as tall as its tallest and as wide as all of them, a V column the other
+  #     way round.  A block free to take any shape needs nothing. -->
+  my $needOf;
+  $needOf = sub {
+    my ($n) = @_;
+    unless ( ref $n ) {
+      return (0, 0) if ( $n eq '*' );
+      my $ref = $leaf{$n}{ref};
+      return exists $fixed->{$ref} ? @{$fixed->{$ref}} : (0, 0);
+    }
+    my ($dir, $kids) = @$n;
+    my ($w, $h) = (0, 0);
+    foreach my $k ( @$kids ) {
+      my ($kw, $kh) = $needOf->($k);
+      if ( $dir eq 'H' ) { $w += $kw; $h = $kh if ( $kh > $h ); }
+      else               { $h += $kh; $w = $kw if ( $kw > $w ); }
+    }
+    return ($w, $h);
+  };
   my $place;
   $place = sub {
     my ($n, $x0, $y0, $x1, $y1) = @_;
@@ -577,14 +598,28 @@ if ( defined $spec ) {
       return;
     }
     my ($dir, $kids) = @$n;
-    my ($A, $acc) = ( $areaOf->($n), 0 );
-    foreach my $k ( @$kids ) {
-      my $f0 = $acc / $A;
-      $acc += $areaOf->($k);
-      my $f1 = $acc / $A;
+    #<!-- each part gets the room its fixed blocks need, then the rest of the
+    #     cut is shared by area.  With no fixed shape anywhere that is the
+    #     plain area split; if the fixed ones need more than there is, they
+    #     share what there is in proportion to their need (and $apply counts
+    #     the misses). -->
+    my $span = ( $dir eq 'H' ) ? $x1 - $x0 : $y1 - $y0;
+    my @need = map { my @wh = $needOf->($_); ( $dir eq 'H' ) ? $wh[0] : $wh[1] } @$kids;
+    my @area = map { $areaOf->($_) } @$kids;
+    my ($sumN, $sumA) = (0, 0);
+    $sumN += $_ foreach ( @need );
+    $sumA += $_ foreach ( @area );
+    my @len;
+    if ( $sumN > 0 && $sumN <= $span ) { @len = map { $need[$_] + ( $span - $sumN ) * $area[$_] / $sumA } 0 .. $#$kids; }
+    elsif ( $sumN > 0 )                { @len = map { $span * $need[$_] / $sumN } 0 .. $#$kids; }
+    else                               { @len = map { $span * $area[$_] / $sumA } 0 .. $#$kids; }
+    my $acc = 0;
+    for ( my $i = 0 ; $i < @$kids ; $i++ ) {
+      my ($a0, $a1) = ( $acc, $acc + $len[$i] );
+      $acc = $a1;
       #<!-- H left to right; V top to bottom, the way a floorplan is drawn -->
-      if ( $dir eq 'H' ) { $place->($k, $x0 + ($x1 - $x0) * $f0, $y0, $x0 + ($x1 - $x0) * $f1, $y1); }
-      else               { $place->($k, $x0, $y1 - ($y1 - $y0) * $f1, $x1, $y1 - ($y1 - $y0) * $f0); }
+      if ( $dir eq 'H' ) { $place->($kids->[$i], $x0 + $a0, $y0, $x0 + $a1, $y1); }
+      else               { $place->($kids->[$i], $x0, $y1 - $a1, $x1, $y1 - $a0); }
     }
   };
   $place->($spec, 0, 0, $W, $H);
@@ -677,6 +712,23 @@ foreach my $e ( @entries ) {
 }
 return \%spec;
 }# sub dbfTstgenReadFloorplanSpec
+
+
+#<!-- --keep_shapes: a module's size as its COMMITTED floorplan has it, in
+#     microns -- not the pseudo model's, which edit_module of its parent resets.
+#     (0, 0) for a module with no floorplan yet. -->
+sub dbfTstgenHierCommittedSize {
+my ($module) = @_;
+my $id = 0;
+$id = $MODULE_ALREADY{$module}->dbVNOMGetFloorplanID if ( exists $MODULE_ALREADY{$module} );
+$id = $FLOORPLAN_LOOKUP{"$module/_self_"} if ( ! $id && exists $FLOORPLAN_LOOKUP{"$module/_self_"} );
+return (0, 0) unless ( $id && exists $FLOORPLAN_ALREADY{$id} );
+my $dbu = $FLOORPLAN_ALREADY{$id}->dbFlplanGetDBUnit;
+$dbu = 1 unless ( defined $dbu && $dbu > 0 );
+my @sz = $FLOORPLAN_ALREADY{$id}->dbFlplanGetSize;
+return (0, 0) unless ( @sz >= 4 && defined $sz[3] && $sz[2] > $sz[0] && $sz[3] > $sz[1] );
+return ( ($sz[2] - $sz[0]) / $dbu, ($sz[3] - $sz[1]) / $dbu );
+}# sub dbfTstgenHierCommittedSize
 
 
 #<!-- The module's own box, in microns, as the pseudo database has it. -->
@@ -790,6 +842,7 @@ my $netWeights = "";
 my $weightScale = 10;
 my $weightPower = 3;
 my $fpSpecFile = "";
+my $keepShapes = 0;
 my $freeFlops = 0;
 my $seqAnchorLimit = 2000;
 my $legalize = 0;
@@ -828,6 +881,11 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                          the module's own logic.  Sizes come\n";
   print "                                          from -sizing as usual; the block pass then\n";
   print "                                          places only the ports and flops around them\n";
+  print "                       --keep_shapes           every module already placed keeps its exact\n";
+  print "                                          width x height: sizing and a spec only move\n";
+  print "                                          it, so its internal placement stays valid.  For\n";
+  print "                                          re-placing only the top (-depth 0 --no_cells)\n";
+  print "                                          in a session that has placed everything\n";
   print "                       -cells_placer <path>|qp the cell pass only, default -placer.  qp\n";
   print "                                               is ELECTRON_HOME/3RDBIN/hier_place_qp,\n";
   print "                                               the analytic one: seconds where\n";
@@ -913,6 +971,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-weight_scale")  { $weightScale = $_[$i+1]; }
   elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
   elsif ($_[$i] eq "-floorplan_spec"){ $fpSpecFile = $_[$i+1]; }
+  elsif ($_[$i] eq "--keep_shapes")  { $keepShapes = 1; }
   elsif ($_[$i] eq "-snapshot")      { $snapPrefix = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot_args") { $snapArgs = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_ALL : 001 : invalid option $_[$i]\n"; }
@@ -1003,6 +1062,22 @@ my ($doneCnt, $keptCnt, $failCnt) = (0, 0, 0);
 my %wsMemo = ();
 my %wsSize = ();        #<!-- module => [w, h] that -whitespace gave it -->
 my %sliceShape = ();    #<!-- module => [w, h] a slicing fixed -->
+#<!-- --keep_shapes: every module that already has a committed floorplan is a
+#     fixed shape from the start.  The slicer then only places it, the budget
+#     sizing below leaves its box alone, and the placement inside it -- which
+#     this walk may never revisit (-depth 0) -- still fits. -->
+if ( $keepShapes ) {
+  my $n = 0;
+  foreach my $m ( sort keys %MODULE_ALREADY ) {
+    next if ( $m eq $top );
+    my ($cw, $ch) = &dbfTstgenHierCommittedSize($m);
+    next unless ( $cw > 0 && $ch > 0 );
+    $sliceShape{$m} = [ $cw, $ch ];
+    $wsSize{$m} = [ $cw, $ch ];
+    $n++;
+  }
+  print "INFO-TST-HR_PL_ALL : 046 : --keep_shapes: $n module(s) keep the shape of their committed floorplan\n";
+}
 my $wsSiteUm = 0;
 my $budget = ( $sizing eq "budget" ) ? 1 : 0;
 if ( $sizing ne "" && ! $budget ) {
@@ -1171,6 +1246,8 @@ foreach my $rec ( @order ) {
                          : sqrt( &dbfTstgenHierEffArea($ref, $pack, \%wsMemo) / $u );
       my $bw = ( $siteUm > 0 ) ? POSIX::ceil( $side / $siteUm - 1e-9 ) * $siteUm : $side;
       my $bh = ( $rowHum > 0 ) ? POSIX::ceil( $side / (2 * $rowHum) - 1e-9 ) * 2 * $rowHum : $side;
+      #<!-- --keep_shapes: an already placed child keeps the box it was placed in -->
+      ($bw, $bh) = @{$sliceShape{$ref}} if ( $keepShapes && exists $sliceShape{$ref} );
       $sumBox += $bw * $bh;
       #<!-- the instance box too, not just the module: the block pass takes a
       #     block's size from its instance box, which edit_module filled in
