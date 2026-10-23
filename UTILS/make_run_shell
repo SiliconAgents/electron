@@ -1,0 +1,31 @@
+#<!-- shell: run a command from an electron script and wait for it -- so one
+#     session can hand off to an outside tool and carry on with the design
+#     still in memory (make place PLACE_OPT=1 runs Photon this way between
+#     placement and applying its ECO, instead of a second session reloading
+#     the design).  The words are joined with spaces and given to /bin/sh, so
+#     "shell cd ../.. && make photon_repeat" works.  Its exit status is
+#     reported; a script that must not carry on after a failure has a later
+#     step that needs the command's output, and that step refuses. -->
+sub shell {
+my $noOfArguments = @_;
+if ( $noOfArguments < 1 || $_[0] eq '-h' || $_[0] eq '-help' ) {
+  print "Usage : shell <command ...>\n";
+  print "        Runs the command with /bin/sh in the current directory and waits.\n";
+  print "        The exit status is reported (SHELL 002 / 003).\n";
+  return;
+}
+my $cmd = join(" ", @_);
+my $t0 = time();
+print "INFO-UTS-SHELL : 001 : $cmd\n";
+STDOUT->flush() if ( STDOUT->can("flush") );
+my $rc = system($cmd);
+my $status = ( $rc == -1 ) ? -1 : ( $rc >> 8 );
+if ( $status == 0 ) {
+  printf("INFO-UTS-SHELL : 002 : done in %d s\n", time() - $t0);
+} else {
+  printf("ERROR-UTS-SHELL : 003 : exit status %d after %d s: %s\n", $status, time() - $t0, $cmd);
+}
+return $status;
+}# sub shell
+
+1;
