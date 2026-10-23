@@ -115,7 +115,7 @@ tribuf -formal
 delete t:$assert
 opt -fast
 memory_map
-techmap
+{techmap}
 opt -fast
 dfflibmap -liberty {liberty}
 {latchmap}
@@ -142,6 +142,29 @@ ABC_PLAIN = ("+strash;&get,-n;&fraig,-x,-C,1000;&put;scorr;dc2;dretime;"
              "strash;&get,-n;&dch,-f;&nf,{D};&put")
 ABC_SIZED = ("+strash;&get,-n;&fraig,-x,-C,1000;&put;scorr;dc2;dretime;retime,-o,{D};"
              "strash;&get,-n;&dch,-f;&nf,{D};&put;buffer;upsize,{D};dnsize,{D};stime,-p")
+
+# KEEPING THE STRUCTURE -- --abc-keep-structure, and --adder.  The scripts
+# above start with an area pass (&fraig, scorr, dc2): it rewrites the AIG
+# for fewer nodes, and in doing so flattens a fast adder back into a slow
+# one before &nf ever sees it.  And &nf maps for the module's worst path:
+# when that cannot meet -D, every other path is given the same budget and
+# its area recovered, so an adder off the module's critical path comes out
+# as a chain.  On the FMA module of a 2.9M-cell design, a rounding
+# incrementer on a cross-module path mapped 52 cells deep inside it; abc put
+# the module itself at 1,001 ps.  Measured on that module alone:
+#                                   area   abc delay  incrementer depth
+#   as before                       464      1,001 ps      52 cells
+#   --adder kogge_stone             504        470         26
+#   both                            561        387         19
+#   --abc-keep-structure alone      525        387         19
+# and on the incrementer alone, both: 6 cells against 21.  So these trade
+# area for depth; they are measured choices, not defaults.
+ABC_PLAIN_KEEP = "+strash;&get,-n;&dch,-f;&nf,{D};&put"
+ABC_SIZED_KEEP = "+strash;&get,-n;&dch,-f;&nf,{D};&put;buffer;upsize,{D};dnsize,{D};stime,-p"
+ADDERS = {"brent_kung": "techmap",
+          "kogge_stone": "techmap -map +/techmap.v -map +/choices/kogge-stone.v",
+          "sklansky": "techmap -map +/techmap.v -map +/choices/sklansky.v",
+          "han_carlson": "techmap -map +/techmap.v -map +/choices/han-carlson.v"}
 
 
 # BUFFERING AND SIZING -- --abc-delay.  Plain `abc -liberty` MAPS and does
@@ -380,7 +403,7 @@ def run_one(job):
                              top=name, liberty=args.liberty, dest=dest,
                              latchmap=(f"techmap -map {args.latchmap}"
                                        if args.latchmap else ""),
-                             abc=abc)
+                             techmap=ADDERS[args.adder], abc=abc)
     t = time.time()
     # --abc-timeout: abc's timing-driven sizing (upsize/dnsize) does not scale
     # to one very large flat module -- a 127k-cell register bank, a latch
@@ -406,7 +429,7 @@ def run_one(job):
     except subprocess.TimeoutExpired:
         fallback = True
         p = subprocess.run([args.yosys, "-p", script("-fast " if args.abc_fast
-                                                     else f'-script "{ABC_PLAIN}" ')],
+                                                     else f'-script "{ABC_PLAIN_KEEP if args.abc_keep_structure else ABC_PLAIN}" ')],
                            capture_output=True, text=True)
     with open(log, "w") as fh:
         if fallback:
@@ -462,6 +485,14 @@ def main():
                     help="map with `abc -fast`. DO NOT, unless you are timing "
                          "something: on a large design it cost 44%% of the cell "
                          "count and saves nothing (see the note on SCRIPT)")
+    ap.add_argument("--adder", choices=sorted(ADDERS), default="brent_kung",
+                    help="the prefix structure adders and comparators are built "
+                         "with before abc (yosys +/choices); default brent_kung, "
+                         "yosys's own.  See the note on ABC_PLAIN_KEEP")
+    ap.add_argument("--abc-keep-structure", action="store_true",
+                    help="leave out abc's area pass (&fraig, scorr, dc2) before "
+                         "mapping, so a fast adder is not flattened back into a "
+                         "slow one -- more area, less depth")
     ap.add_argument("--abc-delay", type=float, metavar="PS",
                     help="buffer high-fanout nets and size gates toward this "
                          "delay target (abc -constr -D), in picoseconds. Off "
@@ -483,7 +514,8 @@ def main():
                     help="carry on past a level with failures (the next level "
                          "will fail too, but it reports every break at once)")
     args = ap.parse_args()
-    args.abc_opts = "-fast " if args.abc_fast else f'-script "{ABC_PLAIN}" '
+    args.abc_opts = "-fast " if args.abc_fast else \
+        f'-script "{ABC_PLAIN_KEEP if args.abc_keep_structure else ABC_PLAIN}" '
     if args.abc_delay:
         driver, load = args.abc_driver, args.abc_load
         if driver is None or load is None:
@@ -498,7 +530,7 @@ def main():
         with open(constr, "w") as fh:
             fh.write(f"set_driving_cell {driver}\nset_load {load:.4f}\n")
         if not args.abc_fast:
-            args.abc_opts = f'-script "{ABC_SIZED}" '
+            args.abc_opts = f'-script "{ABC_SIZED_KEEP if args.abc_keep_structure else ABC_SIZED}" '
         args.abc_opts += f"-constr {constr} -D {args.abc_delay:g} "
         print(f"yosys_bottom_up: buffering and sizing on: -D {args.abc_delay:g} ps, "
               f"inputs driven by {driver}, outputs loaded {load:.3f} fF")
