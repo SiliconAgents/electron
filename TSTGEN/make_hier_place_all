@@ -600,9 +600,9 @@ if ( defined $spec ) {
     my ($dir, $kids) = @$n;
     #<!-- each part gets the room its fixed blocks need, then the rest of the
     #     cut is shared by area.  With no fixed shape anywhere that is the
-    #     plain area split; if the fixed ones need more than there is, they
-    #     share what there is in proportion to their need (and $apply counts
-    #     the misses). -->
+    #     plain area split, and it is the fallback too when the fixed ones
+    #     need more than there is ($apply counts the misses) -- shared by
+    #     need instead, a part with no fixed shape would get no room at all. -->
     my $span = ( $dir eq 'H' ) ? $x1 - $x0 : $y1 - $y0;
     my @need = map { my @wh = $needOf->($_); ( $dir eq 'H' ) ? $wh[0] : $wh[1] } @$kids;
     my @area = map { $areaOf->($_) } @$kids;
@@ -611,7 +611,6 @@ if ( defined $spec ) {
     $sumA += $_ foreach ( @area );
     my @len;
     if ( $sumN > 0 && $sumN <= $span ) { @len = map { $need[$_] + ( $span - $sumN ) * $area[$_] / $sumA } 0 .. $#$kids; }
-    elsif ( $sumN > 0 )                { @len = map { $span * $need[$_] / $sumN } 0 .. $#$kids; }
     else                               { @len = map { $span * $area[$_] / $sumA } 0 .. $#$kids; }
     my $acc = 0;
     for ( my $i = 0 ; $i < @$kids ; $i++ ) {
