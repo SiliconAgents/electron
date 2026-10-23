@@ -358,7 +358,7 @@ return { blocks => scalar(@b), fill => ( $box > 0 ) ? $area / $box : 0,
 #     too. -->
 sub dbfTstgenHierSliceBlocks {
 
-my ($module, $W, $H, $siteUm, $rowHum, $fixed, $sizes) = @_;
+my ($module, $W, $H, $siteUm, $rowHum, $fixed, $sizes, $spec) = @_;
 my $pitchY = 2 * $rowHum;
 my %grp = ();
 my %box = ();
@@ -370,6 +370,20 @@ foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
   next unless ( @bb >= 4 && defined $bb[3] && $bb[2] > $bb[0] && $bb[3] > $bb[1] );
   $box{$inst} = [ @bb[0..3] ];
   push(@{$grp{$ref}}, $inst);
+}
+#<!-- a spec divides the box by the children's areas, so every child needs a
+#     size before it can be used: the walk gives them one with -sizing budget
+#     or -whitespace.  Without, the blocks have no box yet and the spec is
+#     refused rather than holding blocks that are nowhere. -->
+if ( defined $spec ) {
+  my @noSize = ();
+  foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+    next if ( $inst eq "PIN" || exists $box{$inst} );
+    my $ref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+    push(@noSize, $inst) if ( defined $ref && ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} ) );
+  }
+  return { blocks => 0, error => "child block(s) with no size yet, give hier_place_all -sizing budget or -whitespace: @noSize" }
+    if ( @noSize || ! %box );
 }
 return { blocks => 0 } unless ( %box );
 my @items = ();
@@ -454,7 +468,6 @@ $solve = sub {
   return $best;
 };
 
-my $sol = $solve->(\@items, 0, 0, $W, $H, 0);
 my ($nBlocks, $worstAsp, $minAreaRatio, $hardMiss) = (0, 1, 1, 0);
 my $snapUp = sub { my ($v, $p) = @_; return ( $p > 0 ) ? POSIX::ceil( $v / $p - 1e-9 ) * $p : $v; };
 my $snapDn = sub { my ($v, $p) = @_; return ( $p > 0 ) ? POSIX::floor( $v / $p + 1e-9 ) * $p : $v; };
@@ -512,11 +525,158 @@ $apply = sub {
   if ( $dir eq 'v' ) { $apply->($l, $x0, $y0, $cut, $y1); $apply->($rr, $cut, $y0, $x1, $y1); }
   else               { $apply->($l, $x0, $y0, $x1, $cut); $apply->($rr, $x0, $cut, $x1, $y1); }
 };
+#<!-- -floorplan_spec: the cut tree is given instead of searched for.  Every
+#     child block is a leaf of its own, named; a part of the box gets area in
+#     proportion to the blocks under it, exactly as a searched cut does, and
+#     the leaves go through the same $apply -- site and row snapping, and a
+#     module's shape set once and held for its other instances. -->
+if ( defined $spec ) {
+  my @leaves = ();
+  my $walk;
+  $walk = sub { my ($n) = @_; if ( ref $n ) { $walk->($_) foreach ( @{$n->[1]} ); } else { push(@leaves, $n); } };
+  $walk->($spec);
+  my %cnt = ();
+  $cnt{$_}++ foreach ( @leaves );
+  #<!-- "*" is the module's own logic: no block, all of the box the blocks do
+  #     not need, left empty for the cell pass to fill -->
+  my $starCnt = exists $cnt{'*'} ? delete $cnt{'*'} : 0;
+  my @unknown = grep { ! exists $box{$_} } sort keys %cnt;
+  my @twice   = grep { $cnt{$_} > 1 } sort keys %cnt;
+  my @missing = grep { ! exists $cnt{$_} } sort keys %box;
+  my $blockA = 0;
+  $blockA += ( $box{$_}[2] - $box{$_}[0] ) * ( $box{$_}[3] - $box{$_}[1] ) foreach ( keys %box );
+  my $freeA = $W * $H - $blockA;
+  if ( @unknown || @twice || @missing || $starCnt > 1 || ( $starCnt && $freeA <= 0 ) ) {
+    my @why = ();
+    push(@why, "* given more than once") if ( $starCnt > 1 );
+    push(@why, "* given but the blocks leave no free area") if ( $starCnt && $freeA <= 0 );
+    push(@why, "not blocks of $module: @unknown") if ( @unknown );
+    push(@why, "named twice: @twice") if ( @twice );
+    push(@why, "not named: @missing") if ( @missing );
+    return { blocks => 0, error => join("; ", @why) };
+  }
+  my %leaf = ();
+  foreach my $i ( grep { $_ ne '*' } @leaves ) {
+    my $ref = $PSEUDO_VINST_ALREADY{$module}{$i}->dbPimDBGetInstCellref;
+    my $a = ( $box{$i}[2] - $box{$i}[0] ) * ( $box{$i}[3] - $box{$i}[1] );
+    $leaf{$i} = { ref => $ref, insts => [ $i ], k => 1, a => $a, area => $a,
+                  cx => ( $box{$i}[0] + $box{$i}[2] ) / 2, cy => ( $box{$i}[1] + $box{$i}[3] ) / 2 };
+  }
+  my $areaOf;
+  $areaOf = sub { my ($n) = @_; return ( $n eq '*' ? $freeA : $leaf{$n}{area} ) unless ( ref $n );
+                  my $A = 0; $A += $areaOf->($_) foreach ( @{$n->[1]} ); return $A; };
+  my $place;
+  $place = sub {
+    my ($n, $x0, $y0, $x1, $y1) = @_;
+    unless ( ref $n ) {
+      return if ( $n eq '*' );
+      my $it = $leaf{$n};
+      #<!-- a module an earlier leaf (or an earlier parent) shaped keeps it -->
+      $it->{hard} = $fixed->{$it->{ref}} if ( exists $fixed->{$it->{ref}} );
+      $apply->([ 'leaf', $it ], $x0, $y0, $x1, $y1);
+      return;
+    }
+    my ($dir, $kids) = @$n;
+    my ($A, $acc) = ( $areaOf->($n), 0 );
+    foreach my $k ( @$kids ) {
+      my $f0 = $acc / $A;
+      $acc += $areaOf->($k);
+      my $f1 = $acc / $A;
+      #<!-- H left to right; V top to bottom, the way a floorplan is drawn -->
+      if ( $dir eq 'H' ) { $place->($k, $x0 + ($x1 - $x0) * $f0, $y0, $x0 + ($x1 - $x0) * $f1, $y1); }
+      else               { $place->($k, $x0, $y1 - ($y1 - $y0) * $f1, $x1, $y1 - ($y1 - $y0) * $f0); }
+    }
+  };
+  $place->($spec, 0, 0, $W, $H);
+  return { blocks => $nBlocks, groups => scalar(@leaves) - $starCnt, worst_aspect => $worstAsp,
+           min_area_ratio => $minAreaRatio, hard_misses => $hardMiss, spec => 1,
+           own_region => ( $starCnt ? $freeA : 0 ) };
+}
+
+my $sol = $solve->(\@items, 0, 0, $W, $H, 0);
 $apply->($sol->[1], 0, 0, $W, $H);
 return { blocks => $nBlocks, groups => scalar(@items), worst_aspect => $worstAsp,
          min_area_ratio => $minAreaRatio, hard_misses => $hardMiss };
 
 }# sub dbfTstgenHierSliceBlocks
+
+
+#<!-- -floorplan_spec <file>: module => cut tree, the arrangement of that
+#     module's child blocks given rather than placed.  One module per entry,
+#     "module : expression", where an expression is an instance name or
+#     V( e e ... ) -- stacked, the first on top -- or H( e e ... ) -- side by
+#     side, the first on the left.  Nests; may run over several lines; # starts
+#     a comment.  Every hierarchical child of the module is named exactly once.
+#     "*" may stand once for the module's own logic: it gets all the area the
+#     blocks leave free, nothing is placed there, and the cell pass fills it --
+#     without it that free area is spread round every block.
+#
+#         mc_top : V( \core_hi  H( mem0 mem1 )  \core_lo )
+#
+#     It says which block sits beside which and nothing about microns: the
+#     sizes come from the sizing the walk already does, so a spec written
+#     from a hierBlame report, by a person or a language model, cannot ask for
+#     an arrangement that does not fit. -->
+sub dbfTstgenReadFloorplanSpec {
+my ($file) = @_;
+my $fh;
+unless ( open($fh, "<", $file) ) {
+  print "ERR-TST-HR_PL_ALL : 038 : cannot read -floorplan_spec $file : $!\n";
+  return undef;
+}
+my @entries = ();                                #<!-- [module, text, line] -->
+my $depth = 0;
+while ( my $l = <$fh> ) {
+  $l =~ s/#.*$//;
+  next unless ( $l =~ m/\S/ );
+  if ( $depth == 0 && $l =~ m/^\s*([^\s:()]+)\s*:(.*)$/ ) {
+    push(@entries, [ $1, $2, $. ]);
+  }
+  elsif ( @entries ) {
+    $entries[-1][1] .= " $l";
+  }
+  else {
+    print "ERR-TST-HR_PL_ALL : 039 : $file line $.: expected \"module : expression\"\n";
+    close($fh);
+    return undef;
+  }
+  my $t = $entries[-1][1];
+  $depth = ( () = $t =~ m/\(/g ) - ( () = $t =~ m/\)/g );
+}
+close($fh);
+my %spec = ();
+foreach my $e ( @entries ) {
+  my ($mod, $text, $line) = @$e;
+  my @t = ( $text =~ m/([VH]\(|\)|[^\s()]+)/g );
+  my $pos = 0;
+  my $parse;
+  $parse = sub {
+    my $tok = $t[$pos++];
+    return undef unless ( defined $tok && $tok ne ")" );
+    return $tok unless ( $tok =~ m/^([VH])\($/ );
+    my ($dir, @kids) = ($1);
+    while ( $pos < @t && $t[$pos] ne ")" ) {
+      my $k = $parse->();
+      return undef unless ( defined $k );
+      push(@kids, $k);
+    }
+    return undef unless ( $pos < @t && @kids );
+    $pos++;
+    return [ $dir, \@kids ];
+  };
+  my $tree = $parse->();
+  unless ( defined $tree && $pos == @t ) {
+    print "ERR-TST-HR_PL_ALL : 040 : $file line $line: cannot read the expression for $mod\n";
+    return undef;
+  }
+  if ( exists $spec{$mod} ) {
+    print "ERR-TST-HR_PL_ALL : 041 : $file line $line: $mod is given twice\n";
+    return undef;
+  }
+  $spec{$mod} = $tree;
+}
+return \%spec;
+}# sub dbfTstgenReadFloorplanSpec
 
 
 #<!-- The module's own box, in microns, as the pseudo database has it. -->
@@ -629,6 +789,7 @@ my $cellsPlacer;
 my $netWeights = "";
 my $weightScale = 10;
 my $weightPower = 3;
+my $fpSpecFile = "";
 my $freeFlops = 0;
 my $seqAnchorLimit = 2000;
 my $legalize = 0;
@@ -660,6 +821,13 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                          a placer that reads weights (qp) pulls those\n";
   print "                                          cones tight.  -weight_scale <K>, default 10;\n";
   print "                                          -weight_power <P>, default 3\n";
+  print "                       -floorplan_spec <file>  the arrangement of some modules' child\n";
+  print "                                          blocks, given as a cut tree per module:\n";
+  print "                                          \"mod : V( a H( b c ) d )\", V stacked top\n";
+  print "                                          to bottom, H left to right; * once for\n";
+  print "                                          the module's own logic.  Sizes come\n";
+  print "                                          from -sizing as usual; the block pass then\n";
+  print "                                          places only the ports and flops around them\n";
   print "                       -cells_placer <path>|qp the cell pass only, default -placer.  qp\n";
   print "                                               is ELECTRON_HOME/3RDBIN/hier_place_qp,\n";
   print "                                               the analytic one: seconds where\n";
@@ -744,6 +912,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-net_weights")   { $netWeights = $_[$i+1]; }
   elsif ($_[$i] eq "-weight_scale")  { $weightScale = $_[$i+1]; }
   elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
+  elsif ($_[$i] eq "-floorplan_spec"){ $fpSpecFile = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot")      { $snapPrefix = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot_args") { $snapArgs = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_ALL : 001 : invalid option $_[$i]\n"; }
@@ -768,6 +937,18 @@ my %instCnt = ();
 #     module's own by stripping each instance path the walk reached it by,
 #     less the top's name (mc2/mc_fp -> mc_fp; the top itself -> "") -->
 %HIER_PLACE_NET_PREFIXES = ();
+my $fpSpec = {};
+if ( $fpSpecFile ne "" ) {
+  $fpSpec = &dbfTstgenReadFloorplanSpec($fpSpecFile);
+  return unless ( defined $fpSpec );
+  my @unknown = grep { ! exists $MODULE_ALREADY{$_} } sort keys %$fpSpec;
+  if ( @unknown ) {
+    print "ERR-TST-HR_PL_ALL : 042 : -floorplan_spec names module(s) not in the design: @unknown\n";
+    return;
+  }
+  print "INFO-TST-HR_PL_ALL : 043 : floorplan spec for " . scalar(keys %$fpSpec) . " module(s) from $fpSpecFile: " .
+        join(" ", sort keys %$fpSpec) . "\n";
+}
 if ( $netWeights ne "" ) {
   #<!-- every instance of every module: the walk above expands one instance
   #     per module, and a module's other instances (three of four lanes)
@@ -1025,6 +1206,35 @@ foreach my $rec ( @order ) {
     }
   }
 
+  #<!-- -floorplan_spec: cut this module's box by the given tree, before the
+  #     block pass, and hold the blocks there FIXED, so the pass only places
+  #     the ports and the flops around them.  A spec that does not name the
+  #     module's blocks exactly is reported and the module placed as usual. -->
+  my @specHeld = ();
+  if ( exists $fpSpec->{$mod} && ! $keepExisting ) {
+    my $sum = &dbfTstgenHierSliceBlocks($mod, $w, $h, $wsSiteUm, $GLOBAL->dbGlobalGetRowHeight,
+                                        \%sliceShape, \%wsSize, $fpSpec->{$mod});
+    if ( exists $sum->{error} ) {
+      print "WARN-TST-HR_PL_ALL : 044 : floorplan spec for $mod not used, it is placed as usual: $sum->{error}\n";
+    }
+    else {
+      foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$mod}} ) {
+        next if ( $inst eq "PIN" );
+        my $ref = $PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBGetInstCellref;
+        next unless ( defined $ref && ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} ) );
+        my @bb = &dbfTstgenBboxFromCoords($PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBGetInstRelBbox);
+        next unless ( @bb >= 4 && defined $bb[3] && $bb[2] > $bb[0] && $bb[3] > $bb[1] );
+        $PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBSetInstStatus("FIXED");
+        push(@specHeld, $inst);
+      }
+      $mrec{floorplan_spec} = $sum;
+      printf("INFO-TST-HR_PL_ALL : 045 : %s arranged by the floorplan spec: %d block(s), worst aspect %.2f%s%s\n",
+             $mod, $sum->{blocks}, $sum->{worst_aspect},
+             $sum->{own_region} ? sprintf(", %.0f um2 kept for its own logic", $sum->{own_region}) : "",
+             $sum->{hard_misses} ? ", $sum->{hard_misses} fixed shape(s) did not fit" : "");
+    }
+  }
+
   if ( $keepExisting ) {
     print "INFO-TST-HR_PL_ALL : 014 : $mod is already placed, keeping that arrangement\n";
     $keptCnt++;
@@ -1059,7 +1269,9 @@ foreach my $rec ( @order ) {
     }
     &hier_place(@placeArgs);
     $mrec{blocks_after_block_pass} = &dbfTstgenHierBlockFit($mod, $w, $h);
-    if ( $sliceBlocks ) {
+    #<!-- held only for the block pass: PLACED again, like any other block -->
+    $PSEUDO_VINST_ALREADY{$mod}{$_}->dbPimDBSetInstStatus("PLACED") foreach ( @specHeld );
+    if ( $sliceBlocks && ! @specHeld ) {
       my $sum = &dbfTstgenHierSliceBlocks($mod, $w, $h, $wsSiteUm, $GLOBAL->dbGlobalGetRowHeight,
                                           \%sliceShape, \%wsSize);
       if ( $sum->{blocks} > 0 ) {
