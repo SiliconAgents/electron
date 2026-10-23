@@ -229,4 +229,60 @@ sub write_sgraph {
 }#write_sgraph 
 
 #------------------------------------------------------------------------------------------------#
+#<!-- write_top_positions: what a top-only re-place changed, for a Photon
+#     server that already holds the sgraph.  After hier_place_all --keep_shapes
+#     -depth 0 the top's children have moved as rigid blocks and only the top's
+#     own cells moved freely, so this is the whole difference between two
+#     placements: a few thousand lines where write_sgraph writes the design
+#     again (3.2 GB, 114 s on a 3M-instance tile).  Ports are left out: the
+#     sgraph marks them PORT and Photon's wire estimate counts only PLACED and
+#     FIXED pins.  All DBU, in write_sgraph's frame:
+#       DBU <per micron>
+#       BLOCK <top child instance> <llx> <lly>     its origin in the top
+#       INST <top cell> <x> <y>                    each of the top's own cells -->
+sub write_top_positions {
+ my $noOfArguments = @_;
+ if ( $noOfArguments < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP" ) {
+    print "Usage : write_top_positions -output <file>\n";
+    print "\n";
+    print "The positions a top-only re-place changes: each child block's origin in\n";
+    print "the top and each of the top's own cells, in DBU -- for photon_server's\n";
+    print "move, so a floorplan try is re-timed without writing the sgraph again.\n";
+    print "  DBU <per micron>\n";
+    print "  BLOCK <child instance> <llx> <lly>\n";
+    print "  INST <top cell> <x> <y>        PLACED and FIXED cells only\n";
+    return;
+ }
+ my $out = "";
+ for ( my $i = 0 ; $i < $noOfArguments ; $i++ ) {
+    $out = $_[$i+1] if ( $_[$i] eq "-output" );
+ }
+ my $top = $GLOBAL->dbfGlobalGetTOP;
+ my $tf = &get_floorplanID_of_module($top);
+ if ( $out eq "" || $tf == -1 || ! exists $FLOORPLAN_ALREADY{$tf} ) {
+    print "ERR-SPK-WR_TOP_POS : 001 : need -output, and a floorplan of $top\n";
+    return;
+ }
+ open(my $fh, ">", $out) or do { print "ERR-SPK-WR_TOP_POS : 002 : cannot write $out\n"; return; };
+ print $fh "DBU " . $GLOBAL->dbfGlobalGetDBU . "\n";
+ my ($nb, $nc) = (0, 0);
+ foreach my $c ( sort $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstList ) {
+    my @e = $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstExtent($c);
+    next unless ( @e == 4 );
+    print $fh "BLOCK $c $e[0] $e[1]\n";
+    $nb++;
+ }
+ foreach my $o ( sort $FLOORPLAN_ALREADY{$tf}->dbFlplanGetLeafInstList ) {
+    next unless ( exists $CADB{$o} );
+    my $st = $CADB{$o}->dbCadbGetStatus;
+    next unless ( defined $st && ( $st eq "PLACED" || $st eq "FIXED" ) );
+    my @l = $CADB{$o}->dbCadbGetLoc;
+    print $fh "INST $o $l[0] $l[1]\n";
+    $nc++;
+ }
+ close($fh);
+ print "INFO-SPK-WR_TOP_POS : 003 : $nb block origin(s) and $nc cell(s) of $top written to $out\n";
+}#write_top_positions
+
+#------------------------------------------------------------------------------------------------#
 1;
