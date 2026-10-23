@@ -2,11 +2,16 @@
 """Compare two DEFs of one design, before and after its top level was placed
 again, and check the children moved as rigid pieces.
 
-  check_rigid.py before.def after.def
+  check_rigid.py before.def after.def [instance path ...]
 
 Cells are grouped by their first hierarchy segment (the top's child instance
 they sit in).  Every group must have moved by one offset, and no two groups'
 cell extents may overlap after the move.  Exits non-zero, saying which, if not.
+
+Given instance paths (hier_place_all -only: every instance of the module
+re-placed), the groups are the children under each of them instead, the
+module's own cells may go anywhere, and every cell outside them must not have
+moved at all.
 """
 import collections
 import re
@@ -33,12 +38,27 @@ def load(path):
 
 
 before, after = load(sys.argv[1]), load(sys.argv[2])
+under = sys.argv[3:]
 groups = collections.defaultdict(list)
-for name in before:
-    if name in after and "/" in name:
-        groups[name.split("/")[0]].append(name)
-
 bad, boxes, moved = [], {}, 0
+outside = 0
+for name in before:
+    if name not in after:
+        continue
+    if not under:
+        if "/" in name:
+            groups[name.split("/")[0]].append(name)
+        continue
+    p = next((u for u in under if name.startswith(u + "/")), None)
+    if p is None:
+        outside += 1
+        if before[name] != after[name]:
+            bad.append(f"{name} is outside {' '.join(under)} and moved")
+        continue
+    rest = name[len(p) + 1:]
+    if "/" in rest:
+        groups[p + "/" + rest.split("/")[0]].append(name)
+
 for g, names in sorted(groups.items()):
     shifts = collections.Counter((after[n][0] - before[n][0], after[n][1] - before[n][1]) for n in names)
     shift, count = shifts.most_common(1)[0]
@@ -61,4 +81,5 @@ if moved == 0:
 if bad:
     print("check_rigid: " + "; ".join(bad))
     sys.exit(1)
-print(f"check_rigid: {len(groups)} blocks, {moved} moved, every one rigidly, none overlapping")
+print(f"check_rigid: {len(groups)} blocks, {moved} moved, every one rigidly, none overlapping"
+      + (f"; {outside} cells outside them unmoved" if under else ""))

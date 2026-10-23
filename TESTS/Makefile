@@ -110,6 +110,12 @@ nangate_keep_shapes:
 	python3 check_rigid.py workarea/ks1.def workarea/ks2.def
 	grep -h "PLACED\|FIXED" workarea/ks2.def | sort > workarea/ks2.placed ; grep -h "PLACED\|FIXED" workarea/ks3.def | sort > workarea/ks3.placed
 	@cmp -s workarea/ks2.placed workarea/ks3.placed || { echo "nangate_keep_shapes: the rigid hier2flat differs from a full one"; exit 1; }
+	$(call KS_EXPECT,HR_PL_ALL : 051 : -only vedic_8x8: 4 instance(s))
+	$(call KS_EXPECT,vedic_8x8 arranged by the floorplan spec: 7 block(s))
+	$(call KS_EXPECT,INFO-SPK-WR_MOVES : 003 :)
+	python3 check_rigid.py workarea/ks3.def workarea/ks4.def V9 V10 V11 V12
+	grep -h "PLACED\|FIXED" workarea/ks4.def | sort > workarea/ks4.placed ; grep -h "PLACED\|FIXED" workarea/ks5.def | sort > workarea/ks5.placed
+	@cmp -s workarea/ks4.placed workarea/ks5.placed || { echo "nangate_keep_shapes: the -only rigid hier2flat differs from a full one"; exit 1; }
 	@echo "nangate_keep_shapes: all expected results"
 
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and

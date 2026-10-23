@@ -1536,33 +1536,57 @@ sub hier2flat{
 #     A FIXED instance keeps that status rather than being demoted to PLACED,
 #     which the old code did to every fixed cell in the design. -->
         my ($h2fPlaced, $h2fFixed, $h2fUnplaced) = (0, 0, 0);
-#<!-- Rigid mode, set up by hier_place_all --keep_shapes -depth 0 in
-#     %HIER2FLAT_RIGID_FROM (top child => its origin and orient before): every
-#     child kept its shape and its contents, so a cell under one moves by
-#     exactly as much as the child did.  Shift those; only the top's own cells
-#     go through the floorplan lookup, and only theirs get a new box.  Any
-#     child that is new, gone or turned and it is the full rebuild. -->
-        my (%rigidD, @rigidTop);
-        my ($rigid, $rigidShifted) = ( scalar(keys %HIER2FLAT_RIGID_FROM) ? 1 : 0, 0 );
+#<!-- Rigid mode, set up by hier_place_all --keep_shapes (-depth 0 or -only)
+#     in %HIER2FLAT_RIGID: the module re-placed, the instance paths it is
+#     reached by ("" for the top), and each of its children's origin and
+#     orient before.  Every child kept its shape and its contents, so a cell
+#     under one moves by exactly as much as the child did: shift those.  Only
+#     the module's own cells go through the floorplan lookup, and only theirs
+#     get a new box; everything outside the module is left alone.  Any child
+#     that is new, gone or turned and it is the full rebuild.  What moved is
+#     kept in %HIER2FLAT_LAST for write_moves. -->
+        my (%rigidD, @rigidTop, @rigidPaths);
+        my ($rigid, $rigidShifted, $rigidOut) = ( exists $HIER2FLAT_RIGID{module} ? 1 : 0, 0, 0 );
+        my $rf = $rigid ? &get_floorplanID_of_module($HIER2FLAT_RIGID{module}) : -1;
         if ( $rigid ) {
-          my @now = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetHierInstList;
-          $rigid = 0 if ( @now != scalar(keys %HIER2FLAT_RIGID_FROM) );
+          my $was = $HIER2FLAT_RIGID{kids};
+          @rigidPaths = @{ $HIER2FLAT_RIGID{paths} };
+          my @now = ( $rf != -1 && exists $FLOORPLAN_ALREADY{$rf} ) ? $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstList : ();
+          $rigid = 0 if ( $rf == -1 || @now != scalar(keys %$was) );
           foreach my $c ( @now ) {
             last unless ( $rigid );
-            my @e = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetHierInstExtent($c);
-            my $o = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetHierInstOrient($c);
-            if ( @e != 4 || ! exists $HIER2FLAT_RIGID_FROM{$c} || $HIER2FLAT_RIGID_FROM{$c}[2] ne $o ) { $rigid = 0; last; }
-            $rigidD{$c} = [ $e[0] - $HIER2FLAT_RIGID_FROM{$c}[0], $e[1] - $HIER2FLAT_RIGID_FROM{$c}[1] ];
+            my @e = $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstExtent($c);
+            my $o = $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstOrient($c);
+            if ( @e != 4 || ! exists $was->{$c} || $was->{$c}[2] ne $o ) { $rigid = 0; last; }
+            $rigidD{$c} = [ $e[0] - $was->{$c}[0], $e[1] - $was->{$c}[1] ];
           }
-          print "INFO-UTS-HIER2FLAT : 008 : the top's children were not all moved rigidly; rebuilding every location\n" unless ( $rigid );
-          %HIER2FLAT_RIGID_FROM = ();
+          print "INFO-UTS-HIER2FLAT : 008 : $HIER2FLAT_RIGID{module}'s children were not all moved rigidly; rebuilding every location\n" unless ( $rigid );
+          %HIER2FLAT_RIGID = ();
+        }
+        %HIER2FLAT_LAST = ();
+        if ( $rigid ) {
+          my %sh = ();
+          foreach my $P ( @rigidPaths ) {
+            foreach my $c ( keys %rigidD ) {
+              next unless ( $rigidD{$c}[0] != 0 || $rigidD{$c}[1] != 0 );
+              $sh{ $P eq "" ? $c : "$P/$c" } = $rigidD{$c};
+            }
+          }
+          %HIER2FLAT_LAST = ( shifts => \%sh, cells => \@rigidTop );
         }
         foreach my $inst (keys %CADB){
             if ( $rigid ) {
-              my $p = index($inst, "/");
-              if ( $p > 0 && exists $rigidD{ substr($inst, 0, $p) }
-                   && ! $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanHasLeafInst($inst) ) {
-                my ($dx, $dy) = @{ $rigidD{ substr($inst, 0, $p) } };
+              my $rest;
+              my $atTop = 0;
+              foreach my $P ( @rigidPaths ) {
+                if ( $P eq "" ) { $rest = $inst; $atTop = 1; last; }
+                if ( index($inst, "$P/") == 0 ) { $rest = substr($inst, length($P) + 1); last; }
+              }
+              unless ( defined $rest ) { $rigidOut++; next; }
+              my $p = index($rest, "/");
+              if ( $p > 0 && exists $rigidD{ substr($rest, 0, $p) }
+                   && ! ( $atTop && $FLOORPLAN_ALREADY{$rf}->dbFlplanHasLeafInst($inst) ) ) {
+                my ($dx, $dy) = @{ $rigidD{ substr($rest, 0, $p) } };
                 if ( $dx != 0 || $dy != 0 ) {
                   my @l = $CADB{$inst}->dbCadbGetLoc;
                   $CADB{$inst}->dbCadbSetLoc($l[0] + $dx, $l[1] + $dy);
@@ -1591,7 +1615,7 @@ sub hier2flat{
         print "INFO-UTS-HIER2FLAT : 002 : $h2fUnplaced left UNPLACED with no location in the hierarchy\n";
         %hier_inst_abs_location = ();
         if ( $rigid ) {
-          print "INFO-UTS-HIER2FLAT : 009 : $rigidShifted cell(s) moved with their block, ".scalar(@rigidTop)." of the top's own looked up\n";
+          print "INFO-UTS-HIER2FLAT : 009 : $rigidShifted cell(s) moved with their block, ".scalar(@rigidTop)." of the module's own looked up, $rigidOut outside it untouched\n";
           $DEF_DATABASE_UNIT = $GLOBAL->dbfGlobalGetDBU;
           foreach my $inst ( @rigidTop ) {
             my $ref = $CADB{$inst}->dbCadbGetCellref;

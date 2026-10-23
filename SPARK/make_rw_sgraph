@@ -285,4 +285,53 @@ sub write_top_positions {
 }#write_top_positions
 
 #------------------------------------------------------------------------------------------------#
+#<!-- write_moves: what the last rigid re-place changed -- hier_place_all
+#     --keep_shapes at -depth 0 or with -only -- as photon_server's moveby
+#     reads it.  Relative to the placement before that re-place, so a server
+#     that has applied every earlier one stays in step with the session.  DBU:
+#       DBU <per micron>
+#       SHIFT <instance path> <dx> <dy>    every instance under it moved by that
+#       INST <cell> <x> <y>                the re-placed module's own cells -->
+sub write_moves {
+ my $noOfArguments = @_;
+ if ( $noOfArguments < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP" ) {
+    print "Usage : write_moves -output <file>\n";
+    print "\n";
+    print "What the last hier_place_all --keep_shapes re-place (-depth 0 or -only)\n";
+    print "moved, for photon_server's moveby: each child block's shift and the\n";
+    print "re-placed module's own cells, in DBU.\n";
+    print "  DBU <per micron>\n";
+    print "  SHIFT <instance path> <dx> <dy>\n";
+    print "  INST <cell> <x> <y>        PLACED and FIXED cells only\n";
+    return;
+ }
+ my $out = "";
+ for ( my $i = 0 ; $i < $noOfArguments ; $i++ ) {
+    $out = $_[$i+1] if ( $_[$i] eq "-output" );
+ }
+ unless ( exists $HIER2FLAT_LAST{shifts} ) {
+    print "ERR-SPK-WR_MOVES : 001 : nothing to write: the last hier2flat was not a rigid re-place\n";
+    return;
+ }
+ open(my $fh, ">", $out) or do { print "ERR-SPK-WR_MOVES : 002 : cannot write $out\n"; return; };
+ print $fh "DBU " . $GLOBAL->dbfGlobalGetDBU . "\n";
+ my ($ns, $nc) = (0, 0);
+ foreach my $p ( sort keys %{ $HIER2FLAT_LAST{shifts} } ) {
+    my ($dx, $dy) = @{ $HIER2FLAT_LAST{shifts}{$p} };
+    print $fh "SHIFT $p $dx $dy\n";
+    $ns++;
+ }
+ foreach my $o ( sort @{ $HIER2FLAT_LAST{cells} } ) {
+    next unless ( exists $CADB{$o} );
+    my $st = $CADB{$o}->dbCadbGetStatus;
+    next unless ( defined $st && ( $st eq "PLACED" || $st eq "FIXED" ) );
+    my @l = $CADB{$o}->dbCadbGetLoc;
+    print $fh "INST $o $l[0] $l[1]\n";
+    $nc++;
+ }
+ close($fh);
+ print "INFO-SPK-WR_MOVES : 003 : $ns block shift(s) and $nc cell(s) written to $out\n";
+}#write_moves
+
+#------------------------------------------------------------------------------------------------#
 1;

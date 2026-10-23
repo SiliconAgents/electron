@@ -861,6 +861,7 @@ my $weightScale = 10;
 my $weightPower = 3;
 my $fpSpecFile = "";
 my $keepShapes = 0;
+my $only = "";
 my $freeFlops = 0;
 my $seqAnchorLimit = 2000;
 my $legalize = 0;
@@ -904,6 +905,10 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                          it, so its internal placement stays valid.  For\n";
   print "                                          re-placing only the top (-depth 0 --no_cells)\n";
   print "                                          in a session that has placed everything\n";
+  print "                       -only <module>          place that module alone, in the box it has,\n";
+  print "                                          with --keep_shapes: its children move as\n";
+  print "                                          blocks by its -floorplan_spec line, its own\n";
+  print "                                          cells are placed again, nothing else moves\n";
   print "                       -cells_placer <path>|qp the cell pass only, default -placer.  qp\n";
   print "                                               is ELECTRON_HOME/3RDBIN/hier_place_qp,\n";
   print "                                               the analytic one: seconds where\n";
@@ -990,6 +995,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
   elsif ($_[$i] eq "-floorplan_spec"){ $fpSpecFile = $_[$i+1]; }
   elsif ($_[$i] eq "--keep_shapes")  { $keepShapes = 1; }
+  elsif ($_[$i] eq "-only")          { $only = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot")      { $snapPrefix = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot_args") { $snapArgs = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_ALL : 001 : invalid option $_[$i]\n"; }
@@ -1009,25 +1015,66 @@ unless ( defined $cellsBatch && $cellsBatch ne "" ) {
 my @order = ();
 my %seen = ();
 my %instCnt = ();
-#<!-- --keep_shapes -depth 0 moves the top's children as rigid blocks and
-#     nothing inside them.  Note where each one is now, so the closing
-#     hier2flat can shift the flat cells under it by how far it moved rather
-#     than rebuild all of them from the floorplans: 85 s of a 212 s re-place
-#     on a 3M-instance tile.  This takes the flat database to agree with the
-#     committed floorplans, as it does after hier2flat -- or after
+#<!-- -only <module>: that module alone, in the box its parent gave it, its
+#     children kept as they are (--keep_shapes) and moved as blocks by its line
+#     of -floorplan_spec, its own cells placed again.  The fast loop one level
+#     down: the parent is not touched, so nothing outside the module moves. -->
+my @onlyPaths = ();
+if ( $only ne "" ) {
+  unless ( exists $MODULE_ALREADY{$only} ) {
+    print "ERR-TST-HR_PL_ALL : 047 : -only $only: no such module\n";
+    return;
+  }
+  unless ( $keepShapes ) {
+    print "ERR-TST-HR_PL_ALL : 048 : -only re-places one level inside placed blocks; it needs --keep_shapes\n";
+    return;
+  }
+  my %allPaths = ();
+  &dbfTstgenHierAllInstPaths($top, "", \%allPaths);
+  @onlyPaths = sort @{ $allPaths{$only} || [] };
+  unless ( @onlyPaths ) {
+    print "ERR-TST-HR_PL_ALL : 049 : -only $only: not instantiated under $top\n";
+    return;
+  }
+  my ($cw, $ch) = &dbfTstgenHierCommittedSize($only);
+  unless ( $cw > 0 && $ch > 0 ) {
+    print "ERR-TST-HR_PL_ALL : 050 : -only $only: it has no committed floorplan yet -- place the design first\n";
+    return;
+  }
+  printf("INFO-TST-HR_PL_ALL : 051 : -only %s: %d instance(s), %.3f x %.3f um, its children kept\n",
+         $only, scalar(@onlyPaths), $cw, $ch);
+}
+
+#<!-- --keep_shapes -depth 0 (or -only) moves one module's children as rigid
+#     blocks and nothing inside them.  Note where each one is now, so the
+#     closing hier2flat can shift the flat cells under it by how far it moved
+#     rather than rebuild all of them from the floorplans: 85 s of a 212 s
+#     re-place on a 3M-instance tile.  This takes the flat database to agree
+#     with the committed floorplans, as it does after hier2flat -- or after
 #     legalize_flat, whose legal positions the shift then keeps. -->
-%HIER2FLAT_RIGID_FROM = ();
-if ( $keepShapes && $maxDepth == 0 && ! $noFlatten && $top eq $GLOBAL->dbfGlobalGetTOP ) {
-  my $tf = &get_floorplanID_of_module($top);
-  if ( $tf != -1 && exists $FLOORPLAN_ALREADY{$tf} ) {
-    foreach my $c ( $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstList ) {
-      my @e = $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstExtent($c);
+%HIER2FLAT_RIGID = ();
+my $rigidMod = ( $only ne "" ) ? $only : $top;
+if ( $keepShapes && ( $only ne "" || $maxDepth == 0 ) && ! $noFlatten && $top eq $GLOBAL->dbfGlobalGetTOP ) {
+  my $rf = &get_floorplanID_of_module($rigidMod);
+  if ( $rf != -1 && exists $FLOORPLAN_ALREADY{$rf} ) {
+    my %kids = ();
+    foreach my $c ( $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstList ) {
+      my @e = $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstExtent($c);
       next unless ( @e == 4 );
-      $HIER2FLAT_RIGID_FROM{$c} = [ $e[0], $e[1], $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstOrient($c) ];
+      $kids{$c} = [ $e[0], $e[1], $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstOrient($c) ];
     }
+    %HIER2FLAT_RIGID = ( module => $rigidMod, kids => \%kids,
+                         paths => ( $only ne "" ? [ @onlyPaths ] : [ "" ] ) );
   }
 }
-&dbfTstgenHierPlaceWalk($top, 0, $top, $maxDepth, \@order, \%seen, \%instCnt);
+if ( $only ne "" ) {
+  push(@order, [ $only, 0, "$top/$onlyPaths[0]" ]);
+  $seen{$only} = [ "$top/$onlyPaths[0]" ];
+  $instCnt{$only} = scalar(@onlyPaths);
+}
+else {
+  &dbfTstgenHierPlaceWalk($top, 0, $top, $maxDepth, \@order, \%seen, \%instCnt);
+}
 #<!-- -net_weights names FLAT nets (mc_fp/foo); write_pseudo_graph finds a
 #     module's own by stripping each instance path the walk reached it by,
 #     less the top's name (mc2/mc_fp -> mc_fp; the top itself -> "") -->
