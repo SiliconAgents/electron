@@ -546,6 +546,19 @@ return ($size[2] - $size[0], $size[3] - $size[1]);
 #     each was reached by, so the caller can report a module used more than
 #     once.  It is also what terminates the walk: a module is expanded once,
 #     cycle or no cycle. -->
+#<!-- every instance path of every module below $mod, as flat nets name them
+#     ("" for the top, then inst, inst/inst ...): $out->{module} = [paths] -->
+sub dbfTstgenHierAllInstPaths {
+my ($mod, $path, $out) = @_;
+push(@{$out->{$mod}}, $path);
+return unless ( exists $MODULE_ALREADY{$mod} );
+foreach my $inst ( $MODULE_ALREADY{$mod}->dbVNOMGetHierInst ) {
+  my $cellref = $MODULE_ALREADY{$mod}->dbVNOMGetHierInstCell($inst);
+  next unless ( defined $cellref && $cellref ne "" && $cellref ne "UND" && exists $MODULE_ALREADY{$cellref} );
+  &dbfTstgenHierAllInstPaths($cellref, ( $path eq "" ? $inst : "$path/$inst" ), $out);
+}
+}# sub dbfTstgenHierAllInstPaths
+
 sub dbfTstgenHierPlaceWalk {
 
 my ($mod, $depth, $path, $maxDepth, $order, $seen, $instCnt) = @_;
@@ -613,6 +626,9 @@ my $maxDepth = -1;
 my $util;
 my $placer;
 my $cellsPlacer;
+my $netWeights = "";
+my $weightScale = 10;
+my $weightPower = 3;
 my $freeFlops = 0;
 my $seqAnchorLimit = 2000;
 my $legalize = 0;
@@ -639,6 +655,11 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                       -depth <levels>         0 is the top only, unset is the whole tree\n";
   print "                       -util <percent>         for a module with no parent box to inherit\n";
   print "                       -placer <path>          defaults to ELECTRON_HOME/3RDBIN/hier_place\n";
+  print "                       -net_weights <file> weight the cell pass for timing: Photon's\n";
+  print "                                          netCriticality (flat nets on violating paths);\n";
+  print "                                          a placer that reads weights (qp) pulls those\n";
+  print "                                          cones tight.  -weight_scale <K>, default 10;\n";
+  print "                                          -weight_power <P>, default 3\n";
   print "                       -cells_placer <path>|qp the cell pass only, default -placer.  qp\n";
   print "                                               is ELECTRON_HOME/3RDBIN/hier_place_qp,\n";
   print "                                               the analytic one: seconds where\n";
@@ -714,12 +735,15 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--slice_blocks") { $sliceBlocks = 1; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
-  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; }
+  elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; $i++; }
   elsif ($_[$i] eq "--skip_placed")  { $skipPlaced = 1; }
   elsif ($_[$i] eq "--no_cells")     { $noCells = 1; }
   elsif ($_[$i] eq "--no_flatten")   { $noFlatten = 1; }
   elsif ($_[$i] eq "--report_only")  { $reportOnly = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
+  elsif ($_[$i] eq "-net_weights")   { $netWeights = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_scale")  { $weightScale = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot")      { $snapPrefix = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot_args") { $snapArgs = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_ALL : 001 : invalid option $_[$i]\n"; }
@@ -740,6 +764,21 @@ my @order = ();
 my %seen = ();
 my %instCnt = ();
 &dbfTstgenHierPlaceWalk($top, 0, $top, $maxDepth, \@order, \%seen, \%instCnt);
+#<!-- -net_weights names FLAT nets (mc_fp/foo); write_pseudo_graph finds a
+#     module's own by stripping each instance path the walk reached it by,
+#     less the top's name (mc2/mc_fp -> mc_fp; the top itself -> "") -->
+%HIER_PLACE_NET_PREFIXES = ();
+if ( $netWeights ne "" ) {
+  #<!-- every instance of every module: the walk above expands one instance
+  #     per module, and a module's other instances (three of four lanes)
+  #     would otherwise get no weights -->
+  my %allPaths = ();
+  &dbfTstgenHierAllInstPaths($top, "", \%allPaths);
+  %HIER_PLACE_NET_PREFIXES = %allPaths;
+  my $np = 0; $np += scalar(@{$allPaths{$_}}) foreach ( keys %allPaths );
+  print "INFO-TST-HR_PL_ALL : 037 : $np instance path(s) of " . scalar(keys %allPaths) . " module(s) for the timing weights\n";
+  print "INFO-TST-HR_PL_ALL : 036 : cell placement weighted for timing from $netWeights (scale $weightScale, power $weightPower)\n";
+}
 
 my $modCnt = @order;
 print "INFO-TST-HR_PL_ALL : 003 : $modCnt module(s) to place under $top\n";
@@ -1049,6 +1088,7 @@ foreach my $rec ( @order ) {
     push(@cellArgs, "--free_flops") if ( $freeFlops );
     push(@cellArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
     push(@cellArgs, "--keep") if ( $keepFiles );
+    push(@cellArgs, "-net_weights", $netWeights, "-weight_scale", $weightScale, "-weight_power", $weightPower) if ( $netWeights ne "" );
     &hier_place_cells(@cellArgs);
     $mrec{cell_pass} = $HIER_PLACE_CELL_STATS{$mod} if ( exists $HIER_PLACE_CELL_STATS{$mod} );
   }

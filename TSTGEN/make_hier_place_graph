@@ -550,6 +550,7 @@ my $hierOnly = 0;
 my $blockAnchors = 0;
 my $batch = 0;
 my $extra = "";
+my ($netWeights, $weightScale, $weightPower) = ("", 10, 3);
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : hier_place -module <module name>\n";
@@ -579,6 +580,8 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                   --block_anchors\n";
   print "                                 blocks, memories and ports only; flops collapse\n";
   print "                                 into the cones (for a cell pass that places them)\n";
+  print "                   -net_weights <file>  -weight_scale <K>  -weight_power <P>\n";
+  print "                         weight the graph for timing, as write_pseudo_graph\n";
   print "                   --hier_only\n";
   print "                         the old graph: hierarchical instances only, with\n";
   print "                         every net that runs through a leaf cell dropped\n";
@@ -611,6 +614,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--hier_only")    { $hierOnly = 1; }
   elsif ($_[$i] eq "--block_anchors"){ $blockAnchors = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
+  elsif ($_[$i] eq "-net_weights")   { $netWeights = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_scale")  { $weightScale = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HIER_PL : 001 : invalid option $_[$i]\n"; }
 }
 
@@ -665,6 +671,7 @@ my @writeArgs = ("-module", $module, "-nodefile", $nodeFile,
 if ( $fanoutLimit > 0 ) {
   push(@writeArgs, "-fanout_limit", $fanoutLimit);
 }
+push(@writeArgs, "-net_weights", $netWeights, "-weight_scale", $weightScale, "-weight_power", $weightPower) if ( $netWeights ne "" );
 &write_pseudo_graph(@writeArgs);
 
 unless ( -e $nodeFile && -e $graphFile ) {
@@ -1143,6 +1150,42 @@ print "Command read_pseudo_nodefile took:",timestr($td),"\n";
 #  undirected adjacency), so a synthetic centre costs nothing there; it only
 #  matters to anchor_hypergraph's loop breaking.
 #****
+#<!-- Photon's netCriticality file (net, worst_slack_ns, paths), read once
+#     however many modules ask: { SLACK => {flat net => slack}, WNS => min } -->
+sub dbfTstgenNetCriticality {
+my ($file) = @_;
+return $NET_CRIT_CACHE{$file} if ( exists $NET_CRIT_CACHE{$file} );
+#<!-- the handle declared out here: "unless ( open(my $fh ...) )" scopes $fh
+#     to that statement, and the loop below then read an empty global one -->
+my $fh;
+unless ( open($fh, "<", $file) ) {
+  print "ERR-TST-WR_PS_GRPH : 032 : cannot read $file : $!\n";
+  return undef;
+}
+my %slack = (); my $wns = 0;
+while ( my $l = <$fh> ) {
+  next if ( $. == 1 && $l =~ /^net\t/ );
+  chomp($l);
+  my ($net, $s) = split(/\t/, $l);
+  next unless ( defined $s && $s =~ /^-?[\d.]+(e-?\d+)?$/ && $s < 0 );
+  $slack{$net} = $s;
+  $wns = $s if ( $s < $wns );
+}
+close($fh);
+#<!-- indexed by the instance path a net lives in (all but its last
+#     segment; "" for the top's own nets), so a module finds its nets by
+#     looking up each instance path it has, not by scanning every net -->
+my %byParent = ();
+foreach my $net ( keys %slack ) {
+  my $k = rindex($net, "/");
+  my ($par, $local) = ( $k < 0 ) ? ("", $net) : ( substr($net, 0, $k), substr($net, $k + 1) );
+  $byParent{$par}{$local} = $slack{$net};
+}
+$NET_CRIT_CACHE{$file} = { SLACK => \%slack, WNS => $wns, BYPARENT => \%byParent };
+printf("INFO-TST-WR_PS_GRPH : 033 : %d critical net(s) read from %s, WNS %.4f ns\n", scalar(keys %slack), $file, $wns);
+return $NET_CRIT_CACHE{$file};
+}# sub dbfTstgenNetCriticality
+
 sub write_pseudo_graph {
 
 use Benchmark;
@@ -1161,6 +1204,10 @@ my $fixPlaced = 0;
 my $fixBlocksOnly = 0;
 my $blockAnchors = 0;
 my $fixedCnt = 0;
+my $netWeights = "";
+my $weightScale = 10;
+my $weightPower = 3;
+my @netPrefix = ();
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : write_pseudo_graph -module <module name>\n";
@@ -1193,6 +1240,21 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                 where they were placed: for a cell placer that\n";
   print "                                 places them with the logic (hier_place_qp)\n";
   print "                           --nodefile_only\n";
+  print "                           -net_weights <file>\n";
+  print "                                 timing criticality per FLAT net (Photon's\n";
+  print "                                 netCriticality: net, worst_slack_ns, paths).  Each\n";
+  print "                                 net's edges get weight 1 + K * (slack / WNS) ^ P, so\n";
+  print "                                 a placer that reads weights (hier_place_qp) pulls\n";
+  print "                                 the critical cones tight; other nets stay near 1\n";
+  print "                           -weight_scale <K>   default 10\n";
+  print "                           -weight_power <P>   default 3: when most of a design\n";
+  print "                                 violates, linear weights lift half its nets; cubed,\n";
+  print "                                 the median critical net stays at 1.1 and the worst\n";
+  print "                                 few percent get the pull\n";
+  print "                           -net_prefix <inst path>\n";
+  print "                                 what to strip from a flat net name to get this\n";
+  print "                                 module's own (e.g. mc_fp); hier_place_all sets it\n";
+  print "                                 for every instance path it reached the module by\n";
   return;
 }
 for (my $i = 0; $i < $noOfArguments; $i++) {
@@ -1206,6 +1268,10 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--fix_anchors")  { $fixPlaced = 1; }
   elsif ($_[$i] eq "--fix_blocks")   { $fixPlaced = 1; $fixBlocksOnly = 1; }
   elsif ($_[$i] eq "--nodefile_only"){ $nodeFileOnly = 1; }
+  elsif ($_[$i] eq "-net_weights")   { $netWeights = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_scale")  { $weightScale = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
+  elsif ($_[$i] eq "-net_prefix")    { push(@netPrefix, $_[$i+1]); }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-WR_PS_GRPH : 001 : invalid option $_[$i]\n"; }
 }
 
@@ -1525,6 +1591,31 @@ unless ( open(WRITE_PSEUDO_GRAPH, ">$graphFile") ) {
   return;
 }
 
+#<!-- timing weights: this module's nets that lie on violating paths, by
+#     their module-local name.  The file names FLAT nets; a module's local
+#     name is the flat one less the instance path (any instance it was reached
+#     by -- they share one floorplan, so the worst of them counts). -->
+my %netWeight = ();
+my ($wtMax, $wtCnt) = (1, 0);
+if ( $netWeights ne "" ) {
+  my $crit = &dbfTstgenNetCriticality($netWeights);
+  if ( defined $crit ) {
+    my @pfx = @netPrefix ? @netPrefix
+            : ( exists $HIER_PLACE_NET_PREFIXES{$module} ? @{$HIER_PLACE_NET_PREFIXES{$module}} : () );
+    my $wns = $crit->{WNS};
+    if ( @pfx && $wns < 0 ) {
+      foreach my $p ( @pfx ) {
+        my $nets = $crit->{BYPARENT}{$p};
+        next unless ( defined $nets );
+        foreach my $local ( keys %$nets ) {
+          my $w = 1 + $weightScale * ($nets->{$local} / $wns) ** $weightPower;
+          $netWeight{$local} = $w if ( !exists $netWeight{$local} || $w > $netWeight{$local} );
+        }
+      }
+    }
+  }
+}
+
 my $defaultFanout = $GLOBAL->dbfGlobalGetFanoutLimit;
 if ( $fanoutLimit == 0 && defined $defaultFanout && $defaultFanout > 0 ) {
   $fanoutLimit = $defaultFanout;
@@ -1655,13 +1746,19 @@ foreach my $group ( @groups ) {
   }
 
   $netCnt++;
+  my $w = 1;
+  foreach my $gnet ( @groupNets ) { $w = $netWeight{$gnet} if ( exists $netWeight{$gnet} && $netWeight{$gnet} > $w ); }
+  my $wcol = "";
+  if ( $w > 1 ) { $wcol = sprintf(" %.4g", $w); $wtCnt++; $wtMax = $w if ( $w > $wtMax ); }
   foreach my $node ( @nodes ) {
     next if ( $node == $centre );
-    print WRITE_PSEUDO_GRAPH "$centre $node\n";
+    print WRITE_PSEUDO_GRAPH "$centre $node$wcol\n";
     $edgeCnt++;
   }
 }
+
 close(WRITE_PSEUDO_GRAPH);
+
 
 my $groupWord = ( $anchorMode ? "logic cones" : "nets" );
 print "INFO-TST-WR_PS_GRPH : 010 : wrote $edgeCnt edges from $netCnt $groupWord of $module to $graphFile\n";
@@ -1682,6 +1779,9 @@ if ( $skipCnt > 0 ) {
 }
 if ( $noNodeCnt > 0 ) {
   print "INFO-TST-WR_PS_GRPH : 014 : $noNodeCnt connection(s) are to instances not in the nodefile\n";
+}
+if ( $netWeights ne "" ) {
+  printf("INFO-TST-WR_PS_GRPH : 031 : %d net(s) weighted for timing, up to %.2f, from %s\n", $wtCnt, $wtMax, $netWeights);
 }
 if ( $noPortNodeCnt > 0 ) {
   print "WARN-TST-WR_PS_GRPH : 028 : $noPortNodeCnt net(s) reach a port of $module whose bits are\n";
@@ -3394,6 +3494,9 @@ my $placer;
 my $batch = 400;
 my $fanoutLimit = 0;
 my $extra = "";
+my $netWeights = "";
+my $weightScale = 10;
+my $weightPower = 3;
 my ($writeOnly, $keepFiles, $noBlockage, $freeFlops) = (0, 0, 0, 0);
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
@@ -3408,6 +3511,8 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                              3RDBIN/hier_place_qp)\n";
   print "                         --write_only         write the graph and stop\n";
   print "                         --keep               keep the graph files\n";
+  print "                         -net_weights <file>  weight critical nets' edges (write_pseudo_graph)\n";
+  print "                         -weight_scale <K>    for -net_weights, default 10\n";
   print "\n";
   print "        Places the leaf cells hier_place left out.  Run hier_place first:\n";
   print "        the blocks, flops and ports it placed are held FIXED here, and this\n";
@@ -3435,6 +3540,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--free_flops")   { $freeFlops = 1; }
   elsif ($_[$i] eq "--write_only")   { $writeOnly = 1; }
   elsif ($_[$i] eq "--keep")         { $keepFiles = 1; }
+  elsif ($_[$i] eq "-net_weights")   { $netWeights = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_scale")  { $weightScale = $_[$i+1]; }
+  elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_CL : 001 : invalid option $_[$i]\n"; }
 }
 
@@ -3459,6 +3567,7 @@ unlink($placedFile) if ( -e $placedFile );
 my @writeArgs = ("-module", $module, "-nodefile", $nodeFile,
                  "-graph", $graphFile, ($freeFlops ? "--fix_blocks" : "--fix_anchors"));
 push(@writeArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
+push(@writeArgs, "-net_weights", $netWeights, "-weight_scale", $weightScale, "-weight_power", $weightPower) if ( $netWeights ne "" );
 &write_pseudo_graph(@writeArgs);
 
 unless ( -e $nodeFile && -e $graphFile ) {

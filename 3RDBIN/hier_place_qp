@@ -10,8 +10,14 @@ step for 30k cells.  On the same input this takes seconds, for shorter wires
 and a far more even spread (see the commit that added it for the numbers).
 
 Reads what hier_place_cells writes (nodes: INST/PORT, FIXED/PLACED; graph:
-one "a b" pair per line), moves only the PLACED instances and writes the same
-format hier_place does, so electron's read_pseudo_nodefile takes it unchanged.
+one "a b" pair per line, or "a b w" with a weight, default 1), moves only the
+PLACED instances and writes the same format hier_place does, so electron's
+read_pseudo_nodefile takes it unchanged.
+
+A weight is how strongly the solve pulls that pair together: a timing-driven
+flow raises it on the connections of nets on violating paths, so a critical
+cone is placed tight at some cost to the rest.  Wirelength is still reported
+unweighted, so runs with and without weights compare.
 
 SimPL-style: a quadratic placement (sparse Laplacian, fixed nodes as anchors)
 gives the wirelength-optimal but overlapping lower bound; rough legalisation
@@ -174,16 +180,17 @@ def main():
     blocks = [(nd[6], nd[7], nd[6] + nd[3], nd[7] + nd[4]) for nd in nodes
               if nd[2] == "INST" and "TYPE=block" in nd[8]]
 
-    ea, eb = [], []
+    ea, eb, ew = [], [], []
     for line in open(a.graph):
         t = line.split()
         if len(t) >= 2:
             p, q = pos.get(int(t[0])), pos.get(int(t[1]))
             if p is not None and q is not None and p != q:
-                ea.append(p); eb.append(q)
-    ea = np.array(ea); eb = np.array(eb)
+                ea.append(p); eb.append(q); ew.append(float(t[2]) if len(t) >= 3 else 1.0)
+    ea = np.array(ea); eb = np.array(eb); ew = np.array(ew)
     keep = movable[ea] | movable[eb]
-    ea, eb = ea[keep], eb[keep]
+    ea, eb, ew = ea[keep], eb[keep], ew[keep]
+    nweighted = int((ew != 1.0).sum())
 
     mi = np.flatnonzero(movable); m = len(mi)
     if m == 0:
@@ -199,15 +206,15 @@ def main():
     both = am & bm
     rows = np.concatenate([slot[ea[both]], slot[eb[both]], slot[ea[both]], slot[eb[both]]])
     cols = np.concatenate([slot[eb[both]], slot[ea[both]], slot[ea[both]], slot[eb[both]]])
-    vals = np.concatenate([-np.ones(both.sum()), -np.ones(both.sum()),
-                           np.ones(both.sum()), np.ones(both.sum())])
+    wb = ew[both]
+    vals = np.concatenate([-wb, -wb, wb, wb])
     one = am ^ bm
-    mv = np.where(am[one], ea[one], eb[one]); fx = np.where(am[one], eb[one], ea[one])
+    mv = np.where(am[one], ea[one], eb[one]); fx = np.where(am[one], eb[one], ea[one]); w1 = ew[one]
     rows = np.concatenate([rows, slot[mv]]); cols = np.concatenate([cols, slot[mv]])
-    vals = np.concatenate([vals, np.ones(len(mv))])
+    vals = np.concatenate([vals, w1])
     L = sp.csr_matrix((vals, (rows, cols)), shape=(m, m))
-    bx = np.bincount(slot[mv], weights=cx[fx], minlength=m).astype(float)
-    by = np.bincount(slot[mv], weights=cy[fx], minlength=m).astype(float)
+    bx = np.bincount(slot[mv], weights=w1 * cx[fx], minlength=m).astype(float)
+    by = np.bincount(slot[mv], weights=w1 * cy[fx], minlength=m).astype(float)
     # a cell with no connection at all would make L singular: tie everything,
     # very weakly, to the die centre
     eps = 1e-6
@@ -221,7 +228,8 @@ def main():
     nby = max(1, min(512, int((die[3] - die[1]) / bin_edge)))
     cap = Capacity(die, blocks, nbx, nby, a.density)
     area = (w * h)[mi]
-    print(f"hier_place_qp: {m} movable, {n - m} fixed ({len(blocks)} blocks), {len(ea)} edges, "
+    print(f"hier_place_qp: {m} movable, {n - m} fixed ({len(blocks)} blocks), {len(ea)} edges "
+          f"({nweighted} weighted), "
           f"{nbx}x{nby} bins of {bin_edge:.2f} um; cell area {area.sum():.0f} um2, "
           f"free capacity {cap.cap.sum():.0f} um2")
 

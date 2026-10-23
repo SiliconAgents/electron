@@ -288,7 +288,13 @@ def parse_nodefile(path: str) -> Tuple[Dict[int, Node], Dict[str, float]]:
     return nodes, header
 
 
-def parse_edges(path: str) -> List[Tuple[int, int]]:
+def parse_edges(path: str) -> List[Tuple[int, int, float]]:
+    """
+    Node index pairs, with an optional third column: the connection's weight.
+
+    electron writes one for a net on a violating path (-net_weights); a line
+    without one counts 1, so an unweighted file places exactly as it always did.
+    """
     edges = []
     with open(path) as fh:
         for raw in fh:
@@ -297,7 +303,13 @@ def parse_edges(path: str) -> List[Tuple[int, int]]:
                 continue
             parts = line.split()
             if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-                edges.append((int(parts[0]), int(parts[1])))
+                w = 1.0
+                if len(parts) >= 3:
+                    try:
+                        w = max(0.0, float(parts[2]))
+                    except ValueError:
+                        w = 1.0
+                edges.append((int(parts[0]), int(parts[1]), w))
     return edges
 
 
@@ -309,7 +321,7 @@ NAME_IN_RE = re.compile(r"(^|_)i_")
 NAME_OUT_RE = re.compile(r"(^|_)o_")
 
 
-def infer_port_directions(raw_edges: List[Tuple[int, int]],
+def infer_port_directions(raw_edges: List[Tuple[int, int, float]],
                           nodes: Dict[int, Node]) -> Dict[str, int]:
     """
     Work out which ports are inputs and which are outputs, from the edge file.
@@ -325,7 +337,7 @@ def infer_port_directions(raw_edges: List[Tuple[int, int]],
     """
     drives = set()
     sunk = set()
-    for a, b in raw_edges:
+    for a, b, _ in raw_edges:
         if a in nodes and nodes[a].kind.upper() == "PORT":
             drives.add(a)
         if b in nodes and nodes[b].kind.upper() == "PORT":
@@ -575,22 +587,24 @@ def assign_port_edges(ports: List[Node],
     return dict(counts)
 
 
-def build_weighted_edges(raw_edges: List[Tuple[int, int]], nodes: Dict[int, Node],
+def build_weighted_edges(raw_edges: List[Tuple[int, int, float]], nodes: Dict[int, Node],
                          placeable: Dict[int, Node], port_fanout_limit: int
                          ) -> Tuple[List[WeightedEdge], Dict[str, int]]:
     """
     Collapse the raw connection list into one weighted spring per placeable pair.
 
-    Direct pairs accumulate a weight of 1 each. A connection through a node that is not
+    Direct pairs accumulate each connection's weight, 1 unless the edge file gave
+    one. A connection through a node that is not
     being placed (a port) carries no position of its own, so a port touching several
     blocks is reduced to a clique between them, its weight divided by the number of pairs
     it creates - otherwise one high-fanout port would outvote all the real connectivity.
     """
     pair_weight: Dict[Tuple[int, int], float] = defaultdict(float)
     via_node: Dict[int, set] = defaultdict(set)
+    via_weight: Dict[int, float] = defaultdict(lambda: 1.0)
     stats = {"direct": 0, "via": 0, "dangling": 0, "self": 0, "unknown": 0}
 
-    for a, b in raw_edges:
+    for a, b, w in raw_edges:
         if a == b:
             stats["self"] += 1
             continue
@@ -600,12 +614,14 @@ def build_weighted_edges(raw_edges: List[Tuple[int, int]], nodes: Dict[int, Node
 
         a_place, b_place = a in placeable, b in placeable
         if a_place and b_place:
-            pair_weight[(min(a, b), max(a, b))] += 1.0
+            pair_weight[(min(a, b), max(a, b))] += w
             stats["direct"] += 1
         elif a_place:
             via_node[b].add(a)
+            via_weight[b] = max(via_weight[b], w)
         elif b_place:
             via_node[a].add(b)
+            via_weight[a] = max(via_weight[a], w)
         else:
             stats["dangling"] += 1
 
@@ -620,7 +636,7 @@ def build_weighted_edges(raw_edges: List[Tuple[int, int]], nodes: Dict[int, Node
             continue
         ordered = sorted(members)
         pair_count = len(ordered) * (len(ordered) - 1) / 2
-        share = 1.0 / pair_count
+        share = via_weight[hub] / pair_count
         for i, m in enumerate(ordered):
             for n in ordered[i + 1:]:
                 pair_weight[(m, n)] += share
