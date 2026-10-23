@@ -547,6 +547,11 @@ my ($skipNoCell, $skipNoSize, $unplacedCnt) = (0, 0, 0);
 #     POWER and GROUND pins do not count -- they are strapped from above and
 #     are not what a router escapes out of a tile. -->
 my %pinsOf = ();
+#<!-- set_macro_halo: a non-CORE cell is held as its halo, snapped to this
+#     grid; write_sgraph gives Photon the same boxes -->
+my $haloOn = ( ! $src && &dbfMacroHaloOn ) ? 1 : 0;
+my ($haloXo, $haloCnt) = (undef, 0);
+if ( $haloOn ) { foreach my $y ( @rowY ) { $haloXo = $rowX0{$y} if ( ! defined $haloXo || $rowX0{$y} < $haloXo ); } }
 
 if ( $src ) {
   foreach my $m ( @{$src->{mov}} ) { push(@mov, [ @$m ]); $totMovW += $m->[1]; }
@@ -587,6 +592,11 @@ foreach my $inst ( $src ? () : sort keys %CADB ) {
   $class = "" unless ( defined $class );
   my $isCore = ( $class =~ m/^CORE/ ) ? 1 : 0;
 
+  if ( $haloOn && ! $isCore ) {
+    push(@obs, [ &dbfMacroHaloBox($x, $y, $x + $w, $y + $h, $haloXo, ( $noSnapX ? 0 : $siteX ), $rowY[0], $rowH) ]);
+    $haloCnt++;
+    next;
+  }
   if ( $status eq "FIXED" || ! $isCore ) {
     push(@obs, [$x, $y, $x + $w, $y + $h]);
     next;
@@ -609,6 +619,8 @@ foreach my $inst ( $src ? () : sort keys %CADB ) {
 my $nMov = @mov;
 my $nObs = @obs;
 print "INFO-ALG-LEGAL : 007 : $nMov movable CORE cell(s), $nObs obstacle(s) held\n";
+print "INFO-ALG-LEGAL : 059 : $haloCnt of them held with their halo, $MACRO_HALO_SITES site(s) and $MACRO_HALO_ROWS row(s) (set_macro_halo)\n"
+  if ( $haloOn );
 if ( $unplacedCnt > 0 ) {
   print "INFO-ALG-LEGAL : 008 : $unplacedCnt instance(s) have no location and were left for the placer\n";
 }

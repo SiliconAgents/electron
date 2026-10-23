@@ -1,0 +1,108 @@
+#!/bin/perl
+
+#<!-- set_macro_halo: a keep-out around every macro, pad and other non-CORE
+#     cell, snapped to the placement grid.
+#
+#     Standard cells packed against a memory's edge crowd its pins and leave a
+#     sliver no router can use.  The halo is the macro's box widened to whole
+#     sites -- N more on the left and right -- and to whole rows, R more above
+#     and below, so no row is left with a partial strip beside a macro.
+#
+#     One setting and two readers, so they cannot disagree: legalize_flat holds
+#     the halo instead of the bare macro, and write_sgraph writes each halo as a
+#     BLOCKAGE line that Photon treats as occupied, both where it puts repeaters
+#     and where it measures the room a resize may grow into.  Were only the
+#     legalizer to know, Photon would fill the halos with buffers and the
+#     legality check after its ECO would have to move every one of them out.
+#
+#     Off until set.  FIXED standard cells (taps, end caps) are obstacles to
+#     the legalizer but get no halo, and neither do hierarchical blocks:
+#     legalize_module handles those and does not read this. -->
+
+sub set_macro_halo {
+
+my $noOfArguments = @_;
+my ($sites, $rows, $off) = (4, 1, 0);
+
+if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
+  print "Usage : set_macro_halo -sites <n>   sites kept free left and right of each macro, default 4\n";
+  print "                       -rows <n>    whole rows kept free above and below, default 1\n";
+  print "                       --off        no halo (the default until this is run)\n";
+  print "\n";
+  print "        Every non-CORE cell -- memories, other macros, pads -- is held by\n";
+  print "        legalize_flat as its box snapped outward to the site grid and the\n";
+  print "        rows, then widened by -sites and -rows.  write_sgraph writes the same\n";
+  print "        boxes as BLOCKAGE lines, so Photon keeps its repeaters and resizes\n";
+  print "        out of them too.  Set it before legalize_flat and write_sgraph.\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if    ($_[$i] eq "-sites") { $sites = $_[$i+1]; $i++; }
+  elsif ($_[$i] eq "-rows")  { $rows = $_[$i+1]; $i++; }
+  elsif ($_[$i] eq "--off")  { $off = 1; }
+  else { print "WARN-ALG-ST_MC_HL : 001 : invalid option $_[$i]\n"; }
+}
+unless ( $sites =~ m/^\d+$/ && $rows =~ m/^\d+$/ ) {
+  print "ERR-ALG-ST_MC_HL : 002 : -sites and -rows take whole numbers, got $sites and $rows\n";
+  return;
+}
+if ( $off ) {
+  ($MACRO_HALO_SITES, $MACRO_HALO_ROWS) = (undef, undef);
+  print "INFO-ALG-ST_MC_HL : 003 : macro halo off\n";
+  return;
+}
+($MACRO_HALO_SITES, $MACRO_HALO_ROWS) = ($sites, $rows);
+print "INFO-ALG-ST_MC_HL : 004 : macro halo: $sites site(s) left and right, $rows row(s) above and below, snapped to the grid\n";
+}# sub set_macro_halo
+
+#<!-- 1 when a halo is set -->
+sub dbfMacroHaloOn {
+return ( defined $MACRO_HALO_SITES && defined $MACRO_HALO_ROWS ) ? 1 : 0;
+}# sub dbfMacroHaloOn
+
+#<!-- The halo of one box, all DBU: snapped outward to the site grid (origin
+#     $xo, pitch $siteX) and the rows (origin $yo, height $rowH), then widened.
+#     With no site pitch the x edges are only widened by nothing. -->
+sub dbfMacroHaloBox {
+my ($x0, $y0, $x1, $y1, $xo, $siteX, $yo, $rowH) = @_;
+my ($n, $r) = ($MACRO_HALO_SITES, $MACRO_HALO_ROWS);
+if ( defined $siteX && $siteX > 0 ) {
+  $x0 = $xo + POSIX::floor(($x0 - $xo) / $siteX) * $siteX - $n * $siteX;
+  $x1 = $xo + POSIX::ceil(($x1 - $xo) / $siteX) * $siteX + $n * $siteX;
+}
+$y0 = $yo + POSIX::floor(($y0 - $yo) / $rowH) * $rowH - $r * $rowH;
+$y1 = $yo + POSIX::ceil(($y1 - $yo) / $rowH) * $rowH + $r * $rowH;
+return ($x0, $y0, $x1, $y1);
+}# sub dbfMacroHaloBox
+
+#<!-- Every placed non-CORE cell's halo, on the flat rows: [x0, y0, x1, y1]
+#     in DBU.  What write_sgraph writes; legalize_flat computes the same boxes
+#     from its own copy of the rows. -->
+sub dbfMacroHaloBoxes {
+return () unless ( &dbfMacroHaloOn );
+my $R = FreeRows::flatRows();
+return () unless ( $R );
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+my $xo; foreach my $y ( @{$R->{Y}} ) { $xo = $R->{X0}{$y} if ( ! defined $xo || $R->{X0}{$y} < $xo ); }
+my $yo = $R->{Y}[0];
+my @boxes = ();
+foreach my $inst ( sort keys %CADB ) {
+  my $ref = $CADB{$inst}->dbCadbGetCellref;
+  next unless ( defined $ref && exists $PLDB{$ref} );
+  my $class = $PLDB{$ref}->dbMdbGetClass;
+  next if ( defined $class && $class =~ m/^CORE/ );
+  my $st = $CADB{$inst}->dbCadbGetStatus;
+  next unless ( defined $st && ( $st eq "PLACED" || $st eq "FIXED" ) );
+  my @s = $PLDB{$ref}->dbMdbGetSize;
+  next unless ( @s >= 2 && $s[0] > 0 && $s[1] > 0 );
+  my @l = $CADB{$inst}->dbCadbGetLoc;
+  next unless ( @l >= 2 && defined $l[0] && defined $l[1] );
+  my $o = $CADB{$inst}->dbCadbGetOrient;
+  my ($w, $h) = ($s[0] * $dbu, $s[1] * $dbu);
+  ($w, $h) = ($h, $w) if ( defined $o && $o =~ m/^F?[EW]$/ );
+  push(@boxes, [ &dbfMacroHaloBox($l[0], $l[1], $l[0] + $w, $l[1] + $h, $xo, $R->{siteX}, $yo, $R->{rowH}) ]);
+}
+return @boxes;
+}# sub dbfMacroHaloBoxes
+
+1;
