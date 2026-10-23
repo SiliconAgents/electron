@@ -192,12 +192,17 @@ printf("INFO-PAR-AP_ADV : 010 : apply_advice took %d s\n", time() - $t0);
 #                                                           aside to make room
 #       BUF   inst cell x y orient out_net in_pin out_pin   a new buffer, placed
 #       CONN  net inst pin                                  move a pin to a net
+#       RESIZE inst from to                                 another cell of the
+#                                                           same class (size, Vt),
+#                                                           growing into the free
+#                                                           space to its right
 #
 #     All DBU.  The whole file is checked before anything changes -- half an
 #     ECO is a broken netlist -- and refused if any line is wrong: a cell not
 #     in the LEF, a buffer name already taken, a pin the cell does not have,
 #     an instance or net that is neither in the design nor made by the ECO,
-#     a MOVE of a cell that is not PLACED.
+#     a MOVE of a cell that is not PLACED, a RESIZE whose "from" is not the
+#     cell there now or whose new cell lacks a pin the instance has connected.
 #     A pin that moves leaves its old net (and the old net's routing, which no
 #     longer describes it).  Flat only, like apply_advice.  Then write_def and
 #     write_sgraph; legalize_flat --incremental --report_only says whether
@@ -208,7 +213,7 @@ my $t0 = time();
 my $noOfArguments = @_;
 if ( $noOfArguments < 1 || $_[0] eq '-h' || $_[0] eq '-help' ) {
   print "Usage : apply_eco -eco <prefix.eco.tsv>\n";
-  print "        Applies an ECO Photon decided and placed (MOVE / BUF / CONN lines, DBU) to\n";
+  print "        Applies an ECO Photon decided and placed (MOVE / BUF / CONN / RESIZE lines, DBU) to\n";
   print "        the flat database, all or nothing.  No legalizing: the buffers come\n";
   print "        placed.  Flat only: the module definitions are not changed.\n";
   return;
@@ -221,7 +226,7 @@ unless ( scalar(keys %CADB) > 0 ) {
   return;
 }
 open(my $ef, "<", $eco) or do { print "ERROR-PAR-AP_ECO : 002 : cannot read $eco : $!\n"; return; };
-my (@bufs, @conns, @moves, @bad) = ();
+my (@bufs, @conns, @moves, @resizes, @bad) = ();
 my %newBuf = ();
 my %newNet = ();
 while ( my $l = <$ef> ) {
@@ -245,6 +250,8 @@ while ( my $l = <$ef> ) {
     push(@moves, [ $inst, $x, $y ]);
   } elsif ( $f[0] eq "CONN" && @f == 4 ) {
     push(@conns, [ @f[1 .. 3] ]);
+  } elsif ( $f[0] eq "RESIZE" && @f == 4 ) {
+    push(@resizes, [ @f[1 .. 3] ]);
   } else {
     push(@bad, "line $.: not a BUF or CONN record");
   }
@@ -256,6 +263,17 @@ foreach my $c ( @conns ) {
   my $cell = exists $newBuf{$inst} ? $newBuf{$inst} : ( exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : undef );
   if ( !defined $cell ) { push(@bad, "CONN $net $inst $pin: no such instance"); next; }
   push(@bad, "CONN $net $inst $pin: $cell has no pin $pin") unless ( exists $PLDB{$cell} && $PLDB{$cell}->dbMdbGetPinDir($pin) ne "" );
+}
+foreach my $rz ( @resizes ) {
+  my ($inst, $from, $to) = @$rz;
+  my $cur = exists $newBuf{$inst} ? $newBuf{$inst} : ( exists $CADB{$inst} ? $CADB{$inst}->dbCadbGetCellref : undef );
+  if ( !defined $cur ) { push(@bad, "RESIZE $inst: no such instance"); next; }
+  if ( $cur ne $from ) { push(@bad, "RESIZE $inst: is $cur, not $from"); next; }
+  if ( !exists $PLDB{$to} ) { push(@bad, "RESIZE $inst: $to not in the loaded LEF"); next; }
+  my %has = map { $_ => 1 } $PLDB{$to}->dbMdbGetPins;
+  my @pins = exists $newBuf{$inst} ? () : grep { defined $COMP_ALREADY{$inst}{$_} } keys %{$COMP_ALREADY{$inst} || {}};
+  my @miss = grep { !exists $has{$_} } @pins;
+  push(@bad, "RESIZE $inst: $to has no pin $miss[0]") if ( @miss );
 }
 if ( @bad ) {
   print "ERROR-PAR-AP_ECO : 003 : " . scalar(@bad) . " problem(s) in $eco, nothing applied; the first: $bad[0]\n";
@@ -288,9 +306,10 @@ foreach my $c ( @conns ) {
   }
   $moved++;
 }
+foreach my $rz ( @resizes ) { $CADB{$rz->[0]}->dbCadbSetCellref($rz->[2]); }
 &set_inst_box;
-printf("INFO-PAR-AP_ECO : 004 : %d buffer(s) added, %d cell(s) slid aside, %d pin(s) moved to another net, %d already there, from %s\n",
-       scalar(@bufs), scalar(@moves), $moved, $same, $eco);
+printf("INFO-PAR-AP_ECO : 004 : %d buffer(s) added, %d cell(s) slid aside, %d resized, %d pin(s) moved to another net, %d already there, from %s\n",
+       scalar(@bufs), scalar(@moves), scalar(@resizes), $moved, $same, $eco);
 print "INFO-PAR-AP_ECO : 005 : flat database only -- the module definitions are unchanged; no hier2flat or elaborate after\n";
 printf("INFO-PAR-AP_ECO : 006 : apply_eco took %d s\n", time() - $t0);
 }# sub apply_eco

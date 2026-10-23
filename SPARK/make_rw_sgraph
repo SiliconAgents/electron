@@ -22,7 +22,9 @@ sub write_sgraph {
     print "the unit of every coordinate.  After the rows, the physical section,\n";
     print "for a reader that places cells (all DBU):\n";
     print "  ROWH <h>  SITE <w>  ROW <y> <x0> <x1> <orient>   the row grid\n";
-    print "  CELL <cellref> <w> <h> <class>                  every cell type placed\n";
+    print "  CELLS <n> library                               the CELL lines that follow\n";
+    print "                                                  are every cell in the LEF\n";
+    print "  CELL <cellref> <w> <h> <class>                  each one's size\n";
     print "  INST <inst> <cellref> <status> <x> <y>          placed instances on no\n";
     print "                                                  NETS row (they take room)\n";
  }else {
@@ -181,16 +183,18 @@ sub write_sgraph {
 
     #<!-- THE PHYSICAL SECTION.  What a reader needs to put a cell somewhere
     #     legal: the row grid (FreeRows::flatRows, as legalize_flat reads it),
-    #     the size of every cell type placed, and the placed instances no NETS
-    #     row mentions -- tap cells, a cell with only clock pins connected --
-    #     which still take room.  Readers of the graph skip these lines. -->
+    #     the size of every cell in the LEF -- not only the ones placed: a
+    #     resize picks cells the design does not use yet, and a drive strength
+    #     can be two rows tall where its neighbour in the class is one, which
+    #     no area figure reveals -- and the placed instances no NETS row
+    #     mentions (tap cells, a cell with only clock pins connected), which
+    #     still take room.  Readers of the graph skip these lines. -->
     my $rows = FreeRows::flatRows();
     if ( $rows ) {
         push(@buf, "ROWH $rows->{rowH}\n", "SITE $rows->{siteX}\n");
         push(@buf, "ROW $_ $rows->{X0}{$_} $rows->{X1}{$_} $rows->{O}{$_}\n") foreach ( @{$rows->{Y}} );
     }
-    my %refs = ();
-    foreach my $o ( keys %onRow ) { my $i = $instInfo{$o}; $refs{$i->[0]} = 1 if ( $i->[1] eq "PLACED" || $i->[1] eq "FIXED" ); }
+    my %refs = map { $_ => 1 } keys %PLDB;
     foreach my $o ( keys %COMP_ALREADY ) {
         next if ( exists $onRow{$o} || !exists $CADB{$o} );
         my $st = $CADB{$o}->dbCadbGetStatus;
@@ -201,10 +205,10 @@ sub write_sgraph {
         push(@buf, "INST $o $ref $st $l[0] $l[1]\n");
         $refs{$ref} = 1;
     }
-    foreach my $ref ( sort keys %refs ) {
-        next unless ( exists $PLDB{$ref} );
+    my @cells = grep { exists $PLDB{$_} && scalar(my @s = $PLDB{$_}->dbMdbGetSize) >= 2 } sort keys %refs;
+    printf WRITE ("CELLS %d library\n", scalar(@cells));
+    foreach my $ref ( @cells ) {
         my @s = $PLDB{$ref}->dbMdbGetSize;
-        next unless ( @s >= 2 );
         my $class = $PLDB{$ref}->dbMdbGetClass;
         $class = "UNKNOWN" unless ( defined $class && $class ne "" );
         $class =~ s/\s+/_/g;
