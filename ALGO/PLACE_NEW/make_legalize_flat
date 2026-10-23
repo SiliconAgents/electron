@@ -829,6 +829,45 @@ my $writeBack = sub {
   &set_inst_box;
 };
 
+#<!-- The legalizer checks its own answer before writing it: every row swept
+#     in integer DBU, cells against cells and against obstacles.  It reported
+#     success on a design whose macros sat off the site grid while leaving 26
+#     pairs of cells overlapping by part of a site; this says so instead.
+#     $locs: the cells that moved, [inst, x, y]; the rest are where they were. -->
+my $selfCheck = sub {
+  my ($locs) = @_;
+  my %at = map { $_->[0] => [ $_->[1], $_->[2] ] } @$locs;
+  my %row = ();                                  #<!-- y => [ [x0, x1, isObs, name] ] -->
+  foreach my $m ( @mov ) {
+    my ($inst, $w, $h, $x, $y) = @$m;
+    ($x, $y) = @{$at{$inst}} if ( exists $at{$inst} );
+    for ( my $k = 0 ; $k * $rowH < $h ; $k++ ) { push(@{$row{$y + $k * $rowH}}, [ $x, $x + $w, 0, $inst ]); }
+  }
+  foreach my $o ( @obs ) {
+    foreach my $y ( @rowY ) {
+      next if ( $o->[3] <= $y || $o->[1] >= $y + $rowH );
+      push(@{$row{$y}}, [ $o->[0], $o->[2], 1, "" ]) if ( exists $row{$y} );
+    }
+  }
+  my ($bad, $ex) = (0, "");
+  foreach my $y ( keys %row ) {
+    my ($endCell, $endObs) = (-9e18, -9e18);
+    foreach my $c ( sort { $a->[0] <=> $b->[0] || $a->[2] <=> $b->[2] } @{$row{$y}} ) {
+      my ($x0, $x1, $isObs, $nm) = @$c;
+      if ( $x0 < $endCell || ( !$isObs && $x0 < $endObs ) ) {
+        $bad++;
+        $ex = ( $isObs ? "an obstacle" : $nm ) . sprintf(" at (%d, %d)", $x0, $y) if ( $ex eq "" );
+      }
+      if ( $isObs ) { $endObs = $x1 if ( $x1 > $endObs ); } else { $endCell = $x1 if ( $x1 > $endCell ); }
+    }
+  }
+  if ( $bad > 0 ) {
+    print "WARN-ALG-LEGAL : 057 : $bad cell(s) overlap another cell or an obstacle after legalizing, e.g. $ex\n";
+  } else {
+    printf("INFO-ALG-LEGAL : 058 : checked: no overlaps among %d cell(s) and %d obstacle(s)\n", scalar(@mov), scalar(@obs));
+  }
+};
+
 #========================= --incremental: repair only ======================#
 #<!-- Keep every cell that is already legal exactly where it is and move only
 #     the ones that are not into the nearest gap that fits.
@@ -918,6 +957,7 @@ if ( $incremental ) {
     print "INFO-ALG-LEGAL : 020 : --report_only given, nothing was changed\n";
   }
   else {
+    $selfCheck->(\@moved) unless ( $sink );
     $writeBack->(\@moved);
   }
   my $t1 = new Benchmark;
@@ -1203,6 +1243,18 @@ foreach my $y ( @rowY ) {
     $x = $c->[1] if ( $c->[1] > $x );
   }
   push(@free, [$x, $rowX1{$y}]) if ( $rowX1{$y} > $x );
+  #<!-- each free run rounded INWARD to the site grid.  A macro's edge need
+  #     not be on it, and a run that ended at the edge itself had Abacus pack
+  #     its last cell flush against it -- off the grid -- while the cell
+  #     before was snapped onto it: on a design with 91 macros, 26 pairs
+  #     overlapping by part of a site, every one against a macro, and the
+  #     legalizer reporting success. -->
+  unless ( $noSnapX ) {
+    my $x0 = $rowX0{$y};
+    @free = grep { $_->[1] > $_->[0] }
+            map { [ $x0 + POSIX::ceil(($_->[0] - $x0) / $siteX) * $siteX,
+                    $x0 + POSIX::floor(($_->[1] - $x0) / $siteX) * $siteX ] } @free;
+  }
   $seg{$y} = \@free;
 }
 
@@ -2070,6 +2122,7 @@ if ( $reportOnly ) {
   return;
 }
 
+$selfCheck->(\@newLoc) unless ( $sink );
 $writeBack->(\@newLoc);
 
 my $t1 = new Benchmark;
