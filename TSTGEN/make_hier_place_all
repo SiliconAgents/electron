@@ -565,6 +565,9 @@ if ( defined $spec ) {
   my $areaOf;
   $areaOf = sub { my ($n) = @_; return ( $n eq '*' ? $freeA : $leaf{$n}{area} ) unless ( ref $n );
                   my $A = 0; $A += $areaOf->($_) foreach ( @{$n->[1]} ); return $A; };
+  my $blockAreaOf;
+  $blockAreaOf = sub { my ($n) = @_; return ( $n eq '*' ? 0 : $leaf{$n}{area} ) unless ( ref $n );
+                       my $A = 0; $A += $blockAreaOf->($_) foreach ( @{$n->[1]} ); return $A; };
   #<!-- the least room a part needs, from the blocks in it whose shape is
   #     fixed (an earlier parent, another instance, --keep_shapes): an H row is
   #     as tall as its tallest and as wide as all of them, a V column the other
@@ -598,19 +601,26 @@ if ( defined $spec ) {
       return;
     }
     my ($dir, $kids) = @$n;
-    #<!-- each part gets the room its fixed blocks need, then the rest of the
-    #     cut is shared by area.  With no fixed shape anywhere that is the
-    #     plain area split, and it is the fallback too when the fixed ones
-    #     need more than there is ($apply counts the misses) -- shared by
-    #     need instead, a part with no fixed shape would get no room at all. -->
+    #<!-- each part gets at least what it cannot do without -- the room its
+    #     fixed blocks need, and for its free blocks their area over the
+    #     cut's depth -- then what is left is shared by area.  With no fixed
+    #     shape anywhere that is the plain area split.  "*" has no floor: it is
+    #     cells, and may be squeezed.  A free block may not: fixed blocks that
+    #     only just fit once left one 0.013 um of a 97 um row.  If the floors
+    #     do not fit, plain area split and $apply counts the misses. -->
     my $span = ( $dir eq 'H' ) ? $x1 - $x0 : $y1 - $y0;
     my @need = map { my @wh = $needOf->($_); ( $dir eq 'H' ) ? $wh[0] : $wh[1] } @$kids;
     my @area = map { $areaOf->($_) } @$kids;
     my ($sumN, $sumA) = (0, 0);
     $sumN += $_ foreach ( @need );
     $sumA += $_ foreach ( @area );
+    my $depthX = ( $dir eq 'H' ) ? $y1 - $y0 : $x1 - $x0;
+    my @floor = map { my $s = ( $depthX > 0 ) ? $blockAreaOf->($kids->[$_]) / $depthX : 0;
+                      ( $need[$_] > $s ) ? $need[$_] : $s } 0 .. $#$kids;
+    my $sumF = 0;
+    $sumF += $_ foreach ( @floor );
     my @len;
-    if ( $sumN > 0 && $sumN <= $span ) { @len = map { $need[$_] + ( $span - $sumN ) * $area[$_] / $sumA } 0 .. $#$kids; }
+    if ( $sumN > 0 && $sumF <= $span ) { @len = map { $floor[$_] + ( $span - $sumF ) * $area[$_] / $sumA } 0 .. $#$kids; }
     else                               { @len = map { $span * $area[$_] / $sumA } 0 .. $#$kids; }
     my $acc = 0;
     for ( my $i = 0 ; $i < @$kids ; $i++ ) {
