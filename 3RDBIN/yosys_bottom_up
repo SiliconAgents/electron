@@ -117,6 +117,7 @@ opt -fast
 memory_map
 {techmap}
 opt -fast
+{regnames}
 dfflibmap -liberty {liberty}
 {latchmap}
 abc {abc}-liberty {liberty}
@@ -161,6 +162,14 @@ ABC_SIZED = ("+strash;&get,-n;&fraig,-x,-C,1000;&put;scorr;dc2;dretime;retime,-o
 # area for depth; they are measured choices, not defaults.
 ABC_PLAIN_KEEP = "+strash;&get,-n;&dch,-f;&nf,{D};&put"
 ABC_SIZED_KEEP = "+strash;&get,-n;&dch,-f;&nf,{D};&put;buffer;upsize,{D};dnsize,{D};stime,-p"
+# REGISTER NAMES -- --name-registers.  Every cell comes out of yosys as _123_,
+# flops included, so a path report cannot say which register it starts or ends
+# at, and a path cannot be matched with another tool's report of the same RTL.
+# Named after the wire each flop or latch drives, before dfflibmap (which keeps
+# the name): u0.q[3]_reg, bit index and all.  Flops and
+# latches only: autoname on every cell made one module's netlist 15x larger,
+# names up to 1,067 characters long; this made it 1% larger.
+REGNAMES = "rename -wire -suffix _reg t:$_*DFF* t:$_DLATCH*"
 ADDERS = {"brent_kung": "techmap",
           "kogge_stone": "techmap -map +/techmap.v -map +/choices/kogge-stone.v",
           "sklansky": "techmap -map +/techmap.v -map +/choices/sklansky.v",
@@ -403,7 +412,8 @@ def run_one(job):
                              top=name, liberty=args.liberty, dest=dest,
                              latchmap=(f"techmap -map {args.latchmap}"
                                        if args.latchmap else ""),
-                             techmap=ADDERS[args.adder], abc=abc)
+                             techmap=ADDERS[args.adder], abc=abc,
+                             regnames=REGNAMES if args.name_registers else "")
     t = time.time()
     # --abc-timeout: abc's timing-driven sizing (upsize/dnsize) does not scale
     # to one very large flat module -- a 127k-cell register bank, a latch
@@ -489,6 +499,10 @@ def main():
                     help="the prefix structure adders and comparators are built "
                          "with before abc (yosys +/choices); default brent_kung, "
                          "yosys's own.  See the note on ABC_PLAIN_KEEP")
+    ap.add_argument("--name-registers", action="store_true",
+                    help="name each flop and latch after the register it holds "
+                         "(<wire>[bit]_reg) instead of yosys's _123_, so paths "
+                         "read as registers; see the note on REGNAMES")
     ap.add_argument("--abc-keep-structure", action="store_true",
                     help="leave out abc's area pass (&fraig, scorr, dc2) before "
                          "mapping, so a fast adder is not flattened back into a "
