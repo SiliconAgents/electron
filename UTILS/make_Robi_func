@@ -1536,7 +1536,44 @@ sub hier2flat{
 #     A FIXED instance keeps that status rather than being demoted to PLACED,
 #     which the old code did to every fixed cell in the design. -->
         my ($h2fPlaced, $h2fFixed, $h2fUnplaced) = (0, 0, 0);
+#<!-- Rigid mode, set up by hier_place_all --keep_shapes -depth 0 in
+#     %HIER2FLAT_RIGID_FROM (top child => its origin and orient before): every
+#     child kept its shape and its contents, so a cell under one moves by
+#     exactly as much as the child did.  Shift those; only the top's own cells
+#     go through the floorplan lookup, and only theirs get a new box.  Any
+#     child that is new, gone or turned and it is the full rebuild. -->
+        my (%rigidD, @rigidTop);
+        my ($rigid, $rigidShifted) = ( scalar(keys %HIER2FLAT_RIGID_FROM) ? 1 : 0, 0 );
+        if ( $rigid ) {
+          my @now = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetHierInstList;
+          $rigid = 0 if ( @now != scalar(keys %HIER2FLAT_RIGID_FROM) );
+          foreach my $c ( @now ) {
+            last unless ( $rigid );
+            my @e = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetHierInstExtent($c);
+            my $o = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetHierInstOrient($c);
+            if ( @e != 4 || ! exists $HIER2FLAT_RIGID_FROM{$c} || $HIER2FLAT_RIGID_FROM{$c}[2] ne $o ) { $rigid = 0; last; }
+            $rigidD{$c} = [ $e[0] - $HIER2FLAT_RIGID_FROM{$c}[0], $e[1] - $HIER2FLAT_RIGID_FROM{$c}[1] ];
+          }
+          print "INFO-UTS-HIER2FLAT : 008 : the top's children were not all moved rigidly; rebuilding every location\n" unless ( $rigid );
+          %HIER2FLAT_RIGID_FROM = ();
+        }
         foreach my $inst (keys %CADB){
+            if ( $rigid ) {
+              my $p = index($inst, "/");
+              if ( $p > 0 && exists $rigidD{ substr($inst, 0, $p) }
+                   && ! $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanHasLeafInst($inst) ) {
+                my ($dx, $dy) = @{ $rigidD{ substr($inst, 0, $p) } };
+                if ( $dx != 0 || $dy != 0 ) {
+                  my @l = $CADB{$inst}->dbCadbGetLoc;
+                  $CADB{$inst}->dbCadbSetLoc($l[0] + $dx, $l[1] + $dy);
+                  my @b = $CADB{$inst}->dbCadbGetbBox;
+                  $CADB{$inst}->dbCadbSetbBox($b[0] + $dx, $b[1] + $dy, $b[2] + $dx, $b[3] + $dy) if ( @b == 4 );
+                }
+                $rigidShifted++;
+                next;
+              }
+              push(@rigidTop, $inst);
+            }
             #my $orient = &get_orien_of_flat_inst_from_pseudo_db($inst);
             my ($x1, $y1, $orient) = &get_location_of_flat_inst_from_pseudo_db($inst);
             if ( defined $orient && $orient ne "UND" && $orient ne "" ) {
@@ -1553,7 +1590,21 @@ sub hier2flat{
         print "INFO-UTS-HIER2FLAT : 001 : $h2fPlaced instance(s) placed, $h2fFixed kept FIXED,\n";
         print "INFO-UTS-HIER2FLAT : 002 : $h2fUnplaced left UNPLACED with no location in the hierarchy\n";
         %hier_inst_abs_location = ();
-        &set_inst_box;
+        if ( $rigid ) {
+          print "INFO-UTS-HIER2FLAT : 009 : $rigidShifted cell(s) moved with their block, ".scalar(@rigidTop)." of the top's own looked up\n";
+          $DEF_DATABASE_UNIT = $GLOBAL->dbfGlobalGetDBU;
+          foreach my $inst ( @rigidTop ) {
+            my $ref = $CADB{$inst}->dbCadbGetCellref;
+            next unless ( exists $PLDB{$ref} );
+            my @sz = $PLDB{$ref}->dbMdbGetSize;
+            my @l = $CADB{$inst}->dbCadbGetLoc;
+            $CADB{$inst}->dbCadbSetbBox( &utilLocToBbox($l[0], $l[1], $CADB{$inst}->dbCadbGetOrient,
+                                                        $sz[0] * $DEF_DATABASE_UNIT, $sz[1] * $DEF_DATABASE_UNIT) );
+          }
+        }
+        else {
+          &set_inst_box;
+        }
 
         ################################# Adding NETS ####################################
         #my @nets = $FLOORPLAN_ALREADY{$top_module_fplanID}->dbFlplanGetNets;

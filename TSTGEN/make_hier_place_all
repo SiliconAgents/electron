@@ -217,30 +217,39 @@ return $packMixed;
 #
 #     Hard macros take a halo and no utilization slack; standard cells take
 #     the one utilization u solved for the whole tree; children take the
-#     packing factor of dbfTstgenHierPack.  Memoized per module and u. -->
+#     packing factor of dbfTstgenHierPack.  Memoized per module and u.
+#
+#     A module's own cell and macro area does not depend on u, and the
+#     bisection asks for the whole tree forty times: on a 3M-instance tile,
+#     summing the leaf cells again each time was 118 s of a 212 s top-only
+#     re-place.  %HIER_OWN_AREA keeps them for one hier_place_all call, which
+#     clears it on entry, so a netlist edited between calls is read again. -->
 sub dbfTstgenHierBudgetArea {
 
 my ($module, $u, $packMixed, $halo, $memo) = @_;
 return $memo->{$module} if ( exists $memo->{$module} );
 return 0 unless ( exists $MODULE_ALREADY{$module} );
-my ($std, $mac) = (0, 0);
-foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetLeafInst ) {
-  my $ref = $MODULE_ALREADY{$module}->dbVNOMGetLeafInstCell($inst);
-  next unless ( defined $ref && exists $PLDB{$ref} );
-  my @sz = $PLDB{$ref}->dbMdbGetSize;
-  next unless ( @sz >= 2 );
-  my $class = $PLDB{$ref}->dbMdbGetClass;
-  if ( defined $class && $class ne "" && $class !~ m/^CORE/ ) { $mac += $sz[0] * $sz[1]; }
-  else                                                         { $std += $sz[0] * $sz[1]; }
+unless ( exists $HIER_OWN_AREA{$module} ) {
+  my ($s, $m) = (0, 0);
+  foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetLeafInst ) {
+    my $ref = $MODULE_ALREADY{$module}->dbVNOMGetLeafInstCell($inst);
+    next unless ( defined $ref && exists $PLDB{$ref} );
+    my @sz = $PLDB{$ref}->dbMdbGetSize;
+    next unless ( @sz >= 2 );
+    my $class = $PLDB{$ref}->dbMdbGetClass;
+    if ( defined $class && $class ne "" && $class !~ m/^CORE/ ) { $m += $sz[0] * $sz[1]; }
+    else                                                         { $s += $sz[0] * $sz[1]; }
+  }
+  $HIER_OWN_AREA{$module} = [ $s, $m, &dbfTstgenHierPack($module, $packMixed) ];
 }
+my ($std, $mac, $pk) = @{$HIER_OWN_AREA{$module}};
 my $kids = 0;
 foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetHierInst ) {
   my $ref = $MODULE_ALREADY{$module}->dbVNOMGetHierInstCell($inst);
   next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
   $kids += &dbfTstgenHierBudgetArea($ref, $u, $packMixed, $halo, $memo);
 }
-$memo->{$module} = $mac * (1 + $halo) + $std / $u
-                 + $kids / &dbfTstgenHierPack($module, $packMixed);
+$memo->{$module} = $mac * (1 + $halo) + $std / $u + $kids / $pk;
 return $memo->{$module};
 
 }# sub dbfTstgenHierBudgetArea
@@ -1000,6 +1009,24 @@ unless ( defined $cellsBatch && $cellsBatch ne "" ) {
 my @order = ();
 my %seen = ();
 my %instCnt = ();
+#<!-- --keep_shapes -depth 0 moves the top's children as rigid blocks and
+#     nothing inside them.  Note where each one is now, so the closing
+#     hier2flat can shift the flat cells under it by how far it moved rather
+#     than rebuild all of them from the floorplans: 85 s of a 212 s re-place
+#     on a 3M-instance tile.  This takes the flat database to agree with the
+#     committed floorplans, as it does after hier2flat -- or after
+#     legalize_flat, whose legal positions the shift then keeps. -->
+%HIER2FLAT_RIGID_FROM = ();
+if ( $keepShapes && $maxDepth == 0 && ! $noFlatten && $top eq $GLOBAL->dbfGlobalGetTOP ) {
+  my $tf = &get_floorplanID_of_module($top);
+  if ( $tf != -1 && exists $FLOORPLAN_ALREADY{$tf} ) {
+    foreach my $c ( $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstList ) {
+      my @e = $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstExtent($c);
+      next unless ( @e == 4 );
+      $HIER2FLAT_RIGID_FROM{$c} = [ $e[0], $e[1], $FLOORPLAN_ALREADY{$tf}->dbFlplanGetHierInstOrient($c) ];
+    }
+  }
+}
 &dbfTstgenHierPlaceWalk($top, 0, $top, $maxDepth, \@order, \%seen, \%instCnt);
 #<!-- -net_weights names FLAT nets (mc_fp/foo); write_pseudo_graph finds a
 #     module's own by stripping each instance path the walk reached it by,
@@ -1069,6 +1096,7 @@ if ( $reportOnly ) {
 #--------------------------------------------------------------------------
 my ($doneCnt, $keptCnt, $failCnt) = (0, 0, 0);
 my %wsMemo = ();
+%HIER_OWN_AREA = ();    #<!-- see dbfTstgenHierBudgetArea -->
 my %wsSize = ();        #<!-- module => [w, h] that -whitespace gave it -->
 my %sliceShape = ();    #<!-- module => [w, h] a slicing fixed -->
 #<!-- --keep_shapes: every module that already has a committed floorplan is a

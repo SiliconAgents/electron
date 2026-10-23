@@ -106,7 +106,10 @@ nangate_keep_shapes:
 	$(call KS_EXPECT,vedic_16x16 arranged by the floorplan spec: 7 block(s))
 	@! grep -q "did not fit" workarea/keep_shapes.log || { echo "nangate_keep_shapes: a kept shape did not fit the spec"; exit 1; }
 	$(call KS_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	$(call KS_EXPECT,INFO-UTS-HIER2FLAT : 009 :)
 	python3 check_rigid.py workarea/ks1.def workarea/ks2.def
+	grep -h "PLACED\|FIXED" workarea/ks2.def | sort > workarea/ks2.placed ; grep -h "PLACED\|FIXED" workarea/ks3.def | sort > workarea/ks3.placed
+	@cmp -s workarea/ks2.placed workarea/ks3.placed || { echo "nangate_keep_shapes: the rigid hier2flat differs from a full one"; exit 1; }
 	@echo "nangate_keep_shapes: all expected results"
 
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and

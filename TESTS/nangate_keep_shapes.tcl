@@ -5,6 +5,8 @@
 # cells must move with it as one piece.  ks1.def is before, ks2.def after the
 # top is re-placed (both before legalising, so a rigid move is exact);
 # check_rigid.py compares them.
+# ks3.def is the same placement through a full hier2flat: the rigid shift the
+# re-place used must give exactly what rebuilding every location gives.
 read_config_file -config ../../CONFIG/library.config -foundary nangate -technode 45nm -layer 6
 read_verilog -v vedic_filter.vg
 set TOP_MODULE vedic_16x16
@@ -17,5 +19,7 @@ write_def -output ks1.def --overwrite
 # the top only, its own cells included; the children keep their placement
 hier_place_all -depth 0 --keep_shapes -sizing budget --slice_blocks -batch 300 -cells_batch 300 -cells_placer qp --free_flops -args --array,4 -floorplan_spec ../keep_shapes.spec
 write_def -output ks2.def --overwrite
+hier2flat --physical
+write_def -output ks3.def --overwrite
 legalize_flat
 exit
