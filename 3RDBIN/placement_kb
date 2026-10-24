@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""A placement knowledge base: what plan-place tried, on what, and what it gained.
+
+  placement_kb init <dir>
+  placement_kb fingerprint <netlist.v[.gz]> <top> [--kb <dir>] [--storage RE] [--clock_gate RE]
+  placement_kb design <name> --kb <dir>
+  placement_kb add <record.json|-> --kb <dir>
+  placement_kb summary --kb <dir>
+
+The schema is electron's (KB/placement_kb.schema.json); the knowledge base is
+yours -- a directory anywhere, never in this repository:
+
+  sessions.jsonl, trials.jsonl   records, appended, one JSON object a line
+  private/salt                   hashes design and technology names; keep it
+  private/aliases.tsv            fingerprint -> module name, design hash ->
+                                 name: for reading your own records
+
+Records hold no names.  A module is its structural fingerprint -- a hash of
+its leaf cell types and counts, its port widths, and its children's
+fingerprints -- so the same module in a later RTL drop has the same one, and a
+plan made on the old drop applies to it.  "add" refuses a record that has any
+name from the alias file in it, so a name that slips into a note or a
+parameter does not get in.
+
+fingerprint prints, per module: name, fingerprint, cells (subtree), own cells,
+children, copies, depth, port bits, pins per cell, storage cells, clock gates
+-- the numbers a trial's "owner" carries.  With --kb the names go to the
+alias file.
+"""
+import argparse
+import collections
+import datetime
+import gzip
+import hashlib
+import json
+import os
+import re
+import secrets
+import statistics
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SCHEMA = os.path.join(HERE, "..", "KB", "placement_kb.schema.json")
+
+
+def opener(path):
+    return gzip.open(path, "rt") if path.endswith(".gz") else open(path)
+
+
+def kb_paths(kb):
+    return {"sessions": os.path.join(kb, "sessions.jsonl"), "trials": os.path.join(kb, "trials.jsonl"),
+            "salt": os.path.join(kb, "private", "salt"), "aliases": os.path.join(kb, "private", "aliases.tsv")}
+
+
+def salt_of(kb):
+    return open(kb_paths(kb)["salt"]).read().strip()
+
+
+def aliases(kb):
+    p = kb_paths(kb)["aliases"]
+    out = {}
+    if os.path.exists(p):
+        for l in open(p):
+            k, _, v = l.rstrip("\n").partition("\t")
+            if k and v:
+                out[k] = v
+    return out
+
+
+def add_alias(kb, pairs):
+    have = aliases(kb)
+    with open(kb_paths(kb)["aliases"], "a") as fh:
+        for k, v in pairs:
+            if have.get(k) != v:
+                fh.write(f"{k}\t{v}\n"); have[k] = v
+
+
+# ---------------------------------------------------------------- init --
+def cmd_init(a):
+    os.makedirs(os.path.join(a.dir, "private"), exist_ok=True)
+    p = kb_paths(a.dir)
+    for k in ("sessions", "trials", "aliases"):
+        if not os.path.exists(p[k]):
+            open(p[k], "a").close()
+    if not os.path.exists(p["salt"]):
+        with open(p["salt"], "w") as fh:
+            fh.write(secrets.token_hex(16) + "\n")
+        os.chmod(p["salt"], 0o600)
+    print(f"placement_kb: {a.dir} ready (schema {os.path.normpath(SCHEMA)})")
+
+
+def cmd_design(a):
+    h = hashlib.sha256((salt_of(a.kb) + "\0" + a.name).encode()).hexdigest()[:16]
+    add_alias(a.kb, [("d" + h, a.name)])
+    print("d" + h)
+
+
+# --------------------------------------------------------- fingerprint --
+def cmd_fingerprint(a):
+    sto, cg = re.compile(a.storage), re.compile(a.clock_gate)
+    mods, cur = {}, None
+    decl = re.compile(r'^\s*(input|output|inout)\s*(?:wire\s*)?(\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\])?\s*(.*?);')
+    inst = re.compile(r'^\s*(\\?\S+)\s+(\\?\S+)\s*\(')
+    for line in opener(a.netlist):
+        if line.startswith("module "):
+            cur = line.split()[1].split("(")[0]
+            mods[cur] = {"ports": [], "insts": []}
+            continue
+        if cur is None:
+            continue
+        if line.startswith("endmodule"):
+            cur = None; continue
+        m = decl.match(line)
+        if m:
+            w = abs(int(m.group(3)) - int(m.group(4))) + 1 if m.group(2) else 1
+            for _ in [x for x in re.split(r"\s*,\s*", m.group(5)) if x.strip()]:
+                mods[cur]["ports"].append(f"{m.group(1)[0]}{w}")
+            continue
+        m = inst.match(line)
+        if m and m.group(1) not in ("assign", "wire", "reg", "module", "input", "output", "inout"):
+            mods[cur]["insts"].append(m.group(1))
+    if a.top not in mods:
+        print(f"placement_kb: no module {a.top} in {a.netlist}", file=sys.stderr); return 1
+    fp, tot, own, sto_n, cg_n = {}, {}, {}, {}, {}
+
+    def walk(m):
+        if m in fp:
+            return
+        leaf = collections.Counter(c for c in mods[m]["insts"] if c not in mods)
+        kids = collections.Counter(c for c in mods[m]["insts"] if c in mods)
+        for k in kids:
+            walk(k)
+        key = json.dumps([sorted(leaf.items()), sorted(collections.Counter(mods[m]["ports"]).items()),
+                          sorted((fp[k], n) for k, n in kids.items())])
+        fp[m] = "m" + hashlib.sha256(key.encode()).hexdigest()[:16]
+        own[m] = sum(leaf.values())
+        tot[m] = own[m] + sum(n * tot[k] for k, n in kids.items())
+        sto_n[m] = sum(n for c, n in leaf.items() if sto.search(c)) + sum(n * sto_n[k] for k, n in kids.items())
+        cg_n[m] = sum(n for c, n in leaf.items() if cg.search(c)) + sum(n * cg_n[k] for k, n in kids.items())
+    walk(a.top)
+    copies, depth = collections.Counter(), {}
+
+    def place(m, k, d):
+        copies[m] += k
+        depth[m] = min(depth.get(m, d), d)
+        for c, n in collections.Counter(c for c in mods[m]["insts"] if c in mods).items():
+            place(c, k * n, d + 1)
+    place(a.top, 1, 0)
+    print("module\tfingerprint\tcells\town_cells\tchildren\tcopies\tdepth\tport_bits\tpins_per_cell\tstorage_cells\tclock_gates")
+    for m in sorted(copies, key=lambda m: (depth[m], m)):
+        pb = sum(int(p[1:]) for p in mods[m]["ports"])
+        kids = sum(1 for c in mods[m]["insts"] if c in mods)
+        print(f"{m}\t{fp[m]}\t{tot[m]}\t{own[m]}\t{kids}\t{copies[m]}\t{depth[m]}\t{pb}\t"
+              f"{pb / max(tot[m], 1):.4f}\t{sto_n[m]}\t{cg_n[m]}")
+    if a.kb:
+        add_alias(a.kb, [(fp[m], m) for m in copies])
+
+
+# ----------------------------------------------------------------- add --
+def check(rec, schema, names):
+    """The schema's required fields, consts, enums and patterns -- enough to
+    keep a malformed record out without a JSON-schema library -- and no name."""
+    errs = []
+    kinds = {b["properties"]["record"]["const"]: b for b in schema["oneOf"]}
+    b = kinds.get(rec.get("record"))
+    if b is None:
+        return [f"record must be one of {sorted(kinds)}"]
+
+    def resolve(s):
+        while "$ref" in s:
+            s = schema["$defs"][s["$ref"].split("/")[-1]]
+        return s
+
+    def walk(v, s, at):
+        s = resolve(s)
+        if "const" in s and v != s["const"]:
+            errs.append(f"{at}: must be {s['const']!r}")
+        if "enum" in s and v not in s["enum"]:
+            errs.append(f"{at}: must be one of {s['enum']}")
+        if "pattern" in s and isinstance(v, str) and not re.match(s["pattern"], v):
+            errs.append(f"{at}: {v!r} does not match {s['pattern']}")
+        if s.get("type") == "object" and isinstance(v, dict):
+            for r in s.get("required", []):
+                if r not in v:
+                    errs.append(f"{at}.{r}: required")
+            for k, sv in s.get("properties", {}).items():
+                if k in v:
+                    walk(v[k], sv, f"{at}.{k}")
+        if s.get("type") == "array" and isinstance(v, list) and "items" in s:
+            for i, x in enumerate(v):
+                walk(x, s["items"], f"{at}[{i}]")
+    walk(rec, b, rec.get("record"))
+    text = json.dumps(rec)
+    for n in names:
+        if len(n) >= 4 and re.search(r"(?<![A-Za-z0-9_])" + re.escape(n) + r"(?![A-Za-z0-9_])", text):
+            errs.append(f"a name from the alias file is in the record: {n}")
+    return errs
+
+
+def cmd_add(a):
+    schema = json.load(open(SCHEMA))
+    names = set(aliases(a.kb).values())
+    src = sys.stdin if a.record == "-" else open(a.record)
+    recs = []
+    for i, line in enumerate(l for l in src.read().splitlines() if l.strip()):
+        rec = json.loads(line)
+        rec.setdefault("schema", 1)
+        if rec.get("record") == "session":
+            rec.setdefault("time", datetime.datetime.now().astimezone().isoformat(timespec="seconds"))
+        errs = check(rec, schema, names)
+        if errs:
+            print(f"placement_kb: record {i + 1} refused: " + "; ".join(errs), file=sys.stderr)
+            return 1
+        recs.append(rec)
+    p = kb_paths(a.kb)
+    for rec in recs:
+        with open(p["sessions" if rec["record"] == "session" else "trials"], "a") as fh:
+            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+    print(f"placement_kb: {len(recs)} record(s) added")
+
+
+# ------------------------------------------------------------- summary --
+def cmd_summary(a):
+    p = kb_paths(a.kb)
+    ses = [json.loads(l) for l in open(p["sessions"]) if l.strip()]
+    tri = [json.loads(l) for l in open(p["trials"]) if l.strip()]
+    print(f"{len(ses)} session(s) on {len({s['design'] for s in ses})} design(s), {len(tri)} trial(s)")
+    by = collections.defaultdict(list)
+    for t in tri:
+        by[(t["action"]["type"], t["verdict"])].append(t)
+    print(f"{'action':<12} {'verdict':<9} {'n':>3}  TNS gain (+ better)  owner charge change")
+    for (act, ver), ts in sorted(by.items()):
+        d = [(t["after"]["tns"] - t["before"]["tns"]) / abs(t["before"]["tns"]) for t in ts if t["before"]["tns"]]
+        o = [(t["owner_charge_after"] - t["owner_charge_before"]) / t["owner_charge_before"]
+             for t in ts if t.get("owner_charge_before")]
+        print(f"{act:<12} {ver:<9} {len(ts):>3}  {statistics.median(d) * 100:+8.1f}%   "
+              + (f"{statistics.median(o) * 100:+8.1f}%" if o else "       -"))
+
+
+def main():
+    ap = argparse.ArgumentParser(description="placement knowledge base (schema: KB/placement_kb.schema.json)")
+    sp = ap.add_subparsers(dest="cmd", required=True)
+    x = sp.add_parser("init"); x.add_argument("dir"); x.set_defaults(f=cmd_init)
+    x = sp.add_parser("design"); x.add_argument("name"); x.add_argument("--kb", required=True); x.set_defaults(f=cmd_design)
+    x = sp.add_parser("fingerprint"); x.add_argument("netlist"); x.add_argument("top"); x.add_argument("--kb")
+    x.add_argument("--storage", default=r"^(LH|LN|DF|SDF|EDF|LATCH|DFF)", help="regex on a cell name: latches and flops")
+    x.add_argument("--clock_gate", default=r"^(CKLN|CKLH|ICG|CLKGATE)", help="regex on a cell name: clock gates")
+    x.set_defaults(f=cmd_fingerprint)
+    x = sp.add_parser("add"); x.add_argument("record"); x.add_argument("--kb", required=True); x.set_defaults(f=cmd_add)
+    x = sp.add_parser("summary"); x.add_argument("--kb", required=True); x.set_defaults(f=cmd_summary)
+    a = ap.parse_args()
+    return a.f(a) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

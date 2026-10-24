@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "electron/placement_kb/1",
+  "title": "electron placement knowledge base, one JSON record per line",
+  "description": "What plan-place tried, on what, and what it gained. A knowledge base is a directory (3RDBIN/placement_kb init) holding sessions.jsonl and trials.jsonl, written only by appending. Records carry no design, module or library name: a design is a salted hash (the salt is private to the knowledge base), a module is the structural fingerprint 3RDBIN/placement_kb fingerprint computes (cell-type counts, port widths and children's fingerprints), so the same module in a later RTL drop matches without its name. Names for the owner's own reading go in the knowledge base's private alias file, never in a record. Times in seconds, timing in ns, lengths in um.",
+  "$defs": {
+    "fingerprint": { "type": "string", "pattern": "^m[0-9a-f]{16}$" },
+    "metrics": {
+      "type": "object",
+      "description": "Timing as the predictor sees it: planned repeaters and sizing (photon_server REPEATED + size), split by blame.",
+      "required": ["wns", "tns", "violating"],
+      "properties": {
+        "wns": { "type": "number" },
+        "tns": { "type": "number" },
+        "violating": { "type": "integer" },
+        "tns_logic": { "type": "number", "description": "TNS of what still fails with no wire" },
+        "tns_placement": { "type": "number", "description": "what wires cost: with-wire minus no-wire" }
+      }
+    },
+    "module_features": {
+      "type": "object",
+      "description": "The owner blame pointed at. Structural numbers only.",
+      "required": ["fingerprint", "cells", "depth"],
+      "properties": {
+        "fingerprint": { "$ref": "#/$defs/fingerprint" },
+        "cells": { "type": "integer", "description": "leaf cells in its subtree" },
+        "own_cells": { "type": "integer" },
+        "children": { "type": "integer", "description": "child module instances" },
+        "copies": { "type": "integer", "description": "instances of it in the design" },
+        "depth": { "type": "integer", "description": "0 for the top" },
+        "port_bits": { "type": "integer" },
+        "pins_per_cell": { "type": "number", "description": "port_bits / cells" },
+        "storage_fraction": { "type": "number", "description": "latches and flops over cells" },
+        "clock_gates": { "type": "integer" },
+        "box_um": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "charge_share": { "type": "number", "description": "its share of the placement TNS blame charged, 0..1" },
+        "charge_ns": { "type": "number" }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "title": "session: one placement explored, and the conditions it was explored in",
+      "type": "object",
+      "required": ["record", "schema", "session", "time", "design", "baseline"],
+      "properties": {
+        "record": { "const": "session" },
+        "schema": { "const": 1 },
+        "session": { "type": "string", "description": "unique id, referenced by its trials" },
+        "time": { "type": "string", "format": "date-time" },
+        "design": { "type": "string", "pattern": "^d[0-9a-f]{16}$", "description": "salted hash of the design" },
+        "tools": { "type": "object", "description": "electron / photon commits", "additionalProperties": { "type": "string" } },
+        "technology": { "type": "string", "description": "node and cell family as a salted hash, or a public name (nangate)" },
+        "cells": { "type": "integer" },
+        "die_um": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "period_ns": { "type": "number" },
+        "predictor": { "type": "string", "description": "how timing was predicted, e.g. 'repeated+size3'" },
+        "baseline": { "$ref": "#/$defs/metrics" },
+        "noise_tns": { "type": "number", "description": "TNS spread of a control re-place in this session (fraction of TNS)" },
+        "note": { "type": "string" }
+      }
+    },
+    {
+      "title": "trial: one action tried on one owner, and what it did",
+      "type": "object",
+      "required": ["record", "schema", "session", "trial", "owner_kind", "owner", "action", "before", "after", "verdict"],
+      "properties": {
+        "record": { "const": "trial" },
+        "schema": { "const": 1 },
+        "session": { "type": "string" },
+        "trial": { "type": "string" },
+        "owner_kind": { "enum": ["arrangement", "own-vs-block", "cells", "logic", "none"],
+                        "description": "blame's kind for the owner acted on; none for a control" },
+        "owner": { "$ref": "#/$defs/module_features" },
+        "partners": { "type": "array", "items": { "$ref": "#/$defs/fingerprint" },
+                      "description": "for an arrangement, the block pair" },
+        "action": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["control", "flatten", "spec", "port_side", "net_weights", "anchor_grid", "resize_box", "other"] },
+            "params": { "type": "object", "description": "e.g. {cut: 'V(a H(b c))' with fingerprints for names} or {rows_along: 'y'}" }
+          }
+        },
+        "before": { "$ref": "#/$defs/metrics" },
+        "after": { "$ref": "#/$defs/metrics" },
+        "owner_charge_before": { "type": "number" },
+        "owner_charge_after": { "type": "number" },
+        "seconds": { "type": "number", "description": "what the try cost: placement plus prediction" },
+        "verdict": { "enum": ["accepted", "rejected", "noise", "invalid"],
+                     "description": "accepted: better beyond the session's noise; noise: within it; invalid: the try was broken" },
+        "note": { "type": "string" }
+      }
+    }
+  ]
+}
