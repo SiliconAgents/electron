@@ -477,7 +477,7 @@ $solve = sub {
   return $best;
 };
 
-my ($nBlocks, $worstAsp, $minAreaRatio, $hardMiss) = (0, 1, 1, 0);
+my ($nBlocks, $worstAsp, $minAreaRatio, $hardMiss, $tooSmall) = (0, 1, 1, 0, 0);
 my $snapUp = sub { my ($v, $p) = @_; return ( $p > 0 ) ? POSIX::ceil( $v / $p - 1e-9 ) * $p : $v; };
 my $snapDn = sub { my ($v, $p) = @_; return ( $p > 0 ) ? POSIX::floor( $v / $p + 1e-9 ) * $p : $v; };
 my $apply;
@@ -499,6 +499,19 @@ $apply = sub {
       $bw = $snapDn->($cw, $siteUm) if ( $bw > $cw );
       $bh = $snapUp->($it->{a} / $bw, $pitchY);
       $bh = $snapDn->($ch, $pitchY) if ( $bh > $ch );
+      #<!-- A slice narrower than one site, or shorter than one row pair,
+      #     snapped the block down to nothing, and the aspect below divided by
+      #     it: a 4x4 multiplier's 2x2 blocks, each a few cells, came out of
+      #     their slices 0 um tall.  Such a block keeps one site and one row
+      #     pair -- overhanging its slice, which the legalizer resolves --
+      #     and is counted, rather than taking the walk down with it. -->
+      my $minW = ( $siteUm > 0 ) ? $siteUm : $cw;
+      my $minH = ( $pitchY > 0 ) ? $pitchY : $ch;
+      if ( $bw < $minW || $bh < $minH ) {
+        $tooSmall++;
+        $bw = $minW if ( $bw < $minW );
+        $bh = $minH if ( $bh < $minH );
+      }
       $minAreaRatio = ($bw * $bh) / $it->{a} if ( ($bw * $bh) / $it->{a} < $minAreaRatio );
     }
     my $asp = ( $bw > $bh ) ? $bw / $bh : $bh / $bw;
@@ -642,14 +655,14 @@ if ( defined $spec ) {
   };
   $place->($spec, 0, 0, $W, $H);
   return { blocks => $nBlocks, groups => scalar(@leaves) - $starCnt, worst_aspect => $worstAsp,
-           min_area_ratio => $minAreaRatio, hard_misses => $hardMiss, spec => 1,
+           min_area_ratio => $minAreaRatio, hard_misses => $hardMiss, too_small => $tooSmall, spec => 1,
            own_region => ( $starCnt ? $freeA : 0 ) };
 }
 
 my $sol = $solve->(\@items, 0, 0, $W, $H, 0);
 $apply->($sol->[1], 0, 0, $W, $H);
 return { blocks => $nBlocks, groups => scalar(@items), worst_aspect => $worstAsp,
-         min_area_ratio => $minAreaRatio, hard_misses => $hardMiss };
+         min_area_ratio => $minAreaRatio, hard_misses => $hardMiss, too_small => $tooSmall };
 
 }# sub dbfTstgenHierSliceBlocks
 
@@ -1394,10 +1407,11 @@ foreach my $rec ( @order ) {
         push(@specHeld, $inst);
       }
       $mrec{floorplan_spec} = $sum;
-      printf("INFO-TST-HR_PL_ALL : 045 : %s arranged by the floorplan spec: %d block(s), worst aspect %.2f%s%s\n",
+      printf("INFO-TST-HR_PL_ALL : 045 : %s arranged by the floorplan spec: %d block(s), worst aspect %.2f%s%s%s\n",
              $mod, $sum->{blocks}, $sum->{worst_aspect},
              $sum->{own_region} ? sprintf(", %.0f um2 kept for its own logic", $sum->{own_region}) : "",
-             $sum->{hard_misses} ? ", $sum->{hard_misses} fixed shape(s) did not fit" : "");
+             $sum->{hard_misses} ? ", $sum->{hard_misses} fixed shape(s) did not fit" : "",
+             $sum->{too_small} ? ", $sum->{too_small} slice(s) too small, block given one row pair" : "");
     }
   }
 
@@ -1443,11 +1457,12 @@ foreach my $rec ( @order ) {
       if ( $sum->{blocks} > 0 ) {
         $mrec{slice} = $sum;
         $mrec{blocks_after_slice} = &dbfTstgenHierBlockFit($mod, $w, $h);
-        printf("INFO-TST-HR_PL_ALL : 035 : %d block(s) in %d group(s) of %s sliced: overlap %.1f%% -> %.1f%%, worst aspect %.2f%s\n",
+        printf("INFO-TST-HR_PL_ALL : 035 : %d block(s) in %d group(s) of %s sliced: overlap %.1f%% -> %.1f%%, worst aspect %.2f%s%s\n",
                $sum->{blocks}, $sum->{groups}, $mod,
                100 * $mrec{blocks_after_block_pass}{overlap_frac}, 100 * $mrec{blocks_after_slice}{overlap_frac},
                $sum->{worst_aspect},
-               $sum->{hard_misses} ? ", $sum->{hard_misses} fixed shape(s) did not fit" : "");
+               $sum->{hard_misses} ? ", $sum->{hard_misses} fixed shape(s) did not fit" : "",
+               $sum->{too_small} ? ", $sum->{too_small} slice(s) too small, block given one row pair" : "");
       }
     }
     $mrec{seq_left_to_cell_pass} = ( grep { $_ eq "--block_anchors" } @placeArgs ) ? 1 : 0;
