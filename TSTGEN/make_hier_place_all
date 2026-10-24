@@ -846,6 +846,236 @@ foreach my $child ( sort keys %childInsts ) {
 }# sub dbfTstgenHierPlaceWalk
 
 
+#<!-- --child_pins: a child block's pins put where the parent's nets reach it.
+#
+#     Without it a block's ports are placed when the block itself is opened,
+#     by hier_place, at the edge point nearest the block's OWN contents: the
+#     other end of each net is in the parent, which the block cannot see.  On
+#     a 3M-cell design the cells inside a block on nets crossing its boundary
+#     sat only 8% to 17% nearer the side their partners were on than a random
+#     cell of the block, and three blocks faced away from them.
+#
+#     So, after the parent's cell pass, when everything in the parent has a
+#     place: each child port bit goes to the point of the child's boundary
+#     nearest the centroid of its net's other members -- cells, other blocks,
+#     the parent's own ports.  The points of one edge are spread a pin pitch
+#     apart in the order their nets want, and stored on the child FIXED, as a
+#     point, "NONE x y x y".  A child pin is gone after hier2flat; it only has
+#     to steer the child's placement, so it needs a place and no shape or
+#     layer.  commit_module --physical_only writes it into the child's
+#     floorplan with no connectivity work, edit_module reads it back, and
+#     hier_place keeps a FIXED port where it is.
+#
+#     A module has one floorplan, so identical siblings get one set of pins:
+#     each at the average of what the instances want, put back onto the
+#     nearest edge.  A module under several parents keeps what its first
+#     parent gave it ($done).  A port bit whose net has no placed member, or
+#     more members than the fan out limit, is left to the child as before.
+#
+#     Returns a summary for the metrics record. -->
+sub dbfTstgenHierProjectChildPins {
+
+my ($module, $done, $fanoutLimit, $skipPlaced) = @_;
+$fanoutLimit = 1000 unless ( defined $fanoutLimit && $fanoutLimit > 0 );
+my %sum = ( children => 0, pins => 0, no_partner => 0, high_fanout => 0,
+            width_mismatch => 0, rotated => 0, kept => 0 );
+
+#<!-- every placed instance's centre, and the child blocks' boxes -->
+my %centre = ();
+my %child = ();
+foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+  next if ( $inst eq "PIN" );
+  my $v = $PSEUDO_VINST_ALREADY{$module}{$inst};
+  next if ( $v->dbPimDBGetInstStatus eq "UNPLACED" );
+  my @bb = &dbfTstgenBboxFromCoords($v->dbPimDBGetInstRelBbox);
+  next unless ( @bb >= 4 && defined $bb[3] );
+  $centre{$inst} = [ ($bb[0] + $bb[2]) / 2, ($bb[1] + $bb[3]) / 2 ];
+  my $ref = $v->dbPimDBGetInstCellref;
+  next unless ( defined $ref && exists $PSEUDO_MODULE_ALREADY{$ref} && exists $MODULE_ALREADY{$ref} );
+  next unless ( $bb[2] > $bb[0] && $bb[3] > $bb[1] );
+  $child{$inst} = { ref => $ref, box => [ @bb[0..3] ], orient => $v->dbPimDBGetInstOrient };
+}
+return \%sum unless ( %child );
+
+#<!-- One pass over the conn lines: the placed members of every net bit, and
+#     which net bit each child port bit is on.  The parse is
+#     dbfTstgenHierNetToInst's, which drops the pin's own bits; those are
+#     needed here, paired with the net's by position as verilog pairs them. -->
+my %members = ();
+my %childPinNet = ();
+foreach my $conn ( $MODULE_ALREADY{$module}->dbVNOMGetConn ) {
+  $conn =~ s/^\s+//;
+  $conn =~ s/\s*\;?\s*$//;
+  my $instCell = $conn;
+  $instCell =~ s/\(.+$//;
+  my $inst = ( split(/\s+/, $instCell) )[1];
+  next unless ( defined $inst && $inst ne "" );
+  my $at = $centre{$inst};
+  my $kid = $child{$inst};
+  next unless ( defined $at || defined $kid );
+  $conn =~ s/\s*\(\s*/\|/;
+  $conn =~ s/^.*\|//;
+  $conn =~ s/\s+//g;
+  $conn =~ s/\)+$//;
+  foreach my $pair ( split(/\)\,/, $conn) ) {
+    my ($pin, $net) = ( split(/\(/, $pair) )[0,1];
+    next unless ( defined $pin && defined $net && $net ne "" );
+    $pin =~ s/^\.//;
+    my @nb = &array_of_blasted_expr($net, $module);
+    @nb = ($net) unless ( @nb );
+    if ( defined $at ) {
+      foreach my $b ( @nb ) {
+        next if ( ! defined $b || $b eq "" || $b =~ m/^\d*'/ );
+        push(@{$members{$b}}, [ $at->[0], $at->[1], $inst ]);
+      }
+    }
+    if ( defined $kid ) {
+      my @pb = &array_of_blasted_expr($pin, $kid->{ref});
+      @pb = ($pin) unless ( @pb );
+      if ( @pb != @nb ) {
+        $sum{width_mismatch}++;
+        next;
+      }
+      for ( my $k = 0; $k < @pb; $k++ ) {
+        next if ( ! defined $nb[$k] || $nb[$k] eq "" || $nb[$k] =~ m/^\d*'/ );
+        $childPinNet{$inst}{$pb[$k]} = $nb[$k];
+      }
+    }
+  }
+}
+
+#<!-- What each child port bit wants, in the child's own frame, summed over
+#     the instances of its module -->
+my %want = ();
+my %dims = ();
+my %skipRef = ();
+foreach my $inst ( sort keys %childPinNet ) {
+  my $kid = $child{$inst};
+  my $ref = $kid->{ref};
+  next if ( exists $skipRef{$ref} );
+  if ( exists $done->{$ref} || ( $skipPlaced && &dbfTstgenHierModuleIsPlaced($ref) ) ) {
+    $skipRef{$ref} = 1;
+    $sum{kept}++;
+    next;
+  }
+  my $o = $kid->{orient};
+  $o = "N" unless ( defined $o && $o ne "" );
+  unless ( $o =~ m/^(N|R0|S|R180|FN|MY|FS|MX)$/ ) {
+    $sum{rotated}++;
+    next;
+  }
+  my ($x0, $y0, $x1, $y1) = @{$kid->{box}};
+  my ($w, $h) = ($x1 - $x0, $y1 - $y0);
+  $dims{$ref} = [ $w, $h ] unless ( exists $dims{$ref} );
+  foreach my $pb ( keys %{$childPinNet{$inst}} ) {
+    my $net = $childPinNet{$inst}{$pb};
+    my @pts = grep { $_->[2] ne $inst } @{ exists $members{$net} ? $members{$net} : [] };
+    #<!-- the parent's own port on this net, where its placement put it -->
+    if ( $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenHasPin($net) ) {
+      my @r = $PSEUDO_MODULE_ALREADY{$module}->dbaTstgenGetPinRect($net);
+      if ( @r ) {
+        my @v = split(/\s+/, $r[0]);
+        push(@pts, [ $v[-4], $v[-3], "PIN" ]) if ( @v >= 4 );
+      }
+    }
+    unless ( @pts ) {
+      $sum{no_partner}++;
+      next;
+    }
+    if ( @pts > $fanoutLimit ) {
+      $sum{high_fanout}++;
+      next;
+    }
+    my ($ox, $oy) = (0, 0);
+    foreach my $p ( @pts ) {
+      $ox += $p->[0];
+      $oy += $p->[1];
+    }
+    $ox /= @pts;
+    $oy /= @pts;
+    #<!-- the boundary point nearest the partners: clamped onto the box from
+    #     outside, or out to the nearest edge from inside it -->
+    my ($px, $py) = ( $ox < $x0 ? $x0 : ( $ox > $x1 ? $x1 : $ox ),
+                      $oy < $y0 ? $y0 : ( $oy > $y1 ? $y1 : $oy ) );
+    if ( $px > $x0 && $px < $x1 && $py > $y0 && $py < $y1 ) {
+      my %d = ( W => $px - $x0, E => $x1 - $px, S => $py - $y0, N => $y1 - $py );
+      my $side = ( sort { $d{$a} <=> $d{$b} or $a cmp $b } keys %d )[0];
+      if    ( $side eq "W" ) { $px = $x0; }
+      elsif ( $side eq "E" ) { $px = $x1; }
+      elsif ( $side eq "S" ) { $py = $y0; }
+      else                   { $py = $y1; }
+    }
+    my ($lx, $ly) = ($px - $x0, $py - $y0);
+    $lx = $w - $lx if ( $o =~ m/^(S|R180|FN|MY)$/ );
+    $ly = $h - $ly if ( $o =~ m/^(S|R180|FS|MX)$/ );
+    my $acc = ( $want{$ref}{$pb} ||= [ 0, 0, 0 ] );
+    $acc->[0] += $lx;
+    $acc->[1] += $ly;
+    $acc->[2]++;
+  }
+}
+
+#<!-- Onto the edges, spread, and stored on the child -->
+my $pitch = $GLOBAL->dbGlobalGetRowHeight;
+$pitch = ( defined $pitch && $pitch > 0 ) ? $pitch / 4 : 0.05;
+foreach my $ref ( sort keys %want ) {
+  my ($w, $h) = @{$dims{$ref}};
+  my %onEdge = ();
+  foreach my $pb ( keys %{$want{$ref}} ) {
+    my ($sx, $sy, $n) = @{$want{$ref}{$pb}};
+    my ($lx, $ly) = ($sx / $n, $sy / $n);
+    #<!-- an average of boundary points can fall inside: the nearest edge -->
+    my %d = ( W => $lx, E => $w - $lx, S => $ly, N => $h - $ly );
+    my $side = ( sort { $d{$a} <=> $d{$b} or $a cmp $b } keys %d )[0];
+    push(@{$onEdge{$side}}, [ ( $side eq "W" || $side eq "E" ) ? $ly : $lx, $pb ]);
+  }
+  my $pseudo = $PSEUDO_MODULE_ALREADY{$ref};
+  my $fp = $pseudo->dbaTstgenGetFloorplan;
+  $pseudo->dbaTstgenSetFloorplan("$ref/_self_") unless ( defined $fp && $fp ne "" );
+  foreach my $side ( sort keys %onEdge ) {
+    my $vertical = ( $side eq "W" || $side eq "E" );
+    my $len = $vertical ? $h : $w;
+    my @p = sort { $a->[0] <=> $b->[0] or $a->[1] cmp $b->[1] } @{$onEdge{$side}};
+    my $step = ( @p * $pitch > $len ) ? $len / @p : $pitch;
+    #<!-- least displacement in the wanted order: sweep forward, then back if
+    #     the far end overflowed -->
+    my $prev;
+    foreach my $q ( @p ) {
+      my $v = ( $q->[0] < 0 ) ? 0 : $q->[0];
+      $v = $prev + $step if ( defined $prev && $v < $prev + $step );
+      $q->[0] = $v;
+      $prev = $v;
+    }
+    if ( $p[-1][0] > $len ) {
+      my $next;
+      foreach my $q ( reverse @p ) {
+        my $v = ( $q->[0] > $len ) ? $len : $q->[0];
+        $v = $next - $step if ( defined $next && $v > $next - $step );
+        $v = 0 if ( $v < 0 );
+        $q->[0] = $v;
+        $next = $v;
+      }
+    }
+    foreach my $q ( @p ) {
+      my ($x, $y) = $vertical ? ( ( $side eq "W" ? 0 : $w ), $q->[0] )
+                              : ( $q->[0], ( $side eq "S" ? 0 : $h ) );
+      $pseudo->dbaTstgenAddPin($q->[1]) unless ( $pseudo->dbaTstgenHasPin($q->[1]) );
+      $pseudo->dbaTstgenWipePinRect($q->[1]);
+      $pseudo->dbaTstgenAddPinRect($q->[1], "NONE $x $y $x $y");
+      $pseudo->dbaTstgenSetPinStatus($q->[1], "FIXED");
+      $sum{pins}++;
+    }
+  }
+  $pseudo->dbaTstgenSetPhysicalDirty(1);
+  $done->{$ref} = 1;
+  $sum{children}++;
+}
+
+return \%sum;
+
+}# sub dbfTstgenHierProjectChildPins
+
+
 #****f* /hier_place_all
 #  hier_place_all
 # FUNCTION
@@ -885,6 +1115,8 @@ my $mixedWs = 10;
 my $macroHalo = 15;
 my $metricsFile = "hier_place_all.metrics.jsonl";
 my $sliceBlocks = 0;
+my $childPins = 0;
+my %childPinsDone = ();
 my $fanoutLimit = 0;
 my $extra = "";
 my ($noCells, $noFlatten, $skipPlaced, $reportOnly, $keepFiles) = (0, 0, 0, 0, 0);
@@ -944,6 +1176,11 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                       --slice_blocks          after each block pass, lay the child\n";
   print "                                               blocks out without overlap by slicing\n";
   print "                                               the box (identical siblings as a grid)\n";
+  print "                       --child_pins            after each cell pass, put every child\n";
+  print "                                               block's pins where the parent's nets\n";
+  print "                                               reach it, FIXED, so the child is placed\n";
+  print "                                               toward its partners rather than its own\n";
+  print "                                               contents\n";
   print "                       -metrics <file>         one JSON line per module per run,\n";
   print "                                               appended; default\n";
   print "                                               hier_place_all.metrics.jsonl\n";
@@ -999,6 +1236,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-metrics")       { $metricsFile = $_[$i+1]; }
   elsif ($_[$i] eq "--no_metrics")   { $metricsFile = ""; }
   elsif ($_[$i] eq "--slice_blocks") { $sliceBlocks = 1; }
+  elsif ($_[$i] eq "--child_pins")   { $childPins = 1; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; $i++; }
@@ -1485,6 +1723,27 @@ foreach my $rec ( @order ) {
     push(@cellArgs, "-anchor", $cellsAnchor) if ( $cellsAnchor ne "" );
     &hier_place_cells(@cellArgs);
     $mrec{cell_pass} = $HIER_PLACE_CELL_STATS{$mod} if ( exists $HIER_PLACE_CELL_STATS{$mod} );
+  }
+
+  #<!-- --child_pins: the children's pins from where this module's nets reach
+  #     them, before the commit writes them into the children's floorplans --
+  #     after the cell pass, so the partners are real cells, not block centres -->
+  if ( $childPins ) {
+    my $cp = &dbfTstgenHierProjectChildPins($mod, \%childPinsDone, $fanoutLimit, $skipPlaced);
+    $mrec{child_pins} = $cp;
+    if ( $cp->{pins} > 0 || $cp->{kept} > 0 ) {
+      printf("INFO-TST-HR_PL_ALL : 052 : %s: %d pin(s) of %d child module(s) placed toward their nets%s\n",
+             $mod, $cp->{pins}, $cp->{children},
+             $cp->{kept} ? ", $cp->{kept} kept the pins they already had" : "");
+    }
+    my $left = $cp->{no_partner} + $cp->{high_fanout} + $cp->{width_mismatch};
+    if ( $left > 0 ) {
+      printf("INFO-TST-HR_PL_ALL : 053 : %s: %d child port bit(s) left to the child: %d with no placed partner, %d over the fan out limit, %d connection(s) of mismatched width\n",
+             $mod, $left, $cp->{no_partner}, $cp->{high_fanout}, $cp->{width_mismatch});
+    }
+    if ( $cp->{rotated} > 0 ) {
+      print "WARN-TST-HR_PL_ALL : 054 : $mod: $cp->{rotated} child instance(s) are rotated, their pins are left to the child\n";
+    }
   }
 
   #<!-- Commit before descending.  The child's size is read out of this

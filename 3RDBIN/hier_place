@@ -910,6 +910,16 @@ class PlaceWidget(QWidget):
     def assign_ports(self, quiet: bool = True):
         """Confine every port to a die edge and a layer of that edge, then snap it."""
         ports = [n for n in self.nodes.values() if n.kind.upper() == "PORT"]
+        # A FIXED port keeps the place the nodefile gave it, and the edge it sits on.
+        # hier_place_all --child_pins puts a block's pins where the parent's nets
+        # arrive, before the block is opened; re-picking them here from the block's
+        # own contents is exactly the inside-out choice that option exists to replace.
+        held = [p for p in ports if p.fixed]
+        for p in held:
+            p.edge = self._nearest_edge(p)
+        ports = [p for p in ports if not p.fixed]
+        if held and not quiet:
+            print(f"  {len(held)} FIXED ports kept where the nodefile put them")
         if not ports:
             return
         centroid = self._port_block_centroids()
@@ -1011,7 +1021,11 @@ class PlaceWidget(QWidget):
         with no size belongs exactly on the boundary, and insetting it by half of the
         box drawn to make it visible would put it there in the written nodefile too -
         a pin at x=0 would come back as x=0.025 and the flow would have to undo it.
+
+        A FIXED node is not snapped: every pass that moves pins comes through here.
         """
+        if n.fixed:
+            return
         x1, y1, x2, y2 = self.die
         half_w = n.decl_width / 2
         half_h = n.decl_height / 2
@@ -1023,6 +1037,12 @@ class PlaceWidget(QWidget):
             n.y = y1 + half_h
         elif n.edge == "N":
             n.y = y2 - half_h
+
+    def _nearest_edge(self, n: Node) -> str:
+        """The die edge a node sits closest to, for a pin that keeps its own place."""
+        x1, y1, x2, y2 = self.die
+        dist = {"W": n.x - x1, "E": x2 - n.x, "S": n.y - y1, "N": y2 - n.y}
+        return min(dist, key=lambda s: abs(dist[s]))
 
     def initialize_positions(self, seed: int):
         """Keep any coordinates the nodefile supplied; scatter the rest inside the die."""
@@ -1228,7 +1248,7 @@ class PlaceWidget(QWidget):
         ideal: Dict[int, float] = {}
         for pi, targets in self.port_nets.items():
             port = self.nodes.get(pi)
-            if port is None or not port.edge or not targets:
+            if port is None or not port.edge or port.fixed or not targets:
                 continue
             vertical = port.edge in ("W", "E")
             want = sum((t.y if vertical else t.x) for t in targets) / len(targets)
@@ -1308,10 +1328,11 @@ class PlaceWidget(QWidget):
         pitch = max(self.port_footprint, 1e-9)
         layers = max(1, self.layers_per_edge)
 
-        # Scalars are their own one-bit bus so both kinds go through the same path
+        # Scalars are their own one-bit bus so both kinds go through the same path.
+        # FIXED pins are not laid out; they stay where the nodefile put them.
         groups: Dict[Tuple[str, str], List[Node]] = defaultdict(list)
         for n in self.nodes.values():
-            if n.edge:
+            if n.edge and not n.fixed:
                 groups[(n.edge, n.bus if n.bus else f"\x00{n.index}")].append(n)
 
         by_edge: Dict[str, List[Tuple[float, str, List[Node]]]] = defaultdict(list)
@@ -1652,7 +1673,7 @@ class PlaceWidget(QWidget):
         # legalised against each other, which is what makes the layer count buy capacity.
         by_edge: Dict[Tuple[str, int], List[Node]] = defaultdict(list)
         for n in self.nodes.values():
-            if n.edge:
+            if n.edge and not n.fixed:
                 by_edge[(n.edge, n.layer)].append(n)
 
         for (side, _layer), group in by_edge.items():
