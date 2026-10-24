@@ -118,6 +118,25 @@ nangate_keep_shapes:
 	@cmp -s workarea/ks4.placed workarea/ks5.placed || { echo "nangate_keep_shapes: the -only rigid hier2flat differs from a full one"; exit 1; }
 	@echo "nangate_keep_shapes: all expected results"
 
+# nangate_ungroup: adder12 dissolved into vedic_8x8 (four copies) for
+# placement.  The netlist must not change (same_netlist.py on the timing graphs
+# before and after), vedic_8x8's remaining blocks move rigidly and its new own
+# cells freely, nothing outside it moves, the rigid hier2flat gives what a full
+# one gives, and legalize_flat finds no overlap.
+UG_EXPECT = grep -q "$(1)" workarea/ungroup.log || { echo "nangate_ungroup: expected \"$(1)\" in workarea/ungroup.log"; exit 1; }
+nangate_ungroup:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_ungroup.tcl > ungroup.log 2>&1
+	$(call UG_EXPECT,UNGROUP : 006 : 2 instance(s) dissolved into vedic_8x8)
+	$(call UG_EXPECT,8 instance path(s))
+	$(call UG_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	python3 same_netlist.py workarea/ug0.sgraph workarea/ug1.sgraph
+	python3 check_rigid.py --free A4,A5 workarea/ug0.def workarea/ug1.def V9 V10 V11 V12
+	grep -h "PLACED\|FIXED" workarea/ug1.def | sort > workarea/ug1.placed ; grep -h "PLACED\|FIXED" workarea/ug2.def | sort > workarea/ug2.placed
+	@cmp -s workarea/ug1.placed workarea/ug2.placed || { echo "nangate_ungroup: the rigid hier2flat differs from a full one"; exit 1; }
+	@echo "nangate_ungroup: all expected results"
+
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and
 # repaired with legalize_flat --incremental instead of a full flat pass.  Fails
 # unless every module was legalized, the repair ran, and 3RDBIN/def_check_legal
@@ -321,7 +340,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

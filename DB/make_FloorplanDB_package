@@ -228,6 +228,12 @@ unless ( exists $self->{HChild}{$name} ) {
 return $self->{HChild}{$name}{O};
 }# sub dbFlplanGetHierInstOrient
 
+#<!-- one child block gone (ungroup): the others stay -->
+sub dbFlplanRemoveHierInst {
+my ($self, $name) = @_;
+delete $self->{HChild}{$name};
+}# sub dbFlplanRemoveHierInst
+
 sub dbFlplanWipeHierInsts {
 my ($self) = @_;
 $self->{HChild} = ();

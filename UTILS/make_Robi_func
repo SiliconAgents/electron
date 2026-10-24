@@ -1783,6 +1783,12 @@ sub getListOfConnectedNets {
 sub get_location_of_flat_inst_from_pseudo_db
 {
   my $curr_inst_hier_name = $_[0];
+  #<!-- a cell of a dissolved instance (ungroup) is a leaf "C/L" of its
+  #     parent, which the bottom-up walk below cannot see -->
+  if ( %UNGROUPED_PATH ) {
+    my @u = &dbfUngroupFlatLoc($curr_inst_hier_name);
+    return @u if ( @u );
+  }
   ################### Added by aditya if top inst has / in it's name ############
   #if($curr_inst_hier_name =~ /^\s*$/){
   my $global_top_module = $GLOBAL->dbfGlobalGetTOP;

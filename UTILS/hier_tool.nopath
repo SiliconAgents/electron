@@ -533,6 +533,7 @@ require "$BEEHOME/TSTGEN/make_router_graph_file";
 require "$BEEHOME/TSTGEN/make_hier_place_graph";
 require "$BEEHOME/TSTGEN/make_write_hier_cells";
 require "$BEEHOME/TSTGEN/make_hier_place_all";
+require "$BEEHOME/TSTGEN/make_ungroup";
 require "$BEEHOME/TSTGEN/make_pseudo_floorplan";
 require "$BEEHOME/TSTGEN/make_hier_pin_placement";
 require "$BEEHOME/TSTGEN/make_HierPinBySide_db";

@@ -1,0 +1,223 @@
+#<!-- ungroup: dissolve child instances into their parent, for placement.
+#
+#     A child block whose boundary cuts through logic that should interleave
+#     with its parent -- the 9 read-port mux blocks of a latch-array register
+#     file, ~5k cells and ~10k input pins each -- forces every connection
+#     across it to be a long wire.  Dissolved, its cells are placed as the
+#     parent's own and sit beside what they connect to: on a 3M-instance tile
+#     that took TNS from -95.8k to -80.6k with the same cells.
+#
+#     NAME-PRESERVING.  Child C's leaf L becomes a leaf of the parent named
+#     "C/L", so its flat name is exactly what it was and nothing downstream --
+#     the flat database, write_def, write_sgraph, Photon, an ECO -- sees a
+#     difference.  Only the grouping changes: the parent's VNOM (its leaves,
+#     its conn lines, C gone from its hier instances), and its floorplan (C's
+#     cells carried in at C's origin, so a re-place of the parent starts from
+#     where they were and hier2flat sees the move as rigid).  C's internal
+#     nets get names of the parent's own (__ug_<n>); a net on one of C's ports
+#     is the parent's net at that port, bit by bit.
+#
+#     Run after elaborate, before or between placements.  Then
+#     hier_place_all -only <parent> --keep_shapes places the parent with them.
+#
+#     Not handled, and refused: a child that has blocks of its own (v1 dissolves
+#     leaf-only children: their "C/D" names would break the floorplan path
+#     lookups), a port connection whose width does not match the port.  Not
+#     handled, and said: a -net_weights file names flat nets by their parent's
+#     path, so the nets inside a dissolved child get no weight.  Re-running
+#     elaborate after an ungroup is not supported. -->
+sub ungroup {
+my $noOfArguments = @_;
+if ( $noOfArguments < 2 || $_[0] eq "-h" || $_[0] eq "-help" || $_[0] eq "-HELP" ) {
+  print "Usage : ungroup -module <parent> ( -inst <instance> | -cell <child module> )\n";
+  print "\n";
+  print "Dissolve child instances into their parent for placement: child C's leaf L\n";
+  print "becomes the parent's leaf \"C/L\", so every flat instance name stays as it\n";
+  print "was.  -cell dissolves every instance of that module in the parent.  The\n";
+  print "parent's floorplan takes C's cells at C's origin; then\n";
+  print "  hier_place_all -only <parent> --keep_shapes\n";
+  print "places them as the parent's own.  Leaf-only children (no blocks inside).\n";
+  return;
+}
+my ($parent, $instArg, $cellArg) = ("", "", "");
+for ( my $i = 0 ; $i < $noOfArguments ; $i++ ) {
+  if    ( $_[$i] eq "-module" ) { $parent  = $_[$i+1]; }
+  elsif ( $_[$i] eq "-inst" )   { $instArg = $_[$i+1]; }
+  elsif ( $_[$i] eq "-cell" )   { $cellArg = $_[$i+1]; }
+}
+unless ( exists $MODULE_ALREADY{$parent} ) {
+  print "ERR-TST-UNGROUP : 001 : no module $parent\n"; return;
+}
+my $P = $MODULE_ALREADY{$parent};
+my @kids = ();
+foreach my $c ( sort $P->dbVNOMGetHierInst ) {
+  my $cm = $P->dbVNOMGetHierInstCell($c);
+  next unless ( defined $cm && exists $MODULE_ALREADY{$cm} );
+  push(@kids, $c) if ( ( $instArg ne "" && $c eq $instArg ) || ( $cellArg ne "" && $cm eq $cellArg ) );
+}
+unless ( @kids ) {
+  print "ERR-TST-UNGROUP : 002 : $parent has no " . ( $instArg ne "" ? "instance $instArg" : "instance of $cellArg" ) . "\n";
+  return;
+}
+#<!-- every check before any change, so a refusal leaves the design as it was -->
+my %connOf = ();
+foreach my $line ( $P->dbVNOMGetConn ) {
+  my ($cell, $inst) = ( split(/\s+/, $line) )[0, 1];
+  $connOf{$inst} = $line if ( defined $inst );
+}
+foreach my $c ( @kids ) {
+  my $cm = $P->dbVNOMGetHierInstCell($c);
+  if ( $MODULE_ALREADY{$cm}->dbVNOMGetHierInst ) {
+    print "ERR-TST-UNGROUP : 003 : $c ($cm) has blocks of its own; only leaf-only children are dissolved\n";
+    return;
+  }
+  unless ( exists $connOf{$c} ) {
+    print "ERR-TST-UNGROUP : 004 : no connection line for $c in $parent\n"; return;
+  }
+}
+
+my ($nCells, $nNets) = (0, 0);
+my %ugName = ();
+my $fresh = sub {
+  my ($key) = @_;
+  return $ugName{$key} if ( exists $ugName{$key} );
+  my $n = "__ug_" . $UNGROUP_SEQ{$parent}++;
+  $P->dbVNOMAddWire($n);
+  $P->dbVNOMSetWireType($n, 0);
+  $P->dbVNOMAddNet($n);
+  $nNets++;
+  return $ugName{$key} = $n;
+};
+my %gone = ();
+foreach my $c ( @kids ) {
+  my $cm = $P->dbVNOMGetHierInstCell($c);
+  my $CM = $MODULE_ALREADY{$cm};
+  #<!-- the child's ports, bit by bit, to the parent's nets at them -->
+  my %map = ();
+  my %pins = &dbfUngroupPins($connOf{$c});
+  foreach my $port ( keys %pins ) {
+    my @kb = &array_of_blasted_expr($port, $cm);
+    my @pb = &array_of_blasted_expr($pins{$port}, $parent);
+    if ( @kb != @pb ) {
+      print "ERR-TST-UNGROUP : 005 : $c.$port is " . scalar(@kb) . " bit(s) wide but connected to " .
+            scalar(@pb) . "; nothing changed\n";
+      return;
+    }
+    for ( my $k = 0 ; $k < @kb ; $k++ ) { $map{"$c\0$kb[$k]"} = $pb[$k]; }
+  }
+  foreach my $line ( $CM->dbVNOMGetConn ) {
+    my ($cell, $leaf) = ( split(/\s+/, $line) )[0, 1];
+    next unless ( defined $leaf && $CM->dbVNOMHasLeafInst($leaf) );
+    my %lp = &dbfUngroupPins($line);
+    my @pinTxt = ();
+    foreach my $pin ( sort keys %lp ) {
+      my @bits = ();
+      foreach my $b ( &array_of_blasted_expr($lp{$pin}, $cm) ) {
+        if ( $b =~ m/^\d*\'[sS]?[bodhBODH]/ ) { push(@bits, $b); next; }
+        push(@bits, exists $map{"$c\0$b"} ? $map{"$c\0$b"} : $fresh->("$c\0$b"));
+      }
+      push(@pinTxt, "." . $pin . "(" . ( @bits == 1 ? $bits[0] : "{" . join(",", @bits) . "}" ) . ")");
+    }
+    my $name = "$c/$leaf";
+    $P->dbVNOMAddConn("$cell $name (" . join(", ", @pinTxt) . ") ;");
+    $P->dbVNOMAddLeafInst($name);
+    $P->dbVNOMSetLeafInstCell($name, $cell);
+    my $o = $CM->dbVNOMGetLeafInstOrient($leaf);
+    $P->dbVNOMSetLeafInstOrient($name, $o) if ( defined $o && $o ne "" );
+    $nCells++;
+  }
+  $P->dbVNOMWipeSingleHierInst($c);
+  $gone{$c} = $cm;
+}
+#<!-- the dissolved instances' own connection lines leave the parent -->
+my @keep = grep { my $i = ( split(/\s+/, $_) )[1]; !( defined $i && exists $gone{$i} ) } $P->dbVNOMGetConn;
+$P->dbVNOMWipeConn;
+$P->dbVNOMAddConn($_) foreach ( @keep );
+
+#<!-- the parent's floorplan, where it has one: the child gone, its cells
+#     carried in at its origin -->
+my $carried = 0;
+my $pf = &get_floorplanID_of_module($parent);
+if ( defined $pf && $pf != -1 && exists $FLOORPLAN_ALREADY{$pf} ) {
+  my $F = $FLOORPLAN_ALREADY{$pf};
+  foreach my $c ( sort keys %gone ) {
+    next unless ( $F->dbFlplanHasHierInst($c) );
+    my @e = $F->dbFlplanGetHierInstExtent($c);
+    my $cf = &get_floorplanID_of_module($gone{$c});
+    if ( @e == 4 && defined $cf && $cf != -1 && exists $FLOORPLAN_ALREADY{$cf} ) {
+      my $CF = $FLOORPLAN_ALREADY{$cf};
+      foreach my $l ( $CF->dbFlplanGetLeafInstList ) {
+        my ($x, $y, $o) = $CF->dbFlplanGetLeafInstLoc($l);
+        next unless ( defined $x );
+        $F->dbFlplanAddLeafInst("$c/$l", $x + $e[0], $y + $e[1], $o);
+        my @bb = $CF->dbFlplanGetLeafInstBbox($l);
+        $F->dbFlplanUpdateLeafInstBbox("$c/$l", $bb[0] + $e[0], $bb[1] + $e[1], $bb[2] + $e[0], $bb[3] + $e[1]) if ( @bb == 4 );
+        $carried++;
+      }
+    }
+    $F->dbFlplanRemoveHierInst($c);
+  }
+}
+#<!-- where the flat-location lookup must find these: every path the parent
+#     is reached by, with each dissolved child -->
+my %paths = ();
+&dbfTstgenHierAllInstPaths($GLOBAL->dbfGlobalGetTOP, "", \%paths);
+my $np = 0;
+foreach my $pp ( @{ $paths{$parent} || [] } ) {
+  foreach my $c ( keys %gone ) {
+    $UNGROUPED_PATH{ $pp eq "" ? $c : "$pp/$c" } = $parent;
+    $np++;
+  }
+}
+delete $PSEUDO_MODULE_ALREADY{$parent};
+delete $PSEUDO_VINST_ALREADY{$parent};
+printf("INFO-TST-UNGROUP : 006 : %d instance(s) dissolved into %s: %d cell(s) now its own, %d net(s) of theirs renamed, %d placed cell(s) carried into its floorplan; %d instance path(s)\n",
+       scalar(keys %gone), $parent, $nCells, $nNets, $carried, $np);
+print "INFO-TST-UNGROUP : 007 : a -net_weights file gives no weight to nets inside a dissolved instance\n";
+}# sub ungroup
+
+
+#<!-- ".pin(expr), .pin(expr)" of a conn line, as pin => expr -->
+sub dbfUngroupPins {
+my ($line) = @_;
+my %p = ();
+my $body = $line;
+$body =~ s/^\s*\S+\s+\S+\s*\(//;
+$body =~ s/\)\s*;\s*$//;
+while ( $body =~ m/\.\s*(\\?[^\s(]+)\s*\(\s*([^()]*?)\s*\)/g ) {
+  $p{$1} = $2 if ( $2 ne "" );
+}
+return %p;
+}# sub dbfUngroupPins
+
+
+#<!-- The flat location of a cell inside a dissolved instance.  The general
+#     lookup walks a flat name bottom up, splitting at the last "/", and for
+#     "Ppath/C/L" would look for a block C in the parent that ungroup removed.
+#     This finds the longest dissolved-instance prefix instead and reads the
+#     leaf "C/L" from the parent's floorplan at the parent's place.  () when
+#     the name is not under one. -->
+sub dbfUngroupFlatLoc {
+my ($name) = @_;
+return () unless ( %UNGROUPED_PATH );
+my $j = rindex($name, "/");
+while ( $j > 0 ) {
+  my $pre = substr($name, 0, $j);
+  if ( exists $UNGROUPED_PATH{$pre} ) {
+    my $k = rindex($pre, "/");
+    my $pp = ( $k > 0 ) ? substr($pre, 0, $k) : "";
+    my $leaf = substr($name, ( $k > 0 ? $k + 1 : 0 ));
+    my $pf = &get_floorplanID_of_module($UNGROUPED_PATH{$pre});
+    return () unless ( defined $pf && $pf != -1 && exists $FLOORPLAN_ALREADY{$pf} );
+    my ($x, $y, $o) = $FLOORPLAN_ALREADY{$pf}->dbFlplanGetLeafInstLoc($leaf);
+    return ( 0, 0, "UND" ) unless ( defined $x );
+    my ($ox, $oy) = ( 0, 0 );
+    ($ox, $oy) = ( &get_location_of_flat_inst_from_pseudo_db($pp) )[0, 1] if ( $pp ne "" );
+    return ( $x + $ox, $y + $oy, $o );
+  }
+  $j = rindex($name, "/", $j - 1);
+}
+return ();
+}# sub dbfUngroupFlatLoc
+
+1;

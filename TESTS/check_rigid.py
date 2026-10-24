@@ -11,7 +11,8 @@ cell extents may overlap after the move.  Exits non-zero, saying which, if not.
 Given instance paths (hier_place_all -only: every instance of the module
 re-placed), the groups are the children under each of them instead, the
 module's own cells may go anywhere, and every cell outside them must not have
-moved at all.
+moved at all.  --free A,B: children of those names were dissolved into the
+module (ungroup), so their cells are its own and may go anywhere too.
 """
 import collections
 import re
@@ -37,8 +38,12 @@ def load(path):
     return comps
 
 
-before, after = load(sys.argv[1]), load(sys.argv[2])
-under = sys.argv[3:]
+args = sys.argv[1:]
+free = set()
+if "--free" in args:
+    k = args.index("--free"); free = set(args[k + 1].split(",")); del args[k:k + 2]
+before, after = load(args[0]), load(args[1])
+under = args[2:]
 groups = collections.defaultdict(list)
 bad, boxes, moved = [], {}, 0
 outside = 0
@@ -56,7 +61,7 @@ for name in before:
             bad.append(f"{name} is outside {' '.join(under)} and moved")
         continue
     rest = name[len(p) + 1:]
-    if "/" in rest:
+    if "/" in rest and rest.split("/")[0] not in free:
         groups[p + "/" + rest.split("/")[0]].append(name)
 
 for g, names in sorted(groups.items()):
