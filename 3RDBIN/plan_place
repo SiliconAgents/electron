@@ -195,9 +195,18 @@ def cmd_start(a):
          "electron": a.electron, "pyspark": a.pyspark, "sif": a.sif, "spec": spec,
          "ep": os.path.join(d, "photon.ep"), "tries": [], "ungrouped": [], "session": f"plan-{int(time.time())}"}
     log(d, f"plan_place start: {a.top}, netlist {a.netlist}")
+    s["place_extra"] = a.place_extra
+    pre = []
+    if a.pre_ungroup:
+        for l in open(a.pre_ungroup):
+            f = l.split()
+            if len(f) == 2 and not l.startswith("#"):
+                pre.append(f"ungroup -module {f[0]} -cell {f[1]}")
+                s["ungrouped"].append([f[0], f[1]])
     with open(os.path.join(d, "load.tcl"), "w") as fh:
         fh.write(open(a.load).read().rstrip() + "\n")
-        fh.write(f"edit_module --top\nhier_place_all {PLACE_ARGS} -floorplan_spec {spec}\nshell echo PLAN_READY\n")
+        fh.write("".join(x + "\n" for x in pre))
+        fh.write(f"edit_module --top\nhier_place_all {PLACE_ARGS} {a.place_extra} -floorplan_spec {spec}\nshell echo PLAN_READY\n")
     job = os.path.join(d, "session_job.sh")
     with open(job, "w") as fh:
         fh.write(f"""#!/bin/bash
@@ -317,7 +326,7 @@ def do_try(d, s, action, mods, paths):
     tag = f"t{len(s['tries'])}"
     if kind == "control":
         mod = action[1]
-        lines = [f"hier_place_all -only {mod} --keep_shapes {PLACE_ARGS} -floorplan_spec {s['spec']}"]
+        lines = [f"hier_place_all -only {mod} --keep_shapes {PLACE_ARGS} {s.get('place_extra', '')} -floorplan_spec {s['spec']}"]
         desc = f"control: {mod} placed again, nothing changed"
         owner_mod = mod
     else:
@@ -327,9 +336,9 @@ def do_try(d, s, action, mods, paths):
         lines = [f"ungroup -module {parent} -cell {child}"]
         if parent == s["top"]:
             spec_drop(s["spec"], parent, insts)
-            lines.append(f"hier_place_all -depth 0 --keep_shapes {PLACE_ARGS} -floorplan_spec {s['spec']}")
+            lines.append(f"hier_place_all -depth 0 --keep_shapes {PLACE_ARGS} {s.get('place_extra', '')} -floorplan_spec {s['spec']}")
         else:
-            lines.append(f"hier_place_all -only {parent} --keep_shapes {PLACE_ARGS} -floorplan_spec {s['spec']}")
+            lines.append(f"hier_place_all -only {parent} --keep_shapes {PLACE_ARGS} {s.get('place_extra', '')} -floorplan_spec {s['spec']}")
         owner_mod = parent
     lines.append(f"write_moves -output {d}/{tag}.moves")
     log(d, f"try {tag}: {desc}")
@@ -498,6 +507,8 @@ def main():
     x.add_argument("--vts", default="svt,lvt,ulvt")
     x.add_argument("--queue", default="normal"); x.add_argument("--session_mem", default="48")
     x.add_argument("--server_mem", default="64")
+    x.add_argument("--place_extra", default="", help="more hier_place_all options for the placement, e.g. --child_pins")
+    x.add_argument("--pre_ungroup", default="", help="a plan.ungroup: instances dissolved before placing")
     x.set_defaults(f=cmd_start)
     x = sp.add_parser("auto"); x.add_argument("dir"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_auto)
     x = sp.add_parser("try"); x.add_argument("dir"); x.add_argument("action", nargs="+"); x.set_defaults(f=cmd_try)
