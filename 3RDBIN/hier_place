@@ -1060,7 +1060,17 @@ class PlaceWidget(QWidget):
         # sub-micron pins land in one block-sized cell and the per-cell pair count grows
         # as they cluster, which makes the frame cost climb the longer it runs. They are
         # separated in one dimension instead, below.
-        if blocks:
+        #<!-- One grid cannot serve nodes of very different sizes.  Sized by the
+        #     biggest block, it put ~1,500 flops of 0.3 um -- a child dissolved
+        #     into a 3M-instance tile's top level -- into a handful of 25 um cells,
+        #     a million pairs a step; sized by the mean, the spread grid inserted
+        #     each 400 um block into ~125,000 cells.  The step never finished in
+        #     18 minutes.  With many small nodes beside blocks several times
+        #     bigger, the same pairs are found by size class instead (_pairs_split);
+        #     anything else takes the grids below, unchanged. -->
+        if blocks and self._split_classes(blocks):
+            self._pairs_split(*self._split)
+        elif blocks:
             span = max(self.die[2] - self.die[0], self.die[3] - self.die[1], 1.0)
             max_dim = max(max(n.width, n.height) for n in blocks)
             cell = max(max_dim / 16.0, span / 128.0, 1e-6)
@@ -1698,6 +1708,65 @@ class PlaceWidget(QWidget):
                         want = lo + (i + 1) * step
                         move(n, pos_now(n) + t * (want - pos_now(n)))
 
+    SPLIT_MIN_SMALL = 256     # small nodes before the size classes are worth it
+    SPLIT_RATIO = 8.0         # a block this many times the median node is "big"
+
+    def _split_classes(self, blocks: List[Node]) -> bool:
+        """Small nodes (flops, cells) and big ones (blocks), when there are enough
+        small ones beside blocks much bigger than them for one grid to fail."""
+        if len(blocks) <= self.SPLIT_MIN_SMALL:
+            return False
+        dims = sorted(max(n.width, n.height) for n in blocks)
+        med = dims[len(dims) // 2]
+        big = [n for n in blocks if max(n.width, n.height) > self.SPLIT_RATIO * med]
+        if not big:
+            return False
+        small = [n for n in blocks if max(n.width, n.height) <= self.SPLIT_RATIO * med]
+        if len(small) <= self.SPLIT_MIN_SMALL:
+            return False
+        self._split = (small, big)
+        return True
+
+    def _pairs_split(self, small: List[Node], big: List[Node]):
+        """The pairs step() looks for -- overlapping ones separated, close ones
+        spread -- found by size class: small with small on a grid sized for the
+        small, big with big directly (a few dozen at most), small against the
+        short list of big.  Linear in the node count, whatever the mix."""
+        def buckets(nodes, cell, grow):
+            g: Dict[Tuple[int, int], List[Node]] = defaultdict(list)
+            for n in nodes:
+                m = grow(n)
+                l, t, r, b = n.bounds()
+                for gx in range(int((l - m) // cell), int((r + m) // cell) + 1):
+                    for gy in range(int((t - m) // cell), int((b + m) // cell) + 1):
+                        g[(gx, gy)].append(n)
+            return g
+
+        def each_pair(g, fn):
+            seen = set()
+            for bucket in g.values():
+                if len(bucket) < 2:
+                    continue
+                for i, a in enumerate(bucket):
+                    for b in bucket[i + 1:]:
+                        key = (a.index, b.index) if a.index < b.index else (b.index, a.index)
+                        if key not in seen:
+                            seen.add(key)
+                            fn(a, b)
+
+        smax = max(max(n.width, n.height) for n in small)
+        each_pair(buckets(small, max(smax, 1e-6), lambda n: 0.0), self._separate)
+        hd = max(n.half_diagonal for n in small)
+        each_pair(buckets(small, max(hd * 2.2, 1e-6), lambda n: n.half_diagonal * 1.1), self._spread)
+        for i, a in enumerate(big):
+            for b in big[i + 1:]:
+                self._separate(a, b)
+                self._spread(a, b)
+        for a in small:
+            for b in big:
+                self._separate(a, b)
+                self._spread(a, b)
+
     def _separate(self, a: Node, b: Node):
         """Push two overlapping nodes apart along whichever axis needs less correction."""
         overlap_x = (a.width + b.width) / 2 - abs(a.x - b.x)
@@ -1979,7 +2048,12 @@ class PlaceWidget(QWidget):
         """
         groups: Dict[str, List[Node]] = {}
         for n in self.nodes.values():
-            if n.edge or not n.cellref:
+            #<!-- blocks only.  A leaf cell's CELL= is its library cell, and
+            #     holding every flop of one cell to the largest of them let one
+            #     wrongly sized flop -- ~430 um, from a bug since fixed --
+            #     make 1,531 of them die-sized, and the block pass never
+            #     finished.  Leaf cells of one library cell are one size anyway. -->
+            if n.edge or not n.cellref or n.ntype != "block":
                 continue
             groups.setdefault(n.cellref, []).append(n)
         fixed = 0
