@@ -1,0 +1,511 @@
+#!/usr/bin/env python3
+"""plan_place: explore how a design should be placed, and write it down.
+
+  plan_place start  <plan dir> --load <tcl> --netlist <v[.gz]> --top <module>
+                    --spec <file> --kb <dir> [server and session options]
+  plan_place auto   <plan dir> [--n 3]
+  plan_place try    <plan dir> ungroup <parent module> <child module>
+  plan_place try    <plan dir> control <module>
+  plan_place status <plan dir>
+  plan_place stop   <plan dir>
+
+A plan is what `make place` reads -- a floorplan spec and a list of instances
+to dissolve -- found by trying changes on a live placement and keeping the
+ones that beat the noise.  start places the design once in an electron
+session that stays up (fed through the file "cmd"), writes the timing graph,
+and starts a Photon server beside it that predicts what place_opt would
+leave: planned repeaters and sizing.  blame splits what still fails into
+logic (fails with no wire: nothing for a plan) and placement, charged to the
+module that owns each wire.  A control re-place measures the noise.
+
+auto ranks candidate changes -- for v1, dissolving a child whose boundary
+cuts through logic (ungroup): a leaf-only child with many pins for its
+cells, inside a module blame charges, first if the knowledge base has seen
+it help -- and tries the best: the change in the session, the module placed
+again (-only, or the top with -depth 0), the server moved with it (moveby),
+the moved paths sized (size moved), blame again.  Kept if it beats the
+noise; every try goes to the knowledge base.  A rejected change is not
+undone in the session (v1 has no regroup): the plan leaves it out and the
+next try is measured from where the session is.
+
+Everything is logged to <plan dir>/plan.log -- `tail -f` it.  status shows
+the table of tries and the plan so far; stop writes the plan
+(plan.spec, plan.ungroup, plan.report) and shuts the session and server down.
+"""
+import argparse
+import datetime
+import gzip
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+PLACE_ARGS = ("-sizing budget --slice_blocks -batch 300 -cells_batch 300 -cells_placer qp "
+              "--free_flops -args --array,4")
+
+
+# ------------------------------------------------------------------ state --
+def st_path(d): return os.path.join(d, "state.json")
+
+
+def load(d):
+    return json.load(open(st_path(d)))
+
+
+def save(d, s):
+    json.dump(s, open(st_path(d) + ".tmp", "w"), indent=1)
+    os.replace(st_path(d) + ".tmp", st_path(d))
+
+
+def log(d, msg):
+    line = f"{datetime.datetime.now().strftime('%H:%M:%S')} {msg}"
+    print(line, flush=True)
+    with open(os.path.join(d, "plan.log"), "a") as fh:
+        fh.write(line + "\n")
+
+
+def tail(path, n=400000):
+    """the end of a log: the session's grows to tens of MB and is polled"""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2); size = fh.tell(); fh.seek(max(0, size - n))
+            return fh.read().decode(errors="replace")
+    except OSError:
+        return ""
+
+
+def sh(cmd, **kw):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
+
+
+# ------------------------------------------------------------ structure --
+def structure(netlist, top):
+    """modules: own leaf cells, children (instance -> module), port bits;
+    and every instance path, cleaned of escapes as blame writes them."""
+    mods, cur = {}, None
+    decl = re.compile(r'^\s*(input|output|inout)\s*(?:wire\s*)?(\[\s*(-?\d+)\s*:\s*(-?\d+)\s*\])?\s*(.*?);')
+    inst = re.compile(r'^\s*(\\?\S+)\s+(\\?\S+)\s*\(')
+    op = gzip.open(netlist, "rt") if netlist.endswith(".gz") else open(netlist)
+    for line in op:
+        if line.startswith("module "):
+            cur = line.split()[1].split("(")[0]; mods[cur] = {"bits": 0, "insts": []}; continue
+        if cur is None:
+            continue
+        if line.startswith("endmodule"):
+            cur = None; continue
+        m = decl.match(line)
+        if m:
+            w = abs(int(m.group(3)) - int(m.group(4))) + 1 if m.group(2) else 1
+            mods[cur]["bits"] += w * len([x for x in re.split(r"\s*,\s*", m.group(5)) if x.strip()])
+            continue
+        m = inst.match(line)
+        if m and m.group(1) not in ("assign", "wire", "reg", "module", "input", "output", "inout"):
+            mods[cur]["insts"].append((m.group(2), m.group(1)))
+    out = {}
+    for mname, d in mods.items():
+        kids = {i: c for i, c in d["insts"] if c in mods}
+        out[mname] = {"bits": d["bits"], "own": sum(1 for _, c in d["insts"] if c not in mods), "kids": kids}
+    tot = {}
+
+    def total(m):
+        if m not in tot:
+            tot[m] = out[m]["own"] + sum(total(c) for c in out[m]["kids"].values())
+        return tot[m]
+    for m in out:
+        total(m)
+        out[m]["cells"] = tot[m]
+    paths = {}
+
+    def walk(m, p):
+        paths.setdefault(p, m)
+        for i, c in out[m]["kids"].items():
+            walk(c, (p + "/" if p else "") + i.replace("\\", ""))
+    walk(top, "")
+    return out, paths
+
+
+# ---------------------------------------------------------------- session --
+def session_cmd(d, s, lines, marker, timeout=7200):
+    tag = f"{marker}_{int(time.time())}"
+    tcl = os.path.join(d, f"step_{tag}.tcl")
+    with open(tcl, "w") as fh:
+        fh.write("\n".join(lines + [f"shell echo DONE_{tag}"]) + "\n")
+    with open(os.path.join(d, "cmd"), "a") as fh:
+        fh.write(f"source {tcl}\n")
+    t0 = time.time()
+    while True:
+        if f"DONE_{tag}" in tail(os.path.join(d, "session.log")):
+            return time.time() - t0
+        if time.time() - t0 > timeout or not job_alive(s["session_job"]):
+            raise RuntimeError(f"session gone or timed out waiting for {marker}")
+        time.sleep(5)
+
+
+def job_alive(j):
+    r = sh(f"bjobs {j} 2>/dev/null")
+    return any(w in r.stdout for w in (" RUN ", " PEND "))
+
+
+def pq(s, query, timeout=7200):
+    r = sh(f"python3 {s['pyspark']}/scala/pq.py {s['ep']} {shlex.quote(query)}", timeout=timeout)
+    return [l for l in r.stdout.splitlines() if not l.startswith(">>>") and "round trip" not in l]
+
+
+def metrics(lines):
+    for l in lines:
+        m = re.search(r"WNS (-?[\d.]+)\s+TNS (-?[\d.]+)\s+violating ([\d,]+)", l)
+        if m:
+            return {"wns": float(m.group(1)), "tns": float(m.group(2)), "violating": int(m.group(3).replace(",", ""))}
+    return None
+
+
+def now(s):
+    return metrics(pq(s, "wns"))
+
+
+def blame(d, s, tag):
+    out = pq(s, f"blame {d}/blame/{tag} 10")
+    m = {}
+    for l in out:
+        a = re.search(r"TNS (-?[\d.]+) now.*?(\d[\d,]*) endpoint\(s\) still fail, TNS (-?[\d.]+)", l)
+        if a: m["tns_logic"] = float(a.group(3))
+        b = re.search(r"wires cost .*?TNS (-?[\d.]+): placement", l)
+        if b: m["tns_placement"] = float(b.group(1))
+    owners = []
+    for l in open(f"{d}/blame/{tag}.owners.tsv").read().splitlines()[1:]:
+        f = l.split("\t")
+        owners.append({"charge": float(f[0]), "paths": int(f[1]), "kind": f[2],
+                       "module_path": "" if f[3] == "(top)" else f[3], "a": f[4], "b": f[5]})
+    return m, owners
+
+
+# ------------------------------------------------------------------ start --
+def cmd_start(a):
+    d = os.path.abspath(a.dir)
+    os.makedirs(os.path.join(d, "blame"), exist_ok=True)
+    open(os.path.join(d, "cmd"), "w").close()
+    spec = os.path.join(d, "plan.spec")
+    open(spec, "w").write(open(a.spec).read())
+    s = {"dir": d, "top": a.top, "netlist": os.path.abspath(a.netlist), "kb": os.path.abspath(a.kb),
+         "electron": a.electron, "pyspark": a.pyspark, "sif": a.sif, "spec": spec,
+         "ep": os.path.join(d, "photon.ep"), "tries": [], "ungrouped": [], "session": f"plan-{int(time.time())}"}
+    log(d, f"plan_place start: {a.top}, netlist {a.netlist}")
+    with open(os.path.join(d, "load.tcl"), "w") as fh:
+        fh.write(open(a.load).read().rstrip() + "\n")
+        fh.write(f"edit_module --top\nhier_place_all {PLACE_ARGS} -floorplan_spec {spec}\nshell echo PLAN_READY\n")
+    job = os.path.join(d, "session_job.sh")
+    with open(job, "w") as fh:
+        fh.write(f"""#!/bin/bash
+cd {d} && apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /home/$USER:/home/$USER {a.sif} \\
+  bash -c "tail -n0 -F cmd 2>/dev/null | PATH=/usr/bin:\\$PATH PERL_HASH_SEED=0 PERL_PERTURB_KEYS=0 ELECTRON_HOME={a.electron} {a.electron}/electron_hier --nogui --cleanlog --nolog -f load.tcl" 2>&1 \\
+  | perl -MPOSIX -ne 'BEGIN{{$|=1}} print strftime("%H:%M:%S ",localtime), $_' > {d}/session.log
+""")
+    os.chmod(job, 0o755)
+    r = sh(f"source /etc/profile.d/modules.sh; module load flow >/dev/null 2>&1; bsub -q {a.queue} -n 16 "
+           f"-R 'select[mem>={a.session_mem}] rusage[mem={a.session_mem}] span[hosts=1]' -J plan_session "
+           f"-o {d}/session_job.%J.out {job}", executable="/bin/bash")
+    s["session_job"] = re.search(r"Job <(\d+)>", r.stdout).group(1)
+    save(d, s)
+    log(d, f"session: LSF job {s['session_job']}, placing the whole design (about 16 min on 3M instances)")
+    t0 = time.time()
+    while "PLAN_READY" not in tail(f"{d}/session.log"):
+        if not job_alive(s["session_job"]) and time.time() - t0 > 120:
+            log(d, "session died -- see session.log"); return 1
+        time.sleep(20)
+    log(d, f"placed in {time.time() - t0:.0f} s")
+    t = session_cmd(d, s, [f"write_sgraph -output {d}/base.sgraph"], "base")
+    log(d, f"timing graph written in {t:.0f} s")
+    # the Photon server: the flow's corner and wire model, long nets as planned repeaters
+    srv = os.path.join(d, "server.sca")
+    with open(srv, "w") as fh:
+        for k, v in (("psGraph", f'"{d}/base.sgraph"'), ("psStore", f'"{a.arcs}"'), ("psCorner", f'"{a.corner}"'),
+                     ("psPeriod", a.period), ("psSpef", '""'), ("psWire", '"auto"'), ("psWireRes", a.res),
+                     ("psWireCap", a.cap), ("psWireIdeal", 1000), ("psWireModel", f'"{a.wire_model}"'),
+                     ("psCellTable", f'"{a.cells}"'), ("psRepeated", "true"), ("psVts", f'"{a.vts}"'),
+                     ("psSdc", '""'), ("psPort", 0), ("psEpfile", f'"{s["ep"]}"')):
+            fh.write(f"val {k}={v}\n")
+        for f in ("photon.sca", "wireplan.sca", "size.sca", "repeat.sca", "photon_server.sca"):
+            fh.write(open(os.path.join(a.pyspark, "scala", f)).read())
+    r = sh(f"source /etc/profile.d/modules.sh; module load flow >/dev/null 2>&1; bsub -q {a.queue} -n 16 "
+           f"-R 'select[mem>={a.server_mem}] rusage[mem={a.server_mem}] span[hosts=1]' -J plan_photon "
+           f"-o {d}/server.%J.out apptainer exec --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /tmp:/tmp {a.sif} "
+           f"spark-shell --master local[16] --driver-memory {int(a.server_mem) - 8}g "
+           f"--jars {a.pyspark}/scala/build/photon.jar -i {srv}", executable="/bin/bash")
+    s["server_job"] = re.search(r"Job <(\d+)>", r.stdout).group(1)
+    save(d, s)
+    t0 = time.time()
+    while not os.path.exists(s["ep"]):
+        if not job_alive(s["server_job"]) and time.time() - t0 > 120:
+            log(d, "Photon server died -- see server.*.out"); return 1
+        time.sleep(10)
+    log(d, f"Photon server up (LSF job {s['server_job']}) in {time.time() - t0:.0f} s")
+    t0 = time.time()
+    m = metrics([l for l in pq(s, "size all 3") if "now:" in l])
+    log(d, f"planned repeaters + 3 sizing rounds ({time.time() - t0:.0f} s): WNS {m['wns']} TNS {m['tns']:.1f} violating {m['violating']:,}")
+    bm, owners = blame(d, s, "b0")
+    m.update(bm)
+    s["baseline"] = m
+    log(d, f"blame: logic TNS {m.get('tns_logic', 0):.1f}, placement TNS {m.get('tns_placement', 0):.1f}")
+    for o in owners[:6]:
+        log(d, f"   {o['charge']:9.1f} ns  {o['kind']:<13} {o['module_path'] or '(top)'}: {o['a']} <-> {o['b']}")
+    s["owners"] = owners[:200]
+    save(d, s)
+    # the noise: the most-charged module placed again with nothing changed
+    mods, paths = structure(s["netlist"], s["top"])
+    s["structure"] = {"paths": paths}
+    target = next((paths.get(o["module_path"]) for o in owners if paths.get(o["module_path"]) not in (None, s["top"])), None)
+    save(d, s)
+    if target:
+        do_try(d, s, ("control", target), mods, paths)
+    sess = {"record": "session", "session": s["session"], "design": kb_design(s), "tools": tool_commits(s),
+            "cells": mods[s["top"]]["cells"], "predictor": "repeated+size3", "baseline": s["baseline"],
+            "note": "plan_place start"}
+    if "noise" in s:
+        sess["noise_tns"] = s["noise"]
+    kb_add(s, [sess])
+    log(d, "ready: plan_place auto / try / status / stop")
+    return 0
+
+
+def kb_design(s):
+    return sh(f"{HERE}/placement_kb design {shlex.quote(s['top'])} --kb {s['kb']}").stdout.strip()
+
+
+def tool_commits(s):
+    return {k: sh(f"git -C {s[k]} rev-parse --short HEAD").stdout.strip() for k in ("electron", "pyspark")}
+
+
+def kb_add(s, recs):
+    p = os.path.join(s["dir"], "kb_pending.jsonl")
+    with open(p, "w") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+    r = sh(f"{HERE}/placement_kb add {p} --kb {s['kb']}")
+    if r.returncode:
+        log(s["dir"], "knowledge base refused a record: " + r.stderr.strip())
+
+
+# -------------------------------------------------------------- the tries --
+def spec_drop(spec_file, parent, insts):
+    """the parent's spec line without the dissolved instances: their cells are
+    the parent's own now, so they go where '*' is -- added if the line had none"""
+    txt = open(spec_file).read()
+    m = re.search(r"(^|\n)(\s*" + re.escape(parent) + r"\s*:)(.*?)(?=\n\s*\S+\s*:|\Z)", txt, re.S)
+    if not m:
+        return False
+    body = m.group(3)
+    star = "*" in body.split()
+    for i in insts:
+        tok = r"(?<![^\s(])" + re.escape(i) + r"(?![^\s)])"
+        body = re.sub(tok, "" if star else "*", body, count=1)
+        star = True
+        body = re.sub(tok, "", body)
+    body = re.sub(r"[HV]\(\s*\)", "", body)
+    open(spec_file, "w").write(txt[:m.start(3)] + body + txt[m.end(3):])
+    return True
+
+
+def do_try(d, s, action, mods, paths):
+    kind = action[0]
+    before = now(s)
+    t0 = time.time()
+    tag = f"t{len(s['tries'])}"
+    if kind == "control":
+        mod = action[1]
+        lines = [f"hier_place_all -only {mod} --keep_shapes {PLACE_ARGS} -floorplan_spec {s['spec']}"]
+        desc = f"control: {mod} placed again, nothing changed"
+        owner_mod = mod
+    else:
+        parent, child = action[1], action[2]
+        insts = [i for i, c in mods[parent]["kids"].items() if c == child]
+        desc = f"ungroup {len(insts)} {child} into {parent}"
+        lines = [f"ungroup -module {parent} -cell {child}"]
+        if parent == s["top"]:
+            spec_drop(s["spec"], parent, insts)
+            lines.append(f"hier_place_all -depth 0 --keep_shapes {PLACE_ARGS} -floorplan_spec {s['spec']}")
+        else:
+            lines.append(f"hier_place_all -only {parent} --keep_shapes {PLACE_ARGS} -floorplan_spec {s['spec']}")
+        owner_mod = parent
+    lines.append(f"write_moves -output {d}/{tag}.moves")
+    log(d, f"try {tag}: {desc}")
+    te = session_cmd(d, s, lines, tag)
+    errs = [l for l in tail(f"{d}/session.log").splitlines() if "ERR-TST-UNGROUP" in l or "ERR-TST-HR_PL_ALL" in l]
+    if errs:
+        log(d, f"   refused in the session: {errs[-1][9:]}")
+        s["tries"].append({"tag": tag, "action": list(action), "verdict": "invalid", "note": errs[-1][9:]}); save(d, s)
+        return
+    t1 = time.time()
+    mv = pq(s, f"moveby {d}/{tag}.moves")
+    sz = [l for l in pq(s, "size moved 2") if "now:" in l]
+    bm, owners = blame(d, s, tag)
+    after = metrics(sz) or now(s)
+    after.update(bm)
+    tp = time.time() - t1
+    gain = (after["tns"] - before["tns"]) / abs(before["tns"]) if before["tns"] else 0.0
+    noise = s.get("noise", 0.005)
+    if kind == "control":
+        s["noise"] = max(abs(gain), 0.002)
+        verdict = "noise"
+    else:
+        verdict = "accepted" if gain > 2 * noise else ("rejected" if gain < -noise else "noise")
+    rec = {"tag": tag, "action": list(action), "before": before, "after": after, "gain": gain,
+           "electron_s": round(te), "photon_s": round(tp), "verdict": verdict}
+    s["tries"].append(rec)
+    if verdict == "accepted" and kind == "ungroup":
+        s["ungrouped"].append([action[1], action[2]])
+    s["owners"] = owners[:200]
+    save(d, s)
+    log(d, f"   {verdict}: TNS {before['tns']:.1f} -> {after['tns']:.1f} ({gain * 100:+.2f}%), WNS {before['wns']} -> {after['wns']}"
+           f"   [electron {te:.0f} s, photon {tp:.0f} s]")
+    # the knowledge base: the owner's structure, no names
+    f = fingerprints(s)
+    om = f.get(owner_mod, {})
+    owner = {k: om[k] for k in ("fingerprint", "cells", "own_cells", "children", "copies", "depth", "port_bits",
+                                "pins_per_cell") if k in om} or {"fingerprint": "m" + "0" * 16, "cells": 0, "depth": 0}
+    act = {"type": "control"} if kind == "control" else \
+          {"type": "flatten", "params": {"child": f.get(action[2], {}).get("fingerprint", ""),
+                                         "child_pins_per_cell": f.get(action[2], {}).get("pins_per_cell", 0)}}
+    kb_add(s, [{"record": "trial", "session": s["session"], "trial": tag,
+                "owner_kind": "none" if kind == "control" else "cells", "owner": owner, "action": act,
+                "before": before, "after": {k: after[k] for k in ("wns", "tns", "violating", "tns_logic", "tns_placement") if k in after},
+                "seconds": round(te + tp), "verdict": verdict, "note": "plan_place v1"}])
+
+
+_fp = {}
+
+
+def fingerprints(s):
+    if not _fp:
+        r = sh(f"{HERE}/placement_kb fingerprint {s['netlist']} {s['top']} --kb {s['kb']}")
+        for l in r.stdout.splitlines()[1:]:
+            x = l.split("\t")
+            _fp[x[0]] = {"fingerprint": x[1], "cells": int(x[2]), "own_cells": int(x[3]), "children": int(x[4]),
+                         "copies": int(x[5]), "depth": int(x[6]), "port_bits": int(x[7]), "pins_per_cell": float(x[8])}
+    return _fp
+
+
+def candidates(s, mods, paths):
+    """ungroup candidates: inside a module blame charges, a leaf-only child with
+    at least half a pin per cell; knowledge-base evidence first, then charge x
+    pins/cell"""
+    charge = {}
+    for o in s.get("owners", []):
+        m = paths.get(o["module_path"])
+        if m:
+            charge[m] = charge.get(m, 0.0) + o["charge"]
+    seen = {(p, c) for p, c in s["ungrouped"]} | {tuple(t["action"][1:3]) for t in s["tries"] if t["action"][0] == "ungroup"}
+    kbacc = set()
+    try:
+        for l in open(os.path.join(s["kb"], "trials.jsonl")):
+            r = json.loads(l)
+            if r["action"]["type"] == "flatten" and r["verdict"] == "accepted":
+                kbacc.add(r["action"].get("params", {}).get("child"))
+    except OSError:
+        pass
+    f = fingerprints(s)
+    out = []
+    for parent, ch in charge.items():
+        for inst, child in set(mods[parent]["kids"].items()):
+            cm = mods[child]
+            if cm["kids"] or cm["cells"] < 200 or (parent, child) in seen:
+                continue
+            ppc = cm["bits"] / max(cm["cells"], 1)
+            if ppc < 0.5:
+                continue
+            known = f.get(child, {}).get("fingerprint") in kbacc
+            out.append({"parent": parent, "child": child, "charge": ch, "ppc": ppc, "known": known,
+                        "score": (1 if known else 0, ch * ppc)})
+    uniq = {(c["parent"], c["child"]): c for c in out}
+    return sorted(uniq.values(), key=lambda c: c["score"], reverse=True)
+
+
+def cmd_auto(a):
+    d = os.path.abspath(a.dir); s = load(d)
+    mods, paths = structure(s["netlist"], s["top"])
+    for k in range(a.n):
+        cs = candidates(s, mods, paths)
+        if not cs:
+            log(d, "auto: no candidate left"); break
+        log(d, "auto: candidates -- " + "; ".join(
+            f"{c['child']} in {c['parent']} ({'seen helping before, ' if c['known'] else ''}{c['ppc']:.2f} pins/cell, {c['charge']:.0f} ns charged)"
+            for c in cs[:4]))
+        c = cs[0]
+        do_try(d, s, ("ungroup", c["parent"], c["child"]), mods, paths)
+        s = load(d)
+        if c["parent"] in mods and c["child"] in mods[c["parent"]]["kids"].values():
+            mods[c["parent"]]["kids"] = {i: x for i, x in mods[c["parent"]]["kids"].items() if x != c["child"]}
+    cmd_status(a)
+
+
+def cmd_try(a):
+    d = os.path.abspath(a.dir); s = load(d)
+    mods, paths = structure(s["netlist"], s["top"])
+    do_try(d, s, tuple(a.action), mods, paths)
+
+
+def cmd_status(a):
+    d = os.path.abspath(a.dir); s = load(d)
+    b = s.get("baseline", {})
+    print(f"plan {d}: {s['top']}  baseline WNS {b.get('wns')} TNS {b.get('tns')}  noise {s.get('noise', 0) * 100:.2f}%")
+    print(f"{'try':<4} {'verdict':<9} {'TNS gain':>9} {'TNS after':>11} {'WNS after':>9} {'s':>5}  action")
+    for t in s["tries"]:
+        if "after" in t:
+            print(f"{t['tag']:<4} {t['verdict']:<9} {t['gain'] * 100:+8.2f}% {t['after']['tns']:11.1f} {t['after']['wns']:9.4f} "
+                  f"{t['electron_s'] + t['photon_s']:5d}  {' '.join(t['action'])}")
+        else:
+            print(f"{t['tag']:<4} {t['verdict']:<9} {'':>9} {'':>11} {'':>9} {'':>5}  {' '.join(t['action'])}  ({t.get('note', '')})")
+    print("plan: ungroup " + (", ".join(f"{c} in {p}" for p, c in s["ungrouped"]) or "nothing yet"))
+
+
+def cmd_stop(a):
+    d = os.path.abspath(a.dir); s = load(d)
+    with open(os.path.join(d, "plan.ungroup"), "w") as fh:
+        fh.write("# instances plan_place found worth dissolving: ungroup -module <parent> -cell <child>\n")
+        for p, c in s["ungrouped"]:
+            fh.write(f"{p} {c}\n")
+    with open(os.path.join(d, "plan.report"), "w") as fh:
+        sys.stdout = fh; cmd_status(a); sys.stdout = sys.__stdout__
+    try:
+        pq(s, "shutdown", timeout=60)
+    except Exception:
+        pass
+    with open(os.path.join(d, "cmd"), "a") as fh:
+        fh.write("exit\n")
+    time.sleep(15)
+    sh(f"bkill {s.get('session_job', '')} {s.get('server_job', '')} 2>/dev/null")
+    log(d, f"stopped: plan in {d}/plan.spec, plan.ungroup, plan.report")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp = ap.add_subparsers(dest="cmd", required=True)
+    x = sp.add_parser("start"); x.add_argument("dir")
+    x.add_argument("--load", required=True, help="tcl: read, elaborate, floorplan -- up to the placement")
+    x.add_argument("--netlist", required=True); x.add_argument("--top", required=True)
+    x.add_argument("--spec", required=True); x.add_argument("--kb", required=True)
+    x.add_argument("--electron", default=os.path.dirname(HERE))
+    x.add_argument("--pyspark", required=True)
+    x.add_argument("--sif", default=os.path.join(os.path.dirname(HERE), "INSTALL", "podman", "pysparkpp.sif"))
+    x.add_argument("--arcs", required=True); x.add_argument("--corner", required=True)
+    x.add_argument("--period", required=True); x.add_argument("--wire_model", default="")
+    x.add_argument("--res", default="Double.NaN"); x.add_argument("--cap", default="Double.NaN")
+    x.add_argument("--cells", required=True, help="the cell table for sizing and repeaters")
+    x.add_argument("--vts", default="svt,lvt,ulvt")
+    x.add_argument("--queue", default="normal"); x.add_argument("--session_mem", default="48")
+    x.add_argument("--server_mem", default="64")
+    x.set_defaults(f=cmd_start)
+    x = sp.add_parser("auto"); x.add_argument("dir"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_auto)
+    x = sp.add_parser("try"); x.add_argument("dir"); x.add_argument("action", nargs="+"); x.set_defaults(f=cmd_try)
+    x = sp.add_parser("status"); x.add_argument("dir"); x.set_defaults(f=cmd_status)
+    x = sp.add_parser("stop"); x.add_argument("dir"); x.set_defaults(f=cmd_stop)
+    a = ap.parse_args()
+    return a.f(a) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
