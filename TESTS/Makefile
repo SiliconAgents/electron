@@ -132,9 +132,17 @@ nangate_ungroup:
 	$(call UG_EXPECT,8 instance path(s))
 	$(call UG_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
 	python3 same_netlist.py workarea/ug0.sgraph workarea/ug1.sgraph
+	@for f in vedic_8x8.pseudo.nodefile vedic_8x8.cells.nodefile; do \
+	  awk '$$3=="INST" && !/TYPE=block/ && ($$4>5 || $$5>5) {n++} END {if (n) {print "nangate_ungroup: " n " cell(s) in '"$$f"' are not cell-sized"; exit 1}}' workarea/$$f || exit 1; \
+	done
+	@grep -q "A[45]/" workarea/vedic_8x8.cells.nodefile || { echo "nangate_ungroup: the cell pass did not place the dissolved cells"; exit 1; }
 	python3 check_rigid.py --free A4,A5 workarea/ug0.def workarea/ug1.def V9 V10 V11 V12
 	grep -h "PLACED\|FIXED" workarea/ug1.def | sort > workarea/ug1.placed ; grep -h "PLACED\|FIXED" workarea/ug2.def | sort > workarea/ug2.placed
 	@cmp -s workarea/ug1.placed workarea/ug2.placed || { echo "nangate_ungroup: the rigid hier2flat differs from a full one"; exit 1; }
+	$(call UG_EXPECT,UNGROUP : 006 : 1 instance(s) dissolved into vedic_16x16)
+	@! grep -q "HR_PL_ALL : 031" workarea/ungroup.log || { echo "nangate_ungroup: the top was sized for no die after an ungroup (031)"; exit 1; }
+	python3 same_netlist.py workarea/ug0.sgraph workarea/ug3.sgraph
+	python3 check_rigid.py --free A3 workarea/ug2.def workarea/ug3.def
 	@echo "nangate_ungroup: all expected results"
 
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and

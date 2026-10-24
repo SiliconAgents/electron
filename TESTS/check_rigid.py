@@ -12,7 +12,8 @@ Given instance paths (hier_place_all -only: every instance of the module
 re-placed), the groups are the children under each of them instead, the
 module's own cells may go anywhere, and every cell outside them must not have
 moved at all.  --free A,B: children of those names were dissolved into the
-module (ungroup), so their cells are its own and may go anywhere too.
+module (ungroup), so their cells are its own and may go anywhere too --
+the top's, with no instance paths given.
 """
 import collections
 import re
@@ -51,7 +52,7 @@ for name in before:
     if name not in after:
         continue
     if not under:
-        if "/" in name:
+        if "/" in name and name.split("/")[0] not in free:
             groups[name.split("/")[0]].append(name)
         continue
     p = next((u for u in under if name.startswith(u + "/")), None)

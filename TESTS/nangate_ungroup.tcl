@@ -3,7 +3,8 @@
 # vedic_8x8 -- four copies of it -- are ungrouped and vedic_8x8 alone is
 # placed again with their cells as its own.  ug0 is before, ug1 after (rigid
 # hier2flat), ug2 the same through a full hier2flat; the timing graphs before
-# and after must hold the same connections: only the grouping changed.
+# and after must hold the same connections: only the grouping changed.  Then
+# the same at the top: adder16 dissolved into vedic_16x16 (ug3).
 read_config_file -config ../../CONFIG/library.config -foundary nangate -technode 45nm -layer 6
 read_verilog -v vedic_filter.vg
 set TOP_MODULE vedic_16x16
@@ -15,11 +16,17 @@ hier_place_all -batch 300 -cells_batch 300 -cells_placer qp --free_flops -args -
 write_def -output ug0.def --overwrite
 write_sgraph -output ug0.sgraph
 ungroup -module vedic_8x8 -cell adder12
-hier_place_all -only vedic_8x8 --keep_shapes -sizing budget --slice_blocks -batch 300 -cells_batch 300 -cells_placer qp --free_flops -args --array,4 -floorplan_spec ../ungroup.spec
+hier_place_all -only vedic_8x8 --keep_shapes -sizing budget --slice_blocks -batch 300 -cells_batch 300 -cells_placer qp --free_flops -args --array,4 -floorplan_spec ../ungroup.spec --keep
 write_moves -output ug1.moves
 write_def -output ug1.def --overwrite
 write_sgraph -output ug1.sgraph
 hier2flat --physical
 write_def -output ug2.def --overwrite
+# and at the top: adder16 dissolved into vedic_16x16, the top placed again
+ungroup -module vedic_16x16 -cell adder16
+hier_place_all -depth 0 --keep_shapes -sizing budget --slice_blocks -batch 300 -cells_batch 300 -cells_placer qp --free_flops -args --array,4 -floorplan_spec ../ungroup_top.spec
+write_moves -output ug3.moves
+write_def -output ug3.def --overwrite
+write_sgraph -output ug3.sgraph
 legalize_flat
 exit

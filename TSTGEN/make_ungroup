@@ -150,8 +150,18 @@ if ( defined $pf && $pf != -1 && exists $FLOORPLAN_ALREADY{$pf} ) {
         my ($x, $y, $o) = $CF->dbFlplanGetLeafInstLoc($l);
         next unless ( defined $x );
         $F->dbFlplanAddLeafInst("$c/$l", $x + $e[0], $y + $e[1], $o);
-        my @bb = $CF->dbFlplanGetLeafInstBbox($l);
-        $F->dbFlplanUpdateLeafInstBbox("$c/$l", $bb[0] + $e[0], $bb[1] + $e[1], $bb[2] + $e[0], $bb[3] + $e[1]) if ( @bb == 4 );
+        #<!-- the box from the cell's own size, as a commit makes it:
+        #     dbFlplanUpdateLeafInstBbox takes a width and a height and turns
+        #     them by the orient.  Handed the child's box corners instead, it
+        #     read x as the width -- 1,412 flops of a dissolved block came out
+        #     ~430 um, and the block pass that met them never finished. -->
+        my $ref = $MODULE_ALREADY{$gone{$c}}->dbVNOMGetLeafInstCell($l);
+        if ( defined $ref && exists $PLDB{$ref} ) {
+          my @sz = $PLDB{$ref}->dbMdbGetSize;
+          my $dbu = $F->dbFlplanGetDBUnit;
+          $dbu = $GLOBAL->dbfGlobalGetDBU unless ( defined $dbu && $dbu > 0 );
+          $F->dbFlplanUpdateLeafInstBbox("$c/$l", $sz[0] * $dbu, $sz[1] * $dbu) if ( @sz >= 2 );
+        }
         $carried++;
       }
     }
@@ -169,8 +179,17 @@ foreach my $pp ( @{ $paths{$parent} || [] } ) {
     $np++;
   }
 }
-delete $PSEUDO_MODULE_ALREADY{$parent};
-delete $PSEUDO_VINST_ALREADY{$parent};
+#<!-- the parent's pseudo model no longer matches its VNOM.  Open (the top, as
+#     a session has it), it is opened again from the new VNOM and its floorplan;
+#     dropped instead, hier_place_all found the top it reuses as is at 0 x 0 and
+#     sized its blocks for no die at all (WARN-TST-HR_PL_ALL 031). -->
+if ( $parent eq $TOP_MODULE ) {
+  &editModule("-module", $parent);
+}
+else {
+  delete $PSEUDO_MODULE_ALREADY{$parent};
+  delete $PSEUDO_VINST_ALREADY{$parent};
+}
 printf("INFO-TST-UNGROUP : 006 : %d instance(s) dissolved into %s: %d cell(s) now its own, %d net(s) of theirs renamed, %d placed cell(s) carried into its floorplan; %d instance path(s)\n",
        scalar(keys %gone), $parent, $nCells, $nNets, $carried, $np);
 print "INFO-TST-UNGROUP : 007 : a -net_weights file gives no weight to nets inside a dissolved instance\n";
