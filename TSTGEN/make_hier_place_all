@@ -862,6 +862,7 @@ my $weightPower = 3;
 my $fpSpecFile = "";
 my $keepShapes = 0;
 my $only = "";
+my $cellsAnchor = "";
 my $freeFlops = 0;
 my $seqAnchorLimit = 2000;
 my $legalize = 0;
@@ -909,6 +910,9 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                          with --keep_shapes: its children move as\n";
   print "                                          blocks by its -floorplan_spec line, its own\n";
   print "                                          cells are placed again, nothing else moves\n";
+  print "                       -cells_anchor <command> hier_place_cells -anchor for every module\n";
+  print "                                          placed (with -only, that one): e.g.\n";
+  print "                                          3RDBIN/array_anchor for a register file\n";
   print "                       -cells_placer <path>|qp the cell pass only, default -placer.  qp\n";
   print "                                               is ELECTRON_HOME/3RDBIN/hier_place_qp,\n";
   print "                                               the analytic one: seconds where\n";
@@ -996,6 +1000,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-floorplan_spec"){ $fpSpecFile = $_[$i+1]; }
   elsif ($_[$i] eq "--keep_shapes")  { $keepShapes = 1; }
   elsif ($_[$i] eq "-only")          { $only = $_[$i+1]; }
+  elsif ($_[$i] eq "-cells_anchor")  { $cellsAnchor = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot")      { $snapPrefix = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot_args") { $snapArgs = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_ALL : 001 : invalid option $_[$i]\n"; }
@@ -1462,6 +1467,7 @@ foreach my $rec ( @order ) {
     push(@cellArgs, "-fanout_limit", $fanoutLimit) if ( $fanoutLimit > 0 );
     push(@cellArgs, "--keep") if ( $keepFiles );
     push(@cellArgs, "-net_weights", $netWeights, "-weight_scale", $weightScale, "-weight_power", $weightPower) if ( $netWeights ne "" );
+    push(@cellArgs, "-anchor", $cellsAnchor) if ( $cellsAnchor ne "" );
     &hier_place_cells(@cellArgs);
     $mrec{cell_pass} = $HIER_PLACE_CELL_STATS{$mod} if ( exists $HIER_PLACE_CELL_STATS{$mod} );
   }

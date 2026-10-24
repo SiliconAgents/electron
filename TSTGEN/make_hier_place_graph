@@ -3498,6 +3498,7 @@ my $netWeights = "";
 my $weightScale = 10;
 my $weightPower = 3;
 my ($writeOnly, $keepFiles, $noBlockage, $freeFlops) = (0, 0, 0, 0);
+my $anchorCmd = "";
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : hier_place_cells -module <module name>\n";
@@ -3511,6 +3512,10 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                              3RDBIN/hier_place_qp)\n";
   print "                         --write_only         write the graph and stop\n";
   print "                         --keep               keep the graph files\n";
+  print "                         -anchor <command>    run '<command> <nodefile> <graph>' before\n";
+  print "                                              placing: it may rewrite the nodefile, e.g.\n";
+  print "                                              fix cells of a regular array on a grid\n";
+  print "                                              (3RDBIN/array_anchor)\n";
   print "                         -net_weights <file>  weight critical nets' edges (write_pseudo_graph)\n";
   print "                         -weight_scale <K>    for -net_weights, default 10\n";
   print "\n";
@@ -3543,6 +3548,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-net_weights")   { $netWeights = $_[$i+1]; }
   elsif ($_[$i] eq "-weight_scale")  { $weightScale = $_[$i+1]; }
   elsif ($_[$i] eq "-weight_power")  { $weightPower = $_[$i+1]; }
+  elsif ($_[$i] eq "-anchor")        { $anchorCmd = $_[$i+1]; }
   elsif ($_[$i] =~ m/^-+\w/)         { print "WARN-TST-HR_PL_CL : 001 : invalid option $_[$i]\n"; }
 }
 
@@ -3584,6 +3590,14 @@ unless ( -e $placer ) {
   return;
 }
 
+#<!-- -anchor: a step between writing the graph and placing it, which may
+#     rewrite the nodefile -- fix some cells where a structure wants them, so
+#     the placer arranges the rest around them.  A failure leaves the nodefile
+#     as written and says so. -->
+if ( $anchorCmd ne "" ) {
+  my $arc = system("$anchorCmd $nodeFile $graphFile");
+  print "WARN-TST-HR_PL_CL : 010 : -anchor '$anchorCmd' failed (exit " . ($arc >> 8) . "), placing without it\n" if ( $arc != 0 );
+}
 my $cmd = ( -x $placer ) ? "$placer $nodeFile $graphFile"
                          : "python3 $placer $nodeFile $graphFile";
 $cmd .= " --kinds INST PORT";
