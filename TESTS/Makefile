@@ -483,6 +483,27 @@ nangate_photon_repeat: nangate_store $(NG_SIZING)
 	  python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.eco.def library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef || exit 1; \
 	  [ "$$(grep -c '^NETS' workarea/vedic_16x16.eco.sgraph)" -eq "$$(grep -c '^NETS' workarea/sta/vedic_16x16.prep.sgraph)" ] || { echo "nangate_photon_repeat: electron's graph after the ECO is not the one Photon timed"; exit 1; }; \
 	  echo "nangate_photon_repeat: $$b buffer(s) placed and $$r cell(s) resized by Photon ($$m slid aside), applied by electron, legal, every sink reached"; fi
+# The same with SPARKSTA_ROOM: cells grow under a density cap, overlapping
+# their neighbours, and legalize_flat --incremental moves those; a second,
+# report-only pass and the independent overlap check prove the result legal.
+nangate_photon_repeat_density: SPARKSTA_CELLS = $(NG_SIZING)
+nangate_photon_repeat_density: SPARKSTA_VTS = any
+nangate_photon_repeat_density: SPARKSTA_WIRE_RC = 2000 0.2
+nangate_photon_repeat_density: SPARKSTA_ADVISE_MEM = 4g
+nangate_photon_repeat_density: SPARKSTA_SIZE_ROUNDS = 2
+nangate_photon_repeat_density: SPARKSTA_ROOM = density 0.9 5
+nangate_photon_repeat_density: nangate_store $(NG_SIZING)
+	test -s workarea/vedic_16x16.phys.sgraph || { echo "nangate_photon_repeat_density: run nangate_photon_repeat first"; exit 1; }
+	$(call SPARKSTA_REPEAT,workarea/vedic_16x16.phys.sgraph,$(NG_STORE),slow,$(NG_ADVISE_PERIOD),workarea/sta/vedic_16x16.dens)
+	@if [ -n "$(PYSPARK)" ]; then \
+	  grep -q "within a 0.9 cap" workarea/sta/vedic_16x16.dens.repeat.txt || { echo "nangate_photon_repeat_density: Photon did not size under the cap"; exit 1; }; \
+	  cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../apply/eco_density.tcl > eco_density.log 2>&1; cd ..; \
+	  r=$$(grep -c '^RESIZE' workarea/sta/vedic_16x16.dens.eco.tsv); \
+	  grep -q "AP_ECO : 004 : .* $$r resized" workarea/eco_density.log || { echo "nangate_photon_repeat_density: the ECO's $$r resize(s) were not applied, see workarea/eco_density.log"; exit 1; }; \
+	  [ "$$(grep -c 'LEGAL : 054' workarea/eco_density.log)" -eq 2 ] || { echo "nangate_photon_repeat_density: legalize_flat did not run twice, see workarea/eco_density.log"; exit 1; }; \
+	  grep "LEGAL : 054" workarea/eco_density.log | tail -1 | grep -q "already legal and kept, 0 moved" || { echo "nangate_photon_repeat_density: still not legal after legalize_flat --incremental"; grep "LEGAL : 05[45]" workarea/eco_density.log; exit 1; }; \
+	  python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.dens.def library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef || exit 1; \
+	  echo "nangate_photon_repeat_density: $$r cell(s) resized under the cap; $$(grep 'LEGAL : 054' workarea/eco_density.log | head -1 | grep -oE '[0-9]+ moved, average move [0-9.]+ um'); legal"; fi
 # photon_server against batch Photon on nangate_photon_repeat's graph: the same
 # STA, a repeat estimate that undoes cleanly, and -- the point -- the same
 # sizing choices as place_opt (sizeBound with the footprint rule).  The server

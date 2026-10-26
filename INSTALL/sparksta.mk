@@ -120,6 +120,11 @@ endef
 # Then SPARKSTA_SIZE_ROUNDS (default 5; 0 for none) rounds of sizing and Vt on
 # the graph with the trees in, every cell growing only into the free space to
 # its right, written as RESIZE lines and into the graph Photon times.
+# SPARKSTA_ROOM="density 0.9 5" lets a cell grow instead while the cell area
+# of its 5um tile stays under 0.9; it then overlaps its neighbours and the
+# caller must legalize (legalize_flat --incremental moves only those).  The
+# right-hand gap is the tighter limit: on a 3M-instance tile sizing recovered
+# 43k ns of TNS within it and 73k within a 0.9 cap, for 4.5x the area.
 # $(call SPARKSTA_REPEAT,placed_sgraph,store,corner,period_ns,out_prefix)
 define SPARKSTA_REPEAT
 	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to repeat on $(1)"; exit 0; fi; \
@@ -130,7 +135,7 @@ define SPARKSTA_REPEAT
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5).eco.tsv; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca $(PYSPARK)/scala/repeat.sca > $(5).repeat.sca; \
-	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
+	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
 	 echo 'System.exit(0)' >> $(5).repeat.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
 	   "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
