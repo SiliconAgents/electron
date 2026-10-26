@@ -348,7 +348,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
@@ -481,6 +481,13 @@ nangate_photon_repeat_push: nangate_store $(NG_SIZING)
 	  grep "LEGAL : 054" workarea/eco_push.log | tail -1 | grep -q "already legal and kept, 0 moved" || { echo "nangate_photon_repeat_push: Photon's ECO left cells for the legalizer"; grep "LEGAL : 05[45]" workarea/eco_push.log; exit 1; }; \
 	  python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.push.def library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef || exit 1; \
 	  echo "nangate_photon_repeat_push: $$r cell(s) resized, $$m pushed aside by Photon, legal as written"; fi
+
+# hier_synthesis -patch on a header the filelist only reaches through +incdir+:
+# a flop macro written as a ternary on its async reset, which yosys-slang will
+# not elaborate, fixed in a patched copy that is put first on the include path.
+# Checks the original still fails as vendor RTL does and the copy reads.
+rtl_patch_headers:
+	bash rtl_patch/check.sh
 
 # Cells two rows tall on two sites, each legal only with its bottom on rows
 # of one orientation (-row_start; the config's cell-families row-start).

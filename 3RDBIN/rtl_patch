@@ -44,6 +44,17 @@ beside the files it `includes, so each patched file's original directory is
 added as an +incdir+ -- at the end, where it changes nothing for the files
 that were not patched.  Nested -f/-F lists pass through untouched, and a rule
 for a file inside one is reported as matching nothing.
+
+HEADERS.  A rule may also name a file the list only reaches through an
++incdir+ -- a header of `define macros, say, where one macro is the construct
+the front end will not take and every file that uses it fails.  When `file`
+matches no listed file, it is looked for under each +incdir+ in the list's
+order, the order an `include resolves in, and the first one found is the one
+patched.  Its copy goes in dir/rtl_patched_inc/, and that directory is put
+FIRST in the output list, so the copy is what every `include finds.  Same
+strictness: found nowhere is an error, and so is a listed file sitting in the
+header's own directory, since an `include there finds the original beside it
+before any +incdir+.
 """
 import argparse
 import os
@@ -105,12 +116,39 @@ def main():
             new[i] = p
             entries.append((i, p))
 
+    # the include directories, in the list's order (an `include's search order)
+    incdirs_in = []
+    for i, raw in enumerate(new):
+        s = raw.strip()
+        if s.startswith("+incdir+"):
+            for d in s[len("+incdir+"):].split("+"):
+                if d and d not in incdirs_in:
+                    incdirs_in.append(d)
+
     errors = []
     by_entry = {}                      # index -> [(rx, rep, why)]
+    by_header = {}                     # header path -> [(rx, rep, why)]
     for f, rx, rep, why in rules:
         hits = [(i, p) for i, p in entries if p == f or p.endswith("/" + f.lstrip("/"))]
         if not hits:
-            errors.append(f"{f}: not in the filelist ({why})")
+            # under each +incdir+ in order: the name as an `include gives it,
+            # or the header's own name there with `file` matching the end of
+            # its path ("rtl/defines/x.svh" picks one of two x.svh)
+            found = []
+            for d in incdirs_in:
+                for c in (os.path.join(d, f.lstrip("/")), os.path.join(d, os.path.basename(f))):
+                    c = os.path.normpath(c)
+                    if os.path.isfile(c) and (c == f or c.endswith("/" + f.lstrip("/"))) and c not in found:
+                        found.append(c)
+            if not found:
+                errors.append(f"{f}: not in the filelist, nor under any +incdir+ of it ({why})")
+                continue
+            h = os.path.normpath(found[0])
+            beside = [p for _, p in entries if os.path.dirname(p) == os.path.dirname(h)]
+            if beside:
+                errors.append(f"{f}: {beside[0]} sits beside the header and would `include the original")
+                continue
+            by_header.setdefault(h, []).append((f, rx, rep, why))
         elif len(hits) > 1:
             errors.append(f"{f}: matches {len(hits)} files; give more of the path: "
                           + ", ".join(p for _, p in hits[:3]))
@@ -154,6 +192,37 @@ def main():
             incdirs.append(d)
         print(f"  patched {name}: {', '.join(applied)}")
 
+    hdir = os.path.join(out, "rtl_patched_inc")
+    headers = {}
+    for src, group in sorted(by_header.items()):
+        text = open(src, errors="surrogateescape").read()
+        applied = []
+        for f, rx, rep, why in group:
+            text, n = rx.subn(rep, text)
+            if n == 0:
+                errors.append(f"{f}: pattern matched nothing -- fixed at the source? ({why})")
+            else:
+                applied.append(f"{why} x{n}")
+        if len(applied) != len(group):
+            continue
+        name = os.path.basename(src)
+        if name in headers:
+            errors.append(f"{name}: two patched headers share this name ({headers[name]}, {src})")
+            continue
+        os.makedirs(hdir, exist_ok=True)
+        with open(os.path.join(hdir, name), "w", errors="surrogateescape") as fh:
+            fh.write(text)
+            if not text.endswith("\n"):
+                fh.write("\n")
+            fh.write(f"// rtl_patch: copy of {src}\n")
+            for w in applied:
+                fh.write(f"// rtl_patch: {w}\n")
+        headers[name] = src
+        d = os.path.dirname(src)
+        if d not in incdirs:
+            incdirs.append(d)
+        print(f"  patched header {name}: {', '.join(applied)}")
+
     if errors:
         for e in errors:
             print(f"rtl_patch: ERROR {e}", file=sys.stderr)
@@ -163,11 +232,13 @@ def main():
     # headers that sat beside its original, and no unpatched file's search
     # order changes.
     post = [f"+incdir+{d}" for d in incdirs]
+    # FIRST: the patched headers, ahead of every directory that holds an original
+    pre = [f"+incdir+{hdir}"] if headers else []
     listout = os.path.join(out, os.path.basename(a.filelist))
     with open(listout + ".part", "w") as fh:
-        fh.write("\n".join(new + post) + "\n")
+        fh.write("\n".join(pre + new + post) + "\n")
     os.replace(listout + ".part", listout)
-    print(f"rtl_patch: {len(written)} file(s) patched by {len(rules)} rule(s); wrote {listout}")
+    print(f"rtl_patch: {len(written)} file(s) and {len(headers)} header(s) patched by {len(rules)} rule(s); wrote {listout}")
     return 0
 
 
