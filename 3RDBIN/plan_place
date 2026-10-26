@@ -253,9 +253,18 @@ cd {d} && apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /pro
             log(d, "Photon server died -- see server.*.out"); return 1
         time.sleep(10)
     log(d, f"Photon server up (LSF job {s['server_job']}) in {time.time() - t0:.0f} s")
+    #<!-- sized to convergence with room to grow, then split three ways: what
+    #     sizing recovers (drive) is not charged to placement.  Three fixed rounds
+    #     under the row footprint left most gates at the weakest drive and every
+    #     try's sizing looked like a placement gain. -->
     t0 = time.time()
-    m = metrics([l for l in pq(s, "size all 3") if "now:" in l])
-    log(d, f"planned repeaters + 3 sizing rounds ({time.time() - t0:.0f} s): WNS {m['wns']} TNS {m['tns']:.1f} violating {m['violating']:,}")
+    pq(s, f"room {a.room}")
+    out = pq(s, f"blame3 {d}/blame/b0 10 8", timeout=14400)
+    for l in out:
+        if l.strip().startswith(("A as placed", "B sized")):
+            log(d, "  " + l.strip())
+    m = metrics([l for l in out if l.strip().startswith("B sized")])
+    log(d, f"sized to convergence, room {a.room} ({time.time() - t0:.0f} s): WNS {m['wns']} TNS {m['tns']:.1f} violating {m['violating']:,}")
     bm, owners = blame(d, s, "b0")
     m.update(bm)
     s["baseline"] = m
@@ -267,7 +276,11 @@ cd {d} && apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /pro
     # the noise: the most-charged module placed again with nothing changed
     mods, paths = structure(s["netlist"], s["top"])
     s["structure"] = {"paths": paths}
-    target = next((paths.get(o["module_path"]) for o in owners if paths.get(o["module_path"]) not in (None, s["top"])), None)
+    #<!-- the control: a module that is charged but not huge.  An -only re-place
+    #     of a 2.5M-cell block with nothing changed lost 5% by itself -- it does
+    #     not reproduce the walk -- and the noise measured from it is meaningless. -->
+    target = next((paths.get(o["module_path"]) for o in owners
+                   if paths.get(o["module_path"]) not in (None, s["top"]) and mods[paths.get(o["module_path"])]["cells"] <= 300000), None)
     save(d, s)
     if target:
         do_try(d, s, ("control", target), mods, paths)
@@ -509,6 +522,8 @@ def main():
     x.add_argument("--server_mem", default="64")
     x.add_argument("--place_extra", default="", help="more hier_place_all options for the placement, e.g. --child_pins")
     x.add_argument("--pre_ungroup", default="", help="a plan.ungroup: instances dissolved before placing")
+    x.add_argument("--room", default="density 0.9 5",
+                   help="photon_server room mode for sizing: 'density <cap> <tile um>' (default), 'row' or 'none'")
     x.set_defaults(f=cmd_start)
     x = sp.add_parser("auto"); x.add_argument("dir"); x.add_argument("--n", type=int, default=3); x.set_defaults(f=cmd_auto)
     x = sp.add_parser("try"); x.add_argument("dir"); x.add_argument("action", nargs="+"); x.set_defaults(f=cmd_try)
