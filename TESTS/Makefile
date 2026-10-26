@@ -460,6 +460,28 @@ nangate_repeat:
 	  $(MAKE) --no-print-directory nangate_repeat_sta && \
 	  tr '\r' '\n' < workarea/sta/vedic_16x16.repeated.seg.tsv.log | grep -E "photon: period" | tail -1; fi
 	@echo "nangate_repeat: $$(grep -oE 'AP_ADV : 011 : .*' workarea/repeat.log | cut -c16-)"
+# The same with SPARKSTA_ROOM=push: a cell grows into the space beside it and
+# Photon pushes its neighbours aside itself, so the rows stay legal -- the
+# ECO's MOVE lines carry the pushes, and legalize_flat must find nothing to
+# move.  The overlap check is the independent proof.
+nangate_photon_repeat_push: SPARKSTA_CELLS = $(NG_SIZING)
+nangate_photon_repeat_push: SPARKSTA_VTS = any
+nangate_photon_repeat_push: SPARKSTA_WIRE_RC = 2000 0.2
+nangate_photon_repeat_push: SPARKSTA_ADVISE_MEM = 4g
+nangate_photon_repeat_push: SPARKSTA_SIZE_ROUNDS = 2
+nangate_photon_repeat_push: SPARKSTA_ROOM = push 16
+nangate_photon_repeat_push: nangate_store $(NG_SIZING)
+	test -s workarea/vedic_16x16.phys.sgraph || { echo "nangate_photon_repeat_push: run nangate_photon_repeat first"; exit 1; }
+	$(call SPARKSTA_REPEAT,workarea/vedic_16x16.phys.sgraph,$(NG_STORE),slow,$(NG_ADVISE_PERIOD),workarea/sta/vedic_16x16.push)
+	@if [ -n "$(PYSPARK)" ]; then \
+	  grep -q "neighbour(s) pushed aside" workarea/sta/vedic_16x16.push.repeat.txt || { echo "nangate_photon_repeat_push: Photon did not size with pushing"; exit 1; }; \
+	  cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../apply/eco_push.tcl > eco_push.log 2>&1; cd ..; \
+	  r=$$(grep -c '^RESIZE' workarea/sta/vedic_16x16.push.eco.tsv); m=$$(grep -c '^MOVE' workarea/sta/vedic_16x16.push.eco.tsv); \
+	  grep -q "AP_ECO : 004 : .* $$m cell(s) slid aside, $$r resized" workarea/eco_push.log || { echo "nangate_photon_repeat_push: the ECO's $$r resize(s) and $$m move(s) were not applied, see workarea/eco_push.log"; grep "AP_ECO" workarea/eco_push.log; exit 1; }; \
+	  grep "LEGAL : 054" workarea/eco_push.log | tail -1 | grep -q "already legal and kept, 0 moved" || { echo "nangate_photon_repeat_push: Photon's ECO left cells for the legalizer"; grep "LEGAL : 05[45]" workarea/eco_push.log; exit 1; }; \
+	  python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.push.def library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef || exit 1; \
+	  echo "nangate_photon_repeat_push: $$r cell(s) resized, $$m pushed aside by Photon, legal as written"; fi
+
 # Cells two rows tall on two sites, each legal only with its bottom on rows
 # of one orientation (-row_start; the config's cell-families row-start).
 # legalize_flat must put every one on its own rows; then, with each moved one
