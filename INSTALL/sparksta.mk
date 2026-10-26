@@ -73,6 +73,12 @@ SPARKSTA_WIRE_MODEL_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3
 
 # $(call SPARKSTA,sgraph,store,corner,period_ns,out.tsv)
 # period 0 means arrival only: no required time, no slack.
+# SPARKSTA_DEPTH=1 adds the logic-depth report (photon depth=): every
+# endpoint's worst path counted in levels of logic, buffers and inverters
+# apart, into <out without .seg.tsv>.depth.txt and .depth.tsv -- for judging
+# a netlist before placement.  SPARKSTA_DEPTH_BUDGET=<n> also counts the
+# endpoints deeper than n levels, per module.  Buffers and inverters are
+# told by SPARKSTA_CELLS's classes when it is set.
 define SPARKSTA
 	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to time $(1)"; exit 0; fi; \
 	 test -f "$(1)" || { echo "sparksta: $(1) does not exist -- run the synthesis or placement first"; exit 1; }; \
@@ -80,9 +86,9 @@ define SPARKSTA
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5); \
 	 cat $(PYSPARK)/scala/photon.sca > $(5).sca; \
-	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm=$(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm=$(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel="$(abspath $(SPARKSTA_WIRE_MODEL))"))' >> $(5).sca; \
+	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm=$(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm=$(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel="$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(SPARKSTA_DEPTH),$(_sparksta_comma) depth="$(abspath $(patsubst %.seg.tsv,%,$(5)))"$(if $(SPARKSTA_CELLS),$(_sparksta_comma) depthCells="$(abspath $(SPARKSTA_CELLS))")$(_sparksta_comma) depthBudget=$(or $(SPARKSTA_DEPTH_BUDGET),0)))' >> $(5).sca; \
 	 echo 'System.exit(0)' >> $(5).sca
-	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|rror|xception'; \
+	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|^  |rror|xception'; \
 	 test -s "$(5)" || { echo "sparksta: no $(5), see $(5).log"; exit 1; }; fi
 endef
 
@@ -125,6 +131,9 @@ endef
 # caller must legalize (legalize_flat --incremental moves only those).  The
 # right-hand gap is the tighter limit: on a 3M-instance tile sizing recovered
 # 43k ns of TNS within it and 73k within a 0.9 cap, for 4.5x the area.
+# SPARKSTA_FANOUT=<n> also builds trees for every net with more than n data
+# loads, long or not: for a netlist synthesised without fanout trees
+# (synthesis_mode place), which leaves one gate driving hundreds of pins.
 # SPARKSTA_TALL_PS=5, with a density room and a cell table whose family
 # column puts one-row and two-row cells together (arc_store --opt-cell-sizing),
 # lets a cell become a two-row one when that beats the best of its own height
@@ -139,7 +148,7 @@ define SPARKSTA_REPEAT
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5).eco.tsv; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca $(PYSPARK)/scala/repeat.sca > $(5).repeat.sca; \
-	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
+	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
 	 echo 'System.exit(0)' >> $(5).repeat.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
 	   "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \

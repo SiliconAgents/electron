@@ -38,6 +38,7 @@ sub repair_drive {
 my @vts = ("svt", "lvt");
 my $leakW = 0.04;               # area units (um2) per leakage unit (nW)
 my $margin = 1.0;               # aim for load <= margin * max_capacitance
+my $marginSet = 0;
 my $iters = 2;
 my $table = "";
 my $report = "";
@@ -71,12 +72,19 @@ if ( $noOfArguments > 0 && ( $_[0] eq '-h' || $_[0] eq '-help' ) ) {
 for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-vts"){@vts = split(/,/, lc($_[$i+1]));}
   if($_[$i] eq "-leak_weight"){$leakW = $_[$i+1];}
-  if($_[$i] eq "-margin"){$margin = $_[$i+1];}
+  if($_[$i] eq "-margin"){$margin = $_[$i+1]; $marginSet = 1;}
   if($_[$i] eq "-iterations"){$iters = $_[$i+1];}
   if($_[$i] eq "-table"){$table = $_[$i+1];}
   if($_[$i] eq "-keep_pattern"){$keep = $_[$i+1];}
   if($_[$i] eq "-report"){$report = $_[$i+1];}
   if($_[$i] eq "-dry_run"){$dry = 1;}
+}
+#<!-- synthesis_mode standalone: a netlist judged on its own gets drivers
+#     repaired to a tighter load, so its no-wire timing is not dominated by
+#     overloaded nets; an explicit -margin wins -->
+if ( !$marginSet && defined $SYNTH_MODE && $SYNTH_MODE eq "standalone" ) {
+  $margin = 0.15;
+  print "INFO-PAR-RP_DRV : 013 : synthesis_mode standalone: drivers sized for load <= $margin x max_capacitance\n";
 }
 $table = $LIBCFG_CELL_SIZING if ( $table eq "" && defined $LIBCFG_CELL_SIZING );
 if ( !defined $table || $table eq "" || ! -f $table ) {

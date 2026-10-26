@@ -187,7 +187,12 @@ ADDERS = {"brent_kung": "techmap",
 # abc sees one module's combinational logic at a time, so this cannot buffer a
 # net that fans out through a module port, and it knows nothing about where
 # the loads will be placed.  It is the logical half of the job; a buffer tree
-# that follows the placement is the other.
+# that follows the placement is the other.  --abc-no-buffer (hier_synthesis
+# under synthesis_mode place) keeps the sizing and drops the trees: on a 3M-
+# instance tile they were 160,643 of its 174,110 buffers, every one driving
+# exactly 10 loads, 54,072 trees up to 10 deep, and place_opt then built
+# placement-aware trees on top -- 3.5 synthesis buffers sat on each of the
+# worst failing paths afterwards.
 def liberty_buffer_and_load(path):
     """(driver, load_fF): a buffer of about twice the smallest buffer's area,
     and four median input pins, both read from the liberty itself."""
@@ -507,6 +512,10 @@ def main():
                     help="leave out abc's area pass (&fraig, scorr, dc2) before "
                          "mapping, so a fast adder is not flattened back into a "
                          "slow one -- more area, less depth")
+    ap.add_argument("--abc-no-buffer", action="store_true",
+                    help="with --abc-delay, size gates but build no fanout trees: "
+                         "abc's `buffer` caps every net at 10 loads with trees chosen "
+                         "with no idea where the loads go; leave that to place_opt")
     ap.add_argument("--abc-delay", type=float, metavar="PS",
                     help="buffer high-fanout nets and size gates toward this "
                          "delay target (abc -constr -D), in picoseconds. Off "
@@ -544,10 +553,14 @@ def main():
         with open(constr, "w") as fh:
             fh.write(f"set_driving_cell {driver}\nset_load {load:.4f}\n")
         if not args.abc_fast:
-            args.abc_opts = f'-script "{ABC_SIZED_KEEP if args.abc_keep_structure else ABC_SIZED}" '
+            script = ABC_SIZED_KEEP if args.abc_keep_structure else ABC_SIZED
+            if args.abc_no_buffer:
+                script = script.replace("&put;buffer;", "&put;")
+            args.abc_opts = f'-script "{script}" '
         args.abc_opts += f"-constr {constr} -D {args.abc_delay:g} "
-        print(f"yosys_bottom_up: buffering and sizing on: -D {args.abc_delay:g} ps, "
-              f"inputs driven by {driver}, outputs loaded {load:.3f} fF")
+        print(f"yosys_bottom_up: {'sizing' if args.abc_no_buffer else 'buffering and sizing'} on: -D {args.abc_delay:g} ps, "
+              f"inputs driven by {driver}, outputs loaded {load:.3f} fF"
+              + ("; no fanout trees (--abc-no-buffer)" if args.abc_no_buffer else ""))
 
     levels = sorted(
         (int(d[3:]), os.path.join(args.levels, d))

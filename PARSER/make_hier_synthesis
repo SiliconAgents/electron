@@ -593,7 +593,14 @@ if ( $abcDelay ne "" ) {
   $inner .= " --abc-driver $abcDriver" if ( $abcDriver ne "" );
   $inner .= " --abc-load $abcLoad"     if ( $abcLoad ne "" );
   $inner .= " --abc-timeout $abcTimeout" if ( $abcTimeout ne "" );
-  print "INFO-PAR-HR_SYN : 068 : buffering and sizing toward $abcDelay ps\n";
+  #<!-- synthesis_mode place: sizing without fanout trees; place_opt builds
+  #     them where the loads are (Photon repeatPlace fanoutAbove) -->
+  if ( defined $SYNTH_MODE && $SYNTH_MODE eq "place" ) {
+    $inner .= " --abc-no-buffer";
+    print "INFO-PAR-HR_SYN : 080 : synthesis_mode place: abc sizes toward $abcDelay ps and builds no fanout trees\n";
+  } else {
+    print "INFO-PAR-HR_SYN : 068 : buffering and sizing toward $abcDelay ps\n";
+  }
 }
 
 if ( $noRun == 1 ) {
@@ -806,5 +813,44 @@ return $top;
 
 }# sub dbfHierSynthTop
 #------------------------------------------------------------------------------------------#
+
+#<!-- synthesis_mode standalone|place: what the netlist is FOR.
+#
+#     standalone  judged on its own, before any placement -- logic depth and
+#                 structure, with no-wire timing that means something: abc
+#                 builds its fanout trees and drivers are repaired to a
+#                 tighter load (repair_drive's default margin becomes 0.15 of
+#                 max_capacitance, from 1.0)
+#     place       fed to place and place_opt, which size and buffer with the
+#                 cells' real places in view: abc sizes gates but builds no
+#                 fanout trees (yosys_bottom_up --abc-no-buffer) -- the flow
+#                 must then run place_opt with SPARKSTA_FANOUT so Photon
+#                 builds them where the loads are -- and repair_drive fixes
+#                 only what breaks max_capacitance
+#
+#     Neither given: today's synthesis exactly (abc's trees, margin 1.0).
+#
+#     The two differ because what makes synthesis timing look good is what
+#     costs once placed: on a 3M-instance tile, synthesis buffering and
+#     sizing chosen with no idea where cells go left 3.5 buffers on each
+#     worst failing path after place_opt.  An explicit option on a command
+#     still wins over the mode. -->
+sub synthesis_mode {
+  my $m = $_[0];
+  if ( !defined $m || $m eq "-h" || $m eq "-help" ) {
+    print "Usage : synthesis_mode standalone|place\n";
+    print "        standalone: a netlist judged on its own (repair_drive defaults to -margin 0.15)\n";
+    print "        place:      a netlist for place and place_opt: abc builds no fanout trees, place_opt does\n";
+    print "        neither:    as before either existed\n";
+    print "        now: " . ( $SYNTH_MODE ne "" ? $SYNTH_MODE : "neither" ) . "\n";
+    return;
+  }
+  unless ( $m eq "standalone" || $m eq "place" ) {
+    print "ERROR-PAR-SYN_MD : 001 : synthesis_mode is standalone or place, not $m\n";
+    return;
+  }
+  $SYNTH_MODE = $m;
+  print "INFO-PAR-SYN_MD : 002 : synthesis mode $m\n";
+}#sub synthesis_mode
 
 1;
