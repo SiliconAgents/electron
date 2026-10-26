@@ -26,14 +26,14 @@ $SPARK -i $S/batch.sca < /dev/null > $S/batch.log 2>&1 || { echo "server_parity:
 # --- the server on the same graph
 { printf 'val psGraph="%s"\nval psStore="%s"\nval psCorner="%s"\nval psPeriod=%s\nval psSpef=""\nval psWire="auto"\n' "$SG" "$STORE" $COR $PER
   printf 'val psWireRes=%s\nval psWireCap=%s\nval psWireIdeal=1000\nval psWireModel=""\nval psCellTable="%s"\nval psVts="any"\n' $R $C "$CELLS"
-  printf 'val psSdc=""\nval psPort=0\nval psEpfile="%s"\n' "$S/server.ep"
+  printf 'val psSdc=""\nval psPort=0\nval psRepeated=false\nval psEpfile="%s"\n' "$S/server.ep"
   cat $PY/photon.sca $PY/wireplan.sca $PY/size.sca $PY/repeat.sca $PY/photon_server.sca; } > $S/server.sca
 $SPARK -i $S/server.sca < /dev/null > $S/server.log 2>&1 &
 for i in $(seq 1 120); do [ -s $S/server.ep ] && break; sleep 2; done
 [ -s $S/server.ep ] || { echo "server_parity: the server did not come up, see $S/server.log"; exit 1; }
 # a net place_opt repeated (nangate_photon_repeat's ECO): long enough to be worth it
 NET=$(awk -F'\t' '$1=="CONN" && $2 !~ /^photon_rep/ {print $2; exit}' $W/sta/vedic_16x16.prep.eco.tsv 2>/dev/null)
-python3 $PY/pq.py $S/server.ep "wns; whatif_repeat ${NET:-none}; wns; size all 2; wns; eco $S/server.eco; changes" > $S/queries.txt 2>&1
+python3 $PY/pq.py $S/server.ep "wns; whatif_repeat ${NET:-none}; wns; size all 2; wns; eco $S/server.eco; changes; slack" > $S/queries.txt 2>&1
 python3 $PY/pq.py $S/server.ep "shutdown" > /dev/null 2>&1; wait
 cat $S/queries.txt | grep -vE "^\s+[0-9]+\. " | head -40
 # --- compare
@@ -52,3 +52,17 @@ diff <(awk -F'\t' 'NR>1 {print $1"\t"$2"\t"$3}' $S/batch.resize.tsv | sort) <(aw
   && echo "server_parity: sizing: server and batch chose the same $(grep -c '^RESIZE' $S/server.eco) resize(s)" \
   || { echo "server_parity: sizing differs, $(wc -l < $S/resize.diff) line(s), see $S/resize.diff"; exit 1; }
 grep "best:" $S/batch.size_rounds.txt; grep -E "^\s+now:" $S/queries.txt
+# --- slack at every pin (the backward pass) against the forward timing, on
+#     the sized design: every endpoint, the worst path, and no pin on a failing
+#     endpoint's worst path better than that endpoint
+grep -E "^\s+(check|[0-9,]+ instance)" $S/queries.txt
+python3 - $S/queries.txt <<'PY' || exit 1
+import re, sys
+t = open(sys.argv[1]).read()
+e = float(re.search(r"largest difference from the forward slack ([0-9.]+) ps", t).group(1))
+w = float(re.search(r"all at WNS -?[0-9.]+ within ([0-9.]+) ps", t).group(1))
+v = int(re.search(r"([0-9,]+) pin\(s\) on failing endpoints", t).group(1).replace(",", ""))
+ok = e < 1e-3 and w < 1e-3 and v == 0
+print("server_parity: slack", "agrees with the forward timing" if ok else f"DISAGREES (endpoints {e} ps, worst path {w} ps, {v} pins)")
+sys.exit(0 if ok else 1)
+PY
