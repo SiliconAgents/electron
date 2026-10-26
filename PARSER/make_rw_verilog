@@ -1,5 +1,6 @@
 
 sub read_verilog {
+$VERILOG_READ_ERROR = 0;      # set when behavioural code stops the read (ERROR-PAR-VERI 018)
 
 #use Term::ProgressBar;
 use Benchmark;
@@ -1228,6 +1229,20 @@ if (($skip_comment == 1) && ($_ =~ /\*\//)){
 }
 if($_ =~ /\/\//){
   $_ =~s/\/\/(.*)//;
+}
+#<!-- BEHAVIOURAL CODE IN A NETLIST.  This reads gate netlists; an always or
+#     initial block is a flop or latch synthesis left unmapped (a yosys
+#     internal cell written back as RTL).  It used to end the read here in
+#     silence -- `last` on the first one -- so every module after it was
+#     lost: a 1.88M-cell netlist came back as 24 of its 41 modules, top
+#     included, with only "more than 1 possible top module" to say so.  Now
+#     it is an error that names the line, and $VERILOG_READ_ERROR tells the
+#     caller the database is incomplete. -->
+if($_ =~ /^\s*\b(always|initial)\b/){
+  print "ERROR-PAR-VERI : 018 : line $count of $INPUT_VERILOG_FILE is behavioural code ($1) -- synthesis left a flop or latch unmapped; a netlist cannot hold it, and nothing after it was read\n";
+  print "ERROR-PAR-VERI : 019 :   $_\n";
+  $VERILOG_READ_ERROR = 1;
+  last;
 }
 if($_ =~ /^\s*\balways\b\s*/){
   $start_reading = 1;

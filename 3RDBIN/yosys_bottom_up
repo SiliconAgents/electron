@@ -118,6 +118,7 @@ memory_map
 {techmap}
 opt -fast
 {regnames}
+techmap -map {aldffmap}
 dfflibmap -liberty {liberty}
 {latchmap}
 abc {abc}-liberty {liberty}
@@ -126,6 +127,38 @@ clean -purge
 stat -top {top}
 write_verilog -noattr {dest}
 """
+
+
+# ASYNC-LOAD FLOPS.  A flop whose asynchronous reset loads a SIGNAL rather than
+# a constant -- `always @(posedge C or posedge R) if (R) q <= v; else q <= d;`
+# -- is a $_ALDFF_ to yosys, and dfflibmap maps no such thing: a library has
+# no cell that loads a variable value asynchronously.  It went through every
+# pass "successfully" and write_verilog put it back as an always block, which
+# no netlist reader takes.  What a library does have is a flop with both an
+# async set and an async clear, and the load is exactly
+#     set = load & value,  clear = load & ~value
+# (the two never fire together, so which wins does not matter).  This map
+# rewrites each into $_DFFSR_ plus that logic before dfflibmap; with an
+# enable, the enable becomes a mux on D.  One of 1.88M cells on a link-layer
+# tile, and the netlist could not be read back without it.
+def aldff_map():
+    out = []
+    for c in "PN":
+        for l in "PN":
+            ld = "L" if l == "P" else "~L"
+            out.append(f"""(* techmap_celltype = "$_ALDFF_{c}{l}_" *)
+module _aldff_{c}{l} (input C, L, AD, D, output Q);
+  wire s = ({ld}) & AD, r = ({ld}) & ~AD;
+  \\$_DFFSR_{c}PP_ _TECHMAP_REPLACE_ (.C(C), .S(s), .R(r), .D(D), .Q(Q));
+endmodule""")
+            for e in "PN":
+                en = "E" if e == "P" else "~E"
+                out.append(f"""(* techmap_celltype = "$_ALDFFE_{c}{l}{e}_" *)
+module _aldffe_{c}{l}{e} (input C, L, AD, D, E, output Q);
+  wire s = ({ld}) & AD, r = ({ld}) & ~AD;
+  \\$_DFFSR_{c}PP_ _TECHMAP_REPLACE_ (.C(C), .S(s), .R(r), .D(({en}) ? D : Q), .Q(Q));
+endmodule""")
+    return "\n".join(out) + "\n"
 
 
 # ABC SCRIPTS.  yosys's own abc scripts, word for word, except that &fraig
@@ -417,6 +450,7 @@ def run_one(job):
                              top=name, liberty=args.liberty, dest=dest,
                              latchmap=(f"techmap -map {args.latchmap}"
                                        if args.latchmap else ""),
+                             aldffmap=args.aldffmap,
                              techmap=ADDERS[args.adder], abc=abc,
                              regnames=REGNAMES if args.name_registers else "")
     t = time.time()
@@ -460,12 +494,21 @@ def run_one(job):
         m = _CELLS.search(tail)
         cells = int(m.group(1)) if m else 0
     err = ""
-    if p.returncode != 0:
+    rc = p.returncode
+    if rc != 0:
         for line in (p.stdout + p.stderr).splitlines():
             if line.startswith("ERROR"):
                 err = line
-        err = err or f"rc={p.returncode}"
-    return {"name": name, "copies": copies, "cells": cells, "rc": p.returncode,
+        err = err or f"rc={rc}"
+    elif os.path.exists(dest):
+        # anything write_verilog had to write as RTL is a cell nothing mapped:
+        # a netlist reader stops at it.  A failure here, not downstream.
+        m = re.search(r"^\s*(always|initial)\b.*$\n?(.*)", open(dest).read(), re.M)
+        if m:
+            rc = 1
+            err = (f"unmapped sequential logic written as RTL: '{m.group(0).strip()[:160]}' "
+                   f"-- a flop or latch no library cell implements")
+    return {"name": name, "copies": copies, "cells": cells, "rc": rc,
             "err": err, "secs": time.time() - t, "log": log, "dest": dest,
             "fallback": fallback, "retried": retried}
 
@@ -537,6 +580,10 @@ def main():
                     help="carry on past a level with failures (the next level "
                          "will fail too, but it reports every break at once)")
     args = ap.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+    args.aldffmap = os.path.abspath(os.path.join(args.out, "aldff_map.v"))
+    with open(args.aldffmap, "w") as fh:
+        fh.write(aldff_map())
     args.abc_opts = "-fast " if args.abc_fast else \
         f'-script "{ABC_PLAIN_KEEP if args.abc_keep_structure else ABC_PLAIN}" '
     if args.abc_delay:

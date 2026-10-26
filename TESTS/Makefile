@@ -348,7 +348,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
@@ -481,6 +481,20 @@ nangate_photon_repeat_push: nangate_store $(NG_SIZING)
 	  grep "LEGAL : 054" workarea/eco_push.log | tail -1 | grep -q "already legal and kept, 0 moved" || { echo "nangate_photon_repeat_push: Photon's ECO left cells for the legalizer"; grep "LEGAL : 05[45]" workarea/eco_push.log; exit 1; }; \
 	  python3 apply/check_repeat.py workarea/vedic_16x16.legal.def workarea/vedic_16x16.push.def library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef || exit 1; \
 	  echo "nangate_photon_repeat_push: $$r cell(s) resized, $$m pushed aside by Photon, legal as written"; fi
+
+# Flops whose async reset loads a signal (aldff/aldff.sv): hier_synthesis must
+# map them to set/clear flops (DFFRS) and read the netlist back whole; and a
+# netlist holding an always block must make read_verilog stop with an error
+# that names the line, not drop what follows in silence.
+nangate_aldff:
+	mkdir -p workarea
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../aldff/synth.tcl > aldff.log 2>&1
+	grep -q "HR_SYN : 030 : 3 sequential (2 DFFRS_" workarea/aldff.log || { echo "nangate_aldff: the async-load flops were not mapped to set/clear flops"; grep "HR_SYN : 030\|ERROR" workarea/aldff.log; exit 1; }
+	! zcat workarea/aldff.vg.gz | grep -qE "^\s*(always|initial)" || { echo "nangate_aldff: behavioural code in the netlist"; exit 1; }
+	grep -q "Instance count : 17" workarea/aldff.log || { echo "nangate_aldff: the netlist did not read back whole"; grep "Instance count" workarea/aldff.log; exit 1; }
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../aldff/read_always.tcl > read_always.log 2>&1
+	grep -q "ERROR-PAR-VERI : 018 : line 4 of" workarea/read_always.log || { echo "nangate_aldff: read_verilog did not report the always block"; exit 1; }
+	@echo "nangate_aldff: async-load flops mapped to set/clear flops, read back whole; an always block in a netlist is an error naming its line"
 
 # hier_synthesis -patch on a header the filelist only reaches through +incdir+:
 # a flop macro written as a ternary on its async reset, which yosys-slang will

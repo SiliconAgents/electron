@@ -671,7 +671,12 @@ if ( $readBack == 1 ) {
     return;
   }
   print "INFO-PAR-HR_SYN : 051 : reading $joined back in, top $top\n";
+  $VERILOG_READ_ERROR = 0;
   &read_verilog("-v", $joined);
+  if ( $VERILOG_READ_ERROR ) {
+    print "ERROR-PAR-HR_SYN : 081 : $joined did not read back whole (see ERROR-PAR-VERI 018 above); the netlist is not usable\n";
+    return;
+  }
   $TOP_MODULE = $top;
   &elaborate();
 }
