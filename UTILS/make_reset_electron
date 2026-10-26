@@ -61,6 +61,7 @@ $GLOBAL->dbGlobalSetRowHeight(-1);
 $ROW_SITE_PINNED   = 0;
 $ROW_SITE_NAME     = "";
 @CELL_FAMILY_MATCH = ();
+%ROW_START_SITE    = ();
 }#sub delete_technology_physical
 #-----------------------------------------------------------------------------------------------------------------------------------------#
 sub delete_vdb {

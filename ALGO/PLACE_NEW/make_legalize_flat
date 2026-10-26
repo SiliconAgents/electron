@@ -371,6 +371,9 @@ my $pinGridUm = 5;
 my $pinPctl = 95;
 my $pinMaxRatio = 2.0;
 my $pinTarget = 0;      #<!-- 0 means "derive it from -pin_pctl" -->
+#<!-- site -> the orientation of the row a multi-row cell of that site must
+#     start on: the config's cell-families row-start, -row_start adds to it -->
+my %rowStart = %ROW_START_SITE;
 
 if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP') ) {
   print "Usage : legalize_flat -grid <bin size in um, default 10>\n";
@@ -415,6 +418,10 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                            large moves fewer cells and lowers total\n";
   print "                            displacement; small leaves the big drivers\n";
   print "                            alone and routes better, and is the default.\n";
+  print "                      -row_start <site>=<N|FS>[,...]\n";
+  print "                                     a multi-row cell of that site starts only\n";
+  print "                                     on rows of that orientation; adds to the\n";
+  print "                                     config's cell-families row-start\n";
   print "                      -debug\n";
   print "\n";
   print "        -placer <path>   hand the rows, cells and obstacles to an\n";
@@ -454,6 +461,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-placer")      { $extPlacer = $_[$i+1]; }
   elsif ($_[$i] eq "-args")        { $extArgs = $_[$i+1]; }
   elsif ($_[$i] eq "--keep_files") { $keepExt = 1; }
+  elsif ($_[$i] eq "-row_start")   { foreach my $kv ( split(/,/, $_[$i+1]) ) { my ($s, $o) = split(/=/, $kv); $rowStart{$s} = $o if ( defined $o && $o ne "" ); } }
   elsif ($_[$i] eq "-debug")       { $debug = 1; }
   elsif ($_[$i] =~ m/^-+\w/)       { print "WARN-ALG-LEGAL : 001 : invalid option $_[$i]\n"; }
 }
@@ -634,6 +642,36 @@ unless ( $nMov > 0 ) {
   print "INFO-ALG-LEGAL : 011 : nothing movable, stopping\n";
   return;
 }
+
+#<!-- ROW START.  Rows alternate N and FS so that neighbours share a rail,
+#     and a cell two rows tall spans one rail of each kind.  A library can
+#     give such cells two sites, each legal only with the cell's bottom on a
+#     row of one orientation -- a commercial flow on a 3M-instance design put
+#     every one of 346k such cells on its own parity and none on the other,
+#     while this legalizer, knowing nothing of it, split them half and half.
+#     Field 7 of a movable is the orientation its first row must have, or
+#     empty; only cells more than one row tall get one. -->
+my ($nStartRule, %startRows) = (0);
+if ( %rowStart ) {
+  foreach my $m ( @mov ) {
+    next unless ( $m->[2] > $rowH + 0.5 );
+    my $ref = exists $CADB{$m->[0]} ? $CADB{$m->[0]}->dbCadbGetCellref : undef;
+    next unless ( defined $ref );
+    my $site = exists $MACROS_ATTRIBUTE_ALREADY{$ref} ? $MACROS_ATTRIBUTE_ALREADY{$ref}{site} : undef;
+    next unless ( defined $site && exists $rowStart{$site} );
+    $m->[7] = $rowStart{$site};
+    $nStartRule++;
+    $startRows{$rowStart{$site}}++;
+  }
+  printf("INFO-ALG-LEGAL : 060 : %d multi-row cell(s) must start on a row of one orientation (%s)\n",
+         $nStartRule, join(", ", map { "$startRows{$_} on $_" } sort keys %startRows)) if ( $nStartRule );
+}
+#<!-- may movable $m start on row index $r -->
+my $startOK = sub {
+  my ($m, $r) = @_;
+  return 1 unless ( defined $m->[7] && $m->[7] ne "" );
+  return ( $rowOrient{$rowY[$r]} eq $m->[7] ) ? 1 : 0;
+};
 
 #<!-- remember where everything started, to measure the displacement against -->
 my %origX = ();
@@ -908,6 +946,7 @@ if ( $incremental ) {
     }
   }
   my (@keep, @fix);
+  my $wrongStart = 0;
   foreach my $m ( sort { $a->[4] <=> $b->[4] || $a->[3] <=> $b->[3] || $a->[0] cmp $b->[0] } @mov ) {
     my ($inst, $w, $h, $x, $y) = @$m;
     my $need = int( ($h + $rowH - 1) / $rowH );
@@ -921,6 +960,7 @@ if ( $incremental ) {
       }
     }
     $ok = 0 if ( $ok && ! $noSnapX && ( ($x - $rowX0{$y}) % $siteX ) );
+    if ( $ok && ! $startOK->($m, $r) ) { $ok = 0; $wrongStart++; }
     if ( $ok ) {
       for ( my $k = 0 ; $k < $need ; $k++ ) {
         if ( $fr->overlaps($r + $k, $x, $x + $w) ) { $ok = 0; last; }
@@ -947,7 +987,8 @@ if ( $incremental ) {
                           $a->[0][3] <=> $b->[0][3] || $a->[0][0] cmp $b->[0][0] } @fix ) {
     my ($m, $need) = @$fm;
     my ($inst, $w, $h, $tx, $ty) = @$m;
-    my ($pX, $pR) = $fr->nearest($w, $need, $tx, $ty, $rowWin);
+    my ($pX, $pR) = $fr->nearest($w, $need, $tx, $ty, $rowWin,
+                                 ( defined $m->[7] && $m->[7] ne "" ) ? sub { $startOK->($m, $_[0]) } : undef);
     unless ( defined $pR ) { $noFit++; next; }
     $fr->take($pR, $pX, $w, $need);
     push(@moved, [ $inst, $pX, $rowY[$pR] ]);
@@ -965,6 +1006,8 @@ if ( $incremental ) {
   if ( $noFit > 0 ) {
     print "WARN-ALG-LEGAL : 055 : $noFit cell(s) found no gap anywhere and keep their location\n";
   }
+  print "INFO-ALG-LEGAL : 061 : --incremental: $wrongStart multi-row cell(s) were on a row of the wrong orientation for their site and were moved\n"
+    if ( $wrongStart );
   if ( $reportOnly ) {
     print "INFO-ALG-LEGAL : 020 : --report_only given, nothing was changed\n";
   }
@@ -1432,6 +1475,7 @@ my ($tooTall, $multiNoRoom) = (0, 0);
       foreach my $r ( ($best - $d), ($best + $d) ) {
         next if ( $d > 0 && $r == $best );
         next if ( $r < 0 || $r + $need > $nRows );
+        next unless ( $startOK->($m, $r) );
         #<!-- the span has to be contiguous at the row pitch.  A DEF may carry
         #     several ROW records with gaps between them, and a cell cannot
         #     bridge a gap. -->

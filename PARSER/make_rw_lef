@@ -523,6 +523,13 @@ if(/^MACRO $macroName/ ... /^END $macroName\s*$/){
                              $MACROS_ATTRIBUTE_ALREADY{$macroName}{size} = "$width $height";
                              #print "$MACROS_ATTRIBUTE_ALREADY{$macroName}{size}\n";
                            }# if SIZE
+          #<!-- the macro's own SITE: a cell two rows tall may only start on
+          #     the row of each pair that its site allows (the config's
+          #     cell-families row-start, which legalize_flat applies) -->
+          if($_ =~ /^SITE\s+(\S+)/){
+                             $MACROS_ATTRIBUTE_ALREADY{$macroName}{site} = $1
+                               if ( exists $MACROS_ATTRIBUTE_ALREADY{$macroName} && ! exists $MACROS_ATTRIBUTE_ALREADY{$macroName}{site} );
+                           }# if SITE
           if($_ =~ /^CLASS/){
                              my @c =split(/\s+/, $_);
                              my $len = @c;

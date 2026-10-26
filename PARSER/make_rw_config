@@ -66,6 +66,7 @@ my $config = parse_config($config_file);
     @CELL_FAMILY_MATCH = ();
     $ROW_SITE_PINNED   = 0;
     $ROW_SITE_NAME     = "";
+    %ROW_START_SITE    = ();
     my $families = [];
     my $group = &dbfConfigFileGroup($config, $foundry, $tech_node, $layer);
     $LIBCFG_CELL_STUBS = &dbfConfigCellStubs($group);
@@ -301,6 +302,13 @@ my $config = parse_config($config_file);
         $GLOBAL->dbGlobalSetRowHeight($h);
         $ROW_SITE_NAME   = $pin_site;
         $ROW_SITE_PINNED = 1;
+        #<!-- which row of each pair a multi-row cell of a given site starts
+        #     on, from the family that sets the rows -->
+        if ( @$families && ref($families->[0]{row_start}) eq 'HASH' ) {
+            %ROW_START_SITE = %{$families->[0]{row_start}};
+            print "INFO-PAR-CONFIG : 018 : multi-row cells start on rows by site: " .
+                  join(", ", map { "$_ on $ROW_START_SITE{$_}" } sort keys %ROW_START_SITE) . "\n";
+        }
         print "INFO-PAR-CONFIG : 011 : rows fixed: " .
               ( $pin_site ne "" ? "site $pin_site, " : "" ) . "height $h um ($from)\n";
     }
@@ -361,8 +369,15 @@ print "Command read_config took:",timestr($td),"\n";
 #
 #       "cell-families": {
 #         "<name>": { "match": "<substring of the file paths>",
-#                     "site": "<row site>", "row-height": <um> }, ...
+#                     "site": "<row site>", "row-height": <um>,
+#                     "row-start": { "<cell site>": "<row orientation>", ... } }, ...
 #       }
+#
+#     "row-start" is optional.  Rows alternate N and FS so that neighbours
+#     share a rail, and a cell two rows tall spans one rail of each kind; a
+#     library may give such cells two sites, each legal only with its bottom
+#     on a row of one orientation.  legalize_flat starts a cell of a listed
+#     site only on rows of that orientation.
 #
 #     "match" picks the family's entries out of std-cell-lefs, std-cell-libs
 #     and std-cell-synth-libs alike; the vendor's names already carry it.
@@ -391,7 +406,8 @@ sub dbfConfigCellFamilies {
             return undef;
         }
         push(@families, { name => $name, match => $fam->{match},
-                          site => $fam->{site}, height => $fam->{'row-height'} });
+                          site => $fam->{site}, height => $fam->{'row-height'},
+                          row_start => $fam->{'row-start'} });
     }
     return \@families;
 }

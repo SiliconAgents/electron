@@ -1,0 +1,104 @@
+# Two buffers two rows tall for nangate_rowstart: the same cell on two
+# sites, each legal only with its bottom on rows of one orientation.
+VERSION 5.5 ;
+NAMESCASESENSITIVE ON ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+
+SITE tallStartN
+  SYMMETRY X Y ;
+  CLASS CORE ;
+  SIZE 0.19 BY 2.8 ;
+END tallStartN
+
+SITE tallStartFS
+  SYMMETRY X Y ;
+  CLASS CORE ;
+  SIZE 0.19 BY 2.8 ;
+END tallStartFS
+
+MACRO TALLN_X2
+  CLASS CORE ;
+  FOREIGN TALLN_X2 0.0 0.0 ;
+  ORIGIN 0 0 ;
+  SYMMETRY X Y ;
+  SITE tallStartN ;
+  SIZE 0.76 BY 2.8 ;
+  PIN Z
+    DIRECTION OUTPUT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.42 1.2 0.485 1.6 ;
+    END
+  END Z
+  PIN A
+    DIRECTION INPUT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.175 1.2 0.24 1.6 ;
+    END
+  END A
+  PIN VDD
+    DIRECTION INOUT ;
+    USE power ;
+    SHAPE ABUTMENT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0 1.315 0.76 1.485 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE ground ;
+    SHAPE ABUTMENT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0 -0.085 0.76 0.085 ;
+        RECT 0 2.715 0.76 2.885 ;
+    END
+  END VSS
+END TALLN_X2
+
+MACRO TALLFS_X2
+  CLASS CORE ;
+  FOREIGN TALLFS_X2 0.0 0.0 ;
+  ORIGIN 0 0 ;
+  SYMMETRY X Y ;
+  SITE tallStartFS ;
+  SIZE 0.76 BY 2.8 ;
+  PIN Z
+    DIRECTION OUTPUT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.42 1.2 0.485 1.6 ;
+    END
+  END Z
+  PIN A
+    DIRECTION INPUT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0.175 1.2 0.24 1.6 ;
+    END
+  END A
+  PIN VDD
+    DIRECTION INOUT ;
+    USE power ;
+    SHAPE ABUTMENT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0 1.315 0.76 1.485 ;
+    END
+  END VDD
+  PIN VSS
+    DIRECTION INOUT ;
+    USE ground ;
+    SHAPE ABUTMENT ;
+    PORT
+      LAYER metal1 ;
+        RECT 0 -0.085 0.76 0.085 ;
+        RECT 0 2.715 0.76 2.885 ;
+    END
+  END VSS
+END TALLFS_X2
+
+END LIBRARY

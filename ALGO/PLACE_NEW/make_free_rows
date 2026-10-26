@@ -245,7 +245,7 @@ sub fitRow {
 #     that, then all -- each widening only when nothing was found.  Returns
 #     (x, r, cost) or (). -->
 sub nearest {
-  my ($self, $w, $rows, $tx, $ty, $rowWin) = @_;
+  my ($self, $w, $rows, $tx, $ty, $rowWin, $okRow) = @_;     # okRow: optional, r -> may it start there
   my ($Y, $H) = ($self->{Y}, $self->{H});
   my $n = scalar(@$Y);
   my $c0 = $self->rowAt($ty);
@@ -258,6 +258,7 @@ sub nearest {
       last if ( defined $pC && $rowDist >= $pC );
       foreach my $r ( ( $d == 0 ) ? ($c0) : ($c0 - $d, $c0 + $d) ) {
         next if ( $r < 0 || $r + $rows > $n );
+        next if ( $okRow && ! $okRow->($r) );
         my $dy = abs($Y->[$r] - $ty);
         next if ( defined $pC && $dy >= $pC );
         my $b = int($r / $self->{BAND});

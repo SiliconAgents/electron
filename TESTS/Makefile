@@ -348,7 +348,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
@@ -460,6 +460,24 @@ nangate_repeat:
 	  $(MAKE) --no-print-directory nangate_repeat_sta && \
 	  tr '\r' '\n' < workarea/sta/vedic_16x16.repeated.seg.tsv.log | grep -E "photon: period" | tail -1; fi
 	@echo "nangate_repeat: $$(grep -oE 'AP_ADV : 011 : .*' workarea/repeat.log | cut -c16-)"
+# Cells two rows tall on two sites, each legal only with its bottom on rows
+# of one orientation (-row_start; the config's cell-families row-start).
+# legalize_flat must put every one on its own rows; then, with each moved one
+# row up onto the wrong ones, --incremental must move them back and a
+# report-only pass find nothing.  check_rowstart.py checks both DEFs on its
+# own: rows, site grid, overlaps in integer DBU, and the row each starts on.
+# Without the rule this design puts 37 of its 80 tall cells on the wrong rows.
+NG_LEF = library/NangateOpenCellLibrary_PDKv1_2_v2008_10.lef
+nangate_rowstart:
+	mkdir -p workarea
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../rowstart/rowstart.tcl > rowstart.log 2>&1
+	grep -q "LEGAL : 060 : 80 multi-row" workarea/rowstart.log || { echo "nangate_rowstart: the row-start rule was not applied, see workarea/rowstart.log"; exit 1; }
+	python3 rowstart/check_rowstart.py workarea/rowstart.legal.def $(NG_LEF) rowstart/tall.lef --rule tallStartN=N,tallStartFS=FS --shift-out workarea/rowstart.wrong.def
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../rowstart/rowstart_inc.tcl > rowstart_inc.log 2>&1
+	grep "LEGAL : 054" workarea/rowstart_inc.log | tail -1 | grep -q "already legal and kept, 0 moved" || { echo "nangate_rowstart: --incremental left cells to move"; grep "LEGAL : 05[45]" workarea/rowstart_inc.log; exit 1; }
+	python3 rowstart/check_rowstart.py workarea/rowstart.inc.def $(NG_LEF) rowstart/tall.lef --rule tallStartN=N,tallStartFS=FS
+	@echo "nangate_rowstart: $$(grep -oE '[0-9]+ multi-row cell\(s\) were on a row of the wrong orientation' workarea/rowstart_inc.log) -- moved back; legal"
+
 # Photon's own trees (repeat.sca), then two rounds of sizing in place: a wire
 # of 2000 ohm/um so that this design's short nets need repeaters at all;
 # checked like nangate_repeat once electron has applied the ECO -- the overlap
