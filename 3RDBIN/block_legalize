@@ -13,9 +13,11 @@ nearest those targets with no two blocks overlapping, slicing or not.
 
 in.tsv, microns, the module's own frame (0,0 its lower left):
     BOX     <W> <H> <site> <row pitch>
-    BLOCK   <inst> <w> <h> <target cx> <target cy> <weight> <hard 0|1> <group>
+    BLOCK   <inst> <w> <h> <target cx> <target cy> <weight> <hard 0|1> <group> [<min w> <min h> <max w> <max h>]
   hard: the shape is fixed (an earlier parent or instance shaped the module);
-  group: the module -- blocks of one group share one shape.
+  group: the module -- blocks of one group share one shape;
+  min/max (0: none): bounds on a reshaped block's sides -- not smaller than a
+  fixed shape inside it, not bigger than another parent it must also fit.
 out.tsv:
     BLOCK   <inst> <x> <y> <w> <h>      lower left and size, on the site and row grid
 and a summary on stdout.
@@ -74,7 +76,7 @@ ap.add_argument("--cuts", type=int, default=30, help="rounds of tangent cuts per
 a = ap.parse_args()
 
 W = H = site = pitch = None
-names = []; w0 = []; h0 = []; tx = []; ty = []; wt = []; hard = []; grp = []
+names = []; w0 = []; h0 = []; tx = []; ty = []; wt = []; hard = []; grp = []; bmin = []; bmax = []
 for l in open(a.inp):
     f = l.split()
     if not f: continue
@@ -84,6 +86,8 @@ for l in open(a.inp):
         names.append(f[1]); w0.append(float(f[2])); h0.append(float(f[3]))
         tx.append(float(f[4])); ty.append(float(f[5])); wt.append(float(f[6]))
         hard.append(len(f) > 7 and f[7] == "1"); grp.append(f[8] if len(f) > 8 else f[1])
+        b = [float(v) for v in f[9:13]] if len(f) >= 13 else [0.0] * 4
+        bmin.append(b[0:2]); bmax.append(b[2:4])
 n = len(names)
 def up(v, p): return np.ceil(np.asarray(v) / p - 1e-9) * p if p > 0 else np.asarray(v, float)
 def dn(v, p): return np.floor(np.asarray(v) / p + 1e-9) * p if p > 0 else np.asarray(v, float)
@@ -94,6 +98,21 @@ r = a.aspect
 tiny = A < pitch * pitch / r
 wmin = np.where(hard, w0, np.maximum(site, np.where(tiny, site, np.sqrt(A / r))))
 wmax = np.where(hard, w0, np.maximum(wmin, np.minimum(W, np.where(tiny, np.maximum(A / pitch, site), np.sqrt(A * r)))))
+# the bounds from fixed shapes inside a block and other parents it must fit: they win over the
+# aspect limit (a block held to them is not held to 1:r); a max below a min is dropped
+bmin = np.array(bmin) if n else np.zeros((0, 2)); bmax = np.array(bmax) if n else np.zeros((0, 2))
+bound = np.array([not hard[i] and (bmin[i] > 0).any() or (bmax[i] > 0).any() for i in range(n)], bool) & ~hard
+hmin_b = np.zeros(n); hmax_b = np.full(n, np.inf); conflicts = 0
+for i in range(n):
+    if hard[i] or not bound[i]: continue
+    mw, mh = bmin[i]; xw, xh = bmax[i]
+    lo_w = max(mw, site); hi_w = xw if xw > 0 else W
+    if hi_w < lo_w: hi_w = max(lo_w, W); conflicts += 1
+    hmin_b[i] = mh; hmax_b[i] = xh if xh > 0 else np.inf
+    if hmax_b[i] < hmin_b[i]: hmax_b[i] = np.inf; conflicts += 1
+    # the area at the widest and narrowest allowed widths must keep h within its bounds
+    wmin[i] = max(lo_w, A[i] / hmax_b[i] if np.isfinite(hmax_b[i]) else site)
+    wmax[i] = max(wmin[i], min(hi_w, A[i] / max(hmin_b[i], pitch)))
 BIG = 1e4 * (wt.sum() + 1)
 
 # ---- 1. relations from the targets: rel[(i, j)] = (axis, first)
@@ -124,7 +143,7 @@ def program(rel, sizes=None, cuts=None):
     for i in range(n):
         rows.append(({X + i: 1, Wv + i: 1, SX + i: -1}, W))
         rows.append(({Y + i: 1, Hv + i: 1, SY + i: -1}, H))
-        if sizes is None and not hard[i] and not tiny[i]:
+        if sizes is None and not hard[i] and not tiny[i] and not bound[i]:
             rows.append(({Wv + i: 1, Hv + i: -r}, 0.0))
             rows.append(({Hv + i: 1, Wv + i: -r}, 0.0))
         if sizes is None and not hard[i]:
@@ -155,7 +174,7 @@ def program(rel, sizes=None, cuts=None):
     for i in range(n):
         if sizes is not None: bnd[Wv + i] = (sizes[0][i], sizes[0][i]); bnd[Hv + i] = (sizes[1][i], sizes[1][i])
         elif hard[i]: bnd[Wv + i] = (w0[i], w0[i]); bnd[Hv + i] = (h0[i], h0[i])
-        else: bnd[Wv + i] = (wmin[i], wmax[i]); bnd[Hv + i] = (max(pitch, A[i] / wmax[i]), None)
+        else: bnd[Wv + i] = (wmin[i], wmax[i]); bnd[Hv + i] = (max(pitch, A[i] / wmax[i], hmin_b[i]), hmax_b[i] if np.isfinite(hmax_b[i]) else None)
     res = linprog(c, A_ub=Aub.tocsr(), b_ub=bub, A_eq=Aeq.tocsr(), b_eq=beq, bounds=bnd, method="highs")
     if res.status != 0: return None, []      # a cycle of relations (the search can make one): no arrangement
     du = res.ineqlin.marginals[:nsep] if res.ineqlin is not None else np.zeros(nsep)
@@ -189,7 +208,11 @@ def evaluate(rel):
     # finer site grid: rounding the height up instead added up to half a block
     # where a row pair is a third of its height
     hs = np.where(hard, up(h0, pitch), np.maximum(pitch, np.round(h / pitch) * pitch) if pitch > 0 else h)
-    ws = np.where(hard, up(w0, site), up(A / np.maximum(hs, 1e-9), site))
+    # the bounds again after rounding: a height inside [min, max] on the row-pair grid, the width
+    # taking the area but never under its minimum
+    hs = np.where(hard, hs, np.maximum(hs, up(hmin_b, pitch)))
+    hs = np.where(hard | ~np.isfinite(hmax_b), hs, np.minimum(hs, np.maximum(pitch, dn(np.where(np.isfinite(hmax_b), hmax_b, 0), pitch))))
+    ws = np.where(hard, up(w0, site), np.maximum(up(A / np.maximum(hs, 1e-9), site), up(np.where(bound, bmin[:, 0] if n else 0, 0), site)))
     ws, hs = snap_group(ws, hs)
     g = grid_pass(rel, ws, hs)
     if g is None: return (np.inf,) * 2 + (None,) * 4 + ([],)
@@ -257,4 +280,6 @@ with open(a.out, "w") as f:
 far = int(np.argmax(d)) if n else 0
 print(f"block_legalize: {n} block(s), {resh} reshaped, {sum(1 for v in rel.values() if v[0] == 'x')} pair(s) apart in x and "
       f"{sum(1 for v in rel.values() if v[0] == 'y')} in y, {steps} relation change(s); from target: mean {d.mean() if n else 0:.2f} um, "
-      f"worst {d.max() if n else 0:.2f} um" + (f" ({names[far]})" if n else "") + f"; {over} overlap(s), {100 * overA / max(1e-9, (ws * hs).sum()):.2f}% of block area, box overrun {slack:.2f} um")
+      f"worst {d.max() if n else 0:.2f} um" + (f" ({names[far]})" if n else "") + f"; {over} overlap(s), {100 * overA / max(1e-9, (ws * hs).sum()):.2f}% of block area, box overrun {slack:.2f} um"
+      + f", outside the box after the clamp {sum(max(0, px[i] + ws[i] - W) + max(0, py[i] + hs[i] - H) for i in range(n)):.2f} um"
+      + (f"; {int(bound.sum())} block(s) bounded by fixed shapes" if bound.any() else "") + (f", {conflicts} bound conflict(s) dropped" if conflicts else ""))

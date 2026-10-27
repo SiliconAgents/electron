@@ -690,6 +690,7 @@ return { blocks => $nBlocks, groups => scalar(@items), worst_aspect => $worstAsp
 #     legalize_flat, and reported when it is more than a few percent (068, 069).  $targets is inst => [cx, cy] in microns of
 #     this module's frame, or undef for the block pass's own centres.
 #     Returns a summary. -->
+%HIER_LB_PARENTS = (); %HIER_LB_KIDS = ();   #<!-- module hierarchy, both ways, built on first use -->
 sub dbfTstgenHierLegalizeBlocks {
 
 my ($module, $W, $H, $siteUm, $rowHum, $fixed, $sizes, $targets, $aspect) = @_;
@@ -724,6 +725,38 @@ my $fh;
 unless ( open($fh, ">", $in) ) { return { blocks => 0, error => "cannot write $in: $!" }; }
 printf $fh "BOX\t%.6f\t%.6f\t%.6f\t%.6f\n", $W, $H, $siteUm, $pitchY;
 my %shape = ();
+my %bounds = ();
+#<!-- shape bounds, from modules already shaped.  A block is never made
+#     smaller than a fixed shape inside it (a lane's wrapper around a unit
+#     every lane shares: the unit got its one shape from the first wrapper
+#     opened, and a wrapper reshaped thinner elsewhere could not hold it --
+#     8 sub-blocks of a 3M-instance tile hung 1-18 um out of their box).  And a
+#     module shaped here for the first time, that other parents also hold, is
+#     never made bigger than the smallest of those parents already shaped. -->
+unless ( %HIER_LB_PARENTS ) {
+  foreach my $m ( keys %MODULE_ALREADY ) {
+    foreach my $i ( $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+      my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($i);
+      next unless ( defined $c && exists $MODULE_ALREADY{$c} );
+      $HIER_LB_PARENTS{$c}{$m} = 1; $HIER_LB_KIDS{$m}{$c} = 1;
+    }
+  }
+}
+foreach my $inst ( sort keys %box ) {
+  my $ref = $refOf{$inst};
+  my ($mnW, $mnH, $mxW, $mxH) = (0, 0, 0, 0);
+  foreach my $c ( keys %{$HIER_LB_KIDS{$ref} || {}} ) {
+    next unless ( exists $fixed->{$c} );
+    $mnW = $fixed->{$c}[0] if ( $fixed->{$c}[0] > $mnW ); $mnH = $fixed->{$c}[1] if ( $fixed->{$c}[1] > $mnH );
+  }
+  unless ( exists $fixed->{$ref} ) {
+    foreach my $pm ( keys %{$HIER_LB_PARENTS{$ref} || {}} ) {
+      next if ( $pm eq $module || ! exists $fixed->{$pm} );
+      $mxW = $fixed->{$pm}[0] if ( $mxW == 0 || $fixed->{$pm}[0] < $mxW ); $mxH = $fixed->{$pm}[1] if ( $mxH == 0 || $fixed->{$pm}[1] < $mxH );
+    }
+  }
+  $bounds{$inst} = [ $mnW, $mnH, $mxW, $mxH ];
+}
 foreach my $inst ( sort keys %box ) {
   my ($bw, $bh) = exists $fixed->{$refOf{$inst}} ? @{$fixed->{$refOf{$inst}}}
                                                  : ( $box{$inst}[2] - $box{$inst}[0], $box{$inst}[3] - $box{$inst}[1] );
@@ -733,8 +766,8 @@ foreach my $inst ( sort keys %box ) {
     if ( exists $targets->{$inst} ) { ($cx, $cy) = @{$targets->{$inst}}; }
     else                            { push(@noTarget, $inst); }
   }
-  printf $fh "BLOCK\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t1\t%d\t%s\n", $inst, $bw, $bh, $cx, $cy,
-             exists $fixed->{$refOf{$inst}} ? 1 : 0, $refOf{$inst};
+  printf $fh "BLOCK\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t1\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\n", $inst, $bw, $bh, $cx, $cy,
+             exists $fixed->{$refOf{$inst}} ? 1 : 0, $refOf{$inst}, @{$bounds{$inst}};
 }
 close($fh);
 my $tool = $GLOBAL->dbfGlobalGetElectronHome . "/3RDBIN/block_legalize";
@@ -773,7 +806,8 @@ $r{overlap_pct} = $1 if ( $msg =~ m/([\d.]+)% of block area/ );
 #     the box, spreads cells by a few microns in legalize_flat (0.8 um on
 #     average where two vedic levels kept 4%); a third of it -- what the
 #     force-directed pass alone leaves -- stacks blocks and does not legalize -->
-$r{too_much} = ( ( $r{overlap_pct} // 0 ) > 3 || ( $r{overrun} // 0 ) > $pitchY + 1e-6 ) ? 1 : 0;
+$r{outside} = $1 if ( $msg =~ m/outside the box after the clamp ([\d.]+) um/ );
+$r{too_much} = ( ( $r{overlap_pct} // 0 ) > 3 || ( $r{outside} // 0 ) > $pitchY + 1e-6 ) ? 1 : 0;
 ($r{mean_um}, $r{worst_um}) = ($1, $2) if ( $msg =~ m/mean ([\d.]+) um, worst ([\d.]+) um/ );
 return \%r;
 
@@ -1264,7 +1298,12 @@ my $sliceBlocks = 0;
 my $legalizeBlocks = 0;
 my $blockTargetsFile = "";
 my $blockAspect = 3;
-my $childPins = 0;
+#<!-- on by default since 2026-10-26: without it a child's pins are set by its
+#     own contents, blind to where the parent's nets go, and a lane's boundary
+#     logic is placed away from its partners outside -- on a 3M-instance tile,
+#     1,017 um travelled per failing path for 189 um start to end, 735 um of it
+#     in round trips into and out of modules.  --no_child_pins for the old way. -->
+my $childPins = 1;
 my %childPinsDone = ();
 my $fanoutLimit = 0;
 my $extra = "";
@@ -1338,11 +1377,12 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                               -floorplan_spec line holds it\n";
   print "                       -block_aspect <r>       --legalize_blocks may reshape a block to\n";
   print "                                               any aspect within 1:r (default 3)\n";
-  print "                       --child_pins            after each cell pass, put every child\n";
-  print "                                               block's pins where the parent's nets\n";
+  print "                       --no_child_pins         leave each child block's pins to its own\n";
+  print "                                               contents.  By default (--child_pins),\n";
+  print "                                               after each cell pass every child block's\n";
+  print "                                               pins are put where the parent's nets\n";
   print "                                               reach it, FIXED, so the child is placed\n";
-  print "                                               toward its partners rather than its own\n";
-  print "                                               contents\n";
+  print "                                               toward its partners outside\n";
   print "                       -metrics <file>         one JSON line per module per run,\n";
   print "                                               appended; default\n";
   print "                                               hier_place_all.metrics.jsonl\n";
@@ -1402,6 +1442,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-block_targets") { $blockTargetsFile = $_[$i+1]; $legalizeBlocks = 1; }
   elsif ($_[$i] eq "-block_aspect")  { $blockAspect = $_[$i+1]; }
   elsif ($_[$i] eq "--child_pins")   { $childPins = 1; }
+  elsif ($_[$i] eq "--no_child_pins") { $childPins = 0; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; $i++; }
@@ -1857,7 +1898,7 @@ foreach my $rec ( @order ) {
       $mrec{blocks_after_legalize} = &dbfTstgenHierBlockFit($mod, $w, $h);
       printf("INFO-TST-HR_PL_ALL : 061 : %s laid out toward its block targets: %s%s\n", $mod, $sum->{summary},
              $sum->{no_target} ? "; $sum->{no_target} block(s) had no target and kept the sizing walk's centre" : "");
-      print "WARN-TST-HR_PL_ALL : 068 : $mod: blocks still overlap by $sum->{overlap_pct}% of their area, $sum->{overrun} um over the box -- more than legalize_flat should be left\n" if ( $sum->{too_much} );
+      print "WARN-TST-HR_PL_ALL : 068 : $mod: blocks still overlap by $sum->{overlap_pct}% of their area, $sum->{outside} um outside the box -- more than legalize_flat should be left\n" if ( $sum->{too_much} );
     }
   }
   elsif ( exists $blockTargets->{$mod} && @specHeld ) {
@@ -1911,7 +1952,7 @@ foreach my $rec ( @order ) {
         $mrec{blocks_after_legalize} = &dbfTstgenHierBlockFit($mod, $w, $h);
         printf("INFO-TST-HR_PL_ALL : 064 : blocks of %s legalized: overlap %.1f%% -> %.1f%%; %s\n", $mod,
                100 * $mrec{blocks_after_block_pass}{overlap_frac}, 100 * $mrec{blocks_after_legalize}{overlap_frac}, $sum->{summary});
-        print "WARN-TST-HR_PL_ALL : 069 : $mod: blocks still overlap by $sum->{overlap_pct}% of their area, $sum->{overrun} um over the box -- more than legalize_flat should be left\n" if ( $sum->{too_much} );
+        print "WARN-TST-HR_PL_ALL : 069 : $mod: blocks still overlap by $sum->{overlap_pct}% of their area, $sum->{outside} um outside the box -- more than legalize_flat should be left\n" if ( $sum->{too_much} );
       }
     }
     if ( $sliceBlocks && ! @specHeld ) {
