@@ -1,0 +1,12 @@
+# nangate_legalize_blocks: vedic_16x16's blocks as a ring around adder A3 --
+# the multipliers in the four corners, A3 in the middle, the other two adders
+# between the multipliers on the left and right.  No cut can split this into
+# two parts without cutting a block, so slicing cannot place it; the block
+# legalizer must, with A3 near the centre of the box.
+vedic_16x16	V11	0.22	0.78
+vedic_16x16	V12	0.78	0.78
+vedic_16x16	V10	0.22	0.22
+vedic_16x16	V9	0.78	0.22
+vedic_16x16	A3	0.50	0.50
+vedic_16x16	A4	0.50	0.88
+vedic_16x16	A5	0.50	0.12

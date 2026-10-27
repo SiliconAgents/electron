@@ -118,6 +118,27 @@ nangate_keep_shapes:
 	@cmp -s workarea/ks4.placed workarea/ks5.placed || { echo "nangate_keep_shapes: the -only rigid hier2flat differs from a full one"; exit 1; }
 	@echo "nangate_keep_shapes: all expected results"
 
+# nangate_legalize_blocks: every module's child blocks laid out by
+# --legalize_blocks (3RDBIN/block_legalize) instead of slicing -- reshaped, as
+# near their targets as fits -- with the top given -block_targets that no
+# slicing can make (adder A3 in the middle of a ring of multipliers).  Fails
+# unless the top lands with no overlap, A3's cells are centred within a tenth
+# of the die of the middle, and the flat result legalizes with no more than
+# an ordinary move (slicing on the same design: 0.69 um average).
+LB_EXPECT = grep -q "$(1)" workarea/legalize_blocks.log || { echo "nangate_legalize_blocks: expected \"$(1)\" in workarea/legalize_blocks.log"; exit 1; }
+nangate_legalize_blocks:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_legalize_blocks.tcl > legalize_blocks.log 2>&1
+	$(call LB_EXPECT,HR_PL_ALL : 058 : block targets for 7 block(s) of 1 module(s))
+	$(call LB_EXPECT,vedic_16x16 laid out toward its block targets: .* 0 overlap(s))
+	$(call LB_EXPECT,HR_PL_ALL : 064 : blocks of vedic_8x8 legalized)
+	$(call LB_EXPECT,HR_PL_ALL : 016 : 11 module(s) placed)
+	$(call LB_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	python3 check_block_target.py workarea/lb.def A3/ 0.5 0.5 0.1
+	@grep "INFO-ALG-LEGAL : 018" workarea/legalize_blocks.log | tail -1 | awk '{for (i = 1; i < NF; i++) if ($$i == "move") m = $$(i + 1)} END {if (m + 0 > 1.5) {print "nangate_legalize_blocks: legalize_flat moved cells " m " um on average, more than 1.5"; exit 1}}'
+	@echo "nangate_legalize_blocks: all expected results"
+
 # nangate_ungroup: adder12 dissolved into vedic_8x8 (four copies) for
 # placement.  The netlist must not change (same_netlist.py on the timing graphs
 # before and after), vedic_8x8's remaining blocks move rigidly and its new own

@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Lay a module's child blocks out without overlap, reshaping them, as near their
+targets as fits.
+
+  block_legalize <in.tsv> <out.tsv> [--aspect 3] [--repairs 200]
+
+Run by hier_place_all --legalize_blocks, one module at a time.  Slicing cuts
+the box in two again and again and keeps only the order the block pass left: a
+small block can only sit at the end of a cut, and where anyone wanted it is
+lost.  Here every block has a target -- its centre where the block pass put it,
+or where a plan (-block_targets) wants it -- and the result is the arrangement
+nearest those targets with no two blocks overlapping, slicing or not.
+
+in.tsv, microns, the module's own frame (0,0 its lower left):
+    BOX     <W> <H> <site> <row pitch>
+    BLOCK   <inst> <w> <h> <target cx> <target cy> <weight> <hard 0|1> <group>
+  hard: the shape is fixed (an earlier parent or instance shaped the module);
+  group: the module -- blocks of one group share one shape.
+out.tsv:
+    BLOCK   <inst> <x> <y> <w> <h>      lower left and size, on the site and row grid
+and a summary on stdout.
+
+THE ALGORITHM.
+
+1. Relations.  Two rectangles do not overlap exactly when one is left of or
+   below the other.  Each pair is given one of the four relations, from the
+   targets: apart along the axis the targets leave more room on
+   (|dx| - (wi+wj)/2 against |dy| - (hi+hj)/2), in the targets' order.  This is
+   the constraint-graph view a sequence pair encodes; unlike slicing it can say
+   "a small block between two big ones".
+
+2. Shapes and positions, one linear program.  Per block: x, y (lower left), w,
+   h; the objective is the weighted distance of each centre from its target,
+   |x + w/2 - tx| + |y + h/2 - ty|.  Constraints: the relations
+   (x_i + w_i <= x_j ...), the box (let out by a slack priced far above any
+   move, so the program always solves and the slack names the chain that does
+   not fit), the aspect (w <= r h, h <= r w), one shape per group, hard shapes
+   held.  The area is the one non-linear part: w h >= A, i.e. h >= A / w,
+   convex -- replaced by tangent lines h >= 2A/w0 - (A/w0^2) w, which lie under
+   the curve; after each solve a tangent is added where a block came out short
+   (Kelley's cutting planes) until every block has its area.
+
+3. The grid.  Heights go to the nearest row pair and widths take up the area
+   on the much finer site grid (w = A / h rounded up), then the positions are solved once more with
+   those sizes held (the same program, shapes fixed) and rounded down to the
+   grid -- a separation that held still holds, every size being a multiple of
+   its grid.
+
+   Grid repair: a chain over the box by a row pair or so is rounding -- a
+   soft block on it goes a row pair down (along y) or up (along x), its width
+   keeping the area, while that helps.
+
+4. The relations again.  While a chain of separations is longer than the box,
+   every other relation of each pair on it (the separations the program found
+   tight) is tried and the best kept: a local search, up to --repairs steps,
+   no state twice.  Reshaping comes first because it costs no distance from
+   the targets; a relation changes only when no shape can make the chain fit.
+
+What still overlaps at the end is reported, not hidden -- pairs, the share
+of the block area, the box overrun -- and hier_place_all judges it: a few
+percent spreads cells by a few microns in legalize_flat; a third of the area
+(what the force-directed block pass alone leaves) does not legalize at all.
+"""
+import sys, argparse
+import numpy as np
+from scipy.optimize import linprog
+from scipy.sparse import lil_matrix
+
+ap = argparse.ArgumentParser()
+ap.add_argument("inp"); ap.add_argument("out")
+ap.add_argument("--aspect", type=float, default=3.0)
+ap.add_argument("--repairs", type=int, default=200)
+ap.add_argument("--cuts", type=int, default=30, help="rounds of tangent cuts per solve")
+a = ap.parse_args()
+
+W = H = site = pitch = None
+names = []; w0 = []; h0 = []; tx = []; ty = []; wt = []; hard = []; grp = []
+for l in open(a.inp):
+    f = l.split()
+    if not f: continue
+    if f[0] == "BOX":
+        W, H, site, pitch = map(float, f[1:5])
+    elif f[0] == "BLOCK":
+        names.append(f[1]); w0.append(float(f[2])); h0.append(float(f[3]))
+        tx.append(float(f[4])); ty.append(float(f[5])); wt.append(float(f[6]))
+        hard.append(len(f) > 7 and f[7] == "1"); grp.append(f[8] if len(f) > 8 else f[1])
+n = len(names)
+def up(v, p): return np.ceil(np.asarray(v) / p - 1e-9) * p if p > 0 else np.asarray(v, float)
+def dn(v, p): return np.floor(np.asarray(v) / p + 1e-9) * p if p > 0 else np.asarray(v, float)
+w0 = np.array(w0); h0 = np.array(h0); tx = np.array(tx); ty = np.array(ty); wt = np.array(wt); hard = np.array(hard, bool)
+A = w0 * h0
+r = a.aspect
+# a block too small for the aspect limit at one row pair (a few cells) is not held to it
+tiny = A < pitch * pitch / r
+wmin = np.where(hard, w0, np.maximum(site, np.where(tiny, site, np.sqrt(A / r))))
+wmax = np.where(hard, w0, np.maximum(wmin, np.minimum(W, np.where(tiny, np.maximum(A / pitch, site), np.sqrt(A * r)))))
+BIG = 1e4 * (wt.sum() + 1)
+
+# ---- 1. relations from the targets: rel[(i, j)] = (axis, first)
+pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+def room(i, j):
+    return abs(tx[j] - tx[i]) - (w0[i] + w0[j]) / 2, abs(ty[j] - ty[i]) - (h0[i] + h0[j]) / 2
+rel = {}
+for i, j in pairs:
+    gx, gy = room(i, j)
+    ax = "x" if (gx > gy or (gx == gy and W >= H)) else "y"
+    t = tx if ax == "x" else ty
+    rel[(i, j)] = (ax, i if t[i] <= t[j] else j)
+
+# variable layout: x y w h ex+ ex- ey+ ey- sx sy, each n long
+X, Y, Wv, Hv, EXP, EXM, EYP, EYM, SX, SY = (k * n for k in range(10))
+NV = 10 * n
+
+def program(rel, sizes=None, cuts=None):
+    """the joint program; sizes = (w, h) to hold every shape (the grid pass), else shapes free"""
+    rows = []                         # (coefs dict, rhs) for <= constraints
+    seps = []
+    for (i, j), (ax, f) in rel.items():
+        u, v = (f, j if f == i else i)
+        if ax == "x": rows.append(({X + u: 1, Wv + u: 1, X + v: -1}, 0.0))
+        else:         rows.append(({Y + u: 1, Hv + u: 1, Y + v: -1}, 0.0))
+        seps.append(((i, j), ax))
+    nsep = len(rows)
+    for i in range(n):
+        rows.append(({X + i: 1, Wv + i: 1, SX + i: -1}, W))
+        rows.append(({Y + i: 1, Hv + i: 1, SY + i: -1}, H))
+        if sizes is None and not hard[i] and not tiny[i]:
+            rows.append(({Wv + i: 1, Hv + i: -r}, 0.0))
+            rows.append(({Hv + i: 1, Wv + i: -r}, 0.0))
+        if sizes is None and not hard[i]:
+            for c in cuts[i]:                                 # h >= 2A/c - (A/c^2) w
+                rows.append(({Hv + i: -1, Wv + i: -A[i] / c ** 2}, -2 * A[i] / c))
+    Aub = lil_matrix((len(rows), NV)); bub = np.zeros(len(rows))
+    for k, (co, rhs) in enumerate(rows):
+        for v, c in co.items(): Aub[k, v] = c
+        bub[k] = rhs
+    eq = []
+    for i in range(n):
+        eq.append(({X + i: 1, Wv + i: 0.5, EXP + i: -1, EXM + i: 1}, tx[i]))
+        eq.append(({Y + i: 1, Hv + i: 0.5, EYP + i: -1, EYM + i: 1}, ty[i]))
+    if sizes is None:
+        first = {}
+        for i in range(n):
+            if grp[i] in first:
+                k = first[grp[i]]; eq.append(({Wv + i: 1, Wv + k: -1}, 0.0)); eq.append(({Hv + i: 1, Hv + k: -1}, 0.0))
+            else: first[grp[i]] = i
+    Aeq = lil_matrix((len(eq), NV)); beq = np.zeros(len(eq))
+    for k, (co, rhs) in enumerate(eq):
+        for v, c in co.items(): Aeq[k, v] = c
+        beq[k] = rhs
+    c = np.zeros(NV)
+    for k in (EXP, EXM, EYP, EYM): c[k:k + n] = wt
+    c[SX:SX + n] = BIG; c[SY:SY + n] = BIG
+    bnd = [(0, None)] * NV
+    for i in range(n):
+        if sizes is not None: bnd[Wv + i] = (sizes[0][i], sizes[0][i]); bnd[Hv + i] = (sizes[1][i], sizes[1][i])
+        elif hard[i]: bnd[Wv + i] = (w0[i], w0[i]); bnd[Hv + i] = (h0[i], h0[i])
+        else: bnd[Wv + i] = (wmin[i], wmax[i]); bnd[Hv + i] = (max(pitch, A[i] / wmax[i]), None)
+    res = linprog(c, A_ub=Aub.tocsr(), b_ub=bub, A_eq=Aeq.tocsr(), b_eq=beq, bounds=bnd, method="highs")
+    if res.status != 0: return None, []      # a cycle of relations (the search can make one): no arrangement
+    du = res.ineqlin.marginals[:nsep] if res.ineqlin is not None else np.zeros(nsep)
+    tight = [seps[k] for k in range(nsep) if abs(du[k]) > 1e-9]
+    return res, tight
+
+def snap_group(ws, hs):
+    for i in range(n):                               # one shape per group, the largest
+        k = [j for j in range(n) if grp[j] == grp[i]]
+        ws[i] = max(ws[j] for j in k); hs[i] = max(hs[j] for j in k)
+    return ws, hs
+
+def grid_pass(rel, ws, hs):
+    res, tight = program(rel, sizes=(ws, hs))
+    if res is None: return None
+    sx = res.x[SX:SX + n].sum(); sy = res.x[SY:SY + n].sum()
+    return res, tight, sx, sy
+
+def evaluate(rel):
+    """2 and 3: shapes and positions, then the grid; (cost, slack, x, y, w, h, tight)"""
+    cuts = [list(np.geomspace(wmin[i], wmax[i], 6)) if not hard[i] else [] for i in range(n)]
+    for _ in range(a.cuts):
+        res, tight = program(rel, cuts=cuts)
+        if res is None: return (np.inf,) * 2 + (None,) * 4 + ([],)
+        w = res.x[Wv:Wv + n]; h = res.x[Hv:Hv + n]
+        short = [i for i in range(n) if not hard[i] and w[i] * h[i] < A[i] * (1 - 1e-4)]
+        if not short: break
+        for i in short: cuts[i].append(max(wmin[i], min(wmax[i], w[i])))
+    # the grid: sizes up, then the positions again with the sizes held
+    # height to the nearest row pair, the width taking up the area on the much
+    # finer site grid: rounding the height up instead added up to half a block
+    # where a row pair is a third of its height
+    hs = np.where(hard, up(h0, pitch), np.maximum(pitch, np.round(h / pitch) * pitch) if pitch > 0 else h)
+    ws = np.where(hard, up(w0, site), up(A / np.maximum(hs, 1e-9), site))
+    ws, hs = snap_group(ws, hs)
+    g = grid_pass(rel, ws, hs)
+    if g is None: return (np.inf,) * 2 + (None,) * 4 + ([],)
+    #<!-- grid repair: a chain over the box by a row pair or so is rounding.
+    #     Along y, a soft block on the chain goes down one row pair and widens
+    #     to keep its area; along x, up one row pair and narrows.  The best
+    #     trial is kept while it helps. -->
+    for _ in range(12):
+        res, tight, sx, sy = g
+        if sx + sy < 1e-6: break
+        onchain = sorted({b for (pr, ax) in tight for b in pr if (ax == "y" and sy > 1e-6) or (ax == "x" and sx > 1e-6)})
+        trials = []
+        for b in onchain:
+            if hard[b]: continue
+            for dh in ((-pitch,) if sy > 1e-6 else ()) + ((pitch,) if sx > 1e-6 else ()):
+                h2 = hs[b] + dh
+                if h2 < pitch: continue
+                w2 = float(up(A[b] / h2, site))
+                if w2 > W or max(w2 / h2, h2 / w2) > r * 1.25: continue
+                ws2 = ws.copy(); hs2 = hs.copy()
+                for j in range(n):
+                    if grp[j] == grp[b]: ws2[j] = w2; hs2[j] = h2
+                g2 = grid_pass(rel, ws2, hs2)
+                if g2 is not None: trials.append((g2[2] + g2[3], g2[0].fun, g2, ws2, hs2))
+        if not trials: break
+        t = min(trials, key=lambda t: (t[0], t[1]))
+        if t[0] >= sx + sy - 1e-9: break
+        g = t[2]; ws = t[3]; hs = t[4]
+    res, tight, sx, sy = g
+    tight = [pr for (pr, ax) in tight]
+    slack = sx + sy
+    return res.fun, slack, res.x[X:X + n], res.x[Y:Y + n], ws, hs, (tight if slack > 1e-6 else [])
+
+# ---- 4. the relation search
+cost, slack, px, py, ws, hs, tight = evaluate(rel)
+if px is None: raise SystemExit("block_legalize: the relations from the targets admit no arrangement (a bug: they cannot cycle)")
+steps = 0; seen = {tuple(sorted(rel.items()))}
+for it in range(a.repairs):
+    if slack < 1e-6 or not tight: break
+    cand = None
+    for key in dict.fromkeys(tight):
+        i, j = key
+        for alt in (("x", i), ("x", j), ("y", i), ("y", j)):
+            if alt == rel[key]: continue
+            trial = dict(rel); trial[key] = alt
+            sig = tuple(sorted(trial.items()))
+            if sig in seen: continue
+            e = evaluate(trial)
+            seen.add(sig)
+            if e[2] is None: continue
+            if cand is None or e[0] < cand[0][0]: cand = (e, trial, sig)
+    if cand is None or cand[0][0] >= cost - 1e-9: break
+    (cost, slack, px, py, ws, hs, tight), rel, sig = cand; seen.add(sig); steps += 1
+
+px = dn(px, site); py = dn(py, pitch)
+px = np.minimum(px, np.maximum(0, W - ws)); py = np.minimum(py, np.maximum(0, H - hs))
+over = 0; overA = 0.0
+for i, j in pairs:
+    ox = min(px[i] + ws[i], px[j] + ws[j]) - max(px[i], px[j]); oy = min(py[i] + hs[i], py[j] + hs[j]) - max(py[i], py[j])
+    if ox > 1e-6 and oy > 1e-6: over += 1; overA += ox * oy
+d = np.abs(px + ws / 2 - tx) + np.abs(py + hs / 2 - ty)
+resh = int(sum(1 for i in range(n) if not hard[i] and (abs(ws[i] - up(w0[i], site)) > 1e-6 or abs(hs[i] - up(h0[i], pitch)) > 1e-6)))
+with open(a.out, "w") as f:
+    for i in range(n): f.write(f"BLOCK\t{names[i]}\t{px[i]:.4f}\t{py[i]:.4f}\t{ws[i]:.4f}\t{hs[i]:.4f}\n")
+far = int(np.argmax(d)) if n else 0
+print(f"block_legalize: {n} block(s), {resh} reshaped, {sum(1 for v in rel.values() if v[0] == 'x')} pair(s) apart in x and "
+      f"{sum(1 for v in rel.values() if v[0] == 'y')} in y, {steps} relation change(s); from target: mean {d.mean() if n else 0:.2f} um, "
+      f"worst {d.max() if n else 0:.2f} um" + (f" ({names[far]})" if n else "") + f"; {over} overlap(s), {100 * overA / max(1e-9, (ws * hs).sum()):.2f}% of block area, box overrun {slack:.2f} um")

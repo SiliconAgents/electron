@@ -667,6 +667,152 @@ return { blocks => $nBlocks, groups => scalar(@items), worst_aspect => $worstAsp
 }# sub dbfTstgenHierSliceBlocks
 
 
+#<!-- --legalize_blocks: a module's child blocks laid out without overlap, as
+#     near their targets as fits -- the alternative to --slice_blocks.
+#
+#     Slicing keeps only the order the block pass left: a block can only sit
+#     at the end of a cut, so a small block whose partners are where two big
+#     ones meet (a 24 x 19 um block between a vector unit's register-file
+#     column and an FP unit's, on a 3M-instance tile) ends at the end of a
+#     row, in a die corner, every time; and the free area falls where the cuts
+#     do, not where the module's own logic needs it.  Here each block keeps
+#     its shape and has a target centre -- where the block pass put it, or
+#     where -block_targets says (a plan) -- and 3RDBIN/block_legalize finds
+#     the arrangement nearest the targets with no overlap, slicing or not:
+#     each pair kept apart along the axis their targets leave more room on,
+#     then a linear program per axis.
+#
+#     Shapes: a module an earlier parent or instance shaped keeps that shape
+#     ($fixed); any other is reshaped -- its area from the sizing walk kept,
+#     its aspect within 1:3, on the site and row-pair grid, one shape for
+#     every instance of it here -- and is then fixed, so its other instances
+#     match.  No slicing behind it: what still overlaps is left to
+#     legalize_flat, and reported when it is more than a few percent (068, 069).  $targets is inst => [cx, cy] in microns of
+#     this module's frame, or undef for the block pass's own centres.
+#     Returns a summary. -->
+sub dbfTstgenHierLegalizeBlocks {
+
+my ($module, $W, $H, $siteUm, $rowHum, $fixed, $sizes, $targets, $aspect) = @_;
+my $pitchY = 2 * $rowHum;
+$aspect = 3 unless ( defined $aspect && $aspect > 1 );
+my %box = ();
+my %refOf = ();
+foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+  next if ( $inst eq "PIN" );
+  my $ref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+  next unless ( defined $ref && ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} ) );
+  my @bb = &dbfTstgenBboxFromCoords($PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstRelBbox);
+  next unless ( @bb >= 4 && defined $bb[3] && $bb[2] > $bb[0] && $bb[3] > $bb[1] );
+  $box{$inst} = [ @bb[0..3] ];
+  $refOf{$inst} = $ref;
+}
+if ( defined $targets ) {
+  my @noSize = ();
+  foreach my $inst ( sort keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+    next if ( $inst eq "PIN" || exists $box{$inst} );
+    my $ref = $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBGetInstCellref;
+    push(@noSize, $inst) if ( defined $ref && ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} ) );
+  }
+  return { blocks => 0, error => "child block(s) with no size yet, give hier_place_all -sizing budget or -whitespace: @noSize" }
+    if ( @noSize );
+}
+return { blocks => 0 } unless ( %box );
+my @noTarget = ();
+my $in = "$module.blocks.tsv"; my $out = "$module.blocks.placed.tsv";
+$in =~ s/[\/\\\[\]]/_/g; $out =~ s/[\/\\\[\]]/_/g;
+my $fh;
+unless ( open($fh, ">", $in) ) { return { blocks => 0, error => "cannot write $in: $!" }; }
+printf $fh "BOX\t%.6f\t%.6f\t%.6f\t%.6f\n", $W, $H, $siteUm, $pitchY;
+my %shape = ();
+foreach my $inst ( sort keys %box ) {
+  my ($bw, $bh) = exists $fixed->{$refOf{$inst}} ? @{$fixed->{$refOf{$inst}}}
+                                                 : ( $box{$inst}[2] - $box{$inst}[0], $box{$inst}[3] - $box{$inst}[1] );
+  $shape{$inst} = [ $bw, $bh ];
+  my ($cx, $cy) = ( ($box{$inst}[0] + $box{$inst}[2]) / 2, ($box{$inst}[1] + $box{$inst}[3]) / 2 );
+  if ( defined $targets ) {
+    if ( exists $targets->{$inst} ) { ($cx, $cy) = @{$targets->{$inst}}; }
+    else                            { push(@noTarget, $inst); }
+  }
+  printf $fh "BLOCK\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t1\t%d\t%s\n", $inst, $bw, $bh, $cx, $cy,
+             exists $fixed->{$refOf{$inst}} ? 1 : 0, $refOf{$inst};
+}
+close($fh);
+my $tool = $GLOBAL->dbfGlobalGetElectronHome . "/3RDBIN/block_legalize";
+#<!-- judged by what it wrote, not by its exit status: electron's SIGCHLD
+#     reaper takes the child before a backtick or system() can read it -->
+unlink($out);
+my $log = "$in.log";
+system("python3 $tool $in $out --aspect $aspect > $log 2>&1");
+my $msg = "";
+if ( open(my $lf, "<", $log) ) { local $/; $msg = <$lf>; close($lf); }
+$msg = ( $msg =~ m/^(block_legalize: \d+ block.*)$/m ) ? $1 : $msg;
+unless ( -s $out && $msg =~ m/^block_legalize: \d+ block/ ) { chomp($msg); return { blocks => 0, error => "block_legalize failed: $msg" }; }
+my $n = 0;
+open($fh, "<", $out) or return { blocks => 0, error => "cannot read $out: $!" };
+while ( my $l = <$fh> ) {
+  chomp($l);
+  my ($k, $inst, $x, $y, $bw, $bh) = split(/\t/, $l);
+  next unless ( defined $bh && $k eq "BLOCK" && exists $shape{$inst} );
+  #<!-- the helper's shape: reshaped (area kept, aspect within 1:3, on the
+  #     site and row-pair grid) unless the module's shape was already fixed -->
+  $PSEUDO_VINST_ALREADY{$module}{$inst}->dbPimDBSetInstRelBbox($x, $y, $x + $bw, $y + $bh);
+  my $ref = $refOf{$inst};
+  unless ( exists $fixed->{$ref} ) {
+    $PSEUDO_MODULE_ALREADY{$ref}->dbaTstgenSetSize(0, 0, $bw, $bh) if ( exists $PSEUDO_MODULE_ALREADY{$ref} );
+    $fixed->{$ref} = [ $bw, $bh ];
+    $sizes->{$ref} = [ $bw, $bh ];
+  }
+  $n++;
+}
+close($fh);
+my %r = ( blocks => $n, summary => $msg, no_target => scalar(@noTarget) );
+$r{overlaps} = $1 if ( $msg =~ m/(\d+) overlap\(s\)/ );
+$r{overrun}  = $1 if ( $msg =~ m/box overrun ([\d.]+) um/ );
+$r{overlap_pct} = $1 if ( $msg =~ m/([\d.]+)% of block area/ );
+#<!-- the tolerance: a few percent of the block area, within a row pair of
+#     the box, spreads cells by a few microns in legalize_flat (0.8 um on
+#     average where two vedic levels kept 4%); a third of it -- what the
+#     force-directed pass alone leaves -- stacks blocks and does not legalize -->
+$r{too_much} = ( ( $r{overlap_pct} // 0 ) > 3 || ( $r{overrun} // 0 ) > $pitchY + 1e-6 ) ? 1 : 0;
+($r{mean_um}, $r{worst_um}) = ($1, $2) if ( $msg =~ m/mean ([\d.]+) um, worst ([\d.]+) um/ );
+return \%r;
+
+}# sub dbfTstgenHierLegalizeBlocks
+
+
+#<!-- -block_targets <file>: where a plan wants each module's child blocks.
+#     One line per block: "module<TAB>instance<TAB>cx<TAB>cy", the block's
+#     centre as a fraction (0..1) of its parent's box, left to right and
+#     bottom to top -- the frame hier_place_all places that module in, so a
+#     plan made flat (a register-level placement of the critical paths) says
+#     where blocks go without saying where any cell goes.  # starts a comment.
+#     Returns module => inst => [fx, fy]. -->
+sub dbfTstgenReadBlockTargets {
+my ($file) = @_;
+my $fh;
+unless ( open($fh, "<", $file) ) {
+  print "ERR-TST-HR_PL_ALL : 055 : cannot read -block_targets $file : $!\n";
+  return undef;
+}
+my %t = ();
+my ($n, $bad) = (0, 0);
+while ( my $l = <$fh> ) {
+  $l =~ s/#.*//; next unless ( $l =~ m/\S/ );
+  chomp($l);
+  my ($m, $i, $fx, $fy) = split(/\t/, $l);
+  if ( ! defined $fy || $fx !~ m/^-?[\d.]+(e-?\d+)?$/ || $fy !~ m/^-?[\d.]+(e-?\d+)?$/ ) { $bad++; next; }
+  $t{$m}{$i} = [ $fx, $fy ];
+  $n++;
+}
+close($fh);
+if ( $bad ) {
+  print "ERR-TST-HR_PL_ALL : 056 : -block_targets $file: $bad line(s) are not module<TAB>instance<TAB>cx<TAB>cy\n";
+  return undef;
+}
+return \%t;
+}# sub dbfTstgenReadBlockTargets
+
+
 #<!-- -floorplan_spec <file>: module => cut tree, the arrangement of that
 #     module's child blocks given rather than placed.  One module per entry,
 #     "module : expression", where an expression is an instance name or
@@ -1115,6 +1261,9 @@ my $mixedWs = 10;
 my $macroHalo = 15;
 my $metricsFile = "hier_place_all.metrics.jsonl";
 my $sliceBlocks = 0;
+my $legalizeBlocks = 0;
+my $blockTargetsFile = "";
+my $blockAspect = 3;
 my $childPins = 0;
 my %childPinsDone = ();
 my $fanoutLimit = 0;
@@ -1176,6 +1325,19 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                       --slice_blocks          after each block pass, lay the child\n";
   print "                                               blocks out without overlap by slicing\n";
   print "                                               the box (identical siblings as a grid)\n";
+  print "                       --legalize_blocks       after each block pass, lay the child\n";
+  print "                                               blocks out without overlap as near as\n";
+  print "                                               fits to where the pass put them, not\n";
+  print "                                               by slicing: a small block may sit\n";
+  print "                                               between big ones (3RDBIN/block_legalize)\n";
+  print "                       -block_targets <file>   --legalize_blocks toward a plan: lines of\n";
+  print "                                               module<TAB>instance<TAB>cx<TAB>cy, the\n";
+  print "                                               centre as a fraction of the parent's box;\n";
+  print "                                               a module listed is laid out before its\n";
+  print "                                               block pass and held there, as a\n";
+  print "                                               -floorplan_spec line holds it\n";
+  print "                       -block_aspect <r>       --legalize_blocks may reshape a block to\n";
+  print "                                               any aspect within 1:r (default 3)\n";
   print "                       --child_pins            after each cell pass, put every child\n";
   print "                                               block's pins where the parent's nets\n";
   print "                                               reach it, FIXED, so the child is placed\n";
@@ -1236,6 +1398,9 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-metrics")       { $metricsFile = $_[$i+1]; }
   elsif ($_[$i] eq "--no_metrics")   { $metricsFile = ""; }
   elsif ($_[$i] eq "--slice_blocks") { $sliceBlocks = 1; }
+  elsif ($_[$i] eq "--legalize_blocks") { $legalizeBlocks = 1; }
+  elsif ($_[$i] eq "-block_targets") { $blockTargetsFile = $_[$i+1]; $legalizeBlocks = 1; }
+  elsif ($_[$i] eq "-block_aspect")  { $blockAspect = $_[$i+1]; }
   elsif ($_[$i] eq "--child_pins")   { $childPins = 1; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
@@ -1346,6 +1511,22 @@ if ( $fpSpecFile ne "" ) {
   }
   print "INFO-TST-HR_PL_ALL : 043 : floorplan spec for " . scalar(keys %$fpSpec) . " module(s) from $fpSpecFile: " .
         join(" ", sort keys %$fpSpec) . "\n";
+}
+my $blockTargets = {};
+if ( $blockTargetsFile ne "" ) {
+  $blockTargets = &dbfTstgenReadBlockTargets($blockTargetsFile);
+  return unless ( defined $blockTargets );
+  my @unknown = grep { ! exists $MODULE_ALREADY{$_} } sort keys %$blockTargets;
+  if ( @unknown ) {
+    print "ERR-TST-HR_PL_ALL : 057 : -block_targets names module(s) not in the design: @unknown\n";
+    return;
+  }
+  my $nb = 0; $nb += scalar(keys %{$blockTargets->{$_}}) foreach ( keys %$blockTargets );
+  print "INFO-TST-HR_PL_ALL : 058 : block targets for $nb block(s) of " . scalar(keys %$blockTargets) . " module(s) from $blockTargetsFile\n";
+}
+if ( $legalizeBlocks && $sliceBlocks ) {
+  print "WARN-TST-HR_PL_ALL : 059 : --legalize_blocks and --slice_blocks both given: blocks are legalized, not sliced\n";
+  $sliceBlocks = 0;
 }
 if ( $netWeights ne "" ) {
   #<!-- every instance of every module: the walk above expands one instance
@@ -1653,6 +1834,36 @@ foreach my $rec ( @order ) {
     }
   }
 
+  #<!-- -block_targets: a module the plan names is laid out toward its
+  #     targets before the block pass and held FIXED through it, as a spec
+  #     line holds one -- the pass then only places ports and flops around
+  #     the blocks.  A spec line wins: it is the person's explicit word. -->
+  if ( $legalizeBlocks && exists $blockTargets->{$mod} && ! @specHeld && ! $keepExisting ) {
+    my %tg = map { $_ => [ $blockTargets->{$mod}{$_}[0] * $w, $blockTargets->{$mod}{$_}[1] * $h ] } keys %{$blockTargets->{$mod}};
+    my $sum = &dbfTstgenHierLegalizeBlocks($mod, $w, $h, $wsSiteUm, $GLOBAL->dbGlobalGetRowHeight,
+                                           \%sliceShape, \%wsSize, \%tg, $blockAspect);
+    if ( exists $sum->{error} ) {
+      print "WARN-TST-HR_PL_ALL : 060 : block targets for $mod not used, it is placed as usual: $sum->{error}\n";
+    }
+    elsif ( $sum->{blocks} > 0 ) {
+      foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$mod}} ) {
+        next if ( $inst eq "PIN" );
+        my $ref = $PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBGetInstCellref;
+        next unless ( defined $ref && ( exists $PSEUDO_MODULE_ALREADY{$ref} || exists $MODULE_ALREADY{$ref} ) );
+        $PSEUDO_VINST_ALREADY{$mod}{$inst}->dbPimDBSetInstStatus("FIXED");
+        push(@specHeld, $inst);
+      }
+      $mrec{block_targets} = $sum;
+      $mrec{blocks_after_legalize} = &dbfTstgenHierBlockFit($mod, $w, $h);
+      printf("INFO-TST-HR_PL_ALL : 061 : %s laid out toward its block targets: %s%s\n", $mod, $sum->{summary},
+             $sum->{no_target} ? "; $sum->{no_target} block(s) had no target and kept the sizing walk's centre" : "");
+      print "WARN-TST-HR_PL_ALL : 068 : $mod: blocks still overlap by $sum->{overlap_pct}% of their area, $sum->{overrun} um over the box -- more than legalize_flat should be left\n" if ( $sum->{too_much} );
+    }
+  }
+  elsif ( exists $blockTargets->{$mod} && @specHeld ) {
+    print "WARN-TST-HR_PL_ALL : 062 : $mod has both a floorplan spec line and block targets: the spec is used\n";
+  }
+
   if ( $keepExisting ) {
     print "INFO-TST-HR_PL_ALL : 014 : $mod is already placed, keeping that arrangement\n";
     $keptCnt++;
@@ -1689,6 +1900,20 @@ foreach my $rec ( @order ) {
     $mrec{blocks_after_block_pass} = &dbfTstgenHierBlockFit($mod, $w, $h);
     #<!-- held only for the block pass: PLACED again, like any other block -->
     $PSEUDO_VINST_ALREADY{$mod}{$_}->dbPimDBSetInstStatus("PLACED") foreach ( @specHeld );
+    if ( $legalizeBlocks && ! @specHeld ) {
+      my $sum = &dbfTstgenHierLegalizeBlocks($mod, $w, $h, $wsSiteUm, $GLOBAL->dbGlobalGetRowHeight,
+                                             \%sliceShape, \%wsSize, undef, $blockAspect);
+      if ( exists $sum->{error} ) {
+        print "WARN-TST-HR_PL_ALL : 063 : blocks of $mod not legalized: $sum->{error}\n";
+      }
+      elsif ( $sum->{blocks} > 0 ) {
+        $mrec{legalize_blocks} = $sum;
+        $mrec{blocks_after_legalize} = &dbfTstgenHierBlockFit($mod, $w, $h);
+        printf("INFO-TST-HR_PL_ALL : 064 : blocks of %s legalized: overlap %.1f%% -> %.1f%%; %s\n", $mod,
+               100 * $mrec{blocks_after_block_pass}{overlap_frac}, 100 * $mrec{blocks_after_legalize}{overlap_frac}, $sum->{summary});
+        print "WARN-TST-HR_PL_ALL : 069 : $mod: blocks still overlap by $sum->{overlap_pct}% of their area, $sum->{overrun} um over the box -- more than legalize_flat should be left\n" if ( $sum->{too_much} );
+      }
+    }
     if ( $sliceBlocks && ! @specHeld ) {
       my $sum = &dbfTstgenHierSliceBlocks($mod, $w, $h, $wsSiteUm, $GLOBAL->dbGlobalGetRowHeight,
                                           \%sliceShape, \%wsSize);
