@@ -769,6 +769,24 @@ foreach my $inst ( sort keys %box ) {
   printf $fh "BLOCK\t%s\t%.6f\t%.6f\t%.6f\t%.6f\t1\t%d\t%s\t%.6f\t%.6f\t%.6f\t%.6f\n", $inst, $bw, $bh, $cx, $cy,
              exists $fixed->{$refOf{$inst}} ? 1 : 0, $refOf{$inst}, @{$bounds{$inst}};
 }
+#<!-- the module's own logic ("*" in -block_targets): a soft pseudo-block of
+#     ELECTRON_OWN_REGION (default 0.5) of the box's free area, at the plan's
+#     centre for the module's own critical registers.  The blocks are kept off
+#     it and nothing is placed there, so the free space gathers where the
+#     parent's glue logic is wanted and the cell pass fills it -- what a spec
+#     line's "*" does, placed by the plan instead of by hand.  Without it the
+#     glue went wherever the blocks left room: on a 3M-instance tile 81% of the
+#     module round trips on failing paths were into one parent's glue. -->
+my $ownArea = 0;
+if ( defined $targets && exists $targets->{'*'} ) {
+  my $blockA = 0; $blockA += $shape{$_}[0] * $shape{$_}[1] foreach ( keys %shape );
+  my $frac = $ENV{ELECTRON_OWN_REGION} // 0.5;
+  $ownArea = $frac * ( $W * $H - $blockA );
+  if ( $ownArea > 0 ) {
+    my $side = sqrt($ownArea);
+    printf $fh "BLOCK\t__own__\t%.6f\t%.6f\t%.6f\t%.6f\t1\t0\t__own__\t0\t0\t0\t0\n", $side, $side, @{$targets->{'*'}};
+  }
+}
 close($fh);
 my $tool = $GLOBAL->dbfGlobalGetElectronHome . "/3RDBIN/block_legalize";
 #<!-- judged by what it wrote, not by its exit status: electron's SIGCHLD
@@ -798,7 +816,8 @@ while ( my $l = <$fh> ) {
   $n++;
 }
 close($fh);
-my %r = ( blocks => $n, summary => $msg, no_target => scalar(@noTarget) );
+my %r = ( blocks => $n, summary => $msg . ( $ownArea > 0 ? sprintf("; %.0f um2 kept for its own logic at its target", $ownArea) : "" ),
+          no_target => scalar(@noTarget) );
 $r{overlaps} = $1 if ( $msg =~ m/(\d+) overlap\(s\)/ );
 $r{overrun}  = $1 if ( $msg =~ m/box overrun ([\d.]+) um/ );
 $r{overlap_pct} = $1 if ( $msg =~ m/([\d.]+)% of block area/ );
@@ -817,7 +836,8 @@ return \%r;
 #<!-- -block_targets <file>: where a plan wants each module's child blocks.
 #     One line per block: "module<TAB>instance<TAB>cx<TAB>cy", the block's
 #     centre as a fraction (0..1) of its parent's box, left to right and
-#     bottom to top -- the frame hier_place_all places that module in, so a
+#     bottom to top; instance "*" is the module's own logic, which gets a
+#     region kept free for it there (ELECTRON_OWN_REGION of the free area) -- the frame hier_place_all places that module in, so a
 #     plan made flat (a register-level placement of the critical paths) says
 #     where blocks go without saying where any cell goes.  # starts a comment.
 #     Returns module => inst => [fx, fy]. -->
@@ -1371,7 +1391,9 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                               between big ones (3RDBIN/block_legalize)\n";
   print "                       -block_targets <file>   --legalize_blocks toward a plan: lines of\n";
   print "                                               module<TAB>instance<TAB>cx<TAB>cy, the\n";
-  print "                                               centre as a fraction of the parent's box;\n";
+  print "                                               centre as a fraction of the parent's box\n";
+  print "                                               (instance * : the module's own logic, a\n";
+  print "                                               region of half its free area kept there);\n";
   print "                                               a module listed is laid out before its\n";
   print "                                               block pass and held there, as a\n";
   print "                                               -floorplan_spec line holds it\n";

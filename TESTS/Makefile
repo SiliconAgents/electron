@@ -121,7 +121,8 @@ nangate_keep_shapes:
 # nangate_legalize_blocks: every module's child blocks laid out by
 # --legalize_blocks (3RDBIN/block_legalize) instead of slicing -- reshaped, as
 # near their targets as fits -- with the top given -block_targets that no
-# slicing can make (adder A3 in the middle of a ring of multipliers).  Fails
+# slicing can make (adder A3 in the middle of a ring of multipliers), and
+# vedic_8x8 a region for its own logic in the middle ("*").  Fails
 # unless the top lands with no overlap, A3's cells are centred within a tenth
 # of the die of the middle, and the flat result legalizes with no more than
 # an ordinary move (slicing on the same design: 0.69 um average).
@@ -130,9 +131,9 @@ nangate_legalize_blocks:
 	mkdir -p workarea
 	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
 	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_legalize_blocks.tcl > legalize_blocks.log 2>&1
-	$(call LB_EXPECT,HR_PL_ALL : 058 : block targets for 7 block(s) of 1 module(s))
+	$(call LB_EXPECT,HR_PL_ALL : 058 : block targets for 8 block(s) of 2 module(s))
 	$(call LB_EXPECT,vedic_16x16 laid out toward its block targets: .* 0 overlap(s))
-	$(call LB_EXPECT,HR_PL_ALL : 064 : blocks of vedic_8x8 legalized)
+	$(call LB_EXPECT,vedic_8x8 laid out toward its block targets: .* kept for its own logic at its target)
 	$(call LB_EXPECT,HR_PL_ALL : 016 : 11 module(s) placed)
 	$(call LB_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
 	python3 check_block_target.py workarea/lb.def A3/ 0.5 0.5 0.1

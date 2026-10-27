@@ -10,3 +10,6 @@ vedic_16x16	V9	0.78	0.22
 vedic_16x16	A3	0.50	0.50
 vedic_16x16	A4	0.50	0.88
 vedic_16x16	A5	0.50	0.12
+# and vedic_8x8 (four copies) with its own logic asked for in the middle: the
+# legalizer keeps half its free area there for the cell pass, no blocks on it
+vedic_8x8	*	0.50	0.50
