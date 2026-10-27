@@ -154,6 +154,28 @@ nangate_block_growth: nangate_legalize_blocks
 	@python3 -c 'import re,sys; a=lambda f: {m: float(w)*float(h) for m, w, h in re.findall(r"HR_PL_ALL : 013 : \[\d+/\d+\] (\w+), ([\d.]+) x ([\d.]+) um", open(f).read())}; u=lambda f: float(re.search(r"HR_PL_ALL : 030 : -sizing budget: cells at ([\d.]+)%", open(f).read()).group(1)); b, g = "workarea/legalize_blocks.log", "workarea/block_growth.log"; r=(a(g)["vedic_8x8"]/a(b)["vedic_8x8"])*u(g)/u(b); print("nangate_block_growth: vedic_8x8 budgeted at %.3fx, asked 1.3" % r); sys.exit(0 if abs(r / 1.3 - 1) <= 0.07 else 1)'
 	@echo "nangate_block_growth: all expected results"
 
+# nangate_unshare: --unshare on two lane modules sharing one vedic_8x8.  The
+# multiplier and everything under it (8 modules) get a copy for laneB; fails
+# unless the timing graphs before and after hold the same connections, the
+# DEFs the same instance names, the copies are placed (20 modules, not 12),
+# laneB's blocks -- 4% overlap when its multiplier arrives in laneA's shape --
+# legalize with none, and the result legalizes with no overlap.
+US_EXPECT = grep -q "$(1)" workarea/unshare.log || { echo "nangate_unshare: expected \"$(1)\" in workarea/unshare.log"; exit 1; }
+nangate_unshare:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_unshare.tcl > unshare.log 2>&1
+	$(call US_EXPECT,HR_PL_ALL : 075 : --unshare: 8 module(s) shared by more than one parent module; 8 copie(s) made)
+	$(call US_EXPECT,HR_PL_ALL : 016 : 12 module(s) placed)
+	$(call US_EXPECT,HR_PL_ALL : 016 : 20 module(s) placed)
+	@grep "HR_PL_ALL : 064 : blocks of laneB legalized" workarea/unshare.log | tail -1 | grep -q -- "-> 0.0%" || { echo "nangate_unshare: laneB's blocks still overlap with its own multiplier"; exit 1; }
+	$(call US_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	python3 same_netlist.py workarea/us0.sgraph workarea/us1.sgraph
+	@for f in us0 us1; do awk '/^COMPONENTS/{c=1;next} /^END COMPONENTS/{c=0} c&&/^- /{print $$2}' workarea/$$f.def | sort > workarea/$$f.comps; done
+	@cmp -s workarea/us0.comps workarea/us1.comps || { echo "nangate_unshare: the instance names changed"; exit 1; }
+	@grep -q "__us1" workarea/unshare.log || { echo "nangate_unshare: no copy was placed"; exit 1; }
+	@echo "nangate_unshare: all expected results"
+
 # nangate_ungroup: adder12 dissolved into vedic_8x8 (four copies) for
 # placement.  The netlist must not change (same_netlist.py on the timing graphs
 # before and after), vedic_8x8's remaining blocks move rigidly and its new own

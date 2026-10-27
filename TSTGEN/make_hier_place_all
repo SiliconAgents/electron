@@ -841,6 +841,94 @@ return \%r;
 }# sub dbfTstgenHierLegalizeBlocks
 
 
+#<!-- --unshare: one module per parent module.
+#
+#     hier_place shapes and places a module definition once, inside the first
+#     parent that opens it; every other parent gets that shape as a fixed
+#     block.  Where the parents differ -- one vector unit's lane and another's,
+#     each its own module, holding one shared divider, FMA and convert unit --
+#     the second parent must fit shapes made for another box: on a 3M-instance
+#     tile 36 of 137 blocks reached the block legalizer fixed, five modules
+#     kept 4-15% overlap that no reshaping could remove (all five legalize
+#     with none once the shapes are free), and legalize_flat smeared one
+#     lane's 47k cells 300 um along their rows.
+#
+#     So, top down, a module whose instances sit in more than one parent
+#     module keeps them in the first parent (by name) and gets a copy,
+#     <name>__us<k>, for each other: the parent's instances and conn lines
+#     point at the copy, and the copy's own children are split in turn when
+#     the walk reaches them.  Instances of one module inside one parent stay
+#     one module -- the four lanes of a register file are placed once and
+#     tile alike.  Instance names do not change, so neither do flat names,
+#     the DEF or the timing graph; the module names do, in this session.
+#     %HIER_UNSHARED: copy => original, for the plan files keyed by module. -->
+sub dbfTstgenHierUnshare {
+
+my ($top) = @_;
+my %depth = ( $top => 0 );
+my $nCopies = 0;
+my %split = ();
+for ( my $round = 0 ; $round < 100000 ; $round++ ) {
+  #<!-- the modules under the top, their depth and every parent module of each -->
+  my %parents = ();
+  my @q = ( $top ); my %seenQ = ( $top => 1 ); %depth = ( $top => 0 );
+  while ( my $m = shift @q ) {
+    foreach my $inst ( sort $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+      my $ref = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($inst);
+      next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+      $parents{$ref}{$m} = 1;
+      next if ( $seenQ{$ref}++ );
+      $depth{$ref} = $depth{$m} + 1;
+      push(@q, $ref);
+    }
+  }
+  my @shared = sort { $depth{$a} <=> $depth{$b} || $a cmp $b } grep { scalar(keys %{$parents{$_}}) > 1 } keys %parents;
+  last unless ( @shared );
+  my $d = $shared[0];
+  my @ps = sort keys %{$parents{$d}};
+  shift @ps;                                   # the first parent keeps it
+  foreach my $p ( @ps ) {
+    my $k = 1; $k++ while ( exists $MODULE_ALREADY{"${d}__us$k"} );
+    my $c = "${d}__us$k";
+    $MODULE_ALREADY{$c} = Storable::dclone($MODULE_ALREADY{$d});
+    $MODULE_ALREADY{$c}->{name} = $c;
+    $MODULE_ALREADY{$c}->{parents} = [ $p ];
+    $MODULE_ALREADY{$d}->{parents} = [ grep { $_ ne $p } $MODULE_ALREADY{$d}->dbVNOMGetParent ];
+    foreach my $ch ( $MODULE_ALREADY{$c}->dbVNOMGetHierInst ) {
+      my $cr = $MODULE_ALREADY{$c}->dbVNOMGetHierInstCell($ch);
+      $MODULE_ALREADY{$cr}->dbVNOMAddParent($c) if ( defined $cr && exists $MODULE_ALREADY{$cr} );
+    }
+    my $P = $MODULE_ALREADY{$p};
+    my %moved = ();
+    foreach my $inst ( $P->dbVNOMGetHierInst ) {
+      next unless ( $P->dbVNOMGetHierInstCell($inst) eq $d );
+      $P->dbVNOMSetHierInstCell($inst, $c);
+      $moved{$inst} = 1;
+      #<!-- a parent already opened holds the cell in its pseudo model too -->
+      if ( exists $PSEUDO_VINST_ALREADY{$p} && exists $PSEUDO_VINST_ALREADY{$p}{$inst} ) {
+        $PSEUDO_VINST_ALREADY{$p}{$inst}->dbPimDBSetInstCellref($c);
+      }
+    }
+    my @conns = $P->dbVNOMGetConn;
+    $P->dbVNOMWipeConn;
+    foreach my $line ( @conns ) {
+      my ($cell, $inst) = ( split(/\s+/, $line) )[0, 1];
+      $line =~ s/^(\s*)\Q$d\E(\s)/$1$c$2/ if ( defined $inst && $cell eq $d && exists $moved{$inst} );
+      $P->dbVNOMAddConn($line);
+    }
+    $HIER_UNSHARED{$c} = exists $HIER_UNSHARED{$d} ? $HIER_UNSHARED{$d} : $d;
+    $split{$d}++;
+    $nCopies++;
+  }
+}
+%HIER_LB_PARENTS = (); %HIER_LB_KIDS = ();     #<!-- the hierarchy changed -->
+printf("INFO-TST-HR_PL_ALL : 075 : --unshare: %d module(s) shared by more than one parent module; %d copie(s) made\n",
+       scalar(keys %split), $nCopies);
+return $nCopies;
+
+}# sub dbfTstgenHierUnshare
+
+
 #<!-- -block_targets <file>: where a plan wants each module's child blocks.
 #     One line per block: "module<TAB>instance<TAB>cx<TAB>cy", the block's
 #     centre as a fraction (0..1) of its parent's box, left to right and
@@ -1327,6 +1415,7 @@ my $legalizeBlocks = 0;
 my $blockTargetsFile = "";
 my $blockAspect = 3;
 my $blockGrowthFile = "";
+my $unshare = 0;
 #<!-- on by default since 2026-10-26: without it a child's pins are set by its
 #     own contents, blind to where the parent's nets go, and a lane's boundary
 #     logic is placed away from its partners outside -- on a 3M-instance tile,
@@ -1415,6 +1504,13 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                               what place_opt's trees and upsizing\n";
   print "                                               added there last time (a plan's\n";
   print "                                               area proposal)\n";
+  print "                       --unshare               a module used under more than one parent\n";
+  print "                                               module gets a copy for each, so every\n";
+  print "                                               parent shapes and places its own (two\n";
+  print "                                               vector units' lanes, say); copies in one\n";
+  print "                                               parent stay one module.  Instance names\n";
+  print "                                               do not change.  More to place: for\n";
+  print "                                               timing closure, not by default\n";
   print "                       --no_child_pins         leave each child block's pins to its own\n";
   print "                                               contents.  By default (--child_pins),\n";
   print "                                               after each cell pass every child block's\n";
@@ -1480,6 +1576,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-block_targets") { $blockTargetsFile = $_[$i+1]; $legalizeBlocks = 1; }
   elsif ($_[$i] eq "-block_aspect")  { $blockAspect = $_[$i+1]; }
   elsif ($_[$i] eq "-block_growth")  { $blockGrowthFile = $_[$i+1]; }
+  elsif ($_[$i] eq "--unshare")      { $unshare = 1; }
   elsif ($_[$i] eq "--child_pins")   { $childPins = 1; }
   elsif ($_[$i] eq "--no_child_pins") { $childPins = 0; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
@@ -1508,6 +1605,15 @@ unless ( defined $top && $top ne "" && exists $MODULE_ALREADY{$top} ) {
 }
 unless ( defined $cellsBatch && $cellsBatch ne "" ) {
   $cellsBatch = $batch;
+}
+
+%HIER_UNSHARED = ();
+if ( $unshare ) {
+  if ( $only ne "" || $keepShapes ) {
+    print "ERR-TST-HR_PL_ALL : 074 : --unshare makes new modules, which have nothing placed to keep; not with -only or --keep_shapes\n";
+    return;
+  }
+  &dbfTstgenHierUnshare($top);
 }
 
 #--------------------------------------------------------------------------
@@ -1589,6 +1695,7 @@ if ( $fpSpecFile ne "" ) {
     print "ERR-TST-HR_PL_ALL : 042 : -floorplan_spec names module(s) not in the design: @unknown\n";
     return;
   }
+  foreach my $c ( keys %HIER_UNSHARED ) { $fpSpec->{$c} = $fpSpec->{$HIER_UNSHARED{$c}} if ( exists $fpSpec->{$HIER_UNSHARED{$c}} && ! exists $fpSpec->{$c} ); }
   print "INFO-TST-HR_PL_ALL : 043 : floorplan spec for " . scalar(keys %$fpSpec) . " module(s) from $fpSpecFile: " .
         join(" ", sort keys %$fpSpec) . "\n";
 }
@@ -1620,6 +1727,9 @@ if ( $blockGrowthFile ne "" ) {
   if ( $sizing ne "budget" ) {
     print "WARN-TST-HR_PL_ALL : 072 : -block_growth only changes -sizing budget; it is ignored here\n";
   }
+  foreach my $c ( keys %HIER_UNSHARED ) {
+    $HIER_BLOCK_GROWTH{$c} = $HIER_BLOCK_GROWTH{$HIER_UNSHARED{$c}} if ( exists $HIER_BLOCK_GROWTH{$HIER_UNSHARED{$c}} && ! exists $HIER_BLOCK_GROWTH{$c} );
+  }
   my $listed = scalar(keys %HIER_BLOCK_GROWTH);
   my @todo = ( [ $top, exists $HIER_BLOCK_GROWTH{$top} ? $HIER_BLOCK_GROWTH{$top} : 1 ] );
   my %seenG = ();
@@ -1645,6 +1755,9 @@ if ( $blockTargetsFile ne "" ) {
   if ( @unknown ) {
     print "ERR-TST-HR_PL_ALL : 057 : -block_targets names module(s) not in the design: @unknown\n";
     return;
+  }
+  foreach my $c ( keys %HIER_UNSHARED ) {
+    $blockTargets->{$c} = { %{$blockTargets->{$HIER_UNSHARED{$c}}} } if ( exists $blockTargets->{$HIER_UNSHARED{$c}} && ! exists $blockTargets->{$c} );
   }
   my $nb = 0; $nb += scalar(keys %{$blockTargets->{$_}}) foreach ( keys %$blockTargets );
   print "INFO-TST-HR_PL_ALL : 058 : block targets for $nb block(s) of " . scalar(keys %$blockTargets) . " module(s) from $blockTargetsFile\n";
