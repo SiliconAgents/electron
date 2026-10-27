@@ -223,11 +223,19 @@ return $packMixed;
 #     bisection asks for the whole tree forty times: on a 3M-instance tile,
 #     summing the leaf cells again each time was 118 s of a 212 s top-only
 #     re-place.  %HIER_OWN_AREA keeps them for one hier_place_all call, which
-#     clears it on entry, so a netlist edited between calls is read again. -->
+#     clears it on entry, so a netlist edited between calls is read again.
+#
+#     -block_growth: a module's cells take g x their netlist area, g from
+#     %HIER_BLOCK_GROWTH or else the nearest ancestor's -- what place_opt's
+#     trees and upsizing will add there, so the room is in the box before
+#     they ask for it.  Only g relative to the rest matters: u is solved for
+#     the whole tree, so a uniform g changes nothing. -->
 sub dbfTstgenHierBudgetArea {
 
-my ($module, $u, $packMixed, $halo, $memo) = @_;
-return $memo->{$module} if ( exists $memo->{$module} );
+my ($module, $u, $packMixed, $halo, $memo, $gIn) = @_;
+my $g = exists $HIER_BLOCK_GROWTH{$module} ? $HIER_BLOCK_GROWTH{$module} : ( defined $gIn ? $gIn : 1 );
+my $key = $g == 1 ? $module : "$module\0$g";
+return $memo->{$key} if ( exists $memo->{$key} );
 return 0 unless ( exists $MODULE_ALREADY{$module} );
 unless ( exists $HIER_OWN_AREA{$module} ) {
   my ($s, $m) = (0, 0);
@@ -247,10 +255,10 @@ my $kids = 0;
 foreach my $inst ( $MODULE_ALREADY{$module}->dbVNOMGetHierInst ) {
   my $ref = $MODULE_ALREADY{$module}->dbVNOMGetHierInstCell($inst);
   next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
-  $kids += &dbfTstgenHierBudgetArea($ref, $u, $packMixed, $halo, $memo);
+  $kids += &dbfTstgenHierBudgetArea($ref, $u, $packMixed, $halo, $memo, $g);
 }
-$memo->{$module} = $mac * (1 + $halo) + $std / $u + $kids / $pk;
-return $memo->{$module};
+$memo->{$key} = $mac * (1 + $halo) + $g * $std / $u + $kids / $pk;
+return $memo->{$key};
 
 }# sub dbfTstgenHierBudgetArea
 
@@ -1318,6 +1326,7 @@ my $sliceBlocks = 0;
 my $legalizeBlocks = 0;
 my $blockTargetsFile = "";
 my $blockAspect = 3;
+my $blockGrowthFile = "";
 #<!-- on by default since 2026-10-26: without it a child's pins are set by its
 #     own contents, blind to where the parent's nets go, and a lane's boundary
 #     logic is placed away from its partners outside -- on a 3M-instance tile,
@@ -1399,6 +1408,13 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                               -floorplan_spec line holds it\n";
   print "                       -block_aspect <r>       --legalize_blocks may reshape a block to\n";
   print "                                               any aspect within 1:r (default 3)\n";
+  print "                       -block_growth <file>    with -sizing budget: lines of\n";
+  print "                                               module<TAB>factor; that module's cells\n";
+  print "                                               (and its descendants', unless listed)\n";
+  print "                                               are budgeted at factor x their area --\n";
+  print "                                               what place_opt's trees and upsizing\n";
+  print "                                               added there last time (a plan's\n";
+  print "                                               area proposal)\n";
   print "                       --no_child_pins         leave each child block's pins to its own\n";
   print "                                               contents.  By default (--child_pins),\n";
   print "                                               after each cell pass every child block's\n";
@@ -1463,6 +1479,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "--legalize_blocks") { $legalizeBlocks = 1; }
   elsif ($_[$i] eq "-block_targets") { $blockTargetsFile = $_[$i+1]; $legalizeBlocks = 1; }
   elsif ($_[$i] eq "-block_aspect")  { $blockAspect = $_[$i+1]; }
+  elsif ($_[$i] eq "-block_growth")  { $blockGrowthFile = $_[$i+1]; }
   elsif ($_[$i] eq "--child_pins")   { $childPins = 1; }
   elsif ($_[$i] eq "--no_child_pins") { $childPins = 0; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
@@ -1574,6 +1591,51 @@ if ( $fpSpecFile ne "" ) {
   }
   print "INFO-TST-HR_PL_ALL : 043 : floorplan spec for " . scalar(keys %$fpSpec) . " module(s) from $fpSpecFile: " .
         join(" ", sort keys %$fpSpec) . "\n";
+}
+#<!-- -block_growth: module => factor, then handed down to every descendant
+#     that has none of its own (top down, so the nearest listed ancestor
+#     wins).  Read before the budget is solved: it changes u. -->
+%HIER_BLOCK_GROWTH = ();
+if ( $blockGrowthFile ne "" ) {
+  my $fh;
+  unless ( open($fh, "<", $blockGrowthFile) ) {
+    print "ERR-TST-HR_PL_ALL : 070 : cannot read -block_growth $blockGrowthFile : $!\n";
+    return;
+  }
+  my ($bad, @unknown) = (0);
+  while ( my $l = <$fh> ) {
+    $l =~ s/#.*//; next unless ( $l =~ m/\S/ );
+    chomp($l);
+    my ($m, $f) = split(/\t/, $l);
+    if ( ! defined $f || $f !~ m/^[\d.]+(e-?\d+)?$/ || $f <= 0 ) { $bad++; next; }
+    if ( ! exists $MODULE_ALREADY{$m} ) { push(@unknown, $m); next; }
+    $HIER_BLOCK_GROWTH{$m} = $f;
+  }
+  close($fh);
+  if ( $bad || @unknown ) {
+    print "ERR-TST-HR_PL_ALL : 071 : -block_growth $blockGrowthFile: $bad line(s) not module<TAB>factor" .
+          ( @unknown ? ", module(s) not in the design: @unknown" : "" ) . "\n";
+    return;
+  }
+  if ( $sizing ne "budget" ) {
+    print "WARN-TST-HR_PL_ALL : 072 : -block_growth only changes -sizing budget; it is ignored here\n";
+  }
+  my $listed = scalar(keys %HIER_BLOCK_GROWTH);
+  my @todo = ( [ $top, exists $HIER_BLOCK_GROWTH{$top} ? $HIER_BLOCK_GROWTH{$top} : 1 ] );
+  my %seenG = ();
+  while ( my $e = shift @todo ) {
+    my ($m, $g) = @$e;
+    next if ( $seenG{$m}++ );
+    $HIER_BLOCK_GROWTH{$m} = $g unless ( exists $HIER_BLOCK_GROWTH{$m} );
+    foreach my $inst ( $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+      my $ref = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($inst);
+      next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+      push(@todo, [ $ref, $HIER_BLOCK_GROWTH{$m} ]);
+    }
+  }
+  my @gs = sort { $a <=> $b } map { $HIER_BLOCK_GROWTH{$_} } keys %HIER_BLOCK_GROWTH;
+  printf("INFO-TST-HR_PL_ALL : 073 : -block_growth: %d module(s) listed in %s, %d of %d with what they hand down; factors %.2f to %.2f\n",
+         $listed, $blockGrowthFile, scalar(grep { $_ != 1 } @gs), scalar(@gs), $gs[0], $gs[-1]) if ( @gs );
 }
 my $blockTargets = {};
 if ( $blockTargetsFile ne "" ) {

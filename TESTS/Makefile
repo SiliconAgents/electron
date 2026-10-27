@@ -140,6 +140,20 @@ nangate_legalize_blocks:
 	@grep "INFO-ALG-LEGAL : 018" workarea/legalize_blocks.log | tail -1 | awk '{for (i = 1; i < NF; i++) if ($$i == "move") m = $$(i + 1)} END {if (m + 0 > 1.5) {print "nangate_legalize_blocks: legalize_flat moved cells " m " um on average, more than 1.5"; exit 1}}'
 	@echo "nangate_legalize_blocks: all expected results"
 
+# nangate_block_growth: -block_growth vedic_8x8 1.3 on nangate_legalize_blocks's
+# design.  Fails unless the factor is read and reaches the boxes: vedic_8x8's
+# block must come out 1.3x what it is without, less what the budget's re-solved
+# utilization takes back from everything (u0/u1), within 7% -- the rounding to
+# whole sites and row pairs.  (A small block is no test: adder16's 11.6 x 14 um
+# is 23% rounding.)
+BG_EXPECT = grep -q "$(1)" workarea/block_growth.log || { echo "nangate_block_growth: expected \"$(1)\" in workarea/block_growth.log"; exit 1; }
+nangate_block_growth: nangate_legalize_blocks
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_block_growth.tcl > block_growth.log 2>&1
+	$(call BG_EXPECT,HR_PL_ALL : 073 : -block_growth: 1 module(s) listed in ../block_growth.tsv.* 8 of 11 with what they hand down; factors 1.00 to 1.30)
+	$(call BG_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	@python3 -c 'import re,sys; a=lambda f: {m: float(w)*float(h) for m, w, h in re.findall(r"HR_PL_ALL : 013 : \[\d+/\d+\] (\w+), ([\d.]+) x ([\d.]+) um", open(f).read())}; u=lambda f: float(re.search(r"HR_PL_ALL : 030 : -sizing budget: cells at ([\d.]+)%", open(f).read()).group(1)); b, g = "workarea/legalize_blocks.log", "workarea/block_growth.log"; r=(a(g)["vedic_8x8"]/a(b)["vedic_8x8"])*u(g)/u(b); print("nangate_block_growth: vedic_8x8 budgeted at %.3fx, asked 1.3" % r); sys.exit(0 if abs(r / 1.3 - 1) <= 0.07 else 1)'
+	@echo "nangate_block_growth: all expected results"
+
 # nangate_ungroup: adder12 dissolved into vedic_8x8 (four copies) for
 # placement.  The netlist must not change (same_netlist.py on the timing graphs
 # before and after), vedic_8x8's remaining blocks move rigidly and its new own
