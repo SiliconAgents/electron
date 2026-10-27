@@ -929,6 +929,168 @@ return $nCopies;
 }# sub dbfTstgenHierUnshare
 
 
+#<!-- -jobs: the walk with subtrees placed side by side.
+#
+#     A module needs only its parent placed and committed: its box, and its
+#     pins with --child_pins, come from there and from nothing else.  So once
+#     a parent is committed each child subtree can be placed on its own -- in
+#     a forked copy of the session, which has every module, floorplan and
+#     setting exactly as the serial walk would see them at that point, and
+#     runs the same per-module code in the same order within the subtree.
+#
+#     A subtree is handed to a worker when no module in it has a parent module
+#     outside it (else two processes would shape and place one module), and
+#     when it holds no more than 1/jobs of the design's cells; anything bigger
+#     the main process places itself and splits again below.  With --unshare
+#     every module has one parent module, so every subtree qualifies.
+#
+#     A worker writes back what the rest of the flow reads: the floorplans of
+#     its modules (allocated from its own range of floorplan IDs, so none
+#     collide), their lookup names, each module's floorplan ID, the cell-pass
+#     statistics, its metrics lines and counts; its messages go to a file
+#     that is printed whole when it is merged, so the log reads module by
+#     module.  The pseudo models are not brought back: the walk ends by
+#     reopening the top, which drops them for the whole tree.
+#
+#     electron's SIGCHLD reaper would take the workers before waitpid could,
+#     so it is off while they run. -->
+sub dbfTstgenHierPlaceParallel {
+
+my ($order, $placeOne, $jobs, $metricsFhRef, $doneRef, $keptRef, $failRef, $metricsCntRef) = @_;
+my %inOrder = map { $_->[0] => 1 } @$order;
+my (%kids, %parents, %own);
+foreach my $r ( @$order ) {
+  my $m = $r->[0];
+  next unless ( exists $MODULE_ALREADY{$m} );
+  $own{$m} = scalar( my @l = $MODULE_ALREADY{$m}->dbVNOMGetLeafInst );
+  foreach my $i ( $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+    my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($i);
+    next unless ( defined $c && $inOrder{$c} );
+    $kids{$m}{$c} = 1; $parents{$c}{$m} = 1;
+  }
+}
+my %sub = ();
+my $subOf; $subOf = sub {
+  my ($m) = @_;
+  return $sub{$m} if ( exists $sub{$m} );
+  my %s = ( $m => 1 );
+  foreach my $c ( keys %{$kids{$m} || {}} ) { $s{$_} = 1 foreach ( keys %{$subOf->($c)} ); }
+  return $sub{$m} = \%s;
+};
+my $weight = sub { my $w = 0; $w += ( $own{$_} || 0 ) foreach ( keys %{$_[0]} ); return $w; };
+my $total = $weight->($subOf->($order->[0][0]));
+my $limit = $total / $jobs;
+my %assigned = ();          # module => task index
+my @tasks = ();
+my %spawnAfter = ();        # module => [task indices] to start once it is committed
+my @mainOrder = ();
+foreach my $r ( @$order ) {
+  my $m = $r->[0];
+  next if ( exists $assigned{$m} );
+  push(@mainOrder, $r);
+  foreach my $c ( sort keys %{$kids{$m} || {}} ) {
+    next if ( exists $assigned{$c} || scalar(keys %{$parents{$c}}) != 1 );
+    my $s = $subOf->($c);
+    next if ( $weight->($s) > $limit );
+    my $closed = 1;
+    foreach my $d ( keys %$s ) {
+      next if ( $d eq $c );
+      foreach my $p ( keys %{$parents{$d}} ) { $closed = 0 unless ( $s->{$p} ); }
+    }
+    next unless ( $closed );
+    my $k = scalar(@tasks);
+    push(@tasks, { root => $c, mods => $s, order => [ grep { $s->{$_->[0]} } @$order ], weight => $weight->($s) });
+    $assigned{$_} = $k foreach ( keys %$s );
+    push(@{$spawnAfter{$m}}, $k);
+  }
+}
+printf("INFO-TST-HR_PL_ALL : 077 : -jobs %d: %d subtree(s) to workers (%d module(s), %.0f%% of the cells), %d module(s) placed here\n",
+       $jobs, scalar(@tasks), scalar(keys %assigned), $total > 0 ? 100 * ( $total - $weight->({ map { $_->[0] => 1 } @mainOrder }) ) / $total : 0,
+       scalar(@mainOrder));
+
+local $SIG{CHLD} = 'DEFAULT';
+my $dir = "hier_place_all.jobs.$$";
+mkdir($dir) unless ( -d $dir );
+my $baseFp = $GLOBAL->{MaxFlplanID};
+my %running = ();           # pid => task index
+my $failed = 0;
+my $merge = sub {
+  my ($k, $status) = @_;
+  my $t = $tasks[$k];
+  if ( open(my $lf, "<", "$dir/$k.log") ) { local $/; my $txt = <$lf>; close($lf); print $txt; }
+  my $res = ( -s "$dir/$k.res" ) ? eval { Storable::retrieve("$dir/$k.res") } : undef;
+  unless ( $status == 0 && defined $res ) {
+    print "ERR-TST-HR_PL_ALL : 078 : the worker for $t->{root} failed (status $status); its " . scalar(@{$t->{order}}) . " module(s) are not placed\n";
+    $$failRef += scalar(@{$t->{order}});
+    $failed++;
+    return;
+  }
+  $FLOORPLAN_ALREADY{$_} = $res->{fp}{$_} foreach ( keys %{$res->{fp}} );
+  $FLOORPLAN_LOOKUP{$_} = $res->{lk}{$_} foreach ( keys %{$res->{lk}} );
+  foreach my $m ( keys %{$res->{fpid}} ) {
+    $MODULE_ALREADY{$m}->dbVNOMSetFloorplanID($res->{fpid}{$m}) if ( exists $MODULE_ALREADY{$m} && defined $res->{fpid}{$m} );
+  }
+  $HIER_PLACE_CELL_STATS{$_} = $res->{stats}{$_} foreach ( keys %{$res->{stats}} );
+  $GLOBAL->{MaxFlplanID} = $res->{maxid} if ( $res->{maxid} > $GLOBAL->{MaxFlplanID} );
+  $$doneRef += $res->{cnt}[0]; $$keptRef += $res->{cnt}[1]; $$failRef += $res->{cnt}[2]; $$metricsCntRef += $res->{cnt}[3];
+  if ( defined $$metricsFhRef && open(my $mf, "<", "$dir/$k.metrics") ) { local $/; my $txt = <$mf>; close($mf); print { $$metricsFhRef } $txt; }
+};
+my $reap = sub {
+  my $pid = waitpid(-1, 0);
+  return if ( $pid <= 0 || ! exists $running{$pid} );
+  my $k = delete $running{$pid};
+  $merge->($k, $?);
+};
+my $spawn = sub {
+  my ($k) = @_;
+  $reap->() while ( scalar(keys %running) >= $jobs - 1 );
+  my $t = $tasks[$k];
+  STDOUT->flush; STDERR->flush;
+  $$metricsFhRef->flush if ( defined $$metricsFhRef );
+  my $pid = fork();
+  unless ( defined $pid ) {
+    print "WARN-TST-HR_PL_ALL : 079 : cannot fork for $t->{root} ($!); placing it here\n";
+    $placeOne->($_) foreach ( @{$t->{order}} );
+    return;
+  }
+  if ( $pid == 0 ) {
+    open(STDOUT, ">", "$dir/$k.log"); open(STDERR, ">&STDOUT"); $| = 1;
+    $GLOBAL->{MaxFlplanID} = $baseFp + 10000000 * ( $k + 1 );
+    if ( defined $$metricsFhRef ) { open(my $mf, ">", "$dir/$k.metrics"); $$metricsFhRef = $mf; }
+    $$doneRef = $$keptRef = $$failRef = $$metricsCntRef = 0;
+    $placeOne->($_) foreach ( @{$t->{order}} );
+    my (%fp, %lk, %fpid, %stats);
+    foreach my $key ( keys %FLOORPLAN_LOOKUP ) {
+      my ($m) = split(m{/}, $key);
+      next unless ( defined $m && $t->{mods}{$m} );
+      $lk{$key} = $FLOORPLAN_LOOKUP{$key};
+      $fp{$lk{$key}} = $FLOORPLAN_ALREADY{$lk{$key}} if ( exists $FLOORPLAN_ALREADY{$lk{$key}} );
+    }
+    foreach my $m ( keys %{$t->{mods}} ) {
+      $fpid{$m} = $MODULE_ALREADY{$m}->dbVNOMGetFloorplanID if ( exists $MODULE_ALREADY{$m} );
+      $stats{$m} = $HIER_PLACE_CELL_STATS{$m} if ( exists $HIER_PLACE_CELL_STATS{$m} );
+    }
+    close($$metricsFhRef) if ( defined $$metricsFhRef );
+    Storable::nstore({ fp => \%fp, lk => \%lk, fpid => \%fpid, stats => \%stats, maxid => $GLOBAL->{MaxFlplanID},
+                       cnt => [ $$doneRef, $$keptRef, $$failRef, $$metricsCntRef ] }, "$dir/$k.res");
+    STDOUT->flush;
+    POSIX::_exit(0);
+  }
+  $running{$pid} = $k;
+};
+foreach my $r ( @mainOrder ) {
+  $placeOne->($r);
+  $spawn->($_) foreach ( @{$spawnAfter{$r->[0]} || []} );
+}
+$reap->() while ( %running );
+unless ( $failed ) {
+  unlink(glob("$dir/*")); rmdir($dir);
+}
+return scalar(@tasks);
+
+}# sub dbfTstgenHierPlaceParallel
+
+
 #<!-- -block_targets <file>: where a plan wants each module's child blocks.
 #     One line per block: "module<TAB>instance<TAB>cx<TAB>cy", the block's
 #     centre as a fraction (0..1) of its parent's box, left to right and
@@ -1416,6 +1578,7 @@ my $blockTargetsFile = "";
 my $blockAspect = 3;
 my $blockGrowthFile = "";
 my $unshare = 0;
+my $jobs = 1;
 #<!-- on by default since 2026-10-26: without it a child's pins are set by its
 #     own contents, blind to where the parent's nets go, and a lane's boundary
 #     logic is placed away from its partners outside -- on a 3M-instance tile,
@@ -1511,6 +1674,12 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                               parent stay one module.  Instance names\n";
   print "                                               do not change.  More to place: for\n";
   print "                                               timing closure, not by default\n";
+  print "                       -jobs <n>               place up to n subtrees at once, each in a\n";
+  print "                                               forked copy of the session, once its\n";
+  print "                                               parent is placed (default 1: one at a\n";
+  print "                                               time).  A subtree goes to a worker only\n";
+  print "                                               if no module in it has a parent outside\n";
+  print "                                               it -- with --unshare, every subtree\n";
   print "                       --no_child_pins         leave each child block's pins to its own\n";
   print "                                               contents.  By default (--child_pins),\n";
   print "                                               after each cell pass every child block's\n";
@@ -1577,6 +1746,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-block_aspect")  { $blockAspect = $_[$i+1]; }
   elsif ($_[$i] eq "-block_growth")  { $blockGrowthFile = $_[$i+1]; }
   elsif ($_[$i] eq "--unshare")      { $unshare = 1; }
+  elsif ($_[$i] eq "-jobs")          { $jobs = $_[$i+1]; }
   elsif ($_[$i] eq "--child_pins")   { $childPins = 1; }
   elsif ($_[$i] eq "--no_child_pins") { $childPins = 0; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
@@ -1910,7 +2080,11 @@ my $metricsCnt = 0;
 
 my $step = 0;
 
-foreach my $rec ( @order ) {
+#<!-- One module: open, size its children, the block pass, the cell pass,
+#     child pins, commit.  A closure over everything above, so -jobs can run
+#     it in a forked worker exactly as the serial walk runs it. -->
+my $placeOne = sub {
+  my ($rec) = @_;
   my ($mod, $depth, $path) = @{$rec};
   $step++;
   my %mrec = ();
@@ -1951,7 +2125,7 @@ foreach my $rec ( @order ) {
   unless ( exists $PSEUDO_MODULE_ALREADY{$mod} ) {
     print "WARN-TST-HR_PL_ALL : 009 : $mod could not be opened for edit, skipping it\n";
     $failCnt++;
-    next;
+    return;
   }
 
   #<!-- No box means no area, and a placer handed a design of zero area has no
@@ -1963,7 +2137,7 @@ foreach my $rec ( @order ) {
     print "WARN-TST-HR_PL_ALL : 011 : its instance box in the parent floorplan is empty; commit the\n";
     print "WARN-TST-HR_PL_ALL : 012 : parent first, or give -util so the size is estimated from cell area\n";
     $failCnt++;
-    next;
+    return;
   }
 
   my $keepExisting = ( $skipPlaced && &dbfTstgenHierModuleIsPlaced($mod) );
@@ -2251,6 +2425,17 @@ foreach my $rec ( @order ) {
     push(@snapOpts, split(/\s+/, $snapArgs)) if ( $snapArgs ne "" );
     &write_hier_cells(@snapOpts);
   }
+};
+
+if ( $jobs > 1 && ( ( defined $snapPrefix && $snapPrefix ne "" ) || $only ne "" ) ) {
+  print "WARN-TST-HR_PL_ALL : 076 : -jobs is for a whole walk without -snapshot or -only; placing one module at a time\n";
+  $jobs = 1;
+}
+if ( $jobs > 1 ) {
+  &dbfTstgenHierPlaceParallel(\@order, $placeOne, $jobs, \$metricsFh, \$doneCnt, \$keptCnt, \$failCnt, \$metricsCnt);
+}
+else {
+  $placeOne->($_) foreach ( @order );
 }
 
 #--------------------------------------------------------------------------

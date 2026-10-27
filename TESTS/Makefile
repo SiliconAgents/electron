@@ -176,6 +176,30 @@ nangate_unshare:
 	@grep -q "__us1" workarea/unshare.log || { echo "nangate_unshare: no copy was placed"; exit 1; }
 	@echo "nangate_unshare: all expected results"
 
+# nangate_jobs: hier_place_all -jobs 4 against the same walk one module at a
+# time, each in its own session with the Perl hash seed pinned, on the two
+# lane modules sharing a vedic_8x8 -- with --unshare (every subtree can go to
+# a worker) and without (the shared module's parents stay in the main
+# process).  Fails unless the DEFs are the same line for line, sorted, and
+# the workers were used.
+nangate_jobs:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_filter.vg
+	@for j in 1 4; do \
+	  sed "s/JOBS/$$j/g" nangate_jobs.tcl > workarea/jobs$$j.tcl; \
+	  sed "s/JOBS/$$j/g; s/ --unshare//; s/jobs$$j.def/share$$j.def/" nangate_jobs.tcl > workarea/share$$j.tcl; \
+	done
+	cd workarea ; for t in jobs1 jobs4 share1 share4; do PATH=/usr/bin:$$PATH PERL_HASH_SEED=0 PERL_PERTURB_KEYS=0 ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f $$t.tcl > $$t.log 2>&1 || exit 1; done
+	@grep -q "HR_PL_ALL : 077 : -jobs 4: 7 subtree(s) to workers" workarea/jobs4.log || { echo "nangate_jobs: the --unshare run did not use its workers"; exit 1; }
+	@grep -q "HR_PL_ALL : 077 : -jobs 4: 5 subtree(s) to workers" workarea/share4.log || { echo "nangate_jobs: the shared run did not use its workers"; exit 1; }
+	@! grep -q "HR_PL_ALL : 078" workarea/jobs4.log workarea/share4.log || { echo "nangate_jobs: a worker failed"; exit 1; }
+	@for t in jobs share; do \
+	  sort workarea/$${t}1.def > workarea/$${t}1.sorted; sort workarea/$${t}4.def > workarea/$${t}4.sorted; \
+	  cmp -s workarea/$${t}1.sorted workarea/$${t}4.sorted || { echo "nangate_jobs: $$t: -jobs 4 placed differently from one at a time"; exit 1; }; \
+	done
+	@grep -q "20 module(s) placed" workarea/jobs4.log && grep -q "12 module(s) placed" workarea/share4.log || { echo "nangate_jobs: not every module was placed"; exit 1; }
+	@echo "nangate_jobs: all expected results"
+
 # nangate_ungroup: adder12 dissolved into vedic_8x8 (four copies) for
 # placement.  The netlist must not change (same_netlist.py on the timing graphs
 # before and after), vedic_8x8's remaining blocks move rigidly and its new own
