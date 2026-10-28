@@ -40,10 +40,17 @@ SPARKSTA_WIRE_RC ?=
 SPARKSTA_WIRE_MODEL ?=
 # The optimisation advisor (SPARKSTA_ADVISE): the cell table saying which
 # cells may replace which (SPARKSTA_CELLS_OF reads it from the library config),
-# the Vts it may use ("any" for a table with no Vt column), its sizing rounds,
-# and its Spark driver memory -- a 2.9M-cell design peaked near 37 GB.
+# the Vts it may use (empty: every Vt in the table; "any" for a table with no
+# Vt column), its sizing rounds, and its Spark driver memory -- a 2.9M-cell
+# design peaked near 37 GB.  Which Vts a block may use is a methodology
+# choice, so the block's flow sets it (N02 blocks: svt,lvt,ulvt).
+# SPARKSTA_SEQ_VTS: the Vts a flop or latch may take (empty: any of the above).
+# SPARKSTA_VT_CAP=<vt>[,<vt>]:<fraction>: those Vts on at most that share of the
+# cells, the most negative paths first (slvt:0.12 -- "SLVT under 12%").
 SPARKSTA_CELLS  ?=
-SPARKSTA_VTS    ?= svt,lvt,ulvt
+SPARKSTA_VTS    ?=
+SPARKSTA_SEQ_VTS ?=
+SPARKSTA_VT_CAP ?=
 SPARKSTA_ROUNDS ?= 5
 SPARKSTA_ADVISE_MEM ?= 64g
 _sparksta_comma := ,
@@ -106,7 +113,7 @@ define SPARKSTA_ADVISE
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5).summary.txt; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca > $(5).advise.sca; \
-	 echo 'advise("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", rounds = $(SPARKSTA_ROUNDS)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).advise.sca; \
+	 echo 'advise("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", rounds = $(SPARKSTA_ROUNDS)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).advise.sca; \
 	 echo 'System.exit(0)' >> $(5).advise.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
 	   "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
@@ -156,7 +163,7 @@ define SPARKSTA_REPEAT
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5).eco.tsv; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca $(PYSPARK)/scala/repeat.sca > $(5).repeat.sca; \
-	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_REFUSALS),$(_sparksta_comma) refusals = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
+	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_REFUSALS),$(_sparksta_comma) refusals = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
 	 echo 'System.exit(0)' >> $(5).repeat.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
 	   "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \

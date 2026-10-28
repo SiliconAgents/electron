@@ -2,10 +2,23 @@
 """The library facts a drive-repair pass needs, from liberty, in one small table.
 
     liberty_sizing -o sizing.tsv [-j N] <cells.lib> [<more.lib> ...]
+    liberty_sizing -o sizing.tsv --config library.config --foundry F --node N --layer L [<more.lib> ...]
+
+With --config the library's own entry says everything that depends on its
+naming: the liberties are its std-cell-synth-libs, each under the Vt it is
+listed as; a cell is a clock cell when its base name (drive and what follows
+taken off) matches a CLOCK pattern of the entry's cell-func-map; and when the
+entry's cell-families give a "vt-in-name" pattern for a cell's family (a
+library whose Vt code sits inside the cell name, between its footprint and
+its channel length, rather than at the end), the
+family column is the name after its stem and drive with that group taken out,
+so the Vts of one footprint can replace each other.  A family with no such
+pattern leaves the column empty and Photon reads the family from the name
+(the Vt as a suffix, N02's BWP...CPDSVT).
 
 One row per cell:
 
-    cell  vt  area  leakage  drive  class  dont_use  seq  pins
+    cell  vt  area  leakage  drive  class  dont_use  seq  pins  [clock  family]
 
     leakage  average leakage power in the library's leakage unit (header): the
            sum of the cell's leakage_power groups that carry no `when`, one per
@@ -68,14 +81,18 @@ CELL_RE = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
 PIN_RE = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
 KV_RE = re.compile(r'^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;')
 SEQ_RE = re.compile(r"^\s*(ff|latch|statetable|ff_bank|latch_bank)\s*\(")
+# without --config, the Vt is guessed from N02's file names; with it, the
+# config says which Vt each liberty is
 VT_RE = re.compile(r"_(svt|lvt|lvtll|ulvt|ulvtll|elvt)(?:tt|ss|ff)", re.I)
 
 
-def read_one(path):
-    """(header, [row]) for one liberty file."""
+def read_one(job):
+    """(header, [row]) for one liberty file; job is a path or (path, vt)."""
+    path, vt = job if isinstance(job, tuple) else (job, None)
     op = gzip.open if path.endswith(".gz") else open
-    m = VT_RE.search(os.path.basename(path))
-    vt = m.group(1).lower() if m else ""
+    if vt is None:
+        m = VT_RE.search(os.path.basename(path))
+        vt = m.group(1).lower() if m else ""
     hdr = {"load_unit": "", "time_unit": "", "default_max_transition": "", "leakage_unit": ""}
     rows = []
     cell, depth, cdepth, pin, pins, seq, area, dont = None, 0, 0, None, {}, False, None, False
@@ -173,14 +190,64 @@ def row(cell, vt, area, leak, dont, seq, pins, dflt_tran=""):
             "1" if dont else "0", "1" if seq else "0", ";".join(fields)]
 
 
+def config_entry(path, foundry, node, layer):
+    import json
+    c = json.load(open(path))
+    for n in c.get(foundry, {}).get("node", []):
+        if n.get("type") != node:
+            continue
+        for f in n.get("files", []):
+            if str(f.get("layer")) == str(layer):
+                return f
+    sys.exit(f"liberty_sizing: no {foundry} {node} layer {layer} in {path}")
+
+
+def func_map(path):
+    """[(glob, family)] in order, first match wins -- the cell-func-map format"""
+    import fnmatch
+    out = []
+    for l in open(path):
+        if l.startswith("#") or not l.strip():
+            continue
+        f = l.split()
+        if len(f) >= 3:
+            out.append((re.compile(fnmatch.translate(f[0])), f[2]))
+    return out
+
+
+def base_name(cell):
+    """the cell name with its drive and everything after it taken off, as the
+    cell-func-maps define it: AOI21D4<suffix> and AOI21_D4_<suffix> are
+    both AOI21"""
+    stem, _ = stem_and_drive(cell)
+    return stem.rstrip("_")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("-j", "--jobs", type=int, default=8)
-    ap.add_argument("liberty", nargs="+")
+    ap.add_argument("--config"); ap.add_argument("--foundry"); ap.add_argument("--node"); ap.add_argument("--layer")
+    ap.add_argument("liberty", nargs="*")
     a = ap.parse_args()
+    jobs, fmap, fams = list(a.liberty), None, {}
+    if a.config:
+        e = config_entry(a.config, a.foundry, a.node, a.layer)
+        synth = e.get("std-cell-synth-libs") or {}
+        if not synth:
+            sys.exit("liberty_sizing: the entry has no std-cell-synth-libs")
+        # a synthesis list may carry memory liberties beside the cells (N02's
+        # does, for yosys); a liberty the entry declares as a macro is not a
+        # standard cell and is not sized
+        macros = set(e.get("macro-libs") or []) | {p for v in (e.get("macro-sta-libs") or {}).values() for p in v}
+        jobs = [(p, vt) for vt, ps in synth.items() for p in ps if p not in macros] + list(a.liberty)
+        m = e.get("cell-func-map")
+        fmap = func_map(m[0] if isinstance(m, list) else m) if m else None
+        fams = e.get("cell-families") or {}
+    if not jobs:
+        sys.exit("liberty_sizing: no liberty given")
     with cf.ProcessPoolExecutor(max_workers=max(1, a.jobs)) as ex:
-        results = list(ex.map(read_one, a.liberty))
+        results = list(ex.map(read_one, jobs))
     units = {(h["load_unit"], h["time_unit"], h["leakage_unit"]) for h, _ in results}
     if len(units) > 1:
         sys.exit(f"liberty_sizing: the libraries disagree on units: {sorted(units)}")
@@ -190,19 +257,45 @@ def main():
         for r in rows:
             if r[0] not in seen:
                 seen.add(r[0]); out.append(r)
+    extra = a.config is not None
+    if extra:
+        def clock(cell):
+            if not fmap:
+                return "0"
+            b = base_name(cell)
+            for rx, fam in fmap:
+                if rx.match(b):
+                    return "1" if fam == "CLOCK" else "0"
+            return "0"
+        def family(cell):
+            for key, fd in fams.items():
+                pat = fd.get("vt-in-name") if isinstance(fd, dict) else None
+                if pat and fd.get("match", "").lower() in cell.lower():
+                    stem, _ = stem_and_drive(cell)
+                    rest = re.sub(r"^(?:D\d+(?:P\d+)?|_X\d+(?:P\d+)?)", "", cell[len(stem):])
+                    m = re.search(pat, rest)
+                    return rest[:m.start(1)] + rest[m.end(1):] if m else ""
+            return ""
+        out = [r + [clock(r[0]), family(r[0])] for r in out]
     tmp = a.out + ".part"
     with open(tmp, "w") as fh:
-        fh.write(f"# liberty_sizing: {len(out)} cell(s) from {len(a.liberty)} liberty file(s)\n")
+        fh.write(f"# liberty_sizing: {len(out)} cell(s) from {len(jobs)} liberty file(s)" +
+                 (f" ({a.config} {a.foundry} {a.node} layer {a.layer})" if extra else "") + "\n")
+        if extra:
+            fh.write("# clock: 1 for a CLOCK cell of the config's cell-func-map -- never sized as logic\n")
+            fh.write("# family: cells with the same non-empty family may replace each other; empty = by name\n")
         fh.write(f"# load_unit {hdr['load_unit']}  time_unit {hdr['time_unit']}  "
                  f"leakage_unit {hdr['leakage_unit']}  "
                  f"default_max_transition {hdr['default_max_transition']}\n")
-        for p in a.liberty:
-            fh.write(f"# from {p}\n")
-        fh.write("cell\tvt\tarea\tleakage\tdrive\tclass\tdont_use\tseq\tpins\n")
+        for j in jobs:
+            p, vt = j if isinstance(j, tuple) else (j, None)
+            fh.write(f"# from {p}" + (f"  ({vt})" if vt else "") + "\n")
+        fh.write("cell\tvt\tarea\tleakage\tdrive\tclass\tdont_use\tseq\tpins" + ("\tclock\tfamily" if extra else "") + "\n")
         for r in out:
             fh.write("\t".join(r) + "\n")
     os.replace(tmp, a.out)
-    print(f"liberty_sizing: {len(out)} cell(s) from {len(a.liberty)} file(s) -> {a.out}")
+    print(f"liberty_sizing: {len(out)} cell(s) from {len(jobs)} file(s) -> {a.out}" +
+          (f"; {sum(r[-2] == '1' for r in out)} clock cell(s), {sum(bool(r[-1]) for r in out)} with a family" if extra else ""))
     return 0
 
 
