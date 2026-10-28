@@ -35,7 +35,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
   print "                       [-patch <rules.py>] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
-  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--name_registers]\n";
+  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [--booth] [--name_registers]\n";
   print "                       [-leaf_wrappers <glob>[,<glob>] [-leaf_soft <param>=<value>]\n";
   print "                        [-leaf_soft_mode resize|dissolve] [-leaf_hard <glob>[,<glob>]]\n";
   print "                        [-leaf_drop <glob>[,<glob>]]]\n";
@@ -80,6 +80,12 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        otherwise flattens a fast adder back into a slow one:\n";
   print "                        more area, less depth (3RDBIN/yosys_bottom_up has the\n";
   print "                        measurements)\n";
+  print "        --abc_balance   balance for delay before mapping (abc &if -g) in place\n";
+  print "                        of the area pass: a priority or mux chain written as\n";
+  print "                        a loop becomes a tree.  FMA unit of a 434k-cell core:\n";
+  print "                        abc delay -31%, area +3.8%\n";
+  print "        --booth         multipliers as Booth-encoded trees (yosys booth), not\n";
+  print "                        techmap's array: ~4% less area, no faster after abc\n";
   print "        --name_registers  each flop and latch named after its register,\n";
   print "                        e.g. a_ff.o_q[10]_reg, instead of _123_ (netlist ~1% larger)\n";
   print "        -abc_timeout    with -abc_delay, seconds a module may spend; past it\n";
@@ -139,6 +145,8 @@ my $abcDelay = "";
 my $abcTimeout = "";
 my $adder = "";
 my $abcKeep = 0;
+my $abcBalance = 0;
+my $booth = 0;
 my $nameRegs = 0;
 my $leafWrappers = "";
 my @leafSoft = ();
@@ -172,6 +180,8 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-abc_timeout"){$abcTimeout = $_[$i+1];}
   if($_[$i] eq "-adder"){$adder = $_[$i+1];}
   if($_[$i] eq "--abc_keep_structure"){$abcKeep = 1;}
+  if($_[$i] eq "--abc_balance"){$abcBalance = 1;}
+  if($_[$i] eq "--booth"){$booth = 1;}
   if($_[$i] eq "--name_registers"){$nameRegs = 1;}
   if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
   if($_[$i] eq "-leaf_soft"){push(@leafSoft, $_[$i+1]);}
@@ -582,9 +592,13 @@ my $inner = "python3 -u $beehome/3RDBIN/yosys_bottom_up" .
 $inner .= " --flatten-modules '$flattenModules'" if ( $flattenModules ne "" );
 $inner .= " --adder $adder" if ( $adder ne "" );
 $inner .= " --abc-keep-structure" if ( $abcKeep );
+$inner .= " --abc-balance" if ( $abcBalance );
+$inner .= " --booth" if ( $booth );
 $inner .= " --name-registers" if ( $nameRegs );
 print "INFO-PAR-HR_SYN : 076 : adders built " . ( $adder ne "" ? $adder : "brent_kung" ) .
-      ( $abcKeep ? ", abc's area pass left out" : "" ) . "\n" if ( $adder ne "" || $abcKeep );
+      ( $abcKeep ? ", abc's area pass left out" : "" ) .
+      ( $abcBalance ? ", abc balancing for delay in place of its area pass" : "" ) .
+      ( $booth ? ", multipliers Booth-encoded" : "" ) . "\n" if ( $adder ne "" || $abcKeep || $abcBalance || $booth );
 #<!-- -abc_delay: abc's buffer / upsize / dnsize run only with a constraints
 #     file, so without it every gate is the smallest that does the job and
 #     nothing splits a high fanout.  yosys_bottom_up has the details. -->

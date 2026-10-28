@@ -115,7 +115,7 @@ tribuf -formal
 delete t:$assert
 opt -fast
 memory_map
-{techmap}
+{booth}{techmap}
 opt -fast
 {regnames}
 techmap -map {aldffmap}
@@ -194,6 +194,19 @@ ABC_SIZED = ("+strash;&get,-n;&fraig,-x,-C,1000;&put;scorr;dc2;dretime;retime,-o
 # and on the incrementer alone, both: 6 cells against 21.  So these trade
 # area for depth; they are measured choices, not defaults.
 ABC_PLAIN_KEEP = "+strash;&get,-n;&dch,-f;&nf,{D};&put"
+
+# BALANCING FOR DELAY -- --abc-balance.  The area pass above leaves a long
+# priority chain as a chain: a leading-zero count or a normalize select written
+# as a loop reaches abc as a ripple of muxes, and &dch / &nf map what they are
+# given.  &if -g is abc's delay-oriented SOP balancing: it rebuilds each cone
+# as a balanced sum of products of 8-input cuts, and &dc2 cleans up after it.
+# Two rounds replace the area pass.  On the FMA unit of a 434k-cell in-order
+# core, whose worst path was the 162-bit add then ~50 AND/NAND gates in a line
+# (a normalize): abc delay 750.7 -> 517.8 ps (-31%), area +3.8%.  Also tried
+# on that module: &sopb 592.3 ps (+6.6% area); balance / resub / rewrite
+# rounds 737.2 ps; K 6 instead of 8, 538.8 ps; a third round, 523.4 ps.
+ABC_BALANCE_FRONT = "+strash;&get,-n;&fraig,-x,-C,1000;&st;&if,-g,-K,8;&dc2;&if,-g,-K,8;&dc2;&put;"
+ABC_AREA_FRONT = "+strash;&get,-n;&fraig,-x,-C,1000;&put;scorr;dc2;dretime;"
 ABC_SIZED_KEEP = "+strash;&get,-n;&dch,-f;&nf,{D};&put;buffer;upsize,{D};dnsize,{D};stime,-p"
 # REGISTER NAMES -- --name-registers.  Every cell comes out of yosys as _123_,
 # flops included, so a path report cannot say which register it starts or ends
@@ -452,6 +465,7 @@ def run_one(job):
                                        if args.latchmap else ""),
                              aldffmap=args.aldffmap,
                              techmap=ADDERS[args.adder], abc=abc,
+                             booth="booth\n" if args.booth else "",
                              regnames=REGNAMES if args.name_registers else "")
     t = time.time()
     # --abc-timeout: abc's timing-driven sizing (upsize/dnsize) does not scale
@@ -555,6 +569,14 @@ def main():
                     help="leave out abc's area pass (&fraig, scorr, dc2) before "
                          "mapping, so a fast adder is not flattened back into a "
                          "slow one -- more area, less depth")
+    ap.add_argument("--abc-balance", action="store_true",
+                    help="balance for delay before mapping (abc &if -g, two "
+                         "rounds) in place of the area pass: long priority and "
+                         "mux chains become trees; see BALANCING FOR DELAY")
+    ap.add_argument("--booth", action="store_true",
+                    help="map multipliers ($mul) as Booth-encoded trees (yosys "
+                         "booth) instead of techmap's array: no faster after "
+                         "abc on the FMA unit measured, ~4%% less area")
     ap.add_argument("--abc-no-buffer", action="store_true",
                     help="with --abc-delay, size gates but build no fanout trees: "
                          "abc's `buffer` caps every net at 10 loads with trees chosen "
@@ -580,12 +602,16 @@ def main():
                     help="carry on past a level with failures (the next level "
                          "will fail too, but it reports every break at once)")
     args = ap.parse_args()
+    if args.abc_balance and args.abc_keep_structure:
+        sys.exit("yosys_bottom_up: --abc-balance and --abc-keep-structure both replace the area pass; give one")
     os.makedirs(args.out, exist_ok=True)
     args.aldffmap = os.path.abspath(os.path.join(args.out, "aldff_map.v"))
     with open(args.aldffmap, "w") as fh:
         fh.write(aldff_map())
+    def front(sc):
+        return sc.replace(ABC_AREA_FRONT, ABC_BALANCE_FRONT, 1) if args.abc_balance else sc
     args.abc_opts = "-fast " if args.abc_fast else \
-        f'-script "{ABC_PLAIN_KEEP if args.abc_keep_structure else ABC_PLAIN}" '
+        f'-script "{front(ABC_PLAIN_KEEP if args.abc_keep_structure else ABC_PLAIN)}" '
     if args.abc_delay:
         driver, load = args.abc_driver, args.abc_load
         if driver is None or load is None:
@@ -600,7 +626,7 @@ def main():
         with open(constr, "w") as fh:
             fh.write(f"set_driving_cell {driver}\nset_load {load:.4f}\n")
         if not args.abc_fast:
-            script = ABC_SIZED_KEEP if args.abc_keep_structure else ABC_SIZED
+            script = front(ABC_SIZED_KEEP if args.abc_keep_structure else ABC_SIZED)
             if args.abc_no_buffer:
                 script = script.replace("&put;buffer;", "&put;")
             args.abc_opts = f'-script "{script}" '
