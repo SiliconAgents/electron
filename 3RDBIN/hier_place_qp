@@ -70,8 +70,10 @@ def write_nodes(path, src, hdr, nodes, cx, cy, movable):
 
 
 class Capacity:
-    """Free area per grid bin (die minus fixed blocks), with 2D prefix sums."""
-    def __init__(self, die, blocks, nbx, nby, density):
+    """Free area per grid bin (die minus fixed blocks), with 2D prefix sums.
+    With a region, a bin holds at most its overlap with the region, so the
+    spread puts every movable cell inside it."""
+    def __init__(self, die, blocks, nbx, nby, density, region=None):
         self.x0, self.y0, x1, y1 = die
         self.nbx, self.nby = nbx, nby
         self.bw, self.bh = (x1 - self.x0) / nbx, (y1 - self.y0) / nby
@@ -87,6 +89,13 @@ class Capacity:
                     bb = self.y0 + j * self.bh
                     oy = max(0.0, min(t, bb + self.bh) - max(b, bb))
                     cap[i, j] -= ox * oy
+        if region is not None:
+            rl, rb, rr, rt = region
+            xs = self.x0 + np.arange(nbx + 1) * self.bw; ys = self.y0 + np.arange(nby + 1) * self.bh
+            ox = np.clip(np.minimum(xs[1:], rr) - np.maximum(xs[:-1], rl), 0.0, None)
+            oy = np.clip(np.minimum(ys[1:], rt) - np.maximum(ys[:-1], rb), 0.0, None)
+            cap = np.minimum(cap, np.outer(ox, oy))
+        self.region = region
         self.cap = np.clip(cap, 0.0, None) * density
         self.ps = np.zeros((nbx + 1, nby + 1))
         self.ps[1:, 1:] = self.cap.cumsum(0).cumsum(1)
@@ -109,6 +118,11 @@ def spread(cx, cy, area, cap):
             # keeping their relative order, so the region is filled not stacked
             rx0, rx1 = cap.x0 + i0 * cap.bw, cap.x0 + i1 * cap.bw
             ry0, ry1 = cap.y0 + j0 * cap.bh, cap.y0 + j1 * cap.bh
+            if cap.region is not None:
+                # only the part of the bin inside the region, where it has any
+                rl, rb, rr, rt = cap.region
+                if min(rx1, rr) > max(rx0, rl): rx0, rx1 = max(rx0, rl), min(rx1, rr)
+                if min(ry1, rt) > max(ry0, rb): ry0, ry1 = max(ry0, rb), min(ry1, rt)
             for arr, lo, hi in ((nx, rx0, rx1), (ny, ry0, ry1)):
                 c = arr[ids]
                 o = np.argsort(c, kind="stable")
@@ -164,6 +178,8 @@ def main():
                     help="fraction of each bin's free area cells may use")
     ap.add_argument("--bin_rows", type=float, default=8.0,
                     help="bin edge in row heights (default 8)")
+    ap.add_argument("--region", type=float, nargs=4, metavar=("X0", "Y0", "X1", "Y1"),
+                    help="place every movable cell inside this rectangle (hier_place_all --own_fence)")
     a, _unknown = ap.parse_known_args()   # hier_place's own switches are accepted and ignored
     t0 = time.time()
     hdr, nodes = read_nodes(a.nodefile)
@@ -226,12 +242,20 @@ def main():
     bin_edge = a.bin_rows * rh
     nbx = max(1, min(512, int((die[2] - die[0]) / bin_edge)))
     nby = max(1, min(512, int((die[3] - die[1]) / bin_edge)))
-    cap = Capacity(die, blocks, nbx, nby, a.density)
+    region = tuple(a.region) if a.region else None
+    if region and not (region[0] < region[2] and region[1] < region[3]):
+        print(f"hier_place_qp: --region {region} is empty, placing without it"); region = None
+    cap = Capacity(die, blocks, nbx, nby, a.density, region)
+    if region and cap.cap.sum() < (w * h)[mi].sum():
+        print(f"hier_place_qp: --region {region} holds {cap.cap.sum():.0f} um2, less than the "
+              f"{(w * h)[mi].sum():.0f} um2 of cells: placing without it")
+        region = None; cap = Capacity(die, blocks, nbx, nby, a.density)
     area = (w * h)[mi]
     print(f"hier_place_qp: {m} movable, {n - m} fixed ({len(blocks)} blocks), {len(ea)} edges "
           f"({nweighted} weighted), "
           f"{nbx}x{nby} bins of {bin_edge:.2f} um; cell area {area.sum():.0f} um2, "
-          f"free capacity {cap.cap.sum():.0f} um2")
+          f"free capacity {cap.cap.sum():.0f} um2"
+          + (f", inside region ({region[0]:.1f}, {region[1]:.1f})-({region[2]:.1f}, {region[3]:.1f}) of die {die}" if region else ""))
 
     x0 = np.where(movable, cx, dcx)[mi]; y0 = np.where(movable, cy, dcy)[mi]
     xs, _ = spla.cg(L, bx, x0=x0, rtol=1e-6, maxiter=2000)
@@ -271,6 +295,9 @@ def main():
                          "gap": round(float((best[0] - lb) / max(best[0], 1e-9)), 4),
                          "overflow": round(over, 4), "cell_area": round(float(area.sum()), 4),
                          "free_capacity": round(float(cap.cap.sum()), 4),
+                         "region": list(region) if region else None,
+                         "outside_region": (int(((sx < region[0]) | (sx > region[2]) | (sy < region[1]) | (sy > region[3])).sum())
+                                            if region else None),
                          "seconds": round(time.time() - t0, 3)})
     print(f"hier_place_qp: wrote {a.save}, spread HPWL {best[0]:.1f}, {time.time() - t0:.1f}s")
 

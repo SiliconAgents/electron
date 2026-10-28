@@ -699,6 +699,7 @@ return { blocks => $nBlocks, groups => scalar(@items), worst_aspect => $worstAsp
 #     this module's frame, or undef for the block pass's own centres.
 #     Returns a summary. -->
 %HIER_LB_PARENTS = (); %HIER_LB_KIDS = ();   #<!-- module hierarchy, both ways, built on first use -->
+%HIER_OWN_REGION = ();                        #<!-- module -> [x0, y0, x1, y1] of its own region, as legalized -->
 sub dbfTstgenHierLegalizeBlocks {
 
 my ($module, $W, $H, $siteUm, $rowHum, $fixed, $sizes, $targets, $aspect) = @_;
@@ -765,9 +766,50 @@ foreach my $inst ( sort keys %box ) {
   }
   $bounds{$inst} = [ $mnW, $mnH, $mxW, $mxH ];
 }
+#<!-- h=/w= on a block's target: a min side, and the block starts that shape.
+#     The legalizer picks which blocks sit side by side from the starting
+#     shapes, so a block held tall that starts square can still end up above
+#     a neighbour it would only overlap as a square: a 314 um block sat 43 um
+#     up over four small banks it no longer reached. -->
+my %startShape = ();
+if ( defined $targets ) {
+  my %spec = ();
+  foreach my $inst ( keys %box ) {
+    next if ( exists $fixed->{$refOf{$inst}} || ! exists $targets->{$inst} );
+    my $sp = &dbfTstgenHierShapeSpec($targets->{$inst}[2]);
+    $spec{$inst} = $sp if ( defined $sp && %$sp );
+  }
+  my $area = sub { ( $box{$_[0]}[2] - $box{$_[0]}[0] ) * ( $box{$_[0]}[3] - $box{$_[0]}[1] ) };
+  #<!-- hstack: the box's height in whole row pairs, shared out equally; the
+  #     largest blocks take the odd row pairs.  Equal, not by area, so lane k
+  #     of one unit is exactly as tall as lane k of its mirror and they face
+  #     each other along their whole height. -->
+  my @stack = sort { $area->($b) <=> $area->($a) || $a cmp $b } grep { $spec{$_}{hstack} } keys %spec;
+  if ( @stack && $pitchY > 0 ) {
+    my $np = int( $H / $pitchY + 1e-6 );
+    my ($base, $odd) = ( int($np / @stack), $np % @stack );
+    for my $k ( 0 .. $#stack ) {
+      my $h = ( $base + ( $k < $odd ? 1 : 0 ) ) * $pitchY;
+      $startShape{$stack[$k]} = [ $area->($stack[$k]) / $h, $h ];
+      $bounds{$stack[$k]}[1] = $h; $bounds{$stack[$k]}[3] = $h;
+    }
+  }
+  foreach my $inst ( keys %spec ) {
+    next if ( $spec{$inst}{hstack} );
+    my ($sp, $a) = ( $spec{$inst}, $area->($inst) );
+    $bounds{$inst}[1] = $sp->{h} * $H    if ( exists $sp->{h}    && $sp->{h} * $H > $bounds{$inst}[1] );
+    $bounds{$inst}[0] = $sp->{w} * $W    if ( exists $sp->{w}    && $sp->{w} * $W > $bounds{$inst}[0] );
+    $bounds{$inst}[3] = $sp->{hmax} * $H if ( exists $sp->{hmax} && ( $bounds{$inst}[3] == 0 || $sp->{hmax} * $H < $bounds{$inst}[3] ) );
+    $bounds{$inst}[2] = $sp->{wmax} * $W if ( exists $sp->{wmax} && ( $bounds{$inst}[2] == 0 || $sp->{wmax} * $W < $bounds{$inst}[2] ) );
+    if    ( exists $sp->{h} )    { $startShape{$inst} = [ $a / ( $sp->{h} * $H ), $sp->{h} * $H ]; }
+    elsif ( exists $sp->{w} )    { $startShape{$inst} = [ $sp->{w} * $W, $a / ( $sp->{w} * $W ) ]; }
+    elsif ( exists $sp->{hmax} ) { $startShape{$inst} = [ $a / ( $sp->{hmax} * $H ), $sp->{hmax} * $H ]; }
+  }
+}
 foreach my $inst ( sort keys %box ) {
   my ($bw, $bh) = exists $fixed->{$refOf{$inst}} ? @{$fixed->{$refOf{$inst}}}
-                                                 : ( $box{$inst}[2] - $box{$inst}[0], $box{$inst}[3] - $box{$inst}[1] );
+                : exists $startShape{$inst}        ? @{$startShape{$inst}}
+                                                   : ( $box{$inst}[2] - $box{$inst}[0], $box{$inst}[3] - $box{$inst}[1] );
   $shape{$inst} = [ $bw, $bh ];
   my ($cx, $cy) = ( ($box{$inst}[0] + $box{$inst}[2]) / 2, ($box{$inst}[1] + $box{$inst}[3]) / 2 );
   if ( defined $targets ) {
@@ -791,8 +833,24 @@ if ( defined $targets && exists $targets->{'*'} ) {
   my $frac = $ENV{ELECTRON_OWN_REGION} // 0.5;
   $ownArea = $frac * ( $W * $H - $blockA );
   if ( $ownArea > 0 ) {
-    my $side = sqrt($ownArea);
-    printf $fh "BLOCK\t__own__\t%.6f\t%.6f\t%.6f\t%.6f\t1\t0\t__own__\t0\t0\t0\t0\n", $side, $side, @{$targets->{'*'}};
+    my ($ox, $oy, $osh) = @{$targets->{'*'}};
+    my $sp = &dbfTstgenHierShapeSpec($osh) // {};
+    my ($ow, $oh) = ( sqrt($ownArea), sqrt($ownArea) );
+    my @ob = ( 0, 0, 0, 0 );
+    #<!-- the shape terms as bounds for the legalizer (they win over --aspect),
+    #     and a start shape already within them.  h= and w= together: exactly
+    #     that rectangle, whatever ELECTRON_OWN_REGION would have made it. -->
+    if ( exists $sp->{h} && exists $sp->{w} ) {
+      ($ow, $oh) = ( $sp->{w} * $W, $sp->{h} * $H ); $ownArea = $ow * $oh; @ob = ( $ow, $oh, $ow, $oh );
+    }
+    else {
+      if    ( exists $sp->{h} )    { $oh = $sp->{h} * $H; $ow = $ownArea / $oh; }
+      elsif ( exists $sp->{w} )    { $ow = $sp->{w} * $W; $oh = $ownArea / $ow; }
+      elsif ( exists $sp->{hmax} ) { $oh = $sp->{hmax} * $H; $ow = $ownArea / $oh; }
+      $ob[0] = $sp->{w} * $W    if ( exists $sp->{w} );    $ob[1] = $sp->{h} * $H    if ( exists $sp->{h} );
+      $ob[2] = $sp->{wmax} * $W if ( exists $sp->{wmax} ); $ob[3] = $sp->{hmax} * $H if ( exists $sp->{hmax} );
+    }
+    printf $fh "BLOCK\t__own__\t%.6f\t%.6f\t%.6f\t%.6f\t1\t0\t__own__\t%.6f\t%.6f\t%.6f\t%.6f\n", $ow, $oh, $ox, $oy, @ob;
   }
 }
 close($fh);
@@ -811,6 +869,8 @@ open($fh, "<", $out) or return { blocks => 0, error => "cannot read $out: $!" };
 while ( my $l = <$fh> ) {
   chomp($l);
   my ($k, $inst, $x, $y, $bw, $bh) = split(/\t/, $l);
+  #<!-- where the own region came out, for --own_fence's cell pass -->
+  if ( defined $bh && $k eq "BLOCK" && $inst eq "__own__" ) { $HIER_OWN_REGION{$module} = [ $x, $y, $x + $bw, $y + $bh ]; next; }
   next unless ( defined $bh && $k eq "BLOCK" && exists $shape{$inst} );
   #<!-- the helper's shape: reshaped (area kept, aspect within 1:3, on the
   #     site and row-pair grid) unless the module's shape was already fixed -->
@@ -1098,7 +1158,37 @@ return scalar(@tasks);
 #     region kept free for it there (ELECTRON_OWN_REGION of the free area) -- the frame hier_place_all places that module in, so a
 #     plan made flat (a register-level placement of the critical paths) says
 #     where blocks go without saying where any cell goes.  # starts a comment.
-#     Returns module => inst => [fx, fy]. -->
+#     A fifth column shapes the block (or, on a "*" line, the own region), a
+#     comma list of:
+#       h=<f>  w=<f>       at least that fraction of the box tall / wide
+#       hmax=<f> wmax=<f>  at most that fraction
+#       hstack             the module's hstack blocks split the box's height
+#                          exactly, in equal whole row pairs: a column of
+#                          lanes with no channel between them, each the same
+#                          height as its partner in a mirrored sibling
+#       fence              ("*" only) the module's own cells are placed
+#                          inside its own region and nowhere else
+#     A block keeps its area, so h= sets its width.  An own region given both
+#     h= and w= takes exactly that shape; otherwise its area is
+#     ELECTRON_OWN_REGION of the free area.  A module whose shape is already
+#     fixed keeps it.
+#     Returns module => inst => [fx, fy, shape]. -->
+#<!-- a -block_targets shape column: "h=0.5,hmax=0.5,w=0.05" -> { h => 0.5,
+#     hmax => 0.5, w => 0.05 }; undef if a term is not one of h= w= hmax= wmax=
+#     (a fraction in 0..1), hstack or fence -->
+sub dbfTstgenHierShapeSpec {
+my ($str) = @_;
+my %s = ();
+return \%s unless ( defined $str && $str ne "" );
+foreach my $t ( split(/,/, $str) ) {
+  if ( $t =~ m/^(h|w|hmax|wmax)=(0?\.\d+|1(\.0*)?)$/ ) { $s{$1} = $2; }
+  elsif ( $t eq "hstack" || $t eq "fence" )             { $s{$t} = 1; }
+  else                                                  { return undef; }
+}
+return \%s;
+}# sub dbfTstgenHierShapeSpec
+
+
 sub dbfTstgenReadBlockTargets {
 my ($file) = @_;
 my $fh;
@@ -1111,14 +1201,16 @@ my ($n, $bad) = (0, 0);
 while ( my $l = <$fh> ) {
   $l =~ s/#.*//; next unless ( $l =~ m/\S/ );
   chomp($l);
-  my ($m, $i, $fx, $fy) = split(/\t/, $l);
+  my ($m, $i, $fx, $fy, $sh) = split(/\t/, $l);
   if ( ! defined $fy || $fx !~ m/^-?[\d.]+(e-?\d+)?$/ || $fy !~ m/^-?[\d.]+(e-?\d+)?$/ ) { $bad++; next; }
-  $t{$m}{$i} = [ $fx, $fy ];
+  $sh = "" unless ( defined $sh ); $sh =~ s/\s+//g;
+  if ( $sh ne "" && ! defined &dbfTstgenHierShapeSpec($sh) ) { $bad++; next; }
+  $t{$m}{$i} = [ $fx, $fy, $sh ];
   $n++;
 }
 close($fh);
 if ( $bad ) {
-  print "ERR-TST-HR_PL_ALL : 056 : -block_targets $file: $bad line(s) are not module<TAB>instance<TAB>cx<TAB>cy\n";
+  print "ERR-TST-HR_PL_ALL : 056 : -block_targets $file: $bad line(s) are not module<TAB>instance<TAB>cx<TAB>cy[<TAB>shape], shape a comma list of h= w= hmax= wmax= <frac> and hstack\n";
   return undef;
 }
 return \%t;
@@ -1586,6 +1678,14 @@ my $jobs = 1;
 #     in round trips into and out of modules.  --no_child_pins for the old way. -->
 my $childPins = 1;
 my %childPinsDone = ();
+#<!-- --own_fence: a module's own cells stay inside its own region.  Without
+#     it the cell pass is never told where the region is: it only keeps the
+#     blocks off it, and the cells go to any free space near what they drive.
+#     On a vector unit 42-49% of each lane group's own cells went into the
+#     channels between its stacked lanes, out to the far edge, and half of
+#     the parent's into gaps beside its region. -->
+my $ownFence = 0;
+%HIER_OWN_REGION = ();
 my $fanoutLimit = 0;
 my $extra = "";
 my ($noCells, $noFlatten, $skipPlaced, $reportOnly, $keepFiles) = (0, 0, 0, 0, 0);
@@ -1686,6 +1786,11 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                               pins are put where the parent's nets\n";
   print "                                               reach it, FIXED, so the child is placed\n";
   print "                                               toward its partners outside\n";
+  print "                       --own_fence             every module's own cells only inside its\n";
+  print "                                               own region (\"*\" in -block_targets, with\n";
+  print "                                               --legalize_blocks): the cell pass gets\n";
+  print "                                               no capacity outside it.  \"fence\" in a\n";
+  print "                                               \"*\" line's shape does it for one module\n";
   print "                       -metrics <file>         one JSON line per module per run,\n";
   print "                                               appended; default\n";
   print "                                               hier_place_all.metrics.jsonl\n";
@@ -1749,6 +1854,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-jobs")          { $jobs = $_[$i+1]; }
   elsif ($_[$i] eq "--child_pins")   { $childPins = 1; }
   elsif ($_[$i] eq "--no_child_pins") { $childPins = 0; }
+  elsif ($_[$i] eq "--own_fence")     { $ownFence = 1; }
   elsif ($_[$i] eq "-seq_anchor_limit") { $seqAnchorLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-fanout_limit")  { $fanoutLimit = $_[$i+1]; }
   elsif ($_[$i] eq "-args")          { $extra = $_[$i+1]; $i++; }
@@ -2251,7 +2357,7 @@ my $placeOne = sub {
   #     line holds one -- the pass then only places ports and flops around
   #     the blocks.  A spec line wins: it is the person's explicit word. -->
   if ( $legalizeBlocks && exists $blockTargets->{$mod} && ! @specHeld && ! $keepExisting ) {
-    my %tg = map { $_ => [ $blockTargets->{$mod}{$_}[0] * $w, $blockTargets->{$mod}{$_}[1] * $h ] } keys %{$blockTargets->{$mod}};
+    my %tg = map { $_ => [ $blockTargets->{$mod}{$_}[0] * $w, $blockTargets->{$mod}{$_}[1] * $h, $blockTargets->{$mod}{$_}[2] ] } keys %{$blockTargets->{$mod}};
     my $sum = &dbfTstgenHierLegalizeBlocks($mod, $w, $h, $wsSiteUm, $GLOBAL->dbGlobalGetRowHeight,
                                            \%sliceShape, \%wsSize, \%tg, $blockAspect);
     if ( exists $sum->{error} ) {
@@ -2358,6 +2464,11 @@ my $placeOne = sub {
     push(@cellArgs, "--keep") if ( $keepFiles );
     push(@cellArgs, "-net_weights", $netWeights, "-weight_scale", $weightScale, "-weight_power", $weightPower) if ( $netWeights ne "" );
     push(@cellArgs, "-anchor", $cellsAnchor) if ( $cellsAnchor ne "" );
+    my $fenced = $ownFence || ( exists $blockTargets->{$mod} && exists $blockTargets->{$mod}{'*'}
+                                && ( &dbfTstgenHierShapeSpec($blockTargets->{$mod}{'*'}[2]) // {} )->{fence} );
+    if ( $fenced && exists $HIER_OWN_REGION{$mod} ) {
+      push(@cellArgs, "-args", join(",", "--region", map { sprintf("%.4f", $_) } @{$HIER_OWN_REGION{$mod}}));
+    }
     &hier_place_cells(@cellArgs);
     $mrec{cell_pass} = $HIER_PLACE_CELL_STATS{$mod} if ( exists $HIER_PLACE_CELL_STATS{$mod} );
   }

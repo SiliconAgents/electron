@@ -3476,7 +3476,13 @@ sub copy_port_loc_from_pseudo_to_flat
 #     cannot move.  The combinational cells then arrange themselves around the
 #     blocks, the flops and the ports rather than being placed in a vacuum.
 #
-#     Blocks are handed over as blockage, so a cell cannot land inside one.
+#     Blocks are handed over as blockage, but that only keeps cells out of
+#     them on average: -cells_placer qp spreads by bins, and a bin a block
+#     only partly covers is filled across its whole area, so a few percent of
+#     the cells land on blocks.  Free space anywhere in the module is fair
+#     game too -- a module's own cells go wherever there is room near what
+#     they drive unless -args --region (hier_place_all's fence) confines
+#     them.
 #
 #     What this does NOT do is legalise.  The placer spreads on a continuous
 #     field and snaps nothing to a row, so the result overlaps and sits off
