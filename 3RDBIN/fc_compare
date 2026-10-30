@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Compare Photon's reg->reg timing with Fusion Compiler's, the clock set aside.
+
+    fc_compare --fc setup.rpt.gz --photon design.seg.tsv
+               [--scenario S] [--group G] [--out prefix]
+
+--fc is FC's report_timing (-path_type full -input_pins -nets -transition_time
+-capacitance; -crosstalk_delta and -pba_mode path help); --photon is Photon's
+endpoint table (<out>.seg.tsv) from a run on the same netlist and, for a fair
+comparison, the same SPEF.
+
+Photon times ideal clocks.  FC times a built clock tree, often skewed on
+purpose, and adds uncertainty and a POCV adjustment; compared as they stand,
+the two disagree mostly about the clock.  On one routed 1.2M-net tile FC failed
+110 reg->reg endpoints and Photon 27,711, while their data paths agreed within
+5%: FC's capture clock arrived 29 ps after its launch clock on average, more
+than its 24.7 ps of uncertainty.  So FC's slack is restated without them:
+
+    ideal = slack - (capture latency - launch latency) - CRPR - uncertainty - POCV
+
+which is period - setup - (clock-to-Q + data path), what Photon reports.  Both
+are compared endpoint by endpoint, and the summary splits FC's slack into what
+was set aside.
+
+Each tool picks its own worst path into an endpoint, and with real clock
+latencies FC's is often from another startpoint (97% of endpoints on that
+tile), so an endpoint's difference mixes data-path and path-choice effects.
+
+FC's unit is taken from its clock-to-Q values (ps when they exceed 1);
+Photon's is ns.  Names are compared without backslash escapes.  Paths from or
+to a port are left out: Photon has no input or output delays to match them.
+"""
+import argparse
+import csv
+import gzip
+import math
+import re
+import statistics as st
+import sys
+
+NUM = re.compile(r"^-?(\d+\.?\d*|\.\d+)$")
+MARK = re.compile(r"^([a-zA-Z],?|[-*&^@~+$]+)$")   # edge, attributes ("s, n"), "--" for no SI delta
+
+
+def bare(s):
+    return s.replace("\\", "")
+
+
+def nums(toks):
+    return [float(t) for t in toks if NUM.match(t)]
+
+
+def read_fc(path, scenario, group):
+    """FC's paths of one scenario (the first seen if none is named) and, if named,
+    one group: each a dict of its clock terms, slack and launch-side pins."""
+    out, seen, groups = [], {}, {}
+    scen = scenario
+    p = None
+    pend = None
+    arrived = False
+    keep = False
+
+    def flush():
+        if p is not None and keep and p.get("slack") is not None:
+            out.append(p)
+
+    op = gzip.open if path.endswith(".gz") else open
+    with op(path, "rt", errors="replace") as f:
+        for ln in f:
+            s = ln.strip()
+            if s.startswith("Startpoint:"):
+                flush()
+                p = {"start": s.split()[1], "pins": [], "slack": None}
+                pend, arrived, keep = None, False, False
+                continue
+            if p is None:
+                continue
+            if s.startswith("Endpoint:"):
+                p["end"] = s.split()[1]
+                continue
+            if s.startswith("Scenario:"):
+                p["scen"] = s.split()[1]
+                scen = scen or p["scen"]
+                continue
+            if s.startswith("Path Group:"):
+                g = s.split(":", 1)[1].strip()
+                sc = p.get("scen", "")
+                seen[sc] = seen.get(sc, 0) + 1
+                if sc == scen:
+                    groups[g] = groups.get(g, 0) + 1
+                keep = sc == scen and (not group or g == group)
+                continue
+            if not keep or not s:
+                continue
+            if pend is not None:                    # a long name puts its numbers on the next line
+                if all(NUM.match(t) or MARK.match(t) for t in s.split()):
+                    s = pend + " " + s
+                pend = None
+            t = s.split()
+            if s.startswith("clock reconvergence pessimism"):
+                p["crpr"] = nums(t)[0]
+            elif s.startswith("clock uncertainty"):
+                p["uncert"] = nums(t)[0]
+            elif s.startswith("clock network delay"):
+                p["capture_clk" if arrived else "launch_clk"] = nums(t)[0]
+            elif s.startswith("clock ") and " edge)" in s:
+                p["capture_edge" if arrived else "launch_edge"] = nums(t)[-1]
+            elif s.startswith("input external delay") or s.startswith("output external delay"):
+                p["port"] = True
+            elif s.startswith("data arrival time"):
+                arrived = True
+            elif s.startswith("library setup time"):
+                p["setup"] = nums(t)[0]
+            elif s.startswith("statistical adjustment"):
+                p["stat"] = nums(t)[0]
+            elif s.startswith("slack"):
+                p["slack"] = nums(t)[-1]
+            elif len(t) >= 2 and t[1] == "(net)":
+                v = nums(t[2:])
+                if not v:
+                    pend = s
+                elif not arrived and p["pins"] and len(v) >= 2:
+                    p["pins"][-1]["cap"] = v[1]
+            elif len(t) >= 2 and t[1].startswith("(") and t[1].endswith(")") and not s.startswith("data "):
+                v = nums(t[2:])
+                if not v:
+                    pend = s
+                    continue
+                if t[1] in ("(in)", "(out)"):
+                    p["port"] = True
+                if not arrived:
+                    p["pins"].append({"pin": bare(t[0]), "cell": t[1][1:-1], "trans": v[0],
+                                      "delta": v[1] if len(v) >= 4 else 0.0, "path": v[-1]})
+    flush()
+    return out, scen, seen, groups
+
+
+def read_photon(path):
+    """Photon's endpoint table: inst/pin -> (slack, setup, required), ns."""
+    m = {}
+    with open(path) as f:
+        for r in csv.DictReader(f, delimiter="\t"):
+            if r["startpoint_pin"] == "PIN" or r["endpoint_pin"] == "PIN":
+                continue
+            m[bare(r["endpoint"] + "/" + r["endpoint_pin"])] = (
+                float(r["slack"]), float(r["setup"]), float(r["required"]), bare(r["startpoint"] + "/" + r["startpoint_pin"]))
+    return m
+
+
+def corr(a, b):
+    ma, mb = st.mean(a), st.mean(b)
+    sab = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    d = math.sqrt(sum((x - ma) ** 2 for x in a) * sum((y - mb) ** 2 for y in b))
+    return sab / d if d else float("nan")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--fc", required=True, help="FC report_timing, .gz or plain")
+    ap.add_argument("--photon", required=True, help="Photon's <out>.seg.tsv")
+    ap.add_argument("--scenario", default="", help="FC scenario (default: the first in the report)")
+    ap.add_argument("--group", default="", help="FC path group (default: all)")
+    ap.add_argument("--out", default="", help="write <out>.fc_compare.tsv, one row an endpoint")
+    a = ap.parse_args()
+
+    paths, scen, seen, groups = read_fc(a.fc, a.scenario, a.group)
+    print(f"fc_compare: {len(paths):,} FC path(s), scenario '{scen or '(none named)'}'"
+          + (f", group '{a.group}'" if a.group else f", groups: " + ", ".join(f"{k} ({v:,})" for k, v in groups.items())))
+    if len(seen) > 1:
+        print("fc_compare: scenarios in the report: " + ", ".join(f"{k} ({v:,})" for k, v in seen.items()))
+    if not paths:
+        sys.exit("fc_compare: no paths to compare")
+    ck = sorted(p["pins"][1]["path"] - p["pins"][0]["path"] for p in paths[:2000] if len(p["pins"]) >= 2)
+    u = 1.0 if ck and ck[len(ck) // 2] > 1.0 else 1000.0   # FC value x u = ps
+    ph = read_photon(a.photon)
+    rows, nport = [], 0
+    for p in paths:
+        if p.get("port") or len(p["pins"]) < 2:
+            nport += 1
+            continue
+        end = p["pins"][-1]["pin"]
+        if end not in ph:
+            continue
+        g = lambda k: p.get(k, 0.0) * u
+        skew = g("capture_clk") - g("launch_clk")
+        rows.append({"end": end, "start": p["pins"][1]["pin"], "fc": g("slack"),
+                     "skew": skew, "crpr": g("crpr"), "uncert": g("uncert"), "pocv": g("stat"),
+                     "period": g("capture_edge") - g("launch_edge"),
+                     "ph": ph[end][0] * 1000.0, "ph_start": ph[end][3], "p": p})
+    print(f"fc_compare: {len(rows):,} reg->reg endpoint(s) in both; {nport:,} FC path(s) from or to a port left out;"
+          f" FC unit {'ps' if u == 1.0 else 'ns'}")
+    if not rows:
+        sys.exit("fc_compare: no endpoint in both -- same netlist? same names?")
+    per = st.median(r["period"] for r in rows)
+    preq = st.median(v[2] + v[1] for v in ph.values()) * 1000.0
+    if abs(per - preq) > 0.01 * per:
+        print(f"fc_compare: WARNING FC's period {per:.1f} ps and Photon's {preq:.1f} ps differ -- slacks are not comparable")
+
+    phs = [r["ph"] for r in rows]
+    print(f"\n{'slack, ps':38} {'mean':>7} {'median':>7} {'WNS':>8} {'failing':>8} {'Photon-FC':>10} {'|d|<10ps':>9} {'r':>6}")
+    variants = (("FC as reported", lambda r: r["fc"]),
+                ("FC, skew removed", lambda r: r["fc"] - r["skew"] - r["crpr"]),
+                ("FC, skew+uncertainty+POCV removed", lambda r: r["fc"] - r["skew"] - r["crpr"] - r["uncert"] - r["pocv"]))
+    for name, f in variants:
+        fc = [f(r) for r in rows]
+        d = [x - y for x, y in zip(phs, fc)]
+        print(f"{name:38} {st.mean(fc):7.1f} {st.median(fc):7.1f} {min(fc):8.1f} {sum(x < 0 for x in fc):8,}"
+              f" {st.mean(d):+10.1f} {sum(abs(x) < 10 for x in d) / len(d):9.0%} {corr(phs, fc):6.3f}")
+    print(f"{'Photon (ideal clock)':38} {st.mean(phs):7.1f} {st.median(phs):7.1f} {min(phs):8.1f} {sum(x < 0 for x in phs):8,}")
+    print(f"\nset aside from FC, mean ps: skew {st.mean(r['skew'] for r in rows):+.1f}, CRPR {st.mean(r['crpr'] for r in rows):+.1f},"
+          f" uncertainty {st.mean(r['uncert'] for r in rows):+.1f}, POCV {st.mean(r['pocv'] for r in rows):+.1f}")
+    same_start = sum(1 for r in rows if r["ph_start"] == r["start"])
+    print(f"same startpoint in both: {same_start:,} of {len(rows):,} ({same_start / len(rows):.0%})")
+
+    if a.out:
+        with open(a.out + ".fc_compare.tsv", "w") as w:
+            w.write("endpoint\tfc_startpoint\tphoton_startpoint\tfc_slack\tfc_ideal_slack\tphoton_slack\tdiff"
+                    "\tfc_skew\tfc_crpr\tfc_uncertainty\tfc_pocv\n")
+            for r in sorted(rows, key=lambda r: r["fc"] - r["skew"] - r["crpr"] - r["uncert"] - r["pocv"]):
+                ideal = r["fc"] - r["skew"] - r["crpr"] - r["uncert"] - r["pocv"]
+                w.write(f"{r['end']}\t{r['start']}\t{r['ph_start']}\t{r['fc']:.2f}\t{ideal:.2f}\t{r['ph']:.2f}"
+                        f"\t{r['ph'] - ideal:.2f}\t{r['skew']:.2f}\t{r['crpr']:.2f}\t{r['uncert']:.2f}\t{r['pocv']:.2f}\n")
+        print(f"\n-> {a.out}.fc_compare.tsv")
+
+
+if __name__ == "__main__":
+    main()
