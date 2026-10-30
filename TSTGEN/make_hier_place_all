@@ -698,6 +698,66 @@ return { blocks => $nBlocks, groups => scalar(@items), worst_aspect => $worstAsp
 #     legalize_flat, and reported when it is more than a few percent (068, 069).  $targets is inst => [cx, cy] in microns of
 #     this module's frame, or undef for the block pass's own centres.
 #     Returns a summary. -->
+#<!-- What a module's blocks must go around, [x0, y0, x1, y1] in its frame:
+#     its own hard macros that are FIXED (a released floorplan's, read in with
+#     read_pseudo_nodefile), and at the top set_placement_blockage.
+#
+#     The macros as fields, not one by one.  A floorplan sets them in pairs
+#     with a pin channel between (13.7 um) and rows of pairs with a routing
+#     channel between those (20-30 um); handed 176 separate rectangles, the
+#     legalizer is free to put a small block in a channel.  So a row's macros
+#     less than $gap apart are one rectangle, the channel between two rows
+#     that overlap and are less than 2 x $gap apart is filled, and a field
+#     within $gap of the box's edge is taken to it.  The channels still get
+#     cells -- the cell pass and legalize_flat see the macros themselves. -->
+sub dbfTstgenHierLegalizeObstacles {
+
+my ($module, $W, $H) = @_;
+my $gap = $ENV{ELECTRON_OBS_MERGE} // 16;
+my %row = ();
+foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$module}} ) {
+  next if ( $inst eq "PIN" );
+  my $V = $PSEUDO_VINST_ALREADY{$module}{$inst};
+  my $st = $V->dbPimDBGetInstStatus;
+  next unless ( defined $st && $st eq "FIXED" );
+  my $ref = $V->dbPimDBGetInstCellref;
+  next unless ( defined $ref && exists $PLDB{$ref} );
+  my $class = $PLDB{$ref}->dbMdbGetClass;
+  next if ( ! defined $class || $class eq "" || $class =~ m/^CORE/ );
+  my @bb = &dbfTstgenBboxFromCoords($V->dbPimDBGetInstRelBbox);
+  next unless ( @bb >= 4 && defined $bb[3] && $bb[2] > $bb[0] && $bb[3] > $bb[1] );
+  push(@{$row{ sprintf("%.3f %.3f", $bb[1], $bb[3]) }}, [ @bb[0..3] ]);
+}
+my @r = ();
+foreach my $k ( sort keys %row ) {
+  my @m = sort { $a->[0] <=> $b->[0] } @{$row{$k}};
+  my $cur = [ @{$m[0]} ];
+  foreach my $b ( @m[1..$#m] ) {
+    if ( $b->[0] - $cur->[2] <= $gap ) { $cur->[2] = $b->[2] if ( $b->[2] > $cur->[2] ); }
+    else                               { push(@r, $cur); $cur = [ @$b ]; }
+  }
+  push(@r, $cur);
+}
+my @fill = ();
+for my $i ( 0 .. $#r ) {
+  for my $j ( 0 .. $#r ) {
+    my ($lo, $hi) = ( $r[$i], $r[$j] );
+    my $dy = $hi->[1] - $lo->[3];
+    next unless ( $dy > 0 && $dy <= 2 * $gap );
+    my ($x0, $x1) = ( ( $lo->[0] > $hi->[0] ? $lo->[0] : $hi->[0] ), ( $lo->[2] < $hi->[2] ? $lo->[2] : $hi->[2] ) );
+    push(@fill, [ $x0, $lo->[3], $x1, $hi->[1] ]) if ( $x1 - $x0 > 0 );
+  }
+}
+push(@r, @fill);
+foreach my $b ( @r ) {
+  $b->[0] = 0  if ( $b->[0] <= $gap );      $b->[1] = 0  if ( $b->[1] <= $gap );
+  $b->[2] = $W if ( $W - $b->[2] <= $gap ); $b->[3] = $H if ( $H - $b->[3] <= $gap );
+}
+if ( $module eq $GLOBAL->dbfGlobalGetTOP ) { push(@r, [ @$_ ]) foreach ( @PLACEMENT_BLOCKAGES ); }
+return @r;
+
+}# sub dbfTstgenHierLegalizeObstacles
+
 %HIER_LB_PARENTS = (); %HIER_LB_KIDS = ();   #<!-- module hierarchy, both ways, built on first use -->
 %HIER_OWN_REGION = ();                        #<!-- module -> [x0, y0, x1, y1] of its own region, as legalized -->
 sub dbfTstgenHierLegalizeBlocks {
@@ -827,9 +887,17 @@ foreach my $inst ( sort keys %box ) {
 #     line's "*" does, placed by the plan instead of by hand.  Without it the
 #     glue went wherever the blocks left room: on a 3M-instance tile 81% of the
 #     module round trips on failing paths were into one parent's glue. -->
+#<!-- the fixed macros and the blockages, pinned: the blocks go around them -->
+my @obs = &dbfTstgenHierLegalizeObstacles($module, $W, $H);
+my $obsA = 0;
+for my $k ( 0 .. $#obs ) {
+  my ($x0, $y0, $x1, $y1) = @{$obs[$k]};
+  printf $fh "BLOCK\t__obs_%d\t%.6f\t%.6f\t%.6f\t%.6f\t1\t2\t__obs_%d\n", $k, $x1 - $x0, $y1 - $y0, ($x0 + $x1) / 2, ($y0 + $y1) / 2, $k;
+  $obsA += ( $x1 - $x0 ) * ( $y1 - $y0 );
+}
 my $ownArea = 0;
 if ( defined $targets && exists $targets->{'*'} ) {
-  my $blockA = 0; $blockA += $shape{$_}[0] * $shape{$_}[1] foreach ( keys %shape );
+  my $blockA = $obsA; $blockA += $shape{$_}[0] * $shape{$_}[1] foreach ( keys %shape );
   my $frac = $ENV{ELECTRON_OWN_REGION} // 0.5;
   $ownArea = $frac * ( $W * $H - $blockA );
   if ( $ownArea > 0 ) {
@@ -884,7 +952,8 @@ while ( my $l = <$fh> ) {
   $n++;
 }
 close($fh);
-my %r = ( blocks => $n, summary => $msg . ( $ownArea > 0 ? sprintf("; %.0f um2 kept for its own logic at its target", $ownArea) : "" ),
+my %r = ( blocks => $n, summary => $msg . ( $ownArea > 0 ? sprintf("; %.0f um2 kept for its own logic at its target", $ownArea) : "" )
+                                        . ( @obs ? sprintf("; around %d fixed macro field(s) and blockage(s), %.0f um2", scalar(@obs), $obsA) : "" ),
           no_target => scalar(@noTarget) );
 $r{overlaps} = $1 if ( $msg =~ m/(\d+) overlap\(s\)/ );
 $r{overrun}  = $1 if ( $msg =~ m/box overrun ([\d.]+) um/ );
@@ -2137,7 +2206,26 @@ if ( $whitespace > 0 || $budget || $sliceBlocks ) {
 #     top.  Bisection; the box only grows as u falls. -->
 if ( $budget ) {
   my ($tw, $th) = &dbfTstgenHierPseudoSize($top);
-  my $target = 0.97 * $tw * $th;
+  #<!-- What the blocks cannot have: set_placement_blockage, and fixed macros
+  #     by the fields they make (dbfTstgenHierLegalizeObstacles) -- channels,
+  #     edge margins and all -- rather than by the model's macros x (1 + halo),
+  #     which a floorplan's pin channels exceed: on a 176-macro tile the fields
+  #     were 205k um2 against 193k, and the blocks sized for the difference
+  #     overran the box by 143 um.  The model still counts those macros, so
+  #     their modelled area is given back. -->
+  my ($blkA, $fixMacA) = (0, 0);
+  foreach my $o ( &dbfTstgenHierLegalizeObstacles($top, $tw, $th) ) { $blkA += ( $o->[2] - $o->[0] ) * ( $o->[3] - $o->[1] ); }
+  foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$top}} ) {
+    next if ( $inst eq "PIN" );
+    my $V = $PSEUDO_VINST_ALREADY{$top}{$inst};
+    my ($st, $ref) = ( $V->dbPimDBGetInstStatus, $V->dbPimDBGetInstCellref );
+    next unless ( defined $st && $st eq "FIXED" && defined $ref && exists $PLDB{$ref} );
+    my $class = $PLDB{$ref}->dbMdbGetClass;
+    next if ( ! defined $class || $class eq "" || $class =~ m/^CORE/ );
+    my @sz = $PLDB{$ref}->dbMdbGetSize;
+    $fixMacA += $sz[0] * $sz[1] * ( 1 + $bHalo ) if ( @sz >= 2 );
+  }
+  my $target = 0.97 * ( $tw * $th - $blkA + $fixMacA );
   my $fits = sub { return &dbfTstgenHierBudgetArea($top, $_[0], $bPack, $bHalo, {}) <= $target; };
   if ( $fits->(0.95) ) {
     my ($lo, $hi) = (0.05, 0.95);
@@ -2146,8 +2234,8 @@ if ( $budget ) {
       if ( $fits->($mid) ) { $hi = $mid; } else { $lo = $mid; }
     }
     $bU = $hi;
-    printf("INFO-TST-HR_PL_ALL : 030 : -sizing budget: cells at %.1f%% utilization fill %s's %.1f x %.1f um; mixed levels keep %g%% free, macros a %g%% halo\n",
-           100 * $bU, $top, $tw, $th, $mixedWs, $macroHalo);
+    printf("INFO-TST-HR_PL_ALL : 030 : -sizing budget: cells at %.1f%% utilization fill %s's %.1f x %.1f um%s; mixed levels keep %g%% free, macros a %g%% halo\n",
+           100 * $bU, $top, $tw, $th, $blkA > 0 ? sprintf(" less %.0f um2 of fixed macro fields and placement blockage", $blkA) : "", $mixedWs, $macroHalo);
   }
   else {
     $bU = 0.95;
@@ -2466,9 +2554,16 @@ my $placeOne = sub {
     push(@cellArgs, "-anchor", $cellsAnchor) if ( $cellsAnchor ne "" );
     my $fenced = $ownFence || ( exists $blockTargets->{$mod} && exists $blockTargets->{$mod}{'*'}
                                 && ( &dbfTstgenHierShapeSpec($blockTargets->{$mod}{'*'}[2]) // {} )->{fence} );
+    #<!-- one -args, commas for spaces: hier_place_cells keeps only the last -->
+    my @qpExtra = ();
     if ( $fenced && exists $HIER_OWN_REGION{$mod} ) {
-      push(@cellArgs, "-args", join(",", "--region", map { sprintf("%.4f", $_) } @{$HIER_OWN_REGION{$mod}}));
+      push(@qpExtra, "--region", map { sprintf("%.4f", $_) } @{$HIER_OWN_REGION{$mod}});
     }
+    #<!-- set_placement_blockage is in the top's frame: no capacity there -->
+    if ( $mod eq $GLOBAL->dbfGlobalGetTOP ) {
+      push(@qpExtra, "--keepout", map { sprintf("%.4f", $_) } @$_) foreach ( @PLACEMENT_BLOCKAGES );
+    }
+    push(@cellArgs, "-args", join(",", @qpExtra)) if ( @qpExtra );
     &hier_place_cells(@cellArgs);
     $mrec{cell_pass} = $HIER_PLACE_CELL_STATS{$mod} if ( exists $HIER_PLACE_CELL_STATS{$mod} );
   }

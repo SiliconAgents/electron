@@ -623,6 +623,10 @@ foreach my $inst ( $src ? () : sort keys %CADB ) {
   push(@mov, [$inst, $w, $h, $x, $y, $pinsOf{$cellref}, $w]);
   $totMovW += $w;
 }
+#<!-- set_placement_blockage: held like a macro, on the same grid -->
+my @blkg = $src ? () : &dbfPlacementBlockageBoxes;
+push(@obs, [ @$_ ]) foreach ( @blkg );
+print "INFO-ALG-LEGAL : 062 : " . scalar(@blkg) . " placement blockage(s) held (set_placement_blockage)\n" if ( @blkg );
 
 my $nMov = @mov;
 my $nObs = @obs;

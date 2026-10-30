@@ -227,6 +227,32 @@ nangate_ungroup:
 	python3 check_rigid.py --free A3 workarea/ug2.def workarea/ug3.def
 	@echo "nangate_ungroup: all expected results"
 
+# nangate_fixed_fp: vedic_16x16 in a floorplan given rather than made -- two hard macros
+# (fixed_fp/testram.lef) and three pins held where fixed_fp/fixed_fp.nodes puts them, one macro
+# mirrored (ORIENT=FN), a corner of the die blocked (set_placement_blockage, as an L-shaped die's
+# notch is), and the blocks laid out around them toward nangate_legalize_blocks's targets.  Fails
+# unless the budget leaves the macro fields and the blockage out, the top's blocks are laid out
+# around them with under 1% of their area overlapping, legalize_flat and write_sgraph hold the
+# blockage, and in the DEFs the macros and pins are exactly where they were held -- and, legalized,
+# no cell reaches into the blockage or a macro.
+FF_EXPECT = grep -q "$(1)" workarea/fixed_fp.log || { echo "nangate_fixed_fp: expected \"$(1)\" in workarea/fixed_fp.log"; exit 1; }
+nangate_fixed_fp:
+	mkdir -p workarea
+	awk '/^module vedic_16x16/{f=1} f && /^endmodule/{print "  TESTRAM ram0 (.A(a[0]));"; print "  TESTRAM ram1 (.A(b[0]));"; f=0} {print}' rtls/vedic/vedic.vg | egrep -v "\(\*" > workarea/vedic_fixed.vg
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_fixed_fp.tcl > fixed_fp.log 2>&1
+	$(call FF_EXPECT,ST_PL_BLK : 003 : placement blockage 98.0000 47.0000 110.0000 63.0000)
+	$(call FF_EXPECT,RD_PS_ND : 005 : placed 2 instance(s) and 3 port(s) of vedic_16x16)
+	$(call FF_EXPECT,RD_PS_ND : 018 : 2 instance(s) took the orient)
+	$(call FF_EXPECT,HR_PL_ALL : 030 : .* less 373 um2 of fixed macro fields and placement blockage)
+	$(call FF_EXPECT,vedic_16x16 laid out toward its block targets: .* around 4 fixed macro field(s) and blockage(s))
+	$(call FF_EXPECT,INFO-ALG-LEGAL : 062 : 1 placement blockage(s) held)
+	$(call FF_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	$(call FF_EXPECT,INFO-SPK-WR_SG : 004 : 1 placement blockage(s) written as BLOCKAGE)
+	@grep "vedic_16x16 laid out toward its block targets" workarea/fixed_fp.log | grep -o "[0-9.]*% of block area" | awk '{if ($$1 + 0 > 1.0) {print "nangate_fixed_fp: the top level blocks overlap by " $$1 " of their area, more than 1%"; exit 1}}'
+	python3 check_fixed_fp.py fixed_fp/fixed_fp.nodes workarea/ff.def 98 47 110 63 --held_only
+	python3 check_fixed_fp.py fixed_fp/fixed_fp.nodes workarea/ff.legal.def 98 47 110 63
+	@echo "nangate_fixed_fp: all expected results"
+
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and
 # repaired with legalize_flat --incremental instead of a full flat pass.  Fails
 # unless every module was legalized, the repair ran, and 3RDBIN/def_check_legal
@@ -430,7 +456,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

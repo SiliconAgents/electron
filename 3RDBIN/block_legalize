@@ -13,8 +13,10 @@ nearest those targets with no two blocks overlapping, slicing or not.
 
 in.tsv, microns, the module's own frame (0,0 its lower left):
     BOX     <W> <H> <site> <row pitch>
-    BLOCK   <inst> <w> <h> <target cx> <target cy> <weight> <hard 0|1> <group> [<min w> <min h> <max w> <max h>]
+    BLOCK   <inst> <w> <h> <target cx> <target cy> <weight> <hard 0|1|2> <group> [<min w> <min h> <max w> <max h>]
   hard: the shape is fixed (an earlier parent or instance shaped the module);
+  2: the shape and the place are fixed -- an obstacle the others go around (a
+  fixed macro field, a placement blockage); two of them are never related;
   group: the module -- blocks of one group share one shape;
   min/max (0: none): bounds on a reshaped block's sides -- not smaller than a
   fixed shape inside it, not bigger than another parent it must also fit.
@@ -76,7 +78,7 @@ ap.add_argument("--cuts", type=int, default=30, help="rounds of tangent cuts per
 a = ap.parse_args()
 
 W = H = site = pitch = None
-names = []; w0 = []; h0 = []; tx = []; ty = []; wt = []; hard = []; grp = []; bmin = []; bmax = []
+names = []; w0 = []; h0 = []; tx = []; ty = []; wt = []; hard = []; grp = []; bmin = []; bmax = []; pin = []
 for l in open(a.inp):
     f = l.split()
     if not f: continue
@@ -85,7 +87,7 @@ for l in open(a.inp):
     elif f[0] == "BLOCK":
         names.append(f[1]); w0.append(float(f[2])); h0.append(float(f[3]))
         tx.append(float(f[4])); ty.append(float(f[5])); wt.append(float(f[6]))
-        hard.append(len(f) > 7 and f[7] == "1"); grp.append(f[8] if len(f) > 8 else f[1])
+        hard.append(len(f) > 7 and f[7] in ("1", "2")); pin.append(len(f) > 7 and f[7] == "2"); grp.append(f[8] if len(f) > 8 else f[1])
         b = [float(v) for v in f[9:13]] if len(f) >= 13 else [0.0] * 4
         bmin.append(b[0:2]); bmax.append(b[2:4])
 n = len(names)
@@ -116,19 +118,40 @@ for i in range(n):
 BIG = 1e4 * (wt.sum() + 1)
 
 # ---- 1. relations from the targets: rel[(i, j)] = (axis, first)
-pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+pairs = [(i, j) for i in range(n) for j in range(i + 1, n) if not (pin[i] and pin[j])]
 def room(i, j):
     return abs(tx[j] - tx[i]) - (w0[i] + w0[j]) / 2, abs(ty[j] - ty[i]) - (h0[i] + h0[j]) / 2
 rel = {}
+#<!-- a pinned block cannot give way, so a relation that puts the other block
+#     on a side with no room for it -- left of an obstacle flush with the box's
+#     left edge -- has no solution at all; take the nearest one that has room -->
+def feasible(i, j, ax, first):
+    if not (pin[i] or pin[j]): return True
+    p, m = (i, j) if pin[i] else (j, i)
+    lo = (tx[p] - w0[p] / 2) if ax == "x" else (ty[p] - h0[p] / 2)
+    hi = (tx[p] + w0[p] / 2) if ax == "x" else (ty[p] + h0[p] / 2)
+    need = wmin[m] if ax == "x" else max(pitch, A[m] / wmax[m])
+    return lo >= need - 1e-6 if first == m else (W if ax == "x" else H) - hi >= need - 1e-6
 for i, j in pairs:
     gx, gy = room(i, j)
     ax = "x" if (gx > gy or (gx == gy and W >= H)) else "y"
     t = tx if ax == "x" else ty
-    rel[(i, j)] = (ax, i if t[i] <= t[j] else j)
+    first = i if t[i] <= t[j] else j
+    if not feasible(i, j, ax, first):
+        opts = [(a2, f2) for a2 in (ax, "y" if ax == "x" else "x") for f2 in (first, j if first == i else i) if feasible(i, j, a2, f2)]
+        if opts: ax, first = opts[0]
+    rel[(i, j)] = (ax, first)
 
 # variable layout: x y w h ex+ ex- ey+ ey- sx sy, each n long
 X, Y, Wv, Hv, EXP, EXM, EYP, EYM, SX, SY = (k * n for k in range(10))
-NV = 10 * n
+#<!-- and one slack per pair with a pinned block in it: a pinned block cannot
+#     give way, so a chain of relations through two of them (a block below the
+#     notch and above a macro row, with less room between than the block is
+#     tall) has no solution at all.  Priced like the box's slack, it always
+#     solves, and the chain shows up tight for the repair below -->
+pinPairs = [p for p in pairs if pin[p[0]] or pin[p[1]]]
+PS = 10 * n; psOf = {p: PS + k for k, p in enumerate(pinPairs)}
+NV = 10 * n + len(pinPairs)
 
 def program(rel, sizes=None, cuts=None):
     """the joint program; sizes = (w, h) to hold every shape (the grid pass), else shapes free"""
@@ -138,6 +161,7 @@ def program(rel, sizes=None, cuts=None):
         u, v = (f, j if f == i else i)
         if ax == "x": rows.append(({X + u: 1, Wv + u: 1, X + v: -1}, 0.0))
         else:         rows.append(({Y + u: 1, Hv + u: 1, Y + v: -1}, 0.0))
+        if (i, j) in psOf: rows[-1][0][psOf[(i, j)]] = -1
         seps.append(((i, j), ax))
     nsep = len(rows)
     for i in range(n):
@@ -169,12 +193,14 @@ def program(rel, sizes=None, cuts=None):
         beq[k] = rhs
     c = np.zeros(NV)
     for k in (EXP, EXM, EYP, EYM): c[k:k + n] = wt
-    c[SX:SX + n] = BIG; c[SY:SY + n] = BIG
+    c[SX:SX + n] = BIG; c[SY:SY + n] = BIG; c[PS:NV] = BIG
     bnd = [(0, None)] * NV
     for i in range(n):
         if sizes is not None: bnd[Wv + i] = (sizes[0][i], sizes[0][i]); bnd[Hv + i] = (sizes[1][i], sizes[1][i])
         elif hard[i]: bnd[Wv + i] = (w0[i], w0[i]); bnd[Hv + i] = (h0[i], h0[i])
         else: bnd[Wv + i] = (wmin[i], wmax[i]); bnd[Hv + i] = (max(pitch, A[i] / wmax[i], hmin_b[i]), hmax_b[i] if np.isfinite(hmax_b[i]) else None)
+    for i in range(n):
+        if pin[i]: bnd[X + i] = (tx[i] - w0[i] / 2,) * 2; bnd[Y + i] = (ty[i] - h0[i] / 2,) * 2
     res = linprog(c, A_ub=Aub.tocsr(), b_ub=bub, A_eq=Aeq.tocsr(), b_eq=beq, bounds=bnd, method="highs")
     if res.status != 0: return None, []      # a cycle of relations (the search can make one): no arrangement
     du = res.ineqlin.marginals[:nsep] if res.ineqlin is not None else np.zeros(nsep)
@@ -191,6 +217,9 @@ def grid_pass(rel, ws, hs):
     res, tight = program(rel, sizes=(ws, hs))
     if res is None: return None
     sx = res.x[SX:SX + n].sum(); sy = res.x[SY:SY + n].sum()
+    for p, v in psOf.items():
+        if rel[p][0] == "x": sx += res.x[v]
+        else:                sy += res.x[v]
     return res, tight, sx, sy
 
 def evaluate(rel):
@@ -213,6 +242,11 @@ def evaluate(rel):
     hs = np.where(hard, hs, np.maximum(hs, up(hmin_b, pitch)))
     hs = np.where(hard | ~np.isfinite(hmax_b), hs, np.minimum(hs, np.maximum(pitch, dn(np.where(np.isfinite(hmax_b), hmax_b, 0), pitch))))
     ws = np.where(hard, up(w0, site), np.maximum(up(A / np.maximum(hs, 1e-9), site), up(np.where(bound, bmin[:, 0] if n else 0, 0), site)))
+    #<!-- a pinned block is an obstacle as given: rounded up to the grid like a
+    #     fixed shape, held at its lower left it grew into its neighbours' room
+    #     -- a 7 um macro row 8.4 um tall, and the chain beside it over the box -->
+    pa = np.array(pin, bool)
+    ws = np.where(pa, w0, ws); hs = np.where(pa, h0, hs)
     ws, hs = snap_group(ws, hs)
     g = grid_pass(rel, ws, hs)
     if g is None: return (np.inf,) * 2 + (None,) * 4 + ([],)
@@ -267,8 +301,9 @@ for it in range(a.repairs):
     if cand is None or cand[0][0] >= cost - 1e-9: break
     (cost, slack, px, py, ws, hs, tight), rel, sig = cand; seen.add(sig); steps += 1
 
-px = dn(px, site); py = dn(py, pitch)
-px = np.minimum(px, np.maximum(0, W - ws)); py = np.minimum(py, np.maximum(0, H - hs))
+pin = np.array(pin, bool)                  # a pinned block stays exactly where it was given, off the grid or not
+px = np.where(pin, tx - w0 / 2, dn(px, site)); py = np.where(pin, ty - h0 / 2, dn(py, pitch))
+px = np.where(pin, px, np.minimum(px, np.maximum(0, W - ws))); py = np.where(pin, py, np.minimum(py, np.maximum(0, H - hs)))
 over = 0; overA = 0.0
 for i, j in pairs:
     ox = min(px[i] + ws[i], px[j] + ws[j]) - max(px[i], px[j]); oy = min(py[i] + hs[i], py[j] + hs[j]) - max(py[i], py[j])

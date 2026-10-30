@@ -105,4 +105,72 @@ foreach my $inst ( sort keys %CADB ) {
 return @boxes;
 }# sub dbfMacroHaloBoxes
 
+#<!-- set_placement_blockage: a rectangle no standard cell may use -- the
+#     corner a rectilinear die cuts out of its bounding box, say.  The die is
+#     always a rectangle here (read_def keeps two of a DIEAREA's vertices), so
+#     an L-shaped floorplan is its bounding box with the notch blocked.
+#
+#     One store, read by everything that puts a cell somewhere: hier_place_all
+#     at the top (the budget leaves the area out, the block legalizer goes
+#     around it, the cell pass gives it no capacity), legalize_flat (an
+#     obstacle, like a macro), and write_sgraph (a BLOCKAGE line, so Photon
+#     puts no repeater there).  Microns, the top module's frame. -->
+@PLACEMENT_BLOCKAGES = ();
+sub set_placement_blockage {
+
+my $noOfArguments = @_;
+if ( $noOfArguments < 1 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP' ) {
+  print "Usage : set_placement_blockage -rect <x0> <y0> <x1> <y1>   add one, microns, the top's frame\n";
+  print "                               --clear                     remove them all\n";
+  print "                               --report                    list them\n";
+  print "\n";
+  print "        No standard cell is placed inside: hier_place_all at the top (budget,\n";
+  print "        block legalizer, cell pass), legalize_flat, and write_sgraph's BLOCKAGE\n";
+  print "        lines for Photon.  Set it before hier_place_all.\n";
+  return;
+}
+for (my $i = 0; $i < $noOfArguments; $i++) {
+  if ( $_[$i] eq "-rect" ) {
+    my @r = @_[$i+1 .. $i+4];
+    unless ( 4 == grep { defined $_ && m/^-?\d+(\.\d+)?$/ } @r ) {
+      print "ERR-ALG-ST_PL_BLK : 001 : -rect takes four numbers, x0 y0 x1 y1\n"; return;
+    }
+    @r = ( ($r[0] < $r[2] ? $r[0] : $r[2]), ($r[1] < $r[3] ? $r[1] : $r[3]),
+           ($r[0] < $r[2] ? $r[2] : $r[0]), ($r[1] < $r[3] ? $r[3] : $r[1]) );
+    if ( $r[2] - $r[0] <= 0 || $r[3] - $r[1] <= 0 ) {
+      print "ERR-ALG-ST_PL_BLK : 002 : -rect @r has no area\n"; return;
+    }
+    push(@PLACEMENT_BLOCKAGES, [ @r ]);
+    printf("INFO-ALG-ST_PL_BLK : 003 : placement blockage %.4f %.4f %.4f %.4f, %.1f um2\n", @r, ($r[2] - $r[0]) * ($r[3] - $r[1]));
+    $i += 4;
+  }
+  elsif ( $_[$i] eq "--clear" )  { @PLACEMENT_BLOCKAGES = (); print "INFO-ALG-ST_PL_BLK : 004 : placement blockages cleared\n"; }
+  elsif ( $_[$i] eq "--report" ) {
+    printf("INFO-ALG-ST_PL_BLK : 005 : %d placement blockage(s)%s\n", scalar(@PLACEMENT_BLOCKAGES),
+           join("", map { sprintf("; %.4f %.4f %.4f %.4f", @$_) } @PLACEMENT_BLOCKAGES));
+  }
+  else { print "WARN-ALG-ST_PL_BLK : 006 : invalid option $_[$i]\n"; }
+}
+}# sub set_placement_blockage
+
+#<!-- the placement blockages in DBU, [x0, y0, x1, y1], snapped outward to the
+#     row and site grid as a halo is, so no row is left a partial strip -->
+sub dbfPlacementBlockageBoxes {
+return () unless ( @PLACEMENT_BLOCKAGES );
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+my $R = FreeRows::flatRows();
+my @boxes = ();
+foreach my $b ( @PLACEMENT_BLOCKAGES ) {
+  my ($x0, $y0, $x1, $y1) = map { $_ * $dbu } @$b;
+  if ( $R ) {
+    my $xo; foreach my $y ( @{$R->{Y}} ) { $xo = $R->{X0}{$y} if ( ! defined $xo || $R->{X0}{$y} < $xo ); }
+    my ($yo, $sx, $rh) = ( $R->{Y}[0], $R->{siteX}, $R->{rowH} );
+    if ( defined $sx && $sx > 0 ) { $x0 = $xo + POSIX::floor(($x0 - $xo) / $sx) * $sx; $x1 = $xo + POSIX::ceil(($x1 - $xo) / $sx) * $sx; }
+    if ( defined $rh && $rh > 0 ) { $y0 = $yo + POSIX::floor(($y0 - $yo) / $rh) * $rh; $y1 = $yo + POSIX::ceil(($y1 - $yo) / $rh) * $rh; }
+  }
+  push(@boxes, [ map { int($_ + ($_ < 0 ? -0.5 : 0.5)) } ($x0, $y0, $x1, $y1) ]);
+}
+return @boxes;
+}# sub dbfPlacementBlockageBoxes
+
 1;

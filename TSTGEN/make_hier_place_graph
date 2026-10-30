@@ -893,6 +893,7 @@ my $rowHeight = 0;
 my ($instCnt, $portCnt, $reshapeCnt, $noLocCnt, $unknownCnt, $sizedPinCnt) = (0,0,0,0,0,0);
 my $firstSizeCnt = 0;
 my ($polyMovedCnt, $polySquaredCnt) = (0, 0);
+my $orientCnt = 0;
 my @unknown = ();
 
 while ( my $line = <READ_PSEUDO_ND> ) {
@@ -1032,6 +1033,16 @@ while ( my $line = <READ_PSEUDO_ND> ) {
   }
   $PSEUDO_VINST_ALREADY{$module}{$name}->dbPimDBSetInstStatus(
                                         ($status eq "FIXED") ? "FIXED" : "PLACED");
+  #<!-- ORIENT=<N|FN|S|FS|...> on the record, as a released floorplan has a
+  #     macro mirrored to face its neighbour's pins; commit takes it into the
+  #     floorplan and hier2flat onto the flat instance.  No placer writes one,
+  #     so a record without it leaves the orient as it was. -->
+  foreach my $tok ( @f[6..$#f] ) {
+    if ( defined $tok && $tok =~ m/^ORIENT=(\S+)$/ ) {
+      $PSEUDO_VINST_ALREADY{$module}{$name}->dbPimDBSetInstOrient($1);
+      $orientCnt++;
+    }
+  }
   $instCnt++;
 
   #<!-- A reshaped instance has to tell its child module, or the box drawn in
@@ -1095,6 +1106,7 @@ if ( $instCnt > 0 || $portCnt > 0 ) {
 }
 
 print "INFO-TST-RD_PS_ND : 005 : placed $instCnt instance(s) and $portCnt port(s) of $module from $inFile\n";
+print "INFO-TST-RD_PS_ND : 018 : $orientCnt instance(s) took the orient on their record (ORIENT=)\n" if ( $orientCnt );
 if ( $firstSizeCnt > 0 ) {
   print "INFO-TST-RD_PS_ND : 017 : $firstSizeCnt block(s) had no size of their own and took the one the placer used\n";
 }

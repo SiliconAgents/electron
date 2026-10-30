@@ -1,0 +1,9 @@
+# nangate_fixed_fp: two macros and three pins held where a released floorplan would put them -- the
+# macros stacked mid-left, where nangate_legalize_blocks's ring of blocks leaves room
+# <node> <name> INST|PORT <width> <height> <status> <x> <y> TYPE=<type> [ORIENT=|LAYER=]
+ROWHEIGHT 1.4
+0 ram0 INST 9.88 7 FIXED 1.9 46.2 TYPE=block ORIENT=N
+1 ram1 INST 9.88 7 FIXED 1.9 54.6 TYPE=block ORIENT=FN
+2 a[0] PORT 0 0 FIXED 0 78.0 TYPE=port LAYER=metal3
+3 a[1] PORT 0 0 FIXED 0 80.1 TYPE=port LAYER=metal3
+4 result[31] PORT 0 0 FIXED 109.6 30.0 TYPE=port LAYER=metal3

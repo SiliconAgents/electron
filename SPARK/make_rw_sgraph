@@ -27,8 +27,8 @@ sub write_sgraph {
     print "  CELL <cellref> <w> <h> <class>                  each one's size\n";
     print "  INST <inst> <cellref> <status> <x> <y>          placed instances on no\n";
     print "                                                  NETS row (they take room)\n";
-    print "  BLOCKAGE <x0> <y0> <x1> <y1>                    a macro's halo (set_macro_halo):\n";
-    print "                                                  no cell goes there\n";
+    print "  BLOCKAGE <x0> <y0> <x1> <y1>                    a macro's halo (set_macro_halo) or a\n";
+    print "                                                  placement blockage: no cell goes there\n";
  }else {
     my $outFile = $TOP_MODULE.".sgraph";
     for(my $i=0; $i<$noOfArguments; $i++){
@@ -199,6 +199,10 @@ sub write_sgraph {
         my @halo = &dbfMacroHaloBoxes;
         push(@buf, "BLOCKAGE @$_\n") foreach ( @halo );
         print "INFO-SPK-WR_SG : 001 : " . scalar(@halo) . " macro halo(s) written as BLOCKAGE\n" if ( @halo );
+        #<!-- set_placement_blockage: no repeater or resize there either -->
+        my @blkg = &dbfPlacementBlockageBoxes;
+        push(@buf, "BLOCKAGE @$_\n") foreach ( @blkg );
+        print "INFO-SPK-WR_SG : 004 : " . scalar(@blkg) . " placement blockage(s) written as BLOCKAGE\n" if ( @blkg );
     }
     my %refs = map { $_ => 1 } keys %PLDB;
     foreach my $o ( keys %COMP_ALREADY ) {

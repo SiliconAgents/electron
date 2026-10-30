@@ -180,6 +180,8 @@ def main():
                     help="bin edge in row heights (default 8)")
     ap.add_argument("--region", type=float, nargs=4, metavar=("X0", "Y0", "X1", "Y1"),
                     help="place every movable cell inside this rectangle (hier_place_all --own_fence)")
+    ap.add_argument("--keepout", type=float, nargs=4, action="append", default=[], metavar=("X0", "Y0", "X1", "Y1"),
+                    help="no cell in this rectangle, as if a fixed block were there; repeatable (set_placement_blockage)")
     a, _unknown = ap.parse_known_args()   # hier_place's own switches are accepted and ignored
     t0 = time.time()
     hdr, nodes = read_nodes(a.nodefile)
@@ -194,7 +196,7 @@ def main():
                         for nd in nodes])
     die = hdr["DIEAREA"]
     blocks = [(nd[6], nd[7], nd[6] + nd[3], nd[7] + nd[4]) for nd in nodes
-              if nd[2] == "INST" and "TYPE=block" in nd[8]]
+              if nd[2] == "INST" and "TYPE=block" in nd[8]] + [tuple(b) for b in a.keepout]
 
     ea, eb, ew = [], [], []
     for line in open(a.graph):

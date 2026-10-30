@@ -1,0 +1,23 @@
+VERSION 5.7 ;
+BUSBITCHARS "[]" ;
+DIVIDERCHAR "/" ;
+
+MACRO TESTRAM
+  CLASS BLOCK ;
+  ORIGIN 0 0 ;
+  SIZE 9.88 BY 7 ;
+  PIN A
+    DIRECTION INPUT ;
+    USE SIGNAL ;
+    PORT
+      LAYER metal2 ;
+        RECT 0 3.4 0.2 3.6 ;
+    END
+  END A
+  OBS
+    LAYER metal1 ;
+      RECT 0 0 9.88 7 ;
+  END
+END TESTRAM
+
+END LIBRARY
