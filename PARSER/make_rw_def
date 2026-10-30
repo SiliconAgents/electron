@@ -107,7 +107,25 @@ if ( exists $FLOORPLAN_LOOKUP{"$TOP_MODULE/_self_"} ) {
     my $urx = &dbfDefRoundDBU($dieArea[2]*$mulFactor);
     my $ury = &dbfDefRoundDBU($dieArea[3]*$mulFactor);
 
-print WRITE "DIEAREA ( $llx $lly ) ( $urx $ury ) \;\n";
+    #<!-- A rectilinear die read from a DEF (dbfDefReadDieArea) goes back out
+    #     as its outline -- but only while the die is still that outline's box:
+    #     once something has resized the die, the old outline describes
+    #     nothing, and the rectangle is the truth. -->
+    my $dieLine = "DIEAREA ( $llx $lly ) ( $urx $ury ) ;";
+    if ( exists $DIE_ALREADY{dieOutline} ) {
+      my @o = map { &dbfDefRoundDBU($_ * $mulFactor) } @{$DIE_ALREADY{dieOutline}};
+      my ($ol, $ob, $or, $ot) = ($o[0], $o[1], $o[0], $o[1]);
+      for ( my $i = 2; $i < @o; $i += 2 ) {
+        $ol = $o[$i] if ( $o[$i] < $ol );  $or = $o[$i] if ( $o[$i] > $or );
+        $ob = $o[$i+1] if ( $o[$i+1] < $ob );  $ot = $o[$i+1] if ( $o[$i+1] > $ot );
+      }
+      if ( $ol == $llx && $ob == $lly && $or == $urx && $ot == $ury ) {
+        my @c = ();
+        for ( my $i = 0; $i < @o; $i += 2 ) { push(@c, "( $o[$i] $o[$i+1] )"); }
+        $dieLine = "DIEAREA " . join(" ", @c) . " ;";
+      }
+    }
+print WRITE "$dieLine\n";
 print WRITE "\n";
   }
                                     }
@@ -320,6 +338,48 @@ return 0 unless ( defined $v && $v ne "" );
 return $v unless ( $v =~ /^-?\d*\.?\d+([eE][-+]?\d+)?$/ );
 return int( $v + ( $v < 0 ? -0.5 : 0.5 ) );
 }# sub dbfDefRoundDBU
+
+#<!-- DIEAREA as DEF has it: two corners for a rectangle, or every corner of a
+#     rectilinear outline -- "( 0 0 ) ( 0 770640 ) ( 1171008 770640 ) ..." is
+#     an L from a commercial tool -- and the statement may run over several
+#     lines.  Both readers took fields 2,3,6,7 as the box, which on that L is
+#     (0,0)-(0,770640): a die 0 wide, and read_def died dividing by it.
+#
+#     electron's die is a rectangle everywhere -- dieArea [0..3] and the
+#     floorplan size are read as four numbers in hundreds of places -- so the
+#     die is the outline's bounding box.  The outline itself goes in
+#     $DIE_ALREADY{dieOutline} for write_def to give back.  Placement still
+#     sees the box: the notch is not a blockage. -->
+sub dbfDefReadDieArea {
+my ($line, $fh) = @_;
+while ( $line !~ /;/ ) {
+  my $more = <$fh>;
+  last unless ( defined $more );
+  chomp($more);
+  $line .= " $more";
+}
+my @pts = ( $line =~ /\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s*\)/g );
+if ( @pts < 4 ) {
+  print "WARN-PAR-DEF : 042 : DIEAREA with fewer than two corners, ignored: $line\n";
+  return ();
+}
+my ($llx, $lly, $urx, $ury) = ($pts[0], $pts[1], $pts[0], $pts[1]);
+for ( my $i = 2; $i < @pts; $i += 2 ) {
+  $llx = $pts[$i]     if ( $pts[$i]     < $llx );
+  $urx = $pts[$i]     if ( $pts[$i]     > $urx );
+  $lly = $pts[$i + 1] if ( $pts[$i + 1] < $lly );
+  $ury = $pts[$i + 1] if ( $pts[$i + 1] > $ury );
+}
+if ( @pts > 4 ) {
+  $DIE_ALREADY{dieOutline} = [ @pts ];
+  printf("INFO-PAR-DEF : 043 : the die is rectilinear (%d corners); electron uses its bounding box ( %s %s ) ( %s %s ), write_def writes the outline back\n",
+         @pts / 2, $llx, $lly, $urx, $ury);
+}
+else {
+  delete $DIE_ALREADY{dieOutline};
+}
+return ($llx, $lly, $urx, $ury);
+}# sub dbfDefReadDieArea
 #---------------------------------------------------------------------------------#
 sub dbgGetPortsDB {
 my $moduleName = $_[0];
@@ -701,7 +761,7 @@ else {
 
 ########################### Reading Dia Area Statement  ###############
 if( $_ =~ /^DIEAREA /) {
-                     ($DIEAREA_llx,$DIEAREA_lly,$DIEAREA_urx,$DIEAREA_ury) = (split(/\s+/, $_))[2,3,6,7];
+                     ($DIEAREA_llx,$DIEAREA_lly,$DIEAREA_urx,$DIEAREA_ury) = &dbfDefReadDieArea($_, \*READ_DEF_FILE);
                      $DIEAREA[0]=$DIEAREA_llx;
                      $DIEAREA[1]=$DIEAREA_lly;
                      $DIEAREA[2]=$DIEAREA_urx;
@@ -1127,7 +1187,7 @@ $FLOORPLAN_ALREADY{$flplanID}->dbFlplanSetCellref($TOP_MODULE);
 
 ########################### Reading Dia Area Statement  ###############
 elsif( $_ =~ /^DIEAREA /) {
-                     ($DIEAREA_llx,$DIEAREA_lly,$DIEAREA_urx,$DIEAREA_ury) = (split(/\s+/, $_))[2,3,6,7];
+                     ($DIEAREA_llx,$DIEAREA_lly,$DIEAREA_urx,$DIEAREA_ury) = &dbfDefReadDieArea($_, \*READ_DEF_FILE);
                      $DIEAREA[0]=$DIEAREA_llx;
                      $DIEAREA[1]=$DIEAREA_lly;
                      $DIEAREA[2]=$DIEAREA_urx;
@@ -2110,7 +2170,7 @@ elsif ( $_ =~ /^REGIONS\s/ ) { $section = "REGIONS";  @data = ();
 elsif ( $_ =~ /^END REGIONS/ ) { $section = "REGIONS";  @data = (); $storeData = 0; }
 elsif ( $_ =~ /^DIEAREA / ) {
    if ( $READ_FLPLAN == 1 ) {
-                     ($DIEAREA_llx,$DIEAREA_lly,$DIEAREA_urx,$DIEAREA_ury) = (split(/\s+/, $_))[2,3,6,7];
+                     ($DIEAREA_llx,$DIEAREA_lly,$DIEAREA_urx,$DIEAREA_ury) = &dbfDefReadDieArea($_, \*READ_DEF_FILE);
                      $DIEAREA[0]=$DIEAREA_llx;
                      $DIEAREA[1]=$DIEAREA_lly;
                      $DIEAREA[2]=$DIEAREA_urx;
