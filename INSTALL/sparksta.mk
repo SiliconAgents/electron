@@ -38,6 +38,13 @@ SPARKSTA_WIRE_RC ?=
 # which Photon then uses instead of SPARKSTA_WIRE_RC; set it with
 # SPARKSTA_WIRE_MODEL_OF from the library config.
 SPARKSTA_WIRE_MODEL ?=
+# The clock pins' transition in ns (PHOTON_CLOCK_SLEW), for clock-to-Q and for
+# setup's clock axis.  Empty: an ideal clock, no transition, as Photon always
+# timed.  An ideal clock left clock-to-Q and setup ~9 ps optimistic against a
+# routed tile's clock tree; a design Makefile sets its node's typical clock
+# transition (0.017 on one modern node: the median at the clock pins of an FC
+# route_opt).
+SPARKSTA_CLOCK_SLEW ?=
 # The optimisation advisor (SPARKSTA_ADVISE): the cell table saying which
 # cells may replace which (SPARKSTA_CELLS_OF reads it from the library config),
 # the Vts it may use (empty: every Vt in the table; "any" for a table with no
@@ -54,13 +61,15 @@ SPARKSTA_VT_CAP ?=
 SPARKSTA_ROUNDS ?= 5
 SPARKSTA_ADVISE_MEM ?= 64g
 _sparksta_comma := ,
+# what Photon reads from its environment, in front of each spark-shell
+_sparksta_env = $(if $(SPARKSTA_CLOCK_SLEW),PHOTON_CLOCK_SLEW=$(SPARKSTA_CLOCK_SLEW) )
 
 # Already inside the image (TESTS run there: "make app" first) spark-shell is
 # simply on PATH, and apptainer is not; outside it, go in.
 SPARKSTA_EXEC  ?= $(if $(APPTAINER_CONTAINER),bash -c,apptainer exec $(SPARKSTA_BINDS) $(SPARKSTA_SIF) bash -c)
 
 SPARKSTA_SPARK = $(SPARKSTA_EXEC) \
-  "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_MEM) \
+  "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_MEM) \
    --jars $(PYSPARK)/scala/build/photon.jar -i $(1)" 2>&1 \
   | grep -vE '^[0-9]{2}/[0-9]{2}/[0-9]{2}|^Using Spark|^Setting default|^Welcome to|^ +/|^ +\\|^Spark context|^Spark session|^Type in expr|^scala>|^WARNING|^To adjust'
 
@@ -116,7 +125,7 @@ define SPARKSTA_ADVISE
 	 echo 'advise("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", rounds = $(SPARKSTA_ROUNDS)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).advise.sca; \
 	 echo 'System.exit(0)' >> $(5).advise.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
-	   "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
+	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
 	    --jars $(PYSPARK)/scala/build/photon.jar -i $(abspath $(5)).advise.sca" > $(5).advise.log 2>&1; \
 	 grep -E '^(advise|sizeBound|wirePlan: [0-9]|  (no wires|wires|ranked|round|best|time))' $(5).advise.log; \
 	 test -s "$(5).summary.txt" || { echo "sparksta: no $(5).summary.txt, see $(5).advise.log"; exit 1; }; fi
@@ -166,7 +175,7 @@ define SPARKSTA_REPEAT
 	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_REFUSALS),$(_sparksta_comma) refusals = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
 	 echo 'System.exit(0)' >> $(5).repeat.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
-	   "spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
+	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
 	    --jars $(PYSPARK)/scala/build/photon.jar -i $(abspath $(5)).repeat.sca < /dev/null" > $(5).repeat.log 2>&1; \
 	 tr '\r' '\n' < $(5).repeat.log | grep -E '^(repeatPlace|  |photon: (read|period))|rror|xception'; \
 	 test -s "$(5).eco.tsv" || { echo "sparksta: no $(5).eco.tsv, see $(5).repeat.log"; exit 1; }; fi
