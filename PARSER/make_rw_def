@@ -1293,7 +1293,11 @@ $moduleName = $TOP_MODULE;
             if ( $data eq "NET" ) { $netName = shift @port_data;
                                    $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetConn($netName);
                                   }
-            elsif ( $data eq "DIRECTION" ) { $pinDirection = shift @port_data; 
+            #<!-- DEF allows INPUT or input; electron's own DEFs write lower
+            #     case and some fifteen consumers compare against "input" /
+            #     "output".  A commercial tool's upper-case INPUT made every
+            #     port it drove look undriven, so store the one spelling. -->
+            elsif ( $data eq "DIRECTION" ) { $pinDirection = lc(shift @port_data);
                                    if ( $pinName eq "port_pad_data_in[14]" ) { print "INFO-PAR-DEF : 005 : $pinName : $pinDirection\n"; }
                                    $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetDir($pinDirection);
                                            }
@@ -1546,7 +1550,13 @@ print "DBG-PAR-DEF : 014 : lines in net data are $num \n" if ($DEBUG == 20);
                  $pin = shift @net_data_per_line;
                  shift @net_data_per_line;
                  foreach my $inst(@instArr){
-                   $NETS_ALREADY{$netName}{$inst} = $pin;
+                   #<!-- A port is filed under its own name, as elaborate files it
+                   #     ($NETS_ALREADY{net}{port} = port) and as write_sgraph looks it
+                   #     up.  Filed under "PIN", a design read from a DEF alone lost
+                   #     every edge into an output port, and a net with two ports
+                   #     kept one.  write_def writes either as "( PIN port )". -->
+                   if ( $inst eq "PIN" ) { $NETS_ALREADY{$netName}{$pin} = $pin; }
+                   else { $NETS_ALREADY{$netName}{$inst} = $pin; }
                    if(exists $COMP_ALREADY{$inst}) { $COMP_ALREADY{$inst}{$pin} = $netName;} 
                    elsif( $inst eq "PIN"){ }
                    else { print "ERROR-PAR-DEF : 020 : $netName : $inst not found\n"; }
@@ -1708,7 +1718,13 @@ print "DBG-PAR-DEF : 034 : lines in net data are $num \n" if ($DEBUG == 24);
                  $pin = shift @net_data_per_line;
                  shift @net_data_per_line;
                  foreach my $inst(@instArr){
-                   $NETS_ALREADY{$netName}{$inst} = $pin;
+                   #<!-- A port is filed under its own name, as elaborate files it
+                   #     ($NETS_ALREADY{net}{port} = port) and as write_sgraph looks it
+                   #     up.  Filed under "PIN", a design read from a DEF alone lost
+                   #     every edge into an output port, and a net with two ports
+                   #     kept one.  write_def writes either as "( PIN port )". -->
+                   if ( $inst eq "PIN" ) { $NETS_ALREADY{$netName}{$pin} = $pin; }
+                   else { $NETS_ALREADY{$netName}{$inst} = $pin; }
                    if(exists $COMP_ALREADY{$inst}) { $COMP_ALREADY{$inst}{$pin} = $netName;} 
                    elsif( $inst eq "PIN"){ }
                    elsif( $inst eq "\*") {}

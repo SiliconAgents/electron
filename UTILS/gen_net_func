@@ -9,6 +9,13 @@ sub getNetDriver {
                     print "\nDBG-UTS : 002 : net $netName connected to an instance $instance" if($debug);
                     print "\nDBG-UTS : 003 : net $netName connected to an instance $instance and pin $NETS_ALREADY{$netName}{$instance}" if($debug) ;
                     my $cellref = $CADB{$instance}->dbCadbGetCellref;
+                    #<!-- A cell with no library entry has no pin directions to
+                    #     go by.  Asking anyway died ("Can't call method
+                    #     dbMdbGetPins on an undefined value") and took the
+                    #     caller with it: one hand-instantiated cell from an
+                    #     unloaded library cut a 2.2M-instance write_sgraph off
+                    #     after 16% of its nets.  write_sgraph names such cells. -->
+                    next unless ( defined $cellref && exists $PLDB{$cellref} );
   		    my @pins = $PLDB{$cellref}->dbMdbGetPins;
   		    foreach my $pinName ( @pins ) {
   		      my $conn_net = $COMP_ALREADY{$instance}{$pinName};
@@ -101,6 +108,13 @@ sub getNetSink {
                     print "\nDBG-UTS : 003 : net $netName connected to an instance $instance" if($debug);
                     print "\nDBG-UTS : 004 : net $netName connected to an instance $instance and pin $NETS_ALREADY{$netName}{$instance}" if($debug);
                     my $cellref = $CADB{$instance}->dbCadbGetCellref;
+                    #<!-- A cell with no library entry has no pin directions to
+                    #     go by.  Asking anyway died ("Can't call method
+                    #     dbMdbGetPins on an undefined value") and took the
+                    #     caller with it: one hand-instantiated cell from an
+                    #     unloaded library cut a 2.2M-instance write_sgraph off
+                    #     after 16% of its nets.  write_sgraph names such cells. -->
+                    next unless ( defined $cellref && exists $PLDB{$cellref} );
   		    my @pins = $PLDB{$cellref}->dbMdbGetPins;
   		    foreach my $pinName ( @pins ) {
   		      my $conn_net = $COMP_ALREADY{$instance}{$pinName};

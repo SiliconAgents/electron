@@ -123,6 +123,28 @@ sub write_sgraph {
     #     design. -->
     my @buf = ();
 
+    #<!-- Instances whose cell has no library entry: no pin directions, no
+    #     timing.  They are left out -- a net one drives has no driver and is
+    #     not written, a net one loads loses that sink -- and named here, once,
+    #     rather than killing the graph (a design from another tool can carry a
+    #     few cells from a library nobody loaded: 81 decaps, a tie and a buffer
+    #     in 2.2M instances).  Load that library to time through them. -->
+    my %noLib = ();
+    foreach my $o ( keys %COMP_ALREADY ) {
+        my $ref = exists $CADB{$o} ? $CADB{$o}->dbCadbGetCellref : undef;
+        $noLib{$o} = ( defined $ref && $ref ne "" ? $ref : "(no cell)" )
+            unless ( defined $ref && exists $PLDB{$ref} );
+    }
+    if ( %noLib ) {
+        my %byRef = ();
+        $byRef{$_}++ foreach ( values %noLib );
+        my @refs = sort { $byRef{$b} <=> $byRef{$a} || $a cmp $b } keys %byRef;
+        printf("WARN-SPK-WR_SG : 005 : %d instance(s) of %d cell type(s) have no library cell and are left out of the graph: %s%s\n",
+               scalar(keys %noLib), scalar(@refs),
+               join(", ", map { "$_ ($byRef{$_})" } @refs[0 .. ($#refs < 7 ? $#refs : 7)]),
+               @refs > 8 ? ", ..." : "");
+    }
+
     #------------------------------------------------NETS SECTION---------------------------------------------#
     foreach my $net (keys %NETS_ALREADY){
       #<!-- A net with no %NADB entry is a signal net, not a net to skip.
@@ -157,6 +179,7 @@ sub write_sgraph {
                #     invented a self-edge on every input port. -->
                foreach my $sink ( keys %{$NETS_ALREADY{$net}} ) {
                    if ( exists $COMP_ALREADY{$sink} ) {
+                       next if ( exists $noLib{$sink} );
                        my $si = $info->($sink);
                        my $pins = $COMP_ALREADY{$sink};
                        foreach my $sinkPin ( keys %$pins ) {
