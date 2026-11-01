@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
-"""check_fixed_fp.py <nodefile> <def> <x0 y0 x1 y1> [--held_only] [--no_pins]: a floorplan given rather than made, held in a DEF.
+"""check_fixed_fp.py <nodefile> <def> <x0 y0 x1 y1> [--held_only]: a floorplan given rather than made, held in a DEF.
 
 Every INST of the nodefile at its x y and ORIENT=, every PORT where it was held (a DEF pin is the
 centre of its shape, a quarter row on a side, so within 0.36 um), and -- unless --held_only, for a
 placement not yet legalized -- no other component's box reaching into the blockage x0 y0 x1 y1
-(microns) or into a held macro.  --no_pins: the pins are not checked (a DEF read back with
-read_def --floorplan --components, which writes its pins unplaced)."""
+(microns) or into a held macro."""
 import sys, re, os
 nodes, d = sys.argv[1], sys.argv[2]
 blk = [float(v) for v in sys.argv[3:7]]
 heldOnly = "--held_only" in sys.argv
-noPins = "--no_pins" in sys.argv
 want_i, want_p = {}, {}
 for l in open(nodes):
     t = l.split()
     if len(t) < 8 or not t[0].isdigit(): continue
     if t[2] == "INST": want_i[t[1]] = (float(t[6]), float(t[7]), float(t[3]), float(t[4]), [x[7:] for x in t[8:] if x.startswith("ORIENT=")][0])
-    elif not noPins: want_p[t[1]] = (float(t[6]), float(t[7]))
+    else: want_p[t[1]] = (float(t[6]), float(t[7]))
 dbu = 1000; comps = {}; pins = {}; sec = None; cur = None
 size = {}
 for l in open(d):

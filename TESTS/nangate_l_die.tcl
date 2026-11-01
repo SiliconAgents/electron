@@ -10,7 +10,7 @@ read_lef -lef ../fixed_fp/testram.lef
 read_verilog -v vedic_fixed.vg
 set TOP_MODULE vedic_16x16
 elaborate
-read_def -def l_die.def --floorplan --components
+read_def -def l_die.def --floorplan --components --pins
 set_placement_blockage -rect 98 47 110 63
 set_placement_blockage --report
 set_macro_halo -sites 4 -rows 1

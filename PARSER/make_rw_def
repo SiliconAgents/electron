@@ -1204,6 +1204,8 @@ $referToTechnologyLef = %TECHNOLOGY_PHYSICAL;
 %FILLS_INFORMATION = ();
 %DEF_TRACKS_ALREADY = ();
 %DIE_ALREADY = ();
+%DEF_PINS_SEEN = ();     #<!-- the pins this DEF has given, to tell a repeat in it from a port the netlist made -->
+$DEF_PINS_ONTO = 0;
 %FLOORPLAN_LOOKUP = ();
 %FLOORPLAN_ALREADY = ();
 %BLOCKAGES_ALREADY = ();
@@ -1354,7 +1356,7 @@ elsif( $_ =~ /^UNITS/ ) { $DEF_DATABASE_UNIT = (split(/\s+/, $_))[3];
 ################# begin the PIN section ###################
 elsif(/^PINS\b/ ... /^END PINS\b/){ if ( $READ_PINS == 0 ) { next; } else {
 if($_ =~ /^PINS/){ if ( $READ_PINS ==1 ) { $line = ""; my $noOfPins = (split(/\s+/, $_))[1]; print "INFO-PAR-DEF : 002 : reading $noOfPins of pins\n"; next;} else { next; }}
-if($_ =~ /^END PINS/){ print "INFO-PAR-DEF : 003 : End reading pins\n"; next;}
+if($_ =~ /^END PINS/){ print "INFO-PAR-DEF : 003 : End reading pins\n"; print "INFO-PAR-DEF : 047 : $DEF_PINS_ONTO of the DEF's pins placed ports the netlist already had\n" if ( $DEF_PINS_ONTO ); next;}
 if($_ =~ /\;\s*$/){ if ( $READ_PINS ==1 ) {
 chomp();
 $_ =~ s/^\s+//;
@@ -1367,14 +1369,24 @@ $moduleName = $TOP_MODULE;
   @port_data = split(/\s+/, $line);
             shift @port_data;
             $pinName = shift @port_data;
-            if ( exists $PORTS_ALREADY{$moduleName}{$pinName} ) {
+            #<!-- A pin this DEF has already given is a repeat, and the first
+            #     one stands.  A port that exists only because the netlist made
+            #     it -- read_verilog and elaborate always do, unplaced at (0,0)
+            #     on side W -- is not: it takes the DEF's place, side, layer and
+            #     size, and keeps the netlist's connection and direction.  It
+            #     used to be "a repeat" too, so a DEF read onto its own netlist
+            #     with --pins kept every pin unplaced and said so once per pin. -->
+            if ( $DEF_PINS_SEEN{$pinName}++ ) {
                print "WARN-PAR-DEF : 004 : multiple definition of the same pin ... keeping previous\n";
                                                                 }
-            else { $PORTS_ALREADY{$moduleName}{$pinName} = PortDB::new(); 
+            else {
+            my $fromNetlist = exists $PORTS_ALREADY{$moduleName}{$pinName};
+            $DEF_PINS_ONTO++ if ( $fromNetlist );
+            $PORTS_ALREADY{$moduleName}{$pinName} = PortDB::new() unless ( $fromNetlist );
 
     while ( defined ($data = shift @port_data) ) {
             if ( $data eq "NET" ) { $netName = shift @port_data;
-                                   $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetConn($netName);
+                                   $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetConn($netName) unless ( $fromNetlist );
                                   }
             #<!-- DEF allows INPUT or input; electron's own DEFs write lower
             #     case and some fifteen consumers compare against "input" /
@@ -1382,10 +1394,10 @@ $moduleName = $TOP_MODULE;
             #     port it drove look undriven, so store the one spelling. -->
             elsif ( $data eq "DIRECTION" ) { $pinDirection = lc(shift @port_data);
                                    if ( $pinName eq "port_pad_data_in[14]" ) { print "INFO-PAR-DEF : 005 : $pinName : $pinDirection\n"; }
-                                   $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetDir($pinDirection);
+                                   $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetDir($pinDirection) unless ( $fromNetlist );
                                            }
             elsif ( $data eq "USE" ) { $SIGNAL = shift @port_data;
-                                   $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetSignal($SIGNAL);
+                                   $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetSignal($SIGNAL) unless ( $fromNetlist );
                                      }
             elsif ( $data eq "PLACED" || $data eq "FIXED" ) {
                                    $PORTS_ALREADY{$moduleName}{$pinName}->dbPortSetStatus($data);
