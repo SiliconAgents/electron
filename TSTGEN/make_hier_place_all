@@ -754,6 +754,40 @@ foreach my $b ( @r ) {
   $b->[2] = $W if ( $W - $b->[2] <= $gap ); $b->[3] = $H if ( $H - $b->[3] <= $gap );
 }
 if ( $module eq $GLOBAL->dbfGlobalGetTOP ) { push(@r, [ @$_ ]) foreach ( @PLACEMENT_BLOCKAGES ); }
+
+#<!-- As few rectangles as cover the same: one inside another goes, two with
+#     the same extent along one axis that touch along the other are one, and
+#     a sliver thinner than a row pair goes.  A floorplan DEF's own PLACEMENT
+#     blockages are mostly strips a few hundredths of a micron tall hugging
+#     the macro rows (120 on a 2.9M-cell tile, inside or beside the fields
+#     above): handed 147 obstacles the legalizer ran 38 minutes and did not
+#     finish, handed the 6 they come to it took 105 s.  The slivers constrain
+#     nothing at block scale; the cell pass and legalize_flat still see them,
+#     and the budget no longer counts an area twice. -->
+my $e = 1e-6;
+my $thin = 2 * $GLOBAL->dbGlobalGetRowHeight;
+my $in = sub { my ($a, $b) = @_; $a->[0] >= $b->[0] - $e && $a->[1] >= $b->[1] - $e && $a->[2] <= $b->[2] + $e && $a->[3] <= $b->[3] + $e };
+my $merged = 1;
+while ( $merged ) {
+  $merged = 0;
+  I: for my $i ( 0 .. $#r ) {
+    for my $j ( 0 .. $#r ) {
+      next if ( $i == $j );
+      my ($a, $b) = ( $r[$i], $r[$j] );
+      if ( $in->($b, $a) ) { splice(@r, $j, 1); $merged = 1; last I; }
+      next if ( $j < $i );
+      if ( abs($a->[0] - $b->[0]) < $e && abs($a->[2] - $b->[2]) < $e && $a->[1] <= $b->[3] + $e && $b->[1] <= $a->[3] + $e ) {
+        $r[$i] = [ $a->[0], ( $a->[1] < $b->[1] ? $a->[1] : $b->[1] ), $a->[2], ( $a->[3] > $b->[3] ? $a->[3] : $b->[3] ) ];
+        splice(@r, $j, 1); $merged = 1; last I;
+      }
+      if ( abs($a->[1] - $b->[1]) < $e && abs($a->[3] - $b->[3]) < $e && $a->[0] <= $b->[2] + $e && $b->[0] <= $a->[2] + $e ) {
+        $r[$i] = [ ( $a->[0] < $b->[0] ? $a->[0] : $b->[0] ), $a->[1], ( $a->[2] > $b->[2] ? $a->[2] : $b->[2] ), $a->[3] ];
+        splice(@r, $j, 1); $merged = 1; last I;
+      }
+    }
+  }
+}
+@r = grep { $_->[2] - $_->[0] >= $thin - $e && $_->[3] - $_->[1] >= $thin - $e } @r if ( $thin > 0 );
 return @r;
 
 }# sub dbfTstgenHierLegalizeObstacles

@@ -244,7 +244,7 @@ nangate_fixed_fp:
 	$(call FF_EXPECT,RD_PS_ND : 005 : placed 2 instance(s) and 3 port(s) of vedic_16x16)
 	$(call FF_EXPECT,RD_PS_ND : 018 : 2 instance(s) took the orient)
 	$(call FF_EXPECT,HR_PL_ALL : 030 : .* less 373 um2 of fixed macro fields and placement blockage)
-	$(call FF_EXPECT,vedic_16x16 laid out toward its block targets: .* around 4 fixed macro field(s) and blockage(s))
+	$(call FF_EXPECT,vedic_16x16 laid out toward its block targets: .* around 2 fixed macro field(s) and blockage(s), 373 um2)
 	$(call FF_EXPECT,INFO-ALG-LEGAL : 062 : 1 placement blockage(s) held)
 	$(call FF_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
 	$(call FF_EXPECT,INFO-SPK-WR_SG : 004 : 1 placement blockage(s) written as BLOCKAGE)

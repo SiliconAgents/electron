@@ -65,7 +65,7 @@ of the block area, the box overrun -- and hier_place_all judges it: a few
 percent spreads cells by a few microns in legalize_flat; a third of the area
 (what the force-directed block pass alone leaves) does not legalize at all.
 """
-import sys, argparse
+import sys, argparse, time
 import numpy as np
 from scipy.optimize import linprog
 from scipy.sparse import lil_matrix
@@ -75,6 +75,8 @@ ap.add_argument("inp"); ap.add_argument("out")
 ap.add_argument("--aspect", type=float, default=3.0)
 ap.add_argument("--repairs", type=int, default=200)
 ap.add_argument("--cuts", type=int, default=30, help="rounds of tangent cuts per solve")
+ap.add_argument("--max_seconds", type=float, default=900,
+                help="stop the relation search after this long and keep the best found (0: no limit)")
 a = ap.parse_args()
 
 W = H = site = pitch = None
@@ -116,6 +118,44 @@ for i in range(n):
     wmin[i] = max(lo_w, A[i] / hmax_b[i] if np.isfinite(hmax_b[i]) else site)
     wmax[i] = max(wmin[i], min(hi_w, A[i] / max(hmin_b[i], pitch)))
 BIG = 1e4 * (wt.sum() + 1)
+
+#<!-- a target on a fixed macro field.  The relations come from the targets, so
+#     a block whose target is inside an obstacle is given a side of it that
+#     leads nowhere -- left of a field flush with the box's left edge, below
+#     one on its floor -- and getting out takes several relations changed at
+#     once, which the search below, one change a step, does not find.  A tile
+#     whose macros fill 60% of the die kept a 300 x 31 um block wholly on a
+#     macro field, and its cells legalized up to 880 um away.  Such a target
+#     moves first to the nearest place a block of its area, at any allowed
+#     aspect, clears every obstacle. -->
+retarget = 0
+pinA = np.array(pin, bool)
+if pinA.any() and (~pinA).any():
+    g = max(site, min(W, H) / 400.0)
+    nx = int(np.ceil(W / g)); ny = int(np.ceil(H / g))
+    occ = np.zeros((nx, ny), np.int32)
+    for k in np.nonzero(pinA)[0]:
+        x0 = int(np.floor((tx[k] - w0[k] / 2) / g + 1e-9)); x1 = int(np.ceil((tx[k] + w0[k] / 2) / g - 1e-9))
+        y0 = int(np.floor((ty[k] - h0[k] / 2) / g + 1e-9)); y1 = int(np.ceil((ty[k] + h0[k] / 2) / g - 1e-9))
+        occ[max(0, x0):max(0, x1), max(0, y0):max(0, y1)] = 1
+    S = np.zeros((nx + 1, ny + 1), np.int64); S[1:, 1:] = occ.cumsum(0).cumsum(1)
+    for i in range(n):
+        if pinA[i]: continue
+        inside = any(abs(tx[i] - tx[k]) < w0[k] / 2 and abs(ty[i] - ty[k]) < h0[k] / 2 for k in np.nonzero(pinA)[0])
+        if not inside: continue
+        shapes = [(w0[i], h0[i])] if hard[i] else [(w, A[i] / w) for w in np.geomspace(wmin[i], wmax[i], 7)]
+        best = None
+        for w, h in shapes:
+            kw = int(np.ceil(w / g - 1e-9)); kh = int(np.ceil(h / g - 1e-9))
+            if kw > nx or kh > ny: continue
+            win = S[kw:, kh:] - S[:-kw, kh:] - S[kw:, :-kh] + S[:-kw, :-kh]
+            fx, fy = np.nonzero(win == 0)
+            if not len(fx): continue
+            cx = fx * g + w / 2; cy = fy * g + h / 2
+            dd = np.abs(cx - tx[i]) + np.abs(cy - ty[i]); k = int(np.argmin(dd))
+            if best is None or dd[k] < best[0]: best = (dd[k], cx[k], cy[k])
+        if best is not None:
+            tx[i], ty[i] = best[1], best[2]; retarget += 1
 
 # ---- 1. relations from the targets: rel[(i, j)] = (axis, first)
 pairs = [(i, j) for i in range(n) for j in range(i + 1, n) if not (pin[i] and pin[j])]
@@ -284,13 +324,19 @@ def evaluate(rel):
 cost, slack, px, py, ws, hs, tight = evaluate(rel)
 if px is None: raise SystemExit("block_legalize: the relations from the targets admit no arrangement (a bug: they cannot cycle)")
 steps = 0; seen = {tuple(sorted(rel.items()))}
+# a search that cannot close a tight box can spend hours on candidates that
+# each cost a few linear programs; past the limit the best so far stands
+t_end = time.time() + a.max_seconds if a.max_seconds > 0 else None
+timed_out = False
 for it in range(a.repairs):
     if slack < 1e-6 or not tight: break
+    if t_end and time.time() > t_end: timed_out = True; break
     cand = None
     for key in dict.fromkeys(tight):
         i, j = key
         for alt in (("x", i), ("x", j), ("y", i), ("y", j)):
             if alt == rel[key]: continue
+            if t_end and time.time() > t_end: timed_out = True; break
             trial = dict(rel); trial[key] = alt
             sig = tuple(sorted(trial.items()))
             if sig in seen: continue
@@ -315,6 +361,8 @@ with open(a.out, "w") as f:
 far = int(np.argmax(d)) if n else 0
 print(f"block_legalize: {n} block(s), {resh} reshaped, {sum(1 for v in rel.values() if v[0] == 'x')} pair(s) apart in x and "
       f"{sum(1 for v in rel.values() if v[0] == 'y')} in y, {steps} relation change(s); from target: mean {d.mean() if n else 0:.2f} um, "
-      f"worst {d.max() if n else 0:.2f} um" + (f" ({names[far]})" if n else "") + f"; {over} overlap(s), {100 * overA / max(1e-9, (ws * hs).sum()):.2f}% of block area, box overrun {slack:.2f} um"
+      f"worst {d.max() if n else 0:.2f} um" + (f" ({names[far]})" if n else "") + f"; {over} overlap(s), {100 * overA / max(1e-9, (ws * hs)[~pin].sum() if (~pin).any() else 0):.2f}% of block area, box overrun {slack:.2f} um"
       + f", outside the box after the clamp {sum(max(0, px[i] + ws[i] - W) + max(0, py[i] + hs[i] - H) for i in range(n)):.2f} um"
-      + (f"; {int(bound.sum())} block(s) bounded by fixed shapes" if bound.any() else "") + (f", {conflicts} bound conflict(s) dropped" if conflicts else ""))
+      + (f"; {int(bound.sum())} block(s) bounded by fixed shapes" if bound.any() else "") + (f", {conflicts} bound conflict(s) dropped" if conflicts else "")
+      + (f"; {retarget} target(s) inside a fixed obstacle moved to the nearest place clear of it" if retarget else "")
+      + (f"; search stopped at --max_seconds {a.max_seconds:g}, the best found kept" if timed_out else ""))
