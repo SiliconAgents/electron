@@ -209,6 +209,7 @@ def cmd_start(a):
     log(d, f"timing: sdc {s['sdc'] or '(none: ports untimed, no exceptions)'}; case {s['case'] or '(none)'}; "
            f"clock slew {s['clock_slew'] + ' ns' if s['clock_slew'] else '(Photon default)'}")
     s["place_extra"] = a.place_extra
+    s["place_args"] = a.place_args or PLACE_ARGS
     pre = []
     if a.pre_ungroup:
         for l in open(a.pre_ungroup):
@@ -216,10 +217,17 @@ def cmd_start(a):
             if len(f) == 2 and not l.startswith("#"):
                 pre.append(f"ungroup -module {f[0]} -cell {f[1]}")
                 s["ungrouped"].append([f[0], f[1]])
+    loadtxt = open(a.load).read().rstrip() + "\n"
+    #<!-- a load that opens the top itself (a floorplan tile: edit_module --top,
+    #     then read_pseudo_nodefile holds the macros and pins) must not be
+    #     opened again -- edit_module reloads the module's pseudo model and the
+    #     held places with it -->
+    opened = re.search(r"^\s*edit_module\s+--top\b", loadtxt, re.M) and not pre
     with open(os.path.join(d, "load.tcl"), "w") as fh:
-        fh.write(open(a.load).read().rstrip() + "\n")
+        fh.write(loadtxt)
         fh.write("".join(x + "\n" for x in pre))
-        fh.write(f"edit_module --top\nhier_place_all {PLACE_ARGS} {a.place_extra} -floorplan_spec {spec}\nshell echo PLAN_READY\n")
+        fh.write(("" if opened else "edit_module --top\n") +
+                 f"hier_place_all {s['place_args']} {a.place_extra} -floorplan_spec {spec}\nshell echo PLAN_READY\n")
     job = os.path.join(d, "session_job.sh")
     with open(job, "w") as fh:
         fh.write(f"""#!/bin/bash
@@ -355,7 +363,7 @@ def do_try(d, s, action, mods, paths):
     tag = f"t{len(s['tries'])}"
     if kind == "control":
         mod = action[1]
-        lines = [f"hier_place_all -only {mod} --keep_shapes {PLACE_ARGS} {s.get('place_extra', '')} -floorplan_spec {s['spec']}"]
+        lines = [f"hier_place_all -only {mod} --keep_shapes {s.get('place_args', PLACE_ARGS)} {s.get('place_extra', '')} -floorplan_spec {s['spec']}"]
         desc = f"control: {mod} placed again, nothing changed"
         owner_mod = mod
     else:
@@ -365,9 +373,9 @@ def do_try(d, s, action, mods, paths):
         lines = [f"ungroup -module {parent} -cell {child}"]
         if parent == s["top"]:
             spec_drop(s["spec"], parent, insts)
-            lines.append(f"hier_place_all -depth 0 --keep_shapes {PLACE_ARGS} {s.get('place_extra', '')} -floorplan_spec {s['spec']}")
+            lines.append(f"hier_place_all -depth 0 --keep_shapes {s.get('place_args', PLACE_ARGS)} {s.get('place_extra', '')} -floorplan_spec {s['spec']}")
         else:
-            lines.append(f"hier_place_all -only {parent} --keep_shapes {PLACE_ARGS} {s.get('place_extra', '')} -floorplan_spec {s['spec']}")
+            lines.append(f"hier_place_all -only {parent} --keep_shapes {s.get('place_args', PLACE_ARGS)} {s.get('place_extra', '')} -floorplan_spec {s['spec']}")
         owner_mod = parent
     lines.append(f"write_moves -output {d}/{tag}.moves")
     log(d, f"try {tag}: {desc}")
@@ -536,6 +544,8 @@ def main():
     x.add_argument("--vts", default="svt,lvt,ulvt")
     x.add_argument("--queue", default="normal"); x.add_argument("--session_mem", default="48")
     x.add_argument("--server_mem", default="64")
+    x.add_argument("--place_args", default="", help="the hier_place_all options (default: the slicing set); "
+                   "a tile placed among fixed macros passes its own, --legalize_blocks and its -block_targets")
     x.add_argument("--place_extra", default="", help="more hier_place_all options for the placement, e.g. --child_pins")
     x.add_argument("--pre_ungroup", default="", help="a plan.ungroup: instances dissolved before placing")
     x.add_argument("--sdc", default="", help="the block's SDC, as make sta takes it (SPARKSTA_SDC)")
