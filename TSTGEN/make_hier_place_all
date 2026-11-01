@@ -458,9 +458,24 @@ $solve = sub {
   foreach my $dir ( ( $w >= $h ) ? ('v', 'h') : ('h', 'v') ) {
     my @s = sort { ( ($dir eq 'v') ? $a->{cx} <=> $b->{cx} : $a->{cy} <=> $b->{cy} )
                    || $a->{ref} cmp $b->{ref} } @$its;
+    #<!-- Past a few groups, cut only where the area halves.  Trying every
+    #     split point at every level is exponential: a level of 366 distinct
+    #     child blocks (a netlist whose writer gave every instance a module of
+    #     its own) ran for hours without finishing.  The balanced cut makes it
+    #     a bisection, n log n, and small levels keep the full search. -->
+    my $kOnly = 0;
+    if ( @s > 8 ) {
+      my $c = 0;
+      for ( my $k = 1 ; $k < @s ; $k++ ) {
+        $c += $s[$k-1]{area};
+        if ( $c >= $A / 2 ) { $kOnly = $k; last; }
+      }
+      $kOnly = $#s if ( $kOnly == 0 );
+    }
     my $cum = 0;
     for ( my $k = 1 ; $k < @s ; $k++ ) {
       $cum += $s[$k-1]{area};
+      next if ( $kOnly && $k != $kOnly );
       my $f = $cum / $A;
       my @L = @s[0 .. $k-1];
       my @R = @s[$k .. $#s];
