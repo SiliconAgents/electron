@@ -61,7 +61,9 @@ SPARKSTA_CLOCK_EARLY ?=
 # virtual clock's latency once SPARKSTA_CLOCK is propagated), and setup false
 # paths and multicycles on ports and clocks apply -- without them a 6-cycle
 # reset input is the worst path into every register it reaches.  Photon says
-# what it read and what it could not apply.
+# what it read and what it could not apply.  make sta and place_opt
+# (SPARKSTA_REPEAT: its sizing and its own timing) both use it, and
+# SPARKSTA_CASE below.
 SPARKSTA_SDC ?=
 # Pins held at a constant for the run's mode, as set_case_analysis would:
 # <cell>/<pin>=0|1, globs allowed.  A memory's clock-to-Q exists once per
@@ -200,7 +202,7 @@ define SPARKSTA_REPEAT
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5).eco.tsv; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca $(PYSPARK)/scala/repeat.sca > $(5).repeat.sca; \
-	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_REFUSALS),$(_sparksta_comma) refusals = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC))))' >> $(5).repeat.sca; \
+	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_REFUSALS),$(_sparksta_comma) refusals = true)$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).repeat.sca; \
 	 echo 'System.exit(0)' >> $(5).repeat.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
 	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
