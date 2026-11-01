@@ -275,6 +275,41 @@ nangate_l_die: nangate_fixed_fp
 	python3 check_fixed_fp.py fixed_fp/fixed_fp.nodes workarea/l_die.legal.def 98 47 110 63
 	@echo "nangate_l_die: all expected results"
 
+# nangate_fp_def: read_floorplan_def, a netlist placed inside another tool's floorplan DEF (see
+# nangate_fp_def.tcl).  Fails unless it takes the L's notch as blockage, the DEF's rows of the one
+# site (FS first, decoys left out), dissolves the block holding w1/ram1 so both macros are held,
+# takes the five unconnected FILLCELLs the netlist has out of it before placing (a tool that writes
+# its taps into the netlist), puts all 45 physical cells back FIXED where the DEF has them, and
+# delete_physical_cells finds exactly those 45 and takes them out -- and, legalized, the macros and
+# pins are where the DEF put them and no cell reaches into the notch, a macro or a tap.
+FD_EXPECT = grep -q "$(1)" workarea/fp_def.log || { echo "nangate_fp_def: expected \"$(1)\" in workarea/fp_def.log"; exit 1; }
+nangate_fp_def: nangate_fixed_fp
+	sed -e 's/^  TESTRAM ram1 (.A(b\[0\]));/  ramwrap w1 (.A(b[0]));\n  FILLCELL_X1 ntap_0 ( );\n  FILLCELL_X1 ntap_1 ( );\n  FILLCELL_X1 ntap_2 ( );\n  FILLCELL_X1 ntap_3 ( );\n  FILLCELL_X1 ntap_4 ( );/' workarea/vedic_fixed.vg > workarea/vedic_fpdef.vg
+	printf 'module ramwrap ( A );\n  input A;\n  TESTRAM ram1 (.A(A));\nendmodule\n' >> workarea/vedic_fpdef.vg
+	awk '/^DIEAREA/{print "DIEAREA ( 0 0 ) ( 440000 0 ) ( 440000 188000 ) ( 392000 188000 ) ( 392000 252000 ) ( 440000 252000 ) ( 440000 440000 ) ( 0 440000 ) ;"; next} \
+	  /^ROW /{o=$$6; $$6=(o=="N")?"FS":"N"; print; if ($$2 ~ /_[0-9]*[02468]$$/) print "ROW DECOY_" $$2 " decoy_site 0 " $$5+2800 " N DO 578 BY 1 STEP 760 0 ;"; next} \
+	  /^- ram1 TESTRAM/{print "- w1/ram1 TESTRAM"; fix=1; next} /^- ram0 TESTRAM/{print; fix=1; next} \
+	  fix && /PLACED/{sub(/PLACED/, "FIXED"); fix=0} \
+	  /^END COMPONENTS/{for (k=0; k<40; k++) print "- tap_" k " FILLCELL_X1 + FIXED ( 200000 " k*2*5600 " ) FS ;"; \
+	                    for (k=0; k<5; k++) print "- ntap_" k " FILLCELL_X1 + FIXED ( 240000 " k*2*5600 " ) FS ;"} {print}' workarea/ff.legal.def > workarea/fp_in.def
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_fp_def.tcl > fp_def.log 2>&1
+	$(call FD_EXPECT,INFO-PAR-DEF : 044 : the die's notch 98.0000 47.0000 110.0000 63.0000)
+	$(call FD_EXPECT,INFO-PAR-RD_FP_DEF : 013 : rows: the DEF's 78 of site NCSU_FreePDK_45nm (39 of decoy_site left out))
+	$(call FD_EXPECT,INFO-PAR-RD_FP_DEF : 018 : block w1 dissolved into vedic_16x16)
+	$(call FD_EXPECT,INFO-PAR-RD_FP_DEF : 020 : 2 macro(s) held)
+	$(call FD_EXPECT,INFO-PAR-RD_FP_DEF : 026 : 5 FIXED cell(s) with no signal pin (endcaps, well taps) taken out of the netlist)
+	$(call FD_EXPECT,INFO-PAR-RD_FP_DEF : 022 : 45 FIXED physical cell(s))
+	$(call FD_EXPECT,INFO-PAR-RD_FP_DEF : 009 : 45 physical-only cell(s) added FIXED)
+	$(call FD_EXPECT,INFO-ALG-DL_PH_CL : 002 : 45 physical-only cell(s) found: 45 FILLCELL_X1)
+	$(call FD_EXPECT,INFO-ALG-DL_PH_CL : 002 : 45 physical-only cell(s) deleted)
+	$(call FD_EXPECT,INFO-ALG-LEGAL : 058 : checked: no overlaps)
+	grep -q "^ROW CORE_ROW_0 NCSU_FreePDK_45nm 0 0 FS " workarea/fp_def.legal.def || { echo "nangate_fp_def: the rows are not the DEF's"; exit 1; }
+	test $$(grep -c "^- n*tap_[0-9]* FILLCELL_X1" workarea/fp_def.legal.def) -eq 45 || { echo "nangate_fp_def: the 45 physical cells are not in the legal DEF"; exit 1; }
+	test $$(grep -c "^- n*tap_" workarea/fp_def.notaps.def) -eq 0 || { echo "nangate_fp_def: delete_physical_cells left some"; exit 1; }
+	grep -q "^- w1/ram1 TESTRAM" workarea/fp_def.legal.def || { echo "nangate_fp_def: w1/ram1 lost its name"; exit 1; }
+	python3 check_fp_def.py workarea/fp_in.def workarea/fp_def.legal.def 98 47 110 63
+	@echo "nangate_fp_def: all expected results"
+
 # nangate_flatten_below: 3RDBIN/netlist_flatten_below on the hierarchical vedic netlist, its yosys
 # (* attributes *) taken out -- a place-and-route tool's netlist has none, and they are an error.  Fails
 # unless modules under 200 leaf cells are dissolved into their parents (2 of 11 kept, 10 instances
@@ -491,7 +526,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_flatten_below nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_fp_def nangate_flatten_below nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

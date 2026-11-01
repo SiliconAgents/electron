@@ -1789,6 +1789,41 @@ sub get_location_of_flat_inst_from_pseudo_db
     my @u = &dbfUngroupFlatLoc($curr_inst_hier_name);
     return @u if ( @u );
   }
+  #<!-- Any name with a "/" is resolved top down, by the netlist.  A "/" is
+  #     not always a level of hierarchy: another tool's ungroup leaves blocks
+  #     named "u_x/lanes_0" in their parent and cells named "u_a/L", and so does
+  #     3RDBIN/netlist_flatten_below.  The walk below splits at every "/", took
+  #     "u_x" for a block, found no such module and died. -->
+  if ( $curr_inst_hier_name =~ /\// && ! exists $hier_inst_abs_location{$curr_inst_hier_name} ) {
+    my ($chain, $mods, $leaf) = &dbfHierSplitFlatName($curr_inst_hier_name);
+    my ($x, $y, $o, $path) = ( 0, 0, "UND", "" );
+    for ( my $k = 0 ; $k < @$chain ; $k++ ) {
+      my $c = $chain->[$k];
+      $path = ( $path eq "" ) ? $c : "$path/$c";
+      if ( exists $hier_inst_abs_location{$path} ) {
+        ($x, $y, $o) = @{$hier_inst_abs_location{$path}};
+        next;
+      }
+      my $pf = &get_floorplanID_of_module($mods->[$k]);
+      my @rel = ( 0, 0, "UND" );
+      if ( $pf != -1 && exists $FLOORPLAN_ALREADY{$pf} && $FLOORPLAN_ALREADY{$pf}->dbFlplanHasHierInst($c) ) {
+        my @hierBbox = $FLOORPLAN_ALREADY{$pf}->dbFlplanGetHierInstExtent($c);
+        my $orient = $FLOORPLAN_ALREADY{$pf}->dbFlplanGetHierInstOrient($c);
+        @rel = ( $hierBbox[0], $hierBbox[1], $orient );
+      }
+      ($x, $y, $o) = ( $x + $rel[0], $y + $rel[1], $rel[2] );
+      @{$hier_inst_abs_location{$path}} = ( $x, $y, $o );
+    }
+    if ( $leaf ne "" ) {
+      my $pf = &get_floorplanID_of_module($mods->[-1]);
+      my @l = ( 0, 0, "UND" );
+      if ( $pf != -1 && exists $FLOORPLAN_ALREADY{$pf} && $FLOORPLAN_ALREADY{$pf}->dbFlplanHasLeafInst($leaf) ) {
+        @l = $FLOORPLAN_ALREADY{$pf}->dbFlplanGetLeafInstLoc($leaf);
+      }
+      @{$hier_inst_abs_location{$curr_inst_hier_name}} = ( $x + $l[0], $y + $l[1], $l[2] );
+    }
+    return @{$hier_inst_abs_location{$curr_inst_hier_name}};
+  }
   ################### Added by aditya if top inst has / in it's name ############
   #if($curr_inst_hier_name =~ /^\s*$/){
   my $global_top_module = $GLOBAL->dbfGlobalGetTOP;
@@ -1840,6 +1875,35 @@ sub get_location_of_flat_inst_from_pseudo_db
     }
   }
 }#sub get_location_of_flat_inst_from_pseudo_db
+
+#<!-- a flat name split top down by the netlist: the hierarchical instances
+#     it runs through, the module each of them sits in (the top first, then
+#     each one's cell, so one more than the instances), and what is left -- a
+#     leaf of the last module, "" when the name is a block.  An instance or a
+#     leaf may itself hold "/"; at each level the shortest run of segments
+#     that names an instance of the module is taken. -->
+sub dbfHierSplitFlatName {
+my ($name) = @_;
+my @s = split(/\//, $name);
+my @chain = ();
+my @mods = ( $GLOBAL->dbfGlobalGetTOP );
+my $i = 0;
+while ( $i < @s && exists $MODULE_ALREADY{$mods[-1]} ) {
+  my $found = 0;
+  for ( my $j = $i ; $j < @s ; $j++ ) {
+    my $c = join("/", @s[$i .. $j]);
+    if ( $MODULE_ALREADY{$mods[-1]}->dbVNOMHasHierInst($c) ) {
+      push(@chain, $c);
+      push(@mods, $MODULE_ALREADY{$mods[-1]}->dbVNOMGetHierInstCell($c));
+      $i = $j + 1;
+      $found = 1;
+      last;
+    }
+  }
+  last unless ( $found );
+}
+return ( \@chain, \@mods, join("/", @s[$i .. $#s]) );
+}# sub dbfHierSplitFlatName
 
 sub get_floorplanID_of_module
 {

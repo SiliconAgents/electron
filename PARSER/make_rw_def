@@ -401,7 +401,7 @@ return ($llx, $lly, $urx, $ury);
 #     coordinates: the top's frame when the die starts at the origin. -->
 %DIE_NOTCH_BLOCKAGES = ();
 sub dbfDefDieNotchBlockages {
-my ($pts) = @_;
+my ($pts, $unit) = @_;      #<!-- $unit: the points' units per micron, if not the DEF's being read -->
 if ( %DIE_NOTCH_BLOCKAGES ) {
   @PLACEMENT_BLOCKAGES = grep { ! exists $DIE_NOTCH_BLOCKAGES{"$_"} } @PLACEMENT_BLOCKAGES;
   %DIE_NOTCH_BLOCKAGES = ();
@@ -416,7 +416,8 @@ for my $i ( 0 .. $n - 1 ) {
   print "WARN-PAR-DEF : 045 : the die outline has a diagonal edge ( $x[$i] $y[$i] ) ( $x[$j] $y[$j] ); no placement blockage made for it -- add set_placement_blockage by hand\n";
   return;
 }
-my $u = ( defined $DEF_DATABASE_UNIT && $DEF_DATABASE_UNIT > 0 ) ? $DEF_DATABASE_UNIT : $GLOBAL->dbfGlobalGetDBU;
+my $u = ( defined $unit && $unit > 0 ) ? $unit
+      : ( defined $DEF_DATABASE_UNIT && $DEF_DATABASE_UNIT > 0 ) ? $DEF_DATABASE_UNIT : $GLOBAL->dbfGlobalGetDBU;
 my %sx = map { $_ => 1 } @x; my @xs = sort { $a <=> $b } keys %sx;
 my %sy = map { $_ => 1 } @y; my @ys = sort { $a <=> $b } keys %sy;
 my $inside = sub {

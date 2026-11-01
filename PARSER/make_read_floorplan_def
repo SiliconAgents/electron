@@ -1,0 +1,466 @@
+#<!-- read_floorplan_def: place a netlist inside another tool's floorplan DEF.
+#
+#     A released floorplan comes as a DEF of the whole placed design: its die
+#     (often rectilinear), its rows, its pins, and FIXED components -- the hard
+#     macros, and tens of thousands of physical-only endcaps and well taps --
+#     next to millions of PLACED cells this flow is going to place again.  This
+#     takes the floorplan out of it and nothing else, and stops reading before
+#     the nets.
+#
+#     First call, after elaborate and before hier_place_all:
+#       - the die: its bounding box is the floorplan (set_floorplan), and what
+#         the box has outside the outline is placement blockage
+#         (dbfDefDieNotchBlockages); write_def gives the outline back;
+#       - the rows: the DEF's own, of the cell family's site only -- a DEF can
+#         lay rows of three sites over one another, and rows made here start
+#         N where that tool's start FS, which flips every cell against its
+#         rails;
+#       - PLACEMENT blockages from its BLOCKAGES section;
+#       - the macros: hier_place_all places a block as one rectangle, so a
+#         block holding a macro the floorplan fixes cannot be placed around it.
+#         Each top-level block holding one is dissolved into the top, whole
+#         (ungroup, bottom up) -- what a floorplan loop did by hand -- and
+#         the macros are written as FIXED INST records of the top;
+#       - the pins, as FIXED PORT records.
+#     Both go to -write_nodes for read_pseudo_nodefile.  Edit that file to move
+#     macros, and hand the edited one to read_pseudo_nodefile instead.
+#
+#     Physical cells -- endcaps, well taps: FIXED components with no signal
+#     pin.  A DEF has them; a netlist may too (one tool writes its 84,542 as
+#     unconnected cells of the top), and a placer would move those as cells.
+#     The first call takes them out of the netlist; the second call,
+#     --physical_cells, after hier_place_all and before legalize_flat, puts
+#     every one back FIXED where the DEF has it, so the legalizer goes around
+#     them and write_def carries them.  Leave it out -- or
+#     delete_physical_cells them later -- to arrange macros before the taps
+#     are final. -->
+
+#<!-- the netlist's view of a flat name: [instances], [modules], leaf ("" when
+#     the name is a block, undef when the netlist has no such thing).  Names
+#     compare unescaped: a DEF writes a\[3\], a netlist \a[3] , and electron
+#     keeps either.  A segment run may itself hold "/" (netlist_flatten_below
+#     and other tools' ungroups name cells \u_a/u_b), so at each level the
+#     shortest run naming a block is taken, and what is left must be a leaf. -->
+%FP_UNESC_HIER = (); %FP_UNESC_LEAF = ();
+sub dbfFpUnescMaps {
+my ($m) = @_;
+unless ( exists $FP_UNESC_HIER{$m} ) {
+  my (%h, %l);
+  foreach my $c ( $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) { my $u = $c; $u =~ s/\\//g; $u =~ s/\s+$//; $h{$u} = $c; }
+  foreach my $c ( $MODULE_ALREADY{$m}->dbVNOMGetLeafInst ) { my $u = $c; $u =~ s/\\//g; $u =~ s/\s+$//; $l{$u} = $c; }
+  $FP_UNESC_HIER{$m} = \%h; $FP_UNESC_LEAF{$m} = \%l;
+}
+return ( $FP_UNESC_HIER{$m}, $FP_UNESC_LEAF{$m} );
+}
+#<!-- a module's leaves that connect nothing: a conn line with no ".pin(" --
+#     the cell name and instance first, so a "." inside an escaped name does
+#     not count -->
+%FP_NOPIN = ();
+sub dbfFpNoPin {
+my ($m, $leaf) = @_;
+unless ( exists $FP_NOPIN{$m} ) {
+  my %np = ();
+  foreach my $line ( $MODULE_ALREADY{$m}->dbVNOMGetConn ) {
+    my ($cell, $inst, $rest) = ( $line =~ /^\s*(\S+)\s+(\S+)\s*(.*)$/ );
+    next unless ( defined $inst );
+    $np{$inst} = 1 unless ( $rest =~ /\.\s*[\\A-Za-z_]/ );
+  }
+  $FP_NOPIN{$m} = \%np;
+}
+return exists $FP_NOPIN{$m}{$leaf};
+}
+#<!-- a leaf out of the netlist: its module's leaf and conn line, and the flat
+#     instance elaborate made of it -->
+sub dbfFpDropLeaves {
+my ($m, $leaves, $flat) = @_;
+my %drop = map { $_ => 1 } @$leaves;
+my $M = $MODULE_ALREADY{$m};
+delete ${$M->{Lchild}}{$_} foreach ( @$leaves );
+my @keep = grep { my ($c, $i) = ( split(/\s+/, ( $_ =~ s/^\s+//r )) )[0, 1]; ! ( defined $i && $drop{$i} ) } $M->dbVNOMGetConn;
+$M->dbVNOMWipeConn;
+$M->dbVNOMAddConn($_) foreach ( @keep );
+foreach my $f ( @$flat ) { delete $CADB{$f}; delete $COMP_ALREADY{$f}; }
+delete $FP_NOPIN{$m}; delete $FP_UNESC_LEAF{$m}; delete $FP_UNESC_HIER{$m};
+}
+
+sub dbfFpResolve {
+my ($name) = @_;
+my $u = $name; $u =~ s/\\//g;
+my @s = split(/\//, $u);
+my @chain = (); my @mods = ( $GLOBAL->dbfGlobalGetTOP );
+my $i = 0;
+while ( $i < @s ) {
+  my ($h, $l) = &dbfFpUnescMaps($mods[-1]);
+  my $rest = join("/", @s[$i .. $#s]);
+  return ( \@chain, \@mods, $l->{$rest} ) if ( exists $l->{$rest} );
+  my $found = 0;
+  for ( my $j = $i ; $j < $#s ; $j++ ) {
+    my $c = join("/", @s[$i .. $j]);
+    next unless ( exists $h->{$c} );
+    push(@chain, $h->{$c});
+    push(@mods, $MODULE_ALREADY{$mods[-1]}->dbVNOMGetHierInstCell($h->{$c}));
+    $i = $j + 1; $found = 1;
+    last;
+  }
+  return ( \@chain, \@mods, undef ) unless ( $found && exists $MODULE_ALREADY{$mods[-1]} );
+}
+return ( \@chain, \@mods, "" );
+}
+
+#<!-- one DEF statement at a time, from "-" to ";", for the sections wanted;
+#     stops at the first section past them (the nets, millions of lines) -->
+sub dbfFpReadDef {
+my ($file, $want) = @_;
+my $cmd = ( $file =~ /\.gz$/i ) ? "gzip -dc '$file' |" : "< $file";
+open(my $fh, $cmd) or do { print "ERR-PAR-RD_FP_DEF : 001 : cannot open $file\n"; return undef; };
+my %D = ( unit => 0, die => [], rows => [], comps => [], pins => [], blkgs => [] );
+my ($sec, $stmt) = ("", "");
+while ( my $l = <$fh> ) {
+  if ( $sec eq "" ) {
+    if ( $l =~ /^UNITS\s+DISTANCE\s+MICRONS\s+(\d+)/ ) { $D{unit} = $1; next; }
+    if ( $l =~ /^DIEAREA\b/ ) {
+      my $s = $l; while ( $s !~ /;/ ) { my $m = <$fh>; last unless ( defined $m ); $s .= $m; }
+      $D{die} = [ $s =~ /\(\s*(-?\d+)\s+(-?\d+)\s*\)/g ];
+      next;
+    }
+    if ( $l =~ /^ROW\s/ ) { push(@{$D{rows}}, [ split(/\s+/, $l) ]); next; }
+    if ( $l =~ /^(COMPONENTS|PINS|BLOCKAGES)\b/ ) { $sec = $1; next; }
+    last if ( $l =~ /^(SPECIALNETS|NETS)\b/ && $want->{stop_at_nets} );
+    next;
+  }
+  if ( $l =~ /^END\s+$sec\b/ ) { $sec = ""; $stmt = ""; next; }
+  $stmt .= $l;
+  next unless ( $l =~ /;\s*$/ );
+  my $s = $stmt; $stmt = ""; $s =~ s/\s+/ /g; $s =~ s/^ //;
+  if ( $sec eq "COMPONENTS" ) {
+    next unless ( $s =~ /\+\s*(FIXED|COVER)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*(\S+)/ );
+    my ($st, $x, $y, $o) = ($1, $2, $3, $4);
+    my ($n, $ref) = ( split(/ /, $s) )[1, 2];
+    push(@{$D{comps}}, [ $n, $ref, $st, $x, $y, $o ]);
+  }
+  elsif ( $sec eq "PINS" ) {
+    my ($n) = ( $s =~ /^-\s+(\S+)/ );
+    my ($lay, $x1, $y1, $x2, $y2) = ( $s =~ /\+\s*LAYER\s+(\S+)\s*(?:MASK\s+\d+\s*)?(?:SPACING\s+\d+\s*|DESIGNRULEWIDTH\s+\d+\s*)?\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)/ );
+    my ($st, $x, $y, $o) = ( $s =~ /\+\s*(PLACED|FIXED|COVER)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*(\S+)/ );
+    push(@{$D{pins}}, [ $n, $lay, $x1, $y1, $x2, $y2, $st, $x, $y, $o ]) if ( defined $n && defined $x );
+  }
+  elsif ( $sec eq "BLOCKAGES" ) {
+    if ( $s =~ /^-\s*PLACEMENT\b/ ) {
+      my $kind = ( $s =~ /\+\s*(PARTIAL|SOFT)\b/ ) ? $1 : "HARD";
+      my @r = ( $s =~ /RECT\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)/g );
+      for ( my $k = 0 ; $k + 3 < @r ; $k += 4 ) { push(@{$D{blkgs}}, [ $kind, @r[$k .. $k + 3] ]); }
+    }
+  }
+}
+close($fh);
+return \%D;
+}
+
+#<!-- a rectangle (x1 y1 x2 y2, relative to the origin) under a DEF orient -->
+sub dbfFpOrientRect {
+my ($o, $x1, $y1, $x2, $y2) = @_;
+my @p = ( [$x1, $y1], [$x2, $y2] );
+my %f = ( N => sub { @_ }, S => sub { (-$_[0], -$_[1]) }, E => sub { ($_[1], -$_[0]) }, W => sub { (-$_[1], $_[0]) },
+          FN => sub { (-$_[0], $_[1]) }, FS => sub { ($_[0], -$_[1]) }, FE => sub { ($_[1], $_[0]) }, FW => sub { (-$_[1], -$_[0]) } );
+my $t = $f{$o} || $f{N};
+my @q = map { [ $t->(@$_) ] } @p;
+return ( ($q[0][0] < $q[1][0] ? $q[0][0] : $q[1][0]), ($q[0][1] < $q[1][1] ? $q[0][1] : $q[1][1]),
+         ($q[0][0] < $q[1][0] ? $q[1][0] : $q[0][0]), ($q[0][1] < $q[1][1] ? $q[1][1] : $q[0][1]) );
+}
+
+sub read_floorplan_def {
+my $noOfArguments = @_;
+if ( $noOfArguments < 2 || $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP' ) {
+  print "Usage : read_floorplan_def -def <floorplan.def[.gz]> -write_nodes <file> [-site <name>] [--free_macros]\n";
+  print "        read_floorplan_def -def <floorplan.def[.gz]> --physical_cells\n";
+  print "\n";
+  print "        First form, after elaborate: the die (a rectilinear one's notch blocked),\n";
+  print "        the rows of one site (default: the one read_config_file fixed), PLACEMENT\n";
+  print "        blockages, and -- for read_pseudo_nodefile -- the FIXED macros and the pins\n";
+  print "        as a nodefile.  A top-level block holding a fixed macro is dissolved into\n";
+  print "        the top (ungroup), so the macro can be held where it is.  --free_macros:\n";
+  print "        neither; the macros are placed like any cell.\n";
+  print "        Second form, after hier_place_all: the FIXED cells the netlist does not have\n";
+  print "        (endcaps, well taps), added FIXED.  delete_physical_cells takes them out.\n";
+  return;
+}
+my ($def, $nodes, $site, $freeMacros, $physical) = ("", "", "", 0, 0);
+for ( my $i = 0 ; $i < $noOfArguments ; $i++ ) {
+  if    ( $_[$i] eq "-def" )             { $def = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "-write_nodes" )     { $nodes = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "-site" )            { $site = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "--free_macros" )    { $freeMacros = 1; }
+  elsif ( $_[$i] eq "--physical_cells" ) { $physical = 1; }
+  else { print "WARN-PAR-RD_FP_DEF : 002 : invalid option $_[$i]\n"; }
+}
+unless ( -r $def ) { print "ERR-PAR-RD_FP_DEF : 003 : no DEF $def\n"; return; }
+my $top = $GLOBAL->dbfGlobalGetTOP;
+unless ( defined $top && exists $MODULE_ALREADY{$top} ) { print "ERR-PAR-RD_FP_DEF : 004 : no design -- read_verilog and elaborate first\n"; return; }
+unless ( $physical || $nodes ne "" ) { print "ERR-PAR-RD_FP_DEF : 005 : give -write_nodes <file> (or --physical_cells)\n"; return; }
+my $t0 = time;
+%FP_UNESC_HIER = (); %FP_UNESC_LEAF = (); %FP_NOPIN = ();
+my $D = &dbfFpReadDef($def, { stop_at_nets => 1 });
+return unless ( $D );
+my $u = $D->{unit};
+my $g = $GLOBAL->dbfGlobalGetDBU;
+unless ( $u > 0 ) { print "ERR-PAR-RD_FP_DEF : 006 : $def has no UNITS DISTANCE MICRONS\n"; return; }
+#<!-- what the session stores in DBU (rows, the outline, a cell's location)
+#     is in its own units, which need not be the DEF's: 2000 per micron in
+#     one tool's DEF, 4000 in the session reading it -->
+$g = $u unless ( defined $g && $g > 0 );
+my $f = $g / $u;
+print "INFO-PAR-RD_FP_DEF : 007 : the DEF is in $u units per micron and this session in $g: its coordinates are scaled by $f\n" if ( $f != 1 );
+my $sc = sub { my $v = $_[0] * $f; return int($v + ( $v < 0 ? -0.5 : 0.5 )); };
+printf("INFO-PAR-RD_FP_DEF : 008 : %s: %d FIXED component(s), %d pin(s), %d row(s), %d placement blockage(s), read in %d s\n",
+       $def, scalar(@{$D->{comps}}), scalar(@{$D->{pins}}), scalar(@{$D->{rows}}), scalar(@{$D->{blkgs}}), time - $t0);
+
+#<!-- each FIXED component: in the netlist (a macro, or a cell held), or not
+#     (physical only) -->
+my (@macros, @physOnly, @heldCells, %physIn);
+foreach my $c ( @{$D->{comps}} ) {
+  my ($chain, $mods, $leaf) = &dbfFpResolve($c->[0]);
+  if ( defined $leaf && $leaf ne "" && &dbfFpNoPin($mods->[-1], $leaf) ) {
+    #<!-- a physical cell the netlist carries: out of it, back in with --physical_cells -->
+    my $prefix = join("/", @$chain);
+    my $flat = ( $prefix eq "" ) ? $leaf : "$prefix/$leaf";
+    my $fk = exists $CADB{$flat} ? $flat : ( map { exists $CADB{$_} ? $_ : () } ( $flat =~ s/\\//gr ) )[0];
+    push(@{$physIn{$mods->[-1]}}, [ $leaf, $fk ]);
+    push(@physOnly, $c);
+  }
+  elsif ( defined $leaf && $leaf ne "" ) {
+    my $ref = $c->[1];
+    my $class = ( exists $PLDB{$ref} ) ? $PLDB{$ref}->dbMdbGetClass : "";
+    $class = "" unless ( defined $class );
+    if ( $class =~ m/^CORE/ ) { push(@heldCells, $c); } else { push(@macros, [ @$c, $chain, $mods, $leaf ]); }
+  }
+  else { push(@physOnly, $c); }
+}
+
+if ( %physIn && ! $physical ) {
+  my $n = 0;
+  foreach my $m ( sort keys %physIn ) {
+    my @l = map { $_->[0] } @{$physIn{$m}};
+    my @f = grep { defined } map { $_->[1] } @{$physIn{$m}};
+    &dbfFpDropLeaves($m, \@l, \@f);
+    $n += @l;
+  }
+  printf("INFO-PAR-RD_FP_DEF : 026 : %d FIXED cell(s) with no signal pin (endcaps, well taps) taken out of the netlist, so no placer moves them\n", $n);
+}
+if ( $physical ) {
+  #<!-- the netlist's own are placed by now; add what it does not have -->
+  my ($added, $known, %byRef) = (0, 0);
+  foreach my $c ( @physOnly ) {
+    my ($n, $ref, $st, $x, $y, $o) = @$c;
+    $n =~ s/\\//g;
+    unless ( exists $PLDB{$ref} ) { $byRef{"(no LEF) $ref"}++; next; }
+    if ( exists $CADB{$n} ) { $known++; }
+    else {
+      %{$n} = ();
+      $CADB{$n} = CompAttDB::new();
+      $COMP_ALREADY{$n} = \%{$n};
+      $added++;
+    }
+    $CADB{$n}->dbCadbSetCellref($ref);
+    $CADB{$n}->dbCadbSetStatus("FIXED");
+    $CADB{$n}->dbCadbSetLoc($sc->($x), $sc->($y));
+    $CADB{$n}->dbCadbSetOrient($o);
+    $FP_PHYSICAL_ONLY{$n} = 1;
+    my $cl = $PLDB{$ref}->dbMdbGetClass; $cl = "?" unless ( defined $cl && $cl ne "" );
+    $byRef{$cl}++;
+  }
+  printf("INFO-PAR-RD_FP_DEF : 009 : %d physical-only cell(s) added FIXED, %d already there: %s\n", $added, $known,
+         join(", ", map { "$byRef{$_} $_" } sort { $byRef{$b} <=> $byRef{$a} } keys %byRef));
+  return;
+}
+
+#------------------------------- the die ----------------------------------#
+my @p = @{$D->{die}};
+unless ( @p >= 4 ) { print "ERR-PAR-RD_FP_DEF : 010 : $def has no DIEAREA\n"; return; }
+my ($llx, $lly, $urx, $ury) = ($p[0], $p[1], $p[0], $p[1]);
+for ( my $i = 2 ; $i < @p ; $i += 2 ) {
+  $llx = $p[$i] if ( $p[$i] < $llx ); $urx = $p[$i] if ( $p[$i] > $urx );
+  $lly = $p[$i+1] if ( $p[$i+1] < $lly ); $ury = $p[$i+1] if ( $p[$i+1] > $ury );
+}
+unless ( $llx == 0 && $lly == 0 ) {
+  print "ERR-PAR-RD_FP_DEF : 011 : the die starts at ( $llx $lly ), not the origin; not supported\n"; return;
+}
+&set_floorplan_parameters("-WIDTH", $urx / $u, "-HEIGHT", $ury / $u);
+&set_floorplan();
+my $fid = $FLOORPLAN_LOOKUP{"$top/_self_"};
+unless ( defined $fid && exists $FLOORPLAN_ALREADY{$fid} ) { print "ERR-PAR-RD_FP_DEF : 012 : set_floorplan made no floorplan for $top\n"; return; }
+if ( @p > 4 ) { $DIE_ALREADY{dieOutline} = [ map { $sc->($_) } @p ]; } else { delete $DIE_ALREADY{dieOutline}; }
+&dbfDefDieNotchBlockages(\@p, $u);
+
+#------------------------------- the rows ---------------------------------#
+my $rowH = $GLOBAL->dbGlobalGetRowHeight;
+my %bySite = ();
+foreach my $r ( @{$D->{rows}} ) { $bySite{$r->[2]}++; }
+if ( $site eq "" ) { $site = $ROW_SITE_NAME if ( defined $ROW_SITE_NAME && $ROW_SITE_NAME ne "" && exists $bySite{$ROW_SITE_NAME} ); }
+if ( $site eq "" && %bySite ) {
+  #<!-- no site fixed: the one whose rows are the row height apart -->
+  foreach my $s ( sort { $bySite{$b} <=> $bySite{$a} } keys %bySite ) {
+    my @y = sort { $a <=> $b } map { $_->[4] } grep { $_->[2] eq $s } @{$D->{rows}};
+    if ( @y > 1 && defined $rowH && abs(($y[1] - $y[0]) / $u - $rowH) < 1e-6 ) { $site = $s; last; }
+  }
+}
+if ( $site ne "" && exists $bySite{$site} ) {
+  @{$FLOORPLAN_ALREADY{$fid}->{R}} = ();
+  foreach my $r ( grep { $_->[2] eq $site } @{$D->{rows}} ) {
+    #<!-- ROW name site x y orient DO n BY m STEP sx sy -->
+    my ($name, $s, $x, $y, $o, $nx, $ny, $sx, $sy) = @{$r}[1, 2, 3, 4, 5, 7, 9, 11, 12];
+    $FLOORPLAN_ALREADY{$fid}->dbFlplanAddRows(join(" ", $name, $s, $sc->($x), $sc->($y), $o, $nx, $ny, $sc->($sx), $sc->($sy)));
+  }
+  printf("INFO-PAR-RD_FP_DEF : 013 : rows: the DEF's %d of site %s%s\n", $bySite{$site}, $site,
+         ( keys %bySite > 1 ) ? " (" . join(", ", map { "$bySite{$_} of $_" } grep { $_ ne $site } sort keys %bySite) . " left out)" : "");
+}
+else {
+  print "WARN-PAR-RD_FP_DEF : 014 : no rows of a usable site in the DEF (" . join(", ", sort keys %bySite) . "); set_floorplan's rows kept\n";
+}
+
+#--------------------------- placement blockages ---------------------------#
+my ($hard, $soft) = (0, 0);
+foreach my $b ( @{$D->{blkgs}} ) {
+  my ($kind, @r) = @$b;
+  if ( $kind ne "HARD" ) { $soft++; next; }
+  &set_placement_blockage("-rect", map { $_ / $u } @r);
+  $hard++;
+}
+print "INFO-PAR-RD_FP_DEF : 015 : $hard PLACEMENT blockage(s) taken" . ( $soft ? ", $soft partial or soft one(s) left out" : "" ) . "\n" if ( $hard + $soft );
+
+#------------------------------- the macros -------------------------------#
+my @lines = ();
+my ($dissolved, $failed) = (0, 0);
+if ( $freeMacros ) {
+  printf("INFO-PAR-RD_FP_DEF : 016 : --free_macros: %d macro(s) left to the placer\n", scalar(@macros));
+}
+else {
+  #<!-- every top-level block holding a fixed macro, dissolved whole, bottom up:
+  #     ungroup takes leaf-only children, so a module goes after all of its own -->
+  my %blocks = ();
+  foreach my $m ( @macros ) { $blocks{$m->[6][0]} = 1 if ( @{$m->[6]} ); }
+  my $T = $MODULE_ALREADY{$top};
+  foreach my $b ( sort keys %blocks ) {
+    my $bm = $T->dbVNOMGetHierInstCell($b);
+    my @post = ();
+    my %seen = ();
+    my $walk; $walk = sub {
+      my ($mod) = @_;
+      return if ( $seen{$mod}++ );
+      foreach my $c ( sort $MODULE_ALREADY{$mod}->dbVNOMGetHierInst ) {
+        my $cm = $MODULE_ALREADY{$mod}->dbVNOMGetHierInstCell($c);
+        next unless ( defined $cm && exists $MODULE_ALREADY{$cm} );
+        $walk->($cm);
+        push(@post, [ $mod, $c ]);
+      }
+    };
+    $walk->($bm);
+    push(@post, [ $top, $b ]);
+    my $before = scalar($T->dbVNOMGetLeafInst);
+    foreach my $pc ( @post ) {
+      my ($mod, $c) = @$pc;
+      next unless ( $MODULE_ALREADY{$mod}->dbVNOMHasHierInst($c) );
+      &ungroup("-module", $mod, "-inst", $c);
+      if ( $MODULE_ALREADY{$mod}->dbVNOMHasHierInst($c) ) { $failed++; print "WARN-PAR-RD_FP_DEF : 017 : could not dissolve $c in $mod\n"; }
+      else { $dissolved++; }
+    }
+    printf("INFO-PAR-RD_FP_DEF : 018 : block %s dissolved into %s to hold its macros: %d instance(s) ungrouped, the top now has %d leaf cell(s)\n",
+           $b, $top, scalar(@post), scalar($T->dbVNOMGetLeafInst));
+  }
+  %FP_UNESC_HIER = (); %FP_UNESC_LEAF = ();
+  my (undef, $topLeaf) = &dbfFpUnescMaps($top);
+  my ($held, $lost) = (0, 0);
+  foreach my $m ( @macros ) {
+    my ($n, $ref, $st, $x, $y, $o) = @$m;
+    my $un = $n; $un =~ s/\\//g;
+    my $leaf = $topLeaf->{$un};
+    unless ( defined $leaf ) { $lost++; print "WARN-PAR-RD_FP_DEF : 019 : macro $n is not a cell of $top after dissolving; left to the placer\n" if ( $lost <= 5 ); next; }
+    my @s = $PLDB{$ref}->dbMdbGetSize;
+    my ($w, $h) = @s[0, 1];
+    ($w, $h) = ($h, $w) if ( $o =~ m/^F?[EW]$/ );
+    push(@lines, sprintf("%d %s INST %.4f %.4f FIXED %.4f %.4f TYPE=block ORIENT=%s", scalar(@lines), $leaf, $w, $h, $x / $u, $y / $u, $o));
+    $held++;
+  }
+  printf("INFO-PAR-RD_FP_DEF : 020 : %d macro(s) held%s\n", $held, $lost ? ", $lost not found (WARN 019)" : "");
+}
+if ( @heldCells ) {
+  printf("INFO-PAR-RD_FP_DEF : 021 : %d FIXED standard cell(s) of the netlist (e.g. %s) are placed like the rest\n", scalar(@heldCells), $heldCells[0][0]);
+}
+printf("INFO-PAR-RD_FP_DEF : 022 : %d FIXED physical cell(s) (endcaps, well taps): read_floorplan_def --physical_cells puts them in\n", scalar(@physOnly))
+  if ( @physOnly );
+
+#------------------------------- the pins ---------------------------------#
+my %portOf = ();
+foreach my $pn ( keys %{$PORTS_ALREADY{$top}} ) { my $k = $pn; $k =~ s/\\//g; $portOf{$k} = $pn; }
+my ($pins, $noPort, @noPort) = (0, 0);
+foreach my $pr ( @{$D->{pins}} ) {
+  my ($n, $lay, $x1, $y1, $x2, $y2, $st, $x, $y, $o) = @$pr;
+  my $k = $n; $k =~ s/\\//g;
+  my $port = $portOf{$k};
+  unless ( defined $port ) { $noPort++; push(@noPort, $n) if ( @noPort < 5 ); next; }
+  my ($a, $b, $c, $d) = defined $x1 ? &dbfFpOrientRect($o, $x1, $y1, $x2, $y2) : (0, 0, 0, 0);
+  $lay = "" unless ( defined $lay );
+  push(@lines, sprintf("%d %s PORT %.4f %.4f FIXED %.4f %.4f TYPE=port%s", scalar(@lines), $port, ($c - $a) / $u, ($d - $b) / $u,
+                       ($x + $a) / $u, ($y + $b) / $u, $lay ne "" ? " LAYER=$lay" : ""));
+  $pins++;
+}
+printf("INFO-PAR-RD_FP_DEF : 023 : %d pin(s) held%s\n", $pins, $noPort ? ", $noPort not a port of $top (" . join(" ", @noPort) . ( $noPort > @noPort ? " ..." : "" ) . ")" : "");
+
+open(my $out, ">", $nodes) or do { print "ERR-PAR-RD_FP_DEF : 024 : cannot write $nodes\n"; return; };
+print $out "# $top in the floorplan of $def: its macros and pins, FIXED (read_floorplan_def)\n";
+print $out "# <node> <name> INST|PORT <width> <height> <status> <x> <y> TYPE=<type> [ORIENT=|LAYER=]\n";
+printf $out "ROWHEIGHT %s\n", $rowH;
+print $out "$_\n" foreach ( @lines );
+close($out);
+printf("INFO-PAR-RD_FP_DEF : 025 : %s: %d record(s) for read_pseudo_nodefile -module %s; edit it to move macros\n", $nodes, scalar(@lines), $top);
+}# sub read_floorplan_def
+
+#<!-- delete_physical_cells: take out the physical cells -- endcaps, well
+#     taps, fillers, decaps -- so macros can be moved and the floorplan
+#     rearranged before they are put back.  Physical means the netlist does
+#     not have it, or has it connecting nothing (a tool that writes its taps
+#     into the netlist); a netlist cell with a signal pin is never deleted,
+#     whatever its cell. -->
+sub delete_physical_cells {
+my $noOfArguments = @_;
+if ( $noOfArguments > 0 && ( $_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP' ) ) {
+  print "Usage : delete_physical_cells [-ref <glob>] [--report]\n";
+  print "        Delete the instances the netlist does not have (endcaps, well taps, ...),\n";
+  print "        all of them or those whose cell matches <glob>.  --report counts, deletes nothing.\n";
+  return;
+}
+my ($glob, $report) = ("*", 0);
+for ( my $i = 0 ; $i < $noOfArguments ; $i++ ) {
+  if    ( $_[$i] eq "-ref" )     { $glob = $_[$i+1]; $i++; }
+  elsif ( $_[$i] eq "--report" ) { $report = 1; }
+  else  { print "WARN-ALG-DL_PH_CL : 001 : invalid option $_[$i]\n"; }
+}
+my $re = $glob; $re =~ s/([.+^\$()\[\]{}|\\])/\\$1/g; $re =~ s/\*/.*/g; $re =~ s/\?/./g;
+my $top = $GLOBAL->dbfGlobalGetTOP;
+%FP_UNESC_HIER = (); %FP_UNESC_LEAF = ();
+my ($n, %byRef, %fromNetlist) = (0);
+%FP_NOPIN = ();
+foreach my $inst ( keys %CADB ) {
+  my $ref = $CADB{$inst}->dbCadbGetCellref;
+  next unless ( defined $ref && $ref =~ m/^$re$/ );
+  my $inNetlist;
+  unless ( exists $FP_PHYSICAL_ONLY{$inst} ) {
+    next unless ( defined $top && exists $MODULE_ALREADY{$top} );
+    my ($chain, $mods, $leaf) = &dbfFpResolve($inst);
+    if ( defined $leaf ) {
+      #<!-- a netlist cell is physical only when it connects nothing -->
+      next unless ( $leaf ne "" && &dbfFpNoPin($mods->[-1], $leaf) );
+      $inNetlist = [ $mods->[-1], $leaf ];
+    }
+  }
+  $byRef{$ref}++; $n++;
+  next if ( $report );
+  if ( $inNetlist ) { push(@{$fromNetlist{$inNetlist->[0]}}, $inNetlist->[1]); }
+  delete $CADB{$inst}; delete $COMP_ALREADY{$inst}; delete $FP_PHYSICAL_ONLY{$inst};
+}
+&dbfFpDropLeaves($_, $fromNetlist{$_}, []) foreach ( sort keys %fromNetlist );
+printf("INFO-ALG-DL_PH_CL : 002 : %d physical-only cell(s) %s%s\n", $n, $report ? "found" : "deleted",
+       $n ? ": " . join(", ", map { "$byRef{$_} $_" } ( sort { $byRef{$b} <=> $byRef{$a} } keys %byRef )[0 .. ( keys(%byRef) > 8 ? 7 : keys(%byRef) - 1 )]) . ( keys(%byRef) > 8 ? ", ..." : "" ) : "");
+}# sub delete_physical_cells
+
+%FP_PHYSICAL_ONLY = ();
+1;
