@@ -1,0 +1,523 @@
+#!/usr/bin/env python3
+"""Dissolve the small modules of a gate-level netlist into their parents.
+
+    netlist_flatten_below <in.v[.gz]> <out.v[.gz]> --top <module> --below 2000
+    netlist_flatten_below --verify <a.v[.gz]> <b.v[.gz]> --top <module>
+
+WHAT IT IS FOR
+
+A netlist written by another tool's place and route is uniquified: every
+instance of a module gets a module of its own.  One such netlist had 7,952
+modules, where the same RTL synthesised here has about fifty distinct ones.
+hier_place_all places each module as a block of its own, so that netlist asks
+for thousands of placements of a few cells each, and a level holding 366 of
+them was more than its slicing search could arrange.
+
+The answer is the one `hier_synthesis -flatten_below` gives at synthesis:
+a module whose whole subtree is under N leaf cells is not worth a placement,
+so it is dissolved into its parent.  What stays is the levels big enough to
+be blocks.  A module boundary costs nothing here -- the logic is already
+mapped -- so this is purely about what hier_place_all is asked to place.
+
+NAMES
+
+What a dissolved module held keeps its hierarchical name, written the way the
+place-and-route tools write an ungrouped design: instance `u_b` of a dissolved
+module, inside instance `u_a`, becomes `\\u_a/u_b ` in the parent; a net `n`
+inside it becomes `\\u_a/n `, keeping its range if it had one, so a bus stays a
+bus (`\\u_a/data [3]`).  A design's own names already follow this convention
+where that tool ungrouped something itself, so the output reads the same way
+all through.  A name that would collide with one the parent already has is
+an error, not a silent rename.
+
+Ports are matched bit by bit: concatenations, part selects, bare bus names
+(against the declared range), replications and sized constants are all
+expanded, and the bits are aligned from the least significant end, the way
+Verilog connects ports of different widths.  An `assign` inside a dissolved
+module comes out as one `assign` per bit in the parent.
+
+What is not dissolved is written back statement for statement as it was read,
+apart from the instances that were replaced.
+
+--verify
+
+Flattens both netlists completely and compares them: the same leaf
+instances, of the same cells, and every pin on the same net as the pins it
+shared a net with before.  Net names are not compared -- they are expected to
+differ -- only which pins each net joins.  It is independent of electron, and
+it is what to run before believing an output.
+
+WHAT IT DOES NOT HANDLE
+
+Positional port connections, parameterised instances (`#(...)`), ANSI-style
+module headers and port expressions in a header (`.p(a)`).  A gate-level
+netlist from a place-and-route tool has none of them; meeting one is an error
+naming the module, rather than a guess.
+"""
+
+import argparse
+import gzip
+import re
+import sys
+import time
+
+# statement boundaries: an escaped identifier runs to whitespace and may hold
+# a ';', so it has to be stepped over; endmodule ends a module with no ';'
+STMT = re.compile(r'\\\S+|//[^\n]*|/\*.*?\*/|;|\bendmodule\b', re.S)
+TOK = re.compile(r"\s*(\\\S+|\d*\s*'[sS]?[bBoOdDhH]\s*[0-9a-fA-FxXzZ_?]+|"
+                 r"[A-Za-z_][\w$]*|\d+|[()\[\]{}:,.=#;])")
+COMMENT = re.compile(r'//[^\n]*|/\*.*?\*/', re.S)
+DECL = {'input', 'output', 'inout', 'wire', 'tri', 'supply0', 'supply1', 'wand', 'wor'}
+
+
+class NetlistError(Exception):
+    pass
+
+
+def tokens(s):
+    out, i, n = [], 0, len(s)
+    while i < n:
+        m = TOK.match(s, i)
+        if not m:
+            if s[i:].strip() == '':
+                break
+            raise NetlistError("cannot read %r" % s[i:i + 40])
+        out.append(m.group(1))
+        i = m.end()
+    return out
+
+
+def bare(name):
+    return name[1:] if name.startswith('\\') else name
+
+
+def esc(name):
+    """an identifier for a name that may hold anything"""
+    return name if re.fullmatch(r'[A-Za-z_][\w$]*', name) else '\\' + name
+
+
+def const_bits(tok):
+    m = re.fullmatch(r"(\d*)\s*'[sS]?([bBoOdDhH])\s*([0-9a-fA-FxXzZ_?]+)", tok)
+    width, base, digits = m.group(1), m.group(2).lower(), m.group(3).replace('_', '').lower()
+    per = {'b': 1, 'o': 3, 'h': 4}.get(base)
+    if per:
+        bits = ''
+        for d in digits:
+            if d in 'xz?':
+                bits += ('z' if d == '?' else d) * per
+            else:
+                bits += format(int(d, 16), '0%db' % per)
+    else:
+        bits = format(int(digits), 'b')
+    width = int(width) if width else max(len(bits), 32)
+    bits = bits[-width:].rjust(width, '0')
+    return [('', "1'b" + b) for b in bits]
+
+
+class Module:
+    __slots__ = ('name', 'header', 'ports', 'stmts', 'width', 'supply', 'insts', 'names')
+
+    def __init__(self, name, header):
+        self.name, self.header = name, header
+        self.ports = []
+        self.stmts = []        # [kind, text, type, inst name]
+        self.width = {}        # net -> (msb, lsb); scalars absent
+        self.supply = {}       # net -> 1'b0 / 1'b1
+        self.insts = set()
+        self.names = set()
+
+
+def read_netlist(path):
+    t0 = time.time()
+    op = gzip.open if path.endswith('.gz') else open
+    with op(path, 'rt', errors='replace') as f:
+        text = f.read()
+    mods, cur, start = {}, None, 0
+    for m in STMT.finditer(text):
+        g = m.group(0)
+        if g[0] in '\\/':
+            continue
+        stmt = text[start:m.start()]
+        start = m.end()
+        if g == 'endmodule':
+            if cur is None:
+                raise NetlistError("endmodule with no module")
+            mods[cur.name] = cur
+            cur = None
+            continue
+        body = COMMENT.sub(' ', stmt).strip()
+        if not body:
+            continue
+        head = body.split(None, 1)[0]
+        if cur is None:
+            if head != 'module':
+                continue                       # `timescale and the like
+            tk = tokens(body)
+            cur = Module(tk[1], stmt + ';')
+            if '[' in tk or 'input' in tk or 'output' in tk or '.' in tk:
+                raise NetlistError("module %s: ANSI header or port expression" % tk[1])
+            cur.ports = [t for t in tk[3:] if t not in (',', ')')]
+            continue
+        if head in DECL:
+            tk = tokens(body)
+            rng, i = None, 1
+            if i < len(tk) and tk[i] in ('reg', 'wire', 'signed'):
+                i += 1
+            if i < len(tk) and tk[i] == '[':
+                rng = (int(tk[i + 1]), int(tk[i + 3]))
+                i += 5
+            for t in tk[i:]:
+                if t == ',':
+                    continue
+                cur.names.add(t)
+                if rng:
+                    cur.width[t] = rng
+                if head in ('supply0', 'supply1'):
+                    cur.supply[t] = "1'b" + head[-1]
+            cur.stmts.append(['decl', stmt, None, None])
+        elif head == 'assign':
+            cur.stmts.append(['assign', stmt, None, None])
+        else:
+            # an instance: type, name, then the connections, read only if needed
+            tk = TOK.match(body)
+            m2 = TOK.match(body, tk.end())
+            if m2.group(1) == '#':
+                raise NetlistError("module %s: parameterised instance of %s" % (cur.name, head))
+            cur.stmts.append(['inst', stmt, tk.group(1), m2.group(1)])
+            cur.insts.add(bare(m2.group(1)))
+    sys.stderr.write("read %s: %d modules, %.0fs\n" % (path, len(mods), time.time() - t0))
+    return mods
+
+
+def blast(tk, i, mod):
+    """bits of the expression at tk[i], most significant first, and where it ends"""
+    t = tk[i]
+    if t == '{':
+        if tk[i + 1].isdigit() and tk[i + 2] == '{':
+            n = int(tk[i + 1])
+            inner, i = blast(tk, i + 2, mod)
+            return inner * n, i + 1               # the replication's own '}'
+        bits, i = [], i + 1
+        while tk[i] != '}':
+            b, i = blast(tk, i, mod)
+            bits += b
+            if tk[i] == ',':
+                i += 1
+        return bits, i + 1
+    if "'" in t:
+        return const_bits(t), i + 1
+    if i + 1 < len(tk) and tk[i + 1] == '[':
+        a = int(tk[i + 2])
+        if tk[i + 3] == ':':
+            b = int(tk[i + 4])
+            step = 1 if b >= a else -1
+            return [(t, k) for k in range(a, b + step, step)], i + 6
+        return [(t, a)], i + 4
+    if t in mod.supply:
+        return [('', mod.supply[t])], i + 1
+    if t in mod.width:
+        a, b = mod.width[t]
+        step = 1 if b >= a else -1
+        return [(t, k) for k in range(a, b + step, step)], i + 1
+    return [(t, None)], i + 1
+
+
+def connections(stmt, mod):
+    """[(pin, [bits])] of an instance statement"""
+    tk = tokens(COMMENT.sub(' ', stmt))
+    out, i = [], 3
+    while i < len(tk) and tk[i] != ')':
+        if tk[i] == ',':
+            i += 1
+            continue
+        if tk[i] != '.':
+            raise NetlistError("module %s, instance %s: positional connection" % (mod.name, tk[1]))
+        pin = tk[i + 1]
+        i += 3
+        bits = []
+        if tk[i] != ')':
+            bits, i = blast(tk, i, mod)
+        out.append((pin, bits))
+        i += 1
+    return out
+
+
+def port_bits(mod, p):
+    if p in mod.width:
+        a, b = mod.width[p]
+        step = 1 if b >= a else -1
+        return [(p, k) for k in range(a, b + step, step)]
+    return [(p, None)]
+
+
+def bit_text(b):
+    if b[0] == '':
+        return b[1]
+    return b[0] if b[1] is None else '%s [%d]' % (b[0], b[1])
+
+
+def expr_text(bits):
+    if not bits:
+        return ''
+    if len(bits) == 1:
+        return bit_text(bits[0])
+    return '{ ' + ' , '.join(bit_text(b) for b in bits) + ' }'
+
+
+class Inliner:
+    """walks a dissolved instance down to its leaf cells, calling back with
+    each leaf instance and each assign, in the names of the module it lands in"""
+
+    def __init__(self, mods, leaf_cb, assign_cb):
+        self.mods, self.leaf_cb, self.assign_cb = mods, leaf_cb, assign_cb
+        self.new_nets = {}       # name in the parent -> range or None
+
+    def portmap(self, child, conns, fmap):
+        pm = {}
+        for pin, bits in conns:
+            if pin not in child.ports:
+                raise NetlistError("module %s has no port %s" % (child.name, pin))
+            pb = port_bits(child, pin)
+            for cb, ob in zip(reversed(pb), reversed(bits)):
+                pm[cb] = fmap(ob)
+        return pm
+
+    def walk(self, mod, prefix, fmap):
+        """everything in `mod`, which sits at `prefix` ('' for the module
+        written out), with its bits renamed by fmap"""
+        for kind, stmt, typ, name in mod.stmts:
+            if kind == 'decl':
+                continue
+            if kind == 'assign':
+                tk = tokens(COMMENT.sub(' ', stmt))
+                eq = tk.index('=')
+                lhs, _ = blast(tk, 1, mod)
+                rhs, _ = blast(tk, eq + 1, mod)
+                for lb, rb in zip(reversed(lhs), reversed(rhs)):
+                    self.assign_cb(fmap(lb), fmap(rb))
+                continue
+            path = prefix + '/' + bare(name) if prefix else bare(name)
+            conns = connections(stmt, mod)
+            if typ in self.mods:
+                child = self.mods[typ]
+                pm = self.portmap(child, conns, fmap)
+                self.walk(child, path, self.renamer(child, path, pm))
+            else:
+                self.leaf_cb(typ, path, [(pin, [fmap(b) for b in bits]) for pin, bits in conns])
+
+    def renamer(self, child, path, pm):
+        new_nets = self.new_nets
+
+        def f(b):
+            if b[0] == '':
+                return b
+            if b in pm:
+                return pm[b]
+            n = '\\' + path + '/' + bare(b[0])
+            if n not in new_nets:
+                new_nets[n] = child.width.get(b[0])
+            return (n, b[1])
+        return f
+
+
+def subtree_sizes(mods):
+    memo = {}
+
+    def size(m):
+        if m not in memo:
+            memo[m] = 0
+            s = 0
+            for kind, _, typ, _ in mods[m].stmts:
+                if kind == 'inst':
+                    s += size(typ) if typ in mods else 1
+            memo[m] = s
+        return memo[m]
+    for m in mods:
+        size(m)
+    return memo
+
+
+def flatten_below(mods, top, below, out):
+    size = subtree_sizes(mods)
+    keep, seen, order = set(), set(), []
+
+    def visit(m):
+        if m in seen:
+            return
+        seen.add(m)
+        if m == top or size[m] >= below:
+            keep.add(m)
+            for kind, _, typ, _ in mods[m].stmts:
+                if kind == 'inst' and typ in mods:
+                    visit(typ)
+            order.append(m)
+    visit(top)
+    reach = set()
+
+    def reached(m):
+        if m in reach:
+            return
+        reach.add(m)
+        for kind, _, typ, _ in mods[m].stmts:
+            if kind == 'inst' and typ in mods:
+                reached(typ)
+    reached(top)
+    op = gzip.open if out.endswith('.gz') else open
+    dissolved, own = 0, {}
+    with op(out, 'wt') as f:
+        f.write("// netlist_flatten_below: modules under %d leaf cells dissolved into their parents\n" % below)
+        for m in order:
+            mod = mods[m]
+            body, extra = [], []
+            names, insts = mod.names, mod.insts
+
+            def leaf(typ, path, conns):
+                if path in insts:
+                    raise NetlistError("module %s already has an instance %s" % (m, path))
+                body.append('%s %s ( %s ) ;\n' % (typ, esc(path), ' , '.join(
+                    '.%s ( %s )' % (p, expr_text(b)) for p, b in conns)))
+
+            def assign(lb, rb):
+                if lb[0] == '':
+                    raise NetlistError("module %s: an assign to a constant after dissolving" % m)
+                body.append('assign %s = %s ;\n' % (bit_text(lb), bit_text(rb)))
+            il = Inliner(mods, leaf, assign)
+            f.write(mod.header + '\n')
+            for kind, stmt, typ, name in mod.stmts:
+                if kind == 'decl':
+                    f.write(stmt.strip('\n') + ';\n')
+            for kind, stmt, typ, name in mod.stmts:
+                if kind == 'inst' and typ in mods and typ not in keep:
+                    path = bare(name)
+                    child = mods[typ]
+                    pm = il.portmap(child, connections(stmt, mod), lambda b: b)
+                    il.walk(child, path, il.renamer(child, path, pm))
+                    dissolved += 1
+                elif kind != 'decl':
+                    extra.append(stmt.strip('\n') + ';\n')
+            for n, rng in il.new_nets.items():
+                if bare(n) in names or n in names:
+                    raise NetlistError("module %s already has a net %s" % (m, n))
+                f.write('wire %s%s ;\n' % ('[%d:%d] ' % rng if rng else '', n))
+            f.writelines(extra)
+            f.writelines(body)
+            f.write('endmodule\n\n')
+            # this module's own cells as written, and the kept modules it holds
+            own[m] = (sum(1 for k, _, t, _ in mod.stmts if k == 'inst' and t not in mods)
+                      + sum(1 for line in body if not line.startswith('assign')),
+                      [t for k, _, t, _ in mod.stmts if k == 'inst' and t in keep])
+    # counted per instance, not per module: a module used four times holds its
+    # cells four times over, here as in the input
+    memo = {}
+
+    def written(m):
+        if m not in memo:
+            memo[m] = own[m][0] + sum(written(c) for c in own[m][1])
+        return memo[m]
+    leaves_in = written(top)
+    sys.stderr.write("kept %d of %d modules reached from %s (%d not reached, dropped); "
+                     "%d instances dissolved; %d leaf cells, %d before\n"
+                     % (len(keep), len(reach), top, len(mods) - len(reach), dissolved,
+                        leaves_in, size[top]))
+    if leaves_in != size[top]:
+        raise NetlistError("leaf cell count changed: %d -> %d" % (size[top], leaves_in))
+
+
+def pin_nets(path, top):
+    """every leaf pin bit -> its net class, and every leaf instance -> its cell"""
+    mods = read_netlist(path)
+    if top not in mods:
+        raise NetlistError("%s: no module %s" % (path, top))
+    parent = {}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+    pins, cells = {}, {}
+
+    def key(b):
+        return b[1] if b[0] == '' else (bare(b[0]), b[1])
+
+    def leaf(typ, p, conns):
+        cells[p] = typ
+        for pin, bits in conns:
+            for k, b in enumerate(reversed(bits)):
+                pins[(p, pin, k)] = key(b)
+
+    def assign(lb, rb):
+        a, b = find(key(lb)), find(key(rb))
+        if a != b:
+            if isinstance(a, str):                 # a constant stays the root
+                a, b = b, a
+            parent[a] = b
+    il = Inliner(mods, leaf, assign)
+    il.walk(mods[top], '', lambda b: b)
+    return {k: find(v) for k, v in pins.items()}, cells
+
+
+def verify(a, b, top):
+    pa, ca = pin_nets(a, top)
+    pb, cb = pin_nets(b, top)
+    bad = 0
+    if ca != cb:
+        only_a, only_b = set(ca) - set(cb), set(cb) - set(ca)
+        diff = [i for i in set(ca) & set(cb) if ca[i] != cb[i]]
+        print("cells differ: %d only in a, %d only in b, %d of another type"
+              % (len(only_a), len(only_b), len(diff)))
+        for i in list(only_a)[:5] + list(only_b)[:5] + diff[:5]:
+            print("   ", i, ca.get(i), cb.get(i))
+        bad += 1
+    if set(pa) != set(pb):
+        print("connected pins differ: %d only in a, %d only in b"
+              % (len(set(pa) - set(pb)), len(set(pb) - set(pa))))
+        bad += 1
+    fwd, rev, wrong = {}, {}, 0
+    for k, na in pa.items():
+        nb = pb.get(k)
+        if nb is None:
+            continue
+        if isinstance(na, str) or isinstance(nb, str):
+            if na != nb:
+                wrong += 1
+            continue
+        if fwd.setdefault(na, nb) != nb or rev.setdefault(nb, na) != na:
+            wrong += 1
+            if wrong <= 5:
+                print("   pin %s: net %s in a, %s in b" % (k, na, nb))
+    if wrong:
+        print("%d pin(s) on a net that does not match" % wrong)
+        bad += 1
+    print("%s: %d leaf cells, %d pin bits, %d nets -- %s"
+          % (top, len(ca), len(pa), len(fwd), "same connectivity" if not bad else "DIFFERENT"))
+    return 0 if not bad else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('inp', help='netlist to read (.v or .v.gz)')
+    ap.add_argument('out', help='netlist to write, or with --verify the one to compare against')
+    ap.add_argument('--top', required=True)
+    ap.add_argument('--below', type=int, default=2000,
+                    help='dissolve a module whose subtree has fewer leaf cells (default 2000)')
+    ap.add_argument('--verify', action='store_true',
+                    help='compare the connectivity of the two netlists instead')
+    a = ap.parse_args()
+    sys.setrecursionlimit(100000)
+    try:
+        if a.verify:
+            return verify(a.inp, a.out, a.top)
+        mods = read_netlist(a.inp)
+        if a.top not in mods:
+            raise NetlistError("no module %s in %s" % (a.top, a.inp))
+        flatten_below(mods, a.top, a.below, a.out)
+    except NetlistError as e:
+        sys.stderr.write("netlist_flatten_below: %s\n" % e)
+        return 2
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

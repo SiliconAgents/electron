@@ -275,6 +275,19 @@ nangate_l_die: nangate_fixed_fp
 	python3 check_fixed_fp.py fixed_fp/fixed_fp.nodes workarea/l_die.legal.def 98 47 110 63
 	@echo "nangate_l_die: all expected results"
 
+# nangate_flatten_below: 3RDBIN/netlist_flatten_below on the hierarchical vedic netlist, its yosys
+# (* attributes *) taken out -- a place-and-route tool's netlist has none, and they are an error.  Fails
+# unless modules under 200 leaf cells are dissolved into their parents (2 of 11 kept, 10 instances
+# dissolved, every leaf cell still there) and --verify finds the flattened and the original
+# netlists connect every pin the same way.
+nangate_flatten_below:
+	mkdir -p workarea
+	egrep -v "\(\*" rtls/vedic/vedic.vg > workarea/vedic_noattr.vg
+	python3 ../3RDBIN/netlist_flatten_below workarea/vedic_noattr.vg workarea/vedic_fb.v.gz --top vedic_16x16 --below 200 > workarea/flatten_below.log 2>&1
+	grep -q "kept 2 of 11 modules reached from vedic_16x16 (0 not reached, dropped); 10 instances dissolved; 3617 leaf cells, 3617 before" workarea/flatten_below.log || { cat workarea/flatten_below.log; echo "nangate_flatten_below: unexpected result"; exit 1; }
+	python3 ../3RDBIN/netlist_flatten_below --verify workarea/vedic_noattr.vg workarea/vedic_fb.v.gz --top vedic_16x16 | tee -a workarea/flatten_below.log | grep -q "same connectivity" || { echo "nangate_flatten_below: --verify found a difference"; exit 1; }
+	@echo "nangate_flatten_below: all expected results"
+
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and
 # repaired with legalize_flat --incremental instead of a full flat pass.  Fails
 # unless every module was legalized, the repair ran, and 3RDBIN/def_check_legal
@@ -478,7 +491,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_flatten_below nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
