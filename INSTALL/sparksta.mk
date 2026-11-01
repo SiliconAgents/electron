@@ -63,6 +63,16 @@ SPARKSTA_CLOCK_EARLY ?=
 # reset input is the worst path into every register it reaches.  Photon says
 # what it read and what it could not apply.
 SPARKSTA_SDC ?=
+# Pins held at a constant for the run's mode, as set_case_analysis would:
+# <cell>/<pin>=0|1, globs allowed.  A memory's clock-to-Q exists once per
+# mode (turbo read, normal read, DFT bypass) under liberty "when"
+# conditions, and with nothing held one of them is taken by accident -- on
+# one memory the three are 5.13, 0.130 and 0.096 ns.  Arcs the held pins
+# make false are dropped and the worst of the rest kept; nets into a held
+# pin are cut.  The SDC's own set_case_analysis wins where both speak.
+#   SPARKSTA_CASE = */TURBO=0 */DFTBYP=0 */BIST=0     normal mode
+#   SPARKSTA_CASE = */TURBO=1 */DFTBYP=0 */BIST=0     turbo
+SPARKSTA_CASE ?=
 # The optimisation advisor (SPARKSTA_ADVISE): the cell table saying which
 # cells may replace which (SPARKSTA_CELLS_OF reads it from the library config),
 # the Vts it may use (empty: every Vt in the table; "any" for a table with no
@@ -120,7 +130,7 @@ define SPARKSTA
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5); \
 	 cat $(PYSPARK)/scala/photon.sca > $(5).sca; \
-	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm=$(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm=$(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel="$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(SPARKSTA_DEPTH),$(_sparksta_comma) depth="$(abspath $(patsubst %.seg.tsv,%,$(5)))"$(if $(SPARKSTA_CELLS),$(_sparksta_comma) depthCells="$(abspath $(SPARKSTA_CELLS))")$(_sparksta_comma) depthBudget=$(or $(SPARKSTA_DEPTH_BUDGET),0))$(if $(filter 0,$(SPARKSTA_STICKY_REPEAT)),$(_sparksta_comma) stickyRepeat=false)$(if $(SPARKSTA_CLOCK),$(_sparksta_comma) clock="$(if $(filter ideal propagated,$(SPARKSTA_CLOCK)),$(SPARKSTA_CLOCK),$(abspath $(SPARKSTA_CLOCK)))")$(if $(SPARKSTA_CLOCK_LATE),$(_sparksta_comma) clockLate=$(SPARKSTA_CLOCK_LATE))$(if $(SPARKSTA_CLOCK_EARLY),$(_sparksta_comma) clockEarly=$(SPARKSTA_CLOCK_EARLY))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc=SdcParser.parse("$(abspath $(SPARKSTA_SDC))")))' >> $(5).sca; \
+	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm=$(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm=$(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel="$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(SPARKSTA_DEPTH),$(_sparksta_comma) depth="$(abspath $(patsubst %.seg.tsv,%,$(5)))"$(if $(SPARKSTA_CELLS),$(_sparksta_comma) depthCells="$(abspath $(SPARKSTA_CELLS))")$(_sparksta_comma) depthBudget=$(or $(SPARKSTA_DEPTH_BUDGET),0))$(if $(filter 0,$(SPARKSTA_STICKY_REPEAT)),$(_sparksta_comma) stickyRepeat=false)$(if $(SPARKSTA_CLOCK),$(_sparksta_comma) clock="$(if $(filter ideal propagated,$(SPARKSTA_CLOCK)),$(SPARKSTA_CLOCK),$(abspath $(SPARKSTA_CLOCK)))")$(if $(SPARKSTA_CLOCK_LATE),$(_sparksta_comma) clockLate=$(SPARKSTA_CLOCK_LATE))$(if $(SPARKSTA_CLOCK_EARLY),$(_sparksta_comma) clockEarly=$(SPARKSTA_CLOCK_EARLY))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc=SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases="$(strip $(SPARKSTA_CASE))"))' >> $(5).sca; \
 	 echo 'System.exit(0)' >> $(5).sca
 	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|^  |rror|xception'; \
 	 test -s "$(5)" || { echo "sparksta: no $(5), see $(5).log"; exit 1; }; fi
