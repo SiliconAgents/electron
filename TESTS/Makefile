@@ -253,6 +253,26 @@ nangate_fixed_fp:
 	python3 check_fixed_fp.py fixed_fp/fixed_fp.nodes workarea/ff.legal.def 98 47 110 63
 	@echo "nangate_fixed_fp: all expected results"
 
+# nangate_l_die: a rectilinear die read from a DEF.  nangate_fixed_fp's legalized placement with
+# its DIEAREA rewritten as the outline -- the die less the notch it blocked by hand -- and forty
+# cells moved into the notch.  Fails unless read_def makes the notch a placement blockage itself,
+# a set_placement_blockage for the same notch is not added again, legalize_flat holds it and moves
+# the forty out (no component reaches into it, the macros stay where they were held), and
+# write_def gives the eight-corner outline back.
+LD_EXPECT = grep -q "$(1)" workarea/l_die.log || { echo "nangate_l_die: expected \"$(1)\" in workarea/l_die.log"; exit 1; }
+nangate_l_die: nangate_fixed_fp
+	awk 'BEGIN{n=0} /^DIEAREA/{print "DIEAREA ( 0 0 ) ( 440000 0 ) ( 440000 188000 ) ( 392000 188000 ) ( 392000 252000 ) ( 440000 252000 ) ( 440000 440000 ) ( 0 440000 ) ;"; next} \
+	  /\+ PLACED/ && n < 40 {sub(/\( [0-9]+ [0-9]+ \)/, "( " 396000 + (n % 4) * 8000 " " 196000 + int(n / 4) * 5600 " )"); n++} {print}' workarea/ff.legal.def > workarea/l_die.def
+	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_l_die.tcl > l_die.log 2>&1
+	$(call LD_EXPECT,INFO-PAR-DEF : 043 : the die is rectilinear (8 corners))
+	$(call LD_EXPECT,INFO-PAR-DEF : 044 : the die's notch 98.0000 47.0000 110.0000 63.0000 (192.0 um2) is a placement blockage)
+	$(call LD_EXPECT,ST_PL_BLK : 007 : 98.0000 47.0000 110.0000 63.0000 is inside a placement blockage already)
+	$(call LD_EXPECT,ST_PL_BLK : 005 : 1 placement blockage(s))
+	$(call LD_EXPECT,INFO-ALG-LEGAL : 062 : 1 placement blockage(s) held)
+	grep -q "^DIEAREA ( 0 0 ) ( 440000 0 ) ( 440000 188000 ) ( 392000 188000 ) ( 392000 252000 ) ( 440000 252000 ) ( 440000 440000 ) ( 0 440000 ) ;" workarea/l_die.legal.def || { echo "nangate_l_die: write_def did not give the outline back"; exit 1; }
+	python3 check_fixed_fp.py fixed_fp/fixed_fp.nodes workarea/l_die.legal.def 98 47 110 63 --no_pins
+	@echo "nangate_l_die: all expected results"
+
 # nangate_recurse_qp legalized module by module (hier_place_all --legalize) and
 # repaired with legalize_flat --incremental instead of a full flat pass.  Fails
 # unless every module was legalized, the repair ran, and 3RDBIN/def_check_legal
@@ -456,7 +476,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

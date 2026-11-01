@@ -107,8 +107,10 @@ return @boxes;
 
 #<!-- set_placement_blockage: a rectangle no standard cell may use -- the
 #     corner a rectilinear die cuts out of its bounding box, say.  The die is
-#     always a rectangle here (read_def keeps two of a DIEAREA's vertices), so
-#     an L-shaped floorplan is its bounding box with the notch blocked.
+#     always a rectangle here, so an L-shaped floorplan is its bounding box
+#     with the notch blocked; read_def does that itself for a rectilinear
+#     DIEAREA (dbfDefDieNotchBlockages), and a die set with set_floorplan
+#     needs it by hand.
 #
 #     One store, read by everything that puts a cell somewhere: hier_place_all
 #     at the top (the budget leaves the area out, the block legalizer goes
@@ -139,6 +141,12 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
            ($r[0] < $r[2] ? $r[2] : $r[0]), ($r[1] < $r[3] ? $r[3] : $r[1]) );
     if ( $r[2] - $r[0] <= 0 || $r[3] - $r[1] <= 0 ) {
       print "ERR-ALG-ST_PL_BLK : 002 : -rect @r has no area\n"; return;
+    }
+    #<!-- not twice: hier_place_all sums the blockages' area out of its budget,
+    #     and a flow may block a notch read_def has already blocked -->
+    if ( grep { $_->[0] <= $r[0] + 1e-6 && $_->[1] <= $r[1] + 1e-6 && $_->[2] >= $r[2] - 1e-6 && $_->[3] >= $r[3] - 1e-6 } @PLACEMENT_BLOCKAGES ) {
+      printf("INFO-ALG-ST_PL_BLK : 007 : %.4f %.4f %.4f %.4f is inside a placement blockage already, not added\n", @r);
+      $i += 4; next;
     }
     push(@PLACEMENT_BLOCKAGES, [ @r ]);
     printf("INFO-ALG-ST_PL_BLK : 003 : placement blockage %.4f %.4f %.4f %.4f, %.1f um2\n", @r, ($r[2] - $r[0]) * ($r[3] - $r[1]));

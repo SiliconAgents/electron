@@ -348,8 +348,9 @@ return int( $v + ( $v < 0 ? -0.5 : 0.5 ) );
 #     electron's die is a rectangle everywhere -- dieArea [0..3] and the
 #     floorplan size are read as four numbers in hundreds of places -- so the
 #     die is the outline's bounding box.  The outline itself goes in
-#     $DIE_ALREADY{dieOutline} for write_def to give back.  Placement still
-#     sees the box: the notch is not a blockage. -->
+#     $DIE_ALREADY{dieOutline} for write_def to give back, and what the box
+#     has outside the outline -- an L's notch -- becomes placement blockage
+#     (dbfDefDieNotchBlockages), as set_placement_blockage would make it. -->
 sub dbfDefReadDieArea {
 my ($line, $fh) = @_;
 while ( $line !~ /;/ ) {
@@ -378,8 +379,90 @@ if ( @pts > 4 ) {
 else {
   delete $DIE_ALREADY{dieOutline};
 }
+&dbfDefDieNotchBlockages(\@pts);
 return ($llx, $lly, $urx, $ury);
 }# sub dbfDefReadDieArea
+
+#<!-- The part of a rectilinear die's bounding box outside its outline, as
+#     placement blockages: an L gives one rectangle, a U two, a T two.  Every
+#     placer and legalizer that honours set_placement_blockage then keeps
+#     cells out of the notch; without them the global placers spread cells
+#     into it and legalize_flat dragged them back onto the DEF's rows, a long
+#     way from where they were wanted.
+#
+#     The outline is cut on a grid of its own x and y coordinates; each cell
+#     of the grid is inside or out (a ray to the right crosses the outline's
+#     vertical edges an odd number of times), the outside cells are merged
+#     into runs along each band and the runs into rectangles down the bands.
+#     A blockage already covering one (a set_placement_blockage for the same
+#     notch, as a flow written before this would have) is not added twice --
+#     hier_place_all sums blockage areas out of its budget.  Reading another
+#     DIEAREA takes back what the last one added.  Microns, the DEF's own
+#     coordinates: the top's frame when the die starts at the origin. -->
+%DIE_NOTCH_BLOCKAGES = ();
+sub dbfDefDieNotchBlockages {
+my ($pts) = @_;
+if ( %DIE_NOTCH_BLOCKAGES ) {
+  @PLACEMENT_BLOCKAGES = grep { ! exists $DIE_NOTCH_BLOCKAGES{"$_"} } @PLACEMENT_BLOCKAGES;
+  %DIE_NOTCH_BLOCKAGES = ();
+}
+return if ( @$pts <= 4 );
+my $n = @$pts / 2;
+my @x = map { $pts->[2 * $_] } 0 .. $n - 1;
+my @y = map { $pts->[2 * $_ + 1] } 0 .. $n - 1;
+for my $i ( 0 .. $n - 1 ) {
+  my $j = ( $i + 1 ) % $n;
+  next if ( $x[$i] == $x[$j] || $y[$i] == $y[$j] );
+  print "WARN-PAR-DEF : 045 : the die outline has a diagonal edge ( $x[$i] $y[$i] ) ( $x[$j] $y[$j] ); no placement blockage made for it -- add set_placement_blockage by hand\n";
+  return;
+}
+my $u = ( defined $DEF_DATABASE_UNIT && $DEF_DATABASE_UNIT > 0 ) ? $DEF_DATABASE_UNIT : $GLOBAL->dbfGlobalGetDBU;
+my %sx = map { $_ => 1 } @x; my @xs = sort { $a <=> $b } keys %sx;
+my %sy = map { $_ => 1 } @y; my @ys = sort { $a <=> $b } keys %sy;
+my $inside = sub {
+  my ($px, $py) = @_; my $c = 0;
+  for my $i ( 0 .. $n - 1 ) {
+    my $j = ( $i + 1 ) % $n;
+    next unless ( $x[$i] == $x[$j] && $x[$i] > $px );
+    my ($a, $b) = $y[$i] < $y[$j] ? ( $y[$i], $y[$j] ) : ( $y[$j], $y[$i] );
+    $c++ if ( $py >= $a && $py < $b );
+  }
+  return $c % 2;
+};
+my %open = ();     # "x0 x1" -> [x0, y0, x1, y1] still growing down the bands
+my @rect = ();
+for my $j ( 0 .. $#ys - 1 ) {
+  my $cy = ( $ys[$j] + $ys[$j + 1] ) / 2;
+  my @runs = (); my $start;
+  for my $i ( 0 .. $#xs - 1 ) {
+    my $out = ! $inside->( ( $xs[$i] + $xs[$i + 1] ) / 2, $cy );
+    $start = $xs[$i] if ( $out && ! defined $start );
+    if ( defined $start && ( ! $out || $i == $#xs - 1 ) ) {
+      push(@runs, "$start " . ( $out ? $xs[$i + 1] : $xs[$i] ));
+      undef $start;
+    }
+  }
+  my %now = map { $_ => 1 } @runs;
+  foreach my $k ( keys %open ) { push(@rect, delete $open{$k}) unless ( $now{$k} ); }
+  foreach my $k ( @runs ) {
+    if ( exists $open{$k} ) { $open{$k}[3] = $ys[$j + 1]; }
+    else { my ($x0, $x1) = split(/ /, $k); $open{$k} = [ $x0, $ys[$j], $x1, $ys[$j + 1] ]; }
+  }
+}
+push(@rect, values %open);
+foreach my $r ( sort { $a->[1] <=> $b->[1] || $a->[0] <=> $b->[0] } @rect ) {
+  my @m = map { $_ / $u } @$r;
+  if ( grep { $_->[0] <= $m[0] + 1e-6 && $_->[1] <= $m[1] + 1e-6 && $_->[2] >= $m[2] - 1e-6 && $_->[3] >= $m[3] - 1e-6 } @PLACEMENT_BLOCKAGES ) {
+    printf("INFO-PAR-DEF : 046 : the die's notch %.4f %.4f %.4f %.4f is already a placement blockage\n", @m);
+    next;
+  }
+  my $b = [ @m ];
+  push(@PLACEMENT_BLOCKAGES, $b);
+  $DIE_NOTCH_BLOCKAGES{"$b"} = 1;
+  printf("INFO-PAR-DEF : 044 : the die's notch %.4f %.4f %.4f %.4f (%.1f um2) is a placement blockage\n",
+         @m, ( $m[2] - $m[0] ) * ( $m[3] - $m[1] ));
+}
+}# sub dbfDefDieNotchBlockages
 #---------------------------------------------------------------------------------#
 sub dbgGetPortsDB {
 my $moduleName = $_[0];
