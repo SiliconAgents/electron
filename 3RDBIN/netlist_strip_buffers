@@ -1,0 +1,504 @@
+#!/usr/bin/env python3
+"""Take the buffer and inverter-pair trees out of a gate-level netlist.
+
+    netlist_strip_buffers <in.v[.gz]> <out.v[.gz]> --top <module> --function_map <map>
+                          [--stubs cells.v] [--keep REGEX] [--keep_sdc FILE]
+    netlist_strip_buffers --verify <in.v[.gz]> <out.v[.gz]> --top <module> --function_map <map>
+
+WHAT IT IS FOR
+
+A netlist from another tool's synthesis or placement carries that tool's
+buffering: high-fanout trees, timing buffers, inverter pairs, each sized and
+split for the other tool's placement.  Placed again by hier_place_all, a
+tree built for one placement is wrong for the next.  On a 3M-cell tile the
+other tool left 62k cells at the top level, and the worst paths ran through
+them to the far side of the die and back: one single-sink buffer sat on 58
+of the 150 worst.  They also make the top level's placement graph slow to
+build.  Photon's place_opt buffers the placed design from scratch, so the
+trees are better gone before placing.
+
+WHAT IS REMOVED
+
+A cell is a buffer or an inverter by the cell function map (the config's
+cell-func-map; first matching pattern on the base name wins): function BUF
+or INV in family COMBINATIONAL.  Clock buffers and inverters (family CLOCK)
+and delay cells are never touched.
+
+  a buffer         its output net is merged into its input net
+  inverter pairs   an inverter whose output feeds nothing but inverters goes,
+                   with every inverter it feeds; their outputs are merged into
+                   the first one's input, so the polarity is the same
+
+Merging is per module and bit by bit.  When the output net is a port of the
+module, the input net is renamed to the port instead.  A buffer between two
+ports, or from a constant to a port, stays -- a module port cannot be joined
+to another one without an assign.  So does any instance matching --keep, and
+any named in the --keep_sdc file.  A tree that crosses a module boundary is
+stripped on both sides and the port stays, so the driver reaches every sink
+through the port.
+
+Instances that are rewritten are written as `.pin ( bits )` with bus
+connections expanded; everything else is written back as it was read.
+Declarations are left alone, so a net merged away is left declared and
+unused.
+
+--verify
+
+Flattens both netlists and, for every pin of every cell that is not a
+buffer or an inverter, and every top-level port bit, follows its net up
+through any buffers and inverters to the net they start from, counting
+inversions.  Both netlists must have the same other cells, and each pin must
+reach the same root net (matched between the two by which pins share it)
+with the same parity.  It is what to run before believing an output.
+"""
+
+import argparse
+import fnmatch
+import gzip
+import importlib.machinery
+import os
+import re
+import sys
+import time
+
+_nfb = importlib.machinery.SourceFileLoader(
+    'netlist_flatten_below', os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          'netlist_flatten_below')).load_module()
+NetlistError, read_netlist, connections, tokens, blast = (
+    _nfb.NetlistError, _nfb.read_netlist, _nfb.connections, _nfb.tokens, _nfb.blast)
+COMMENT, Inliner, port_bits, expr_text, bit_text, bare = (
+    _nfb.COMMENT, _nfb.Inliner, _nfb.port_bits, _nfb.expr_text, _nfb.bit_text, _nfb.bare)
+
+SIMPLE = re.compile(r'[A-Za-z_][\w$]*')
+OUT_PINS = ('Z', 'ZN', 'Y', 'X', 'O', 'Q')
+
+
+def norm(b):
+    """one spelling per bit: `\\abc ` and `abc` are the same identifier"""
+    n = b[0]
+    if n.startswith('\\') and SIMPLE.fullmatch(n[1:]):
+        return (n[1:], b[1])
+    return b
+
+
+class CellKinds:
+    """cell -> 'BUF' / 'INV' / None, and its (input, output) pin, from the
+    function map and optionally the cell stubs"""
+
+    def __init__(self, fmap, stubs, base_re):
+        self.rules = []
+        for line in open(fmap):
+            f = line.split()
+            if len(f) >= 3 and not line.lstrip().startswith('#'):
+                self.rules.append((f[0], f[1], f[2]))
+        self.base_re = re.compile(base_re)
+        self.dirs = {}
+        if stubs:
+            self.read_stubs(stubs)
+        self.memo = {}
+
+    def read_stubs(self, path):
+        op = gzip.open if path.endswith('.gz') else open
+        cur = None
+        for line in op(path, 'rt', errors='replace'):
+            m = re.match(r'\s*module\s+(\S+)', line)
+            if m:
+                cur = m.group(1)
+                self.dirs[cur] = {}
+                continue
+            m = re.match(r'\s*(input|output|inout)\s+(.*?);', line)
+            if m and cur:
+                for p in re.split(r'[,\s]+', re.sub(r'\[[^\]]*\]', ' ', m.group(2)).strip()):
+                    if p:
+                        self.dirs[cur][p] = m.group(1)
+
+    def kind(self, cell):
+        if cell not in self.memo:
+            m = self.base_re.match(cell)
+            base = m.group(1) if m else cell
+            k = None
+            for pat, func, fam in self.rules:
+                if fnmatch.fnmatchcase(base, pat):
+                    if fam == 'COMBINATIONAL' and func in ('BUF', 'INV'):
+                        k = func
+                    break
+            self.memo[cell] = k
+        return self.memo[cell]
+
+    def pins(self, cell, names):
+        """(input pin, output pin) of a one-in one-out cell, or None"""
+        if len(names) != 2:
+            return None
+        d = self.dirs.get(cell)
+        if d:
+            ins = [p for p in names if d.get(p) == 'input']
+            outs = [p for p in names if d.get(p) == 'output']
+        else:
+            outs = [p for p in names if p in OUT_PINS]
+            ins = [p for p in names if p not in OUT_PINS]
+        return (ins[0], outs[0]) if len(ins) == 1 and len(outs) == 1 else None
+
+
+def sdc_names(path):
+    """every instance an SDC names in get_cells / get_pins (a pin's instance)"""
+    text = open(path, errors='replace').read()
+    names = set()
+    for m in re.finditer(r'get_(cells|pins)\s+(?:-\S+\s+)*(\{[^}]*\}|\S+)', text):
+        for n in m.group(2).strip('{}').split():
+            n = n.replace('\\', '')
+            names.add(n)
+            if m.group(1) == 'pins' and '/' in n:
+                names.add(n.rsplit('/', 1)[0])
+    return names
+
+
+def inst_paths(mods, top):
+    """module -> the instance path of its one instance ('' for the top);
+    a module used more than once maps to None"""
+    paths = {top: ''}
+    order = [top]
+    for m in order:
+        for kind, stmt, typ, name in mods[m].stmts:
+            if kind == 'inst' and typ in mods:
+                p = (paths[m] + '/' if paths[m] else '') + bare(name)
+                if typ in paths:
+                    paths[typ] = None
+                elif paths[m] is not None:
+                    paths[typ] = p
+                    order.append(typ)
+                else:
+                    paths[typ] = None
+                    order.append(typ)
+    return paths
+
+
+class Stripper:
+    def __init__(self, kinds, keep_re, keep_names):
+        self.kinds, self.keep_re, self.keep_names = kinds, keep_re, keep_names
+        self.removed = {'BUF': 0, 'INV': 0}
+        self.kept = {}
+
+    def note_kept(self, why):
+        self.kept[why] = self.kept.get(why, 0) + 1
+
+    def module(self, mod, mods, path):
+        st = []           # per statement: None, ('inst', pins, bits per pin), ('assign', lhs, rhs)
+        cand = {}         # statement index -> (kind, in bit, out bit)
+        for i, (kind, stmt, typ, name) in enumerate(mod.stmts):
+            if kind == 'inst':
+                conns = [(p, [norm(b) for b in bits]) for p, bits in connections(stmt, mod)]
+                st.append(('inst', conns))
+                k = None if typ in mods else self.kinds.kind(typ)
+                if not k:
+                    continue
+                full = (path + '/' if path else '') + bare(name) if path is not None else None
+                if (self.keep_re and self.keep_re.search(bare(name))) or (full and full in self.keep_names):
+                    self.note_kept('--keep / --keep_sdc')
+                    continue
+                pp = self.kinds.pins(typ, [p for p, _ in conns])
+                cm = dict(conns)
+                if not pp or len(cm[pp[0]]) != 1 or len(cm[pp[1]]) != 1:
+                    self.note_kept('not one bit in, one bit out')
+                    continue
+                cand[i] = (k, cm[pp[0]][0], cm[pp[1]][0], pp[0], pp[1])
+            elif kind == 'assign':
+                tk = tokens(COMMENT.sub(' ', stmt))
+                eq = tk.index('=')
+                lhs, _ = blast(tk, 1, mod)
+                rhs, _ = blast(tk, eq + 1, mod)
+                st.append(('assign', [norm(b) for b in lhs], [norm(b) for b in rhs]))
+            else:
+                st.append(None)
+        ports = set()
+        for p in mod.ports:
+            for b in port_bits(mod, p):
+                ports.add(norm(b))
+        sub = {}
+
+        def find(b):
+            r = b
+            while r in sub:
+                r = sub[r]
+            while b in sub and sub[b] != r:
+                sub[b], b = r, sub[b]
+            return r
+        removed = set()
+
+        def merge(a, z):
+            """drop a one-bit path from a to z; False when it cannot go"""
+            if a == z:
+                return False
+            if z in ports:
+                if a in ports or a[0] == '':
+                    return False
+                sub[a] = z
+            else:
+                sub[z] = a
+            return True
+
+        for rnd in range(20):
+            changed = 0
+            # buffers
+            for i, (k, a, z, _, _) in cand.items():
+                if k != 'BUF' or i in removed:
+                    continue
+                if merge(find(a), find(z)):
+                    removed.add(i)
+                    self.removed['BUF'] += 1
+                    changed += 1
+            # inverter pairs: what each live net feeds -- an inverter's index,
+            # or None for anything else (another cell, a module instance, an
+            # assign); a candidate's own output pin is its driver, not a load
+            loads = {}
+            for i, s in enumerate(st):
+                if s is None or i in removed:
+                    continue
+                if s[0] == 'inst':
+                    c = cand.get(i)
+                    for p, bits in s[1]:
+                        if c and p == c[4]:
+                            continue
+                        who = i if c and c[0] == 'INV' and p == c[3] else None
+                        for b in bits:
+                            loads.setdefault(find(b), []).append(who)
+                else:
+                    for b in s[1] + s[2]:
+                        loads.setdefault(find(b), []).append(None)
+            for i, (k, a, n, _, _) in cand.items():
+                if k != 'INV' or i in removed:
+                    continue
+                a, n = find(a), find(n)
+                ld = loads.get(n, [])
+                if n in ports or not ld or None in ld or i in ld:
+                    continue
+                if any(j in removed for j in ld):
+                    continue
+                outs = [find(cand[j][2]) for j in ld]
+                if sum(1 for z in outs if z in ports) > (0 if a in ports or a[0] == '' else 1):
+                    self.note_kept('inverter pair between ports')
+                    continue
+                removed.add(i)
+                self.removed['INV'] += 1
+                for j, z in zip(ld, outs):
+                    if merge(find(a), find(z)):
+                        removed.add(j)
+                        self.removed['INV'] += 1
+                    else:
+                        raise NetlistError("module %s: inverter pair at %s could not be merged"
+                                           % (mod.name, mod.stmts[j][3]))
+                changed += 1
+            if not changed:
+                break
+        for i, (k, a, z, _, _) in cand.items():
+            if i not in removed:
+                self.note_kept('kept: %s between ports, a constant, or not a pair' % k)
+        out = []
+        for i, (kind, stmt, typ, name) in enumerate(mod.stmts):
+            if kind == 'decl' or i in removed:
+                continue
+            s = st[i]
+            if s and s[0] == 'inst':
+                new = [(p, [find(b) for b in bits]) for p, bits in s[1]]
+                if new != s[1]:
+                    out.append('%s %s ( %s ) ;\n' % (typ, name, ' , '.join(
+                        '.%s ( %s )' % (p, expr_text(b)) for p, b in new)))
+                    continue
+            elif s and s[0] == 'assign':
+                lhs, rhs = [find(b) for b in s[1]], [find(b) for b in s[2]]
+                if lhs != s[1] or rhs != s[2]:
+                    out.extend('assign %s = %s ;\n' % (bit_text(lb), bit_text(rb))
+                               for lb, rb in zip(reversed(lhs), reversed(rhs)))
+                    continue
+            out.append(stmt.strip('\n') + ';\n')
+        return out, len(removed)
+
+
+def strip(mods, top, out, kinds, keep_re, keep_names):
+    reach, order = set(), []
+
+    def visit(m):
+        if m in reach:
+            return
+        reach.add(m)
+        for kind, _, typ, _ in mods[m].stmts:
+            if kind == 'inst' and typ in mods:
+                visit(typ)
+        order.append(m)
+    visit(top)
+    paths = inst_paths(mods, top)
+    s = Stripper(kinds, keep_re, keep_names)
+    per = []
+    op = gzip.open if out.endswith('.gz') else open
+    t0 = time.time()
+    with op(out, 'wt') as f:
+        f.write("// netlist_strip_buffers: buffers and inverter pairs merged away\n")
+        for m in order:
+            mod = mods[m]
+            body, n = s.module(mod, mods, paths.get(m))
+            per.append((n, m))
+            f.write(mod.header + '\n')
+            for kind, stmt, _, _ in mod.stmts:
+                if kind == 'decl':
+                    f.write(stmt.strip('\n') + ';\n')
+            f.writelines(body)
+            f.write('endmodule\n\n')
+    sys.stderr.write("stripped %d buffer(s) and %d inverter(s) in pairs from %d module(s), %.0fs\n"
+                     % (s.removed['BUF'], s.removed['INV'], len(order), time.time() - t0))
+    for why, n in sorted(s.kept.items(), key=lambda x: -x[1]):
+        sys.stderr.write("  %8d %s\n" % (n, why))
+    for n, m in sorted(per, reverse=True)[:8]:
+        sys.stderr.write("  %8d removed in %s\n" % (n, m))
+
+
+def flat(path, top, kinds):
+    """leaf pins -> net class, leaf cells -> type, top port bits -> net class"""
+    mods = read_netlist(path)
+    if top not in mods:
+        raise NetlistError("%s: no module %s" % (path, top))
+    parent = {}
+
+    def find(x):
+        while parent.get(x, x) != x:
+            parent[x] = parent.get(parent[x], parent[x])
+            x = parent[x]
+        return x
+
+    def key(b):
+        b = norm(b)
+        return b[1] if b[0] == '' else (bare(b[0]), b[1])
+    pins, cells = {}, {}
+
+    def leaf(typ, p, conns):
+        cells[p] = typ
+        for pin, bits in conns:
+            for k, b in enumerate(reversed(bits)):
+                pins[(p, pin, k)] = key(b)
+
+    def assign(lb, rb):
+        a, b = find(key(lb)), find(key(rb))
+        if a != b:
+            if isinstance(a, str):
+                a, b = b, a
+            parent[a] = b
+    Inliner(mods, leaf, assign).walk(mods[top], '', lambda b: b)
+    tm = mods[top]
+    for p in tm.ports:
+        for k, b in enumerate(reversed(port_bits(tm, p))):
+            pins[('<port>', bare(p), k)] = key(b)
+    return {k: find(v) for k, v in pins.items()}, cells
+
+
+def roots(pins, cells, kinds):
+    """every pin that is not on a buffer or an inverter -> (root net, parity)"""
+    drv = {}
+    pin_of = {}
+    for (i, p, k), net in pins.items():
+        if i in cells and kinds.kind(cells[i]):
+            pin_of.setdefault(i, {})[p] = net
+    for c, pm in pin_of.items():
+        pp = kinds.pins(cells[c], list(pm))
+        if pp:
+            drv[pm[pp[1]]] = (pm[pp[0]], 1 if kinds.kind(cells[c]) == 'INV' else 0)
+    memo = {}
+
+    def root(n):
+        seen, par, chain = 0, 0, []
+        while n in drv and not isinstance(n, str):
+            if n in memo:
+                r, q = memo[n]
+                par ^= q
+                n = r
+                break
+            chain.append((n, par))
+            n, q = drv[n]
+            par ^= q
+            seen += 1
+            if seen > 100000:
+                raise NetlistError("a loop of buffers")
+        for m, p0 in chain:
+            memo[m] = (n, par ^ p0)
+        return n, par
+    out = {}
+    for (i, p, k), net in pins.items():
+        if i in pin_of:
+            continue
+        out[(i, p, k)] = root(net)
+    return out
+
+
+def verify(a, b, top, kinds):
+    pa, ca = flat(a, top, kinds)
+    pb, cb = flat(b, top, kinds)
+    bad = 0
+    oa = {c: t for c, t in ca.items() if not kinds.kind(t)}
+    ob = {c: t for c, t in cb.items() if not kinds.kind(t)}
+    if oa != ob:
+        print("other cells differ: %d only in a, %d only in b"
+              % (len(set(oa) - set(ob)), len(set(ob) - set(oa))))
+        bad += 1
+    ra, rb = roots(pa, ca, kinds), roots(pb, cb, kinds)
+    if set(ra) != set(rb):
+        print("connected pins differ: %d only in a, %d only in b"
+              % (len(set(ra) - set(rb)), len(set(rb) - set(ra))))
+        for k in list(set(ra) - set(rb))[:5] + list(set(rb) - set(ra))[:5]:
+            print("   ", k)
+        bad += 1
+    fwd, rev, wrong = {}, {}, 0
+    for k, (na, qa) in ra.items():
+        if k not in rb:
+            continue
+        nb, qb = rb[k]
+        ok = qa == qb
+        if isinstance(na, str) or isinstance(nb, str):
+            ok = ok and na == nb
+        else:
+            ok = ok and fwd.setdefault(na, nb) == nb and rev.setdefault(nb, na) == na
+        if not ok:
+            wrong += 1
+            if wrong <= 5:
+                print("   pin %s: %s parity %d in a, %s parity %d in b" % (k, na, qa, nb, qb))
+    if wrong:
+        print("%d pin(s) reach another net or the other polarity" % wrong)
+        bad += 1
+    nbuf = lambda c: sum(1 for t in c.values() if kinds.kind(t))
+    print("%s: %d other cells, %d pin bits, %d root nets; buffers and inverters %d -> %d -- %s"
+          % (top, len(oa), len(ra), len(fwd), nbuf(ca), nbuf(cb),
+             "same logic" if not bad else "DIFFERENT"))
+    return 0 if not bad else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('inp', help='netlist to read (.v or .v.gz)')
+    ap.add_argument('out', help='netlist to write, or with --verify the one to compare against')
+    ap.add_argument('--top', required=True)
+    ap.add_argument('--function_map', required=True,
+                    help="the config's cell-func-map: pattern, function, family per line")
+    ap.add_argument('--base_regex', default=r'(.*?)D\d+BWP',
+                    help='the base name a map pattern is matched against (default: the name '
+                         'up to the drive strength)')
+    ap.add_argument('--stubs', help='cell stubs (Verilog) for pin directions; else Z/ZN/Y/X/O/Q are outputs')
+    ap.add_argument('--keep', help='leave instances whose name matches this regex')
+    ap.add_argument('--keep_sdc', help='leave every instance this SDC names')
+    ap.add_argument('--verify', action='store_true',
+                    help='check that the two netlists are the same logic instead')
+    a = ap.parse_args()
+    sys.setrecursionlimit(100000)
+    try:
+        kinds = CellKinds(a.function_map, a.stubs, a.base_regex)
+        if a.verify:
+            return verify(a.inp, a.out, a.top, kinds)
+        mods = read_netlist(a.inp)
+        if a.top not in mods:
+            raise NetlistError("no module %s in %s" % (a.top, a.inp))
+        keep_names = sdc_names(a.keep_sdc) if a.keep_sdc else set()
+        strip(mods, a.top, a.out, kinds, re.compile(a.keep) if a.keep else None, keep_names)
+    except NetlistError as e:
+        sys.stderr.write("netlist_strip_buffers: %s\n" % e)
+        return 2
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
