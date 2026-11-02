@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""Move cells into the block they belong to, before placing.
+
+    netlist_regroup <in.v[.gz]> <out.v[.gz]> --top <module> --moves <file> [--stubs cells.v]
+    netlist_regroup --verify <in.v[.gz]> <out.v[.gz]> --top <module> --moves <file>
+
+WHAT IT IS FOR
+
+hier_place_all places a module's child blocks first, then the module's own
+cells in the room the blocks leave; the inside of a block is placed later, in
+the block's own pass, from the block's own netlist.  A cell of the parent
+whose every critical neighbour is inside one block therefore cannot be placed
+inside it -- at the parent's pass the block is an obstacle, and at the block's
+pass the cell does not exist -- and goes to whatever free space is left.  On
+a 3M-cell tile two such inverters, left at the top level by another tool's
+placement, sat 150 um from every sink, and 997 of 1,352 paths of one bus went
+out to them and back.  Photon's `glue` command finds these cells ("inside X");
+this moves them into X, so X's own pass places them with their neighbours.
+
+--moves: one move a line, `cell <TAB> block`, both instance paths from the
+top: the cell to move, and the block instance to move it into, below the
+cell's parent (`u_a` or `u_a/u_b`).  Photon glue's file can be used as it is
+-- lines whose class is "inside" are taken, with the pair column as the block.
+
+WHAT IT DOES
+
+Cells going into the same block are moved together, one hierarchy level at a
+time.  Each net bit of a moved cell becomes, inside the block:
+  - the block's port bit, when the net already enters the block there;
+  - when a moved cell drives a net that enters the block through an input
+    port, that port bit is cut and becomes a wire inside the block (a new
+    output port carries it out only if something outside still uses it);
+  - a new wire, when only moved cells use the net;
+  - otherwise a new port, `rg_<n>`: an output when a moved cell drives the
+    net, an input when it reads it.
+A block module used by more than one instance is copied first (`<module>_rg<n>`)
+and the copy given to this instance alone.  The moved cell keeps its name,
+under the block's path.  Instances that change are written as `.pin ( bits )`;
+everything else is written back as it was read.
+
+An SDC that names a moved cell by its old path no longer matches it.
+
+--verify
+
+Flattens both netlists and checks they are the same circuit: the same leaf
+cells (a moved cell under its new path), and every pin bit on the same net
+as the pins it shared one with before.
+"""
+
+import argparse
+import gzip
+import importlib.machinery
+import os
+import re
+import sys
+import time
+
+_nfb = importlib.machinery.SourceFileLoader(
+    'netlist_flatten_below', os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          'netlist_flatten_below')).load_module()
+NetlistError, read_netlist, connections, tokens, blast = (
+    _nfb.NetlistError, _nfb.read_netlist, _nfb.connections, _nfb.tokens, _nfb.blast)
+COMMENT, Module, port_bits, expr_text, bare, esc, pin_nets = (
+    _nfb.COMMENT, _nfb.Module, _nfb.port_bits, _nfb.expr_text, _nfb.bare, _nfb.esc, _nfb.pin_nets)
+
+OUT_PINS = ('Z', 'ZN', 'Y', 'X', 'O', 'Q', 'QN', 'CO', 'S')
+
+
+def read_moves(path):
+    """[(cell path, block path)] from `cell<TAB>block` lines or Photon glue's file"""
+    moves = []
+    for line in open(path):
+        if not line.strip() or line.startswith('#'):
+            continue
+        f = line.rstrip('\n').split('\t')
+        if len(f) >= 5 and f[3] in ('inside', 'bridge', 'port'):     # photon glue
+            if f[3] == 'inside':
+                moves.append((f[0], f[4]))
+        elif len(f) >= 2:
+            moves.append((f[0], f[1]))
+        else:
+            raise NetlistError("--moves: not `cell<TAB>block`: %s" % line.strip())
+    return moves
+
+
+def segs(path):
+    """an instance path's names; an escaped name is one name whatever it holds"""
+    out = []
+    while path:
+        if path.startswith('\\'):
+            out.append(path[1:])
+            break
+        k = path.find('/')
+        if k < 0:
+            out.append(path)
+            break
+        out.append(path[:k])
+        path = path[k + 1:]
+    return out
+
+
+class Dirs:
+    """cell -> pin -> direction, from the stubs; output-pin names otherwise"""
+
+    def __init__(self, stubs):
+        self.d = {}
+        if stubs:
+            op = gzip.open if stubs.endswith('.gz') else open
+            cur = None
+            for line in op(stubs, 'rt', errors='replace'):
+                m = re.match(r'\s*module\s+(\S+)', line)
+                if m:
+                    cur = m.group(1)
+                    self.d[cur] = {}
+                    continue
+                m = re.match(r'\s*(input|output|inout)\s+(.*?);', line)
+                if m and cur:
+                    for p in re.split(r'[,\s]+', re.sub(r'\[[^\]]*\]', ' ', m.group(2)).strip()):
+                        if p:
+                            self.d[cur][p] = m.group(1)
+
+    def drives(self, cell, pin, mods):
+        if cell in mods:
+            return mod_dirs(mods[cell]).get(pin) == 'output'
+        d = self.d.get(cell)
+        return d.get(pin) == 'output' if d else pin in OUT_PINS
+
+
+def mod_dirs(mod):
+    d = {}
+    for kind, stmt, _, _ in mod.stmts:
+        if kind != 'decl':
+            continue
+        tk = tokens(COMMENT.sub(' ', stmt))
+        if tk and tk[0] in ('input', 'output', 'inout'):
+            for t in tk[1:]:
+                if t not in (',', '[', ']', ':', 'wire', 'reg', 'signed') and not t.isdigit():
+                    d[bare(t)] = tk[0]
+    return d
+
+
+class Regrouper:
+    def __init__(self, mods, top, dirs):
+        self.mods, self.top, self.dirs = mods, top, dirs
+        self.copies = 0
+        self.new_ports = {'input': 0, 'output': 0}
+        self.cut = 0
+        self.wires = 0
+        self.moved = 0
+        self.rename = {}            # old leaf path -> new leaf path
+        self.uses = {}              # module -> number of instances of it
+        for m in mods.values():
+            for kind, _, typ, _ in m.stmts:
+                if kind == 'inst' and typ in mods:
+                    self.uses[typ] = self.uses.get(typ, 0) + 1
+
+    def module_at(self, path):
+        m = self.mods[self.top]
+        for s in path:
+            hit = [t for k, _, t, n in m.stmts if k == 'inst' and bare(n) == s]
+            if not hit or hit[0] not in self.mods:
+                raise NetlistError("no block instance %s under %s" % (s, m.name))
+            m = self.mods[hit[0]]
+        return m
+
+    def uniquify(self, parent, xi):
+        """the module of parent's statement xi, copied if anything else uses it"""
+        kind, stmt, typ, name = parent.stmts[xi]
+        if self.uses.get(typ, 0) <= 1:
+            return self.mods[typ]
+        src = self.mods[typ]
+        n = 1
+        while '%s_rg%d' % (typ, n) in self.mods:
+            n += 1
+        new = '%s_rg%d' % (typ, n)
+        cp = Module(new, re.sub(r'(\bmodule\s+)' + re.escape(typ) + r'(?=[\s(;])', r'\g<1>' + new, src.header, count=1))
+        cp.ports = list(src.ports)
+        cp.stmts = [list(s) for s in src.stmts]
+        cp.width, cp.supply = dict(src.width), dict(src.supply)
+        cp.insts, cp.names = set(src.insts), set(src.names)
+        self.mods[new] = cp
+        for kind2, _, t2, _ in cp.stmts:
+            if kind2 == 'inst' and t2 in self.mods:
+                self.uses[t2] = self.uses.get(t2, 0) + 1
+        self.uses[typ] -= 1
+        self.uses[new] = 1
+        parent.stmts[xi] = [kind, re.sub(r'^(\s*)' + re.escape(typ) + r'(?=\s)', r'\g<1>' + new, stmt, count=1), new, name]
+        self.copies += 1
+        return cp
+
+    def move(self, parent, ppath, block, cells):
+        """move the instances named `cells` of module `parent` into its child instance `block`"""
+        idx = {bare(n): i for i, (k, _, _, n) in enumerate(parent.stmts) if k == 'inst'}
+        if block not in idx:
+            raise NetlistError("%s: no instance %s" % (parent.name, block))
+        for c in cells:
+            if c not in idx:
+                raise NetlistError("%s: no instance %s to move" % (parent.name, c))
+        xi = idx[block]
+        if parent.stmts[xi][2] not in self.mods:
+            raise NetlistError("%s/%s is a leaf cell, not a block" % (parent.name, block))
+        T = self.uniquify(parent, xi)
+        tdirs = mod_dirs(T)
+        gset = set(cells)
+        # every net bit of the parent: who uses it
+        users = {}
+        conns = {}
+        for i, (k, stmt, typ, name) in enumerate(parent.stmts):
+            if k == 'inst':
+                cs = connections(stmt, parent)
+                nm = bare(name)
+                conns[nm] = cs
+                for pin, bits in cs:
+                    for b in bits:
+                        if b[0] != '':
+                            users.setdefault(b, []).append((nm, pin))
+            elif k == 'assign':
+                tk = tokens(COMMENT.sub(' ', stmt))
+                eq = tk.index('=')
+                for b in blast(tk, 1, parent)[0] + blast(tk, eq + 1, parent)[0]:
+                    if b[0] != '':
+                        users.setdefault(b, []).append(('<assign>', None))
+        pbits = set()
+        for p in parent.ports:
+            pbits.update(port_bits(parent, p))
+        # the block's connection: parent bit -> [block port bits], aligned from the lsb
+        xconn = {}
+        for pin, bits in conns[block]:
+            for tb, pb in zip(reversed(port_bits(T, pin)), reversed(bits)):
+                if pb[0] != '':
+                    xconn.setdefault(pb, []).append((tb, pin))
+        tnames = set(T.names) | set(T.insts) | set(T.ports)
+
+        def fresh(base):
+            n = len(tnames)
+            while True:
+                nm = 'rg_%s_%d' % (base, n)
+                if nm not in tnames:
+                    tnames.add(nm)
+                    return nm
+                n += 1
+
+        cut_bits = {}            # block port bit -> new wire bit, inside T
+        new_ports = []           # (name, direction, parent bit)
+        new_wires = []
+        inside = {}              # parent bit -> bit inside T
+        for b in sorted({b for c in cells for _, bits in conns[c] for b in bits if b[0] != ''},
+                        key=lambda x: (x[0], -1 if x[1] is None else x[1])):
+            us = users.get(b, [])
+            drv = any(n in gset and self.dirs.drives(parent.stmts[idx[n]][2], p, self.mods) for n, p in us)
+            out_users = [u for u in us if u[0] not in gset and u[0] != block] or (b in pbits)
+            xs = xconn.get(b, [])
+            if drv and xs:
+                # it enters the block as an input the moved cell now drives from
+                # inside: the port bit is cut, and the net is a new wire -- or, if
+                # something outside still uses it, a new output port
+                if out_users:
+                    w = fresh('o')
+                    new_ports.append((w, 'output', b, None))
+                else:
+                    w = fresh('w')
+                    new_wires.append(w)
+                for tb, pin in xs:
+                    if tdirs.get(bare(pin)) == 'output':
+                        raise NetlistError("%s: net %s is driven by %s and by block %s" % (parent.name, expr_text([b]), cells, block))
+                    cut_bits[tb] = (w, None)
+                    self.cut += 1
+                inside[b] = (w, None)
+            elif xs:
+                inside[b] = xs[0][0]
+            elif not out_users:
+                w = fresh('w')
+                new_wires.append(w)
+                inside[b] = (w, None)
+            else:
+                p = fresh('o' if drv else 'i')
+                new_ports.append((p, 'output' if drv else 'input', b, None))
+                inside[b] = (p, None)
+        # the block: cut bits renamed, new ports and wires declared, the cells added
+        if cut_bits:
+            for i, (k, stmt, typ, name) in enumerate(T.stmts):
+                if k == 'inst':
+                    cs = connections(stmt, T)
+                    if any(bb in cut_bits for _, bits in cs for bb in bits):
+                        T.stmts[i] = ['inst', emit(typ, name, [(p, [cut_bits.get(bb, bb) for bb in bits]) for p, bits in cs]), typ, name]
+                elif k == 'assign':
+                    tk = tokens(COMMENT.sub(' ', stmt))
+                    eq = tk.index('=')
+                    if any(bb in cut_bits for bb in blast(tk, 1, T)[0] + blast(tk, eq + 1, T)[0]):
+                        raise NetlistError("%s: an assign uses port bit(s) a moved cell now drives" % T.name)
+        for p, d, _, w in new_ports:
+            T.ports.append(p)
+            T.stmts.insert(0, ['decl', '\n  %s %s' % (d, p), None, None])
+            T.names.add(p)
+            self.new_ports[d] += 1
+        for w in new_wires:
+            T.stmts.insert(0, ['decl', '\n  wire %s' % w, None, None])
+            T.names.add(w)
+            self.wires += 1
+        T.header = 'module %s ( %s )' % (esc(T.name), ' , '.join(T.ports)) + ';'
+        for c in cells:
+            k, stmt, typ, name = parent.stmts[idx[c]]
+            if c in T.insts:
+                raise NetlistError("%s already has an instance %s" % (T.name, c))
+            T.stmts.append(['inst', emit(typ, name, [(p, [inside.get(bb, bb) for bb in bits]) for p, bits in conns[c]]), typ, name])
+            T.insts.add(c)
+            self.rename[(ppath + '/' if ppath else '') + c] = (ppath + '/' if ppath else '') + block + '/' + c
+            self.moved += 1
+        # the parent: the cells gone, the block connected to its new ports and cut off its cut ones
+        gone = {idx[c] for c in cells}
+        cut_pins = {pin for tb, pin in [(tb, pin) for b, xs in xconn.items() for tb, pin in xs] if tb in cut_bits}
+        xs_new = []
+        for pin, bits in conns[block]:
+            if pin in cut_pins:
+                tb = list(reversed(port_bits(T, pin)))
+                bits = list(reversed([(('', "1'bz") if (i < len(tb) and tb[i] in cut_bits) else bb)
+                                      for i, bb in enumerate(reversed(bits))]))
+            xs_new.append((pin, bits))
+        for p, d, b, _ in new_ports:
+            xs_new.append((p, [b]))
+        k, stmt, typ, name = parent.stmts[xi]
+        parent.stmts[xi] = ['inst', emit(typ, name, xs_new), typ, name]
+        parent.stmts = [s for i, s in enumerate(parent.stmts) if i not in gone]
+        for c in cells:
+            parent.insts.discard(c)
+        return T
+
+
+def emit(typ, name, conns):
+    parts = []
+    for p, bits in conns:
+        bits = [b for b in bits]
+        if any(b == ('', "1'bz") for b in bits):
+            # a cut bit: leave it unconnected; only a whole-pin cut can be written
+            if all(b == ('', "1'bz") for b in bits):
+                parts.append('.%s ( )' % p)
+                continue
+            raise NetlistError("instance %s: only part of bus pin %s is cut -- not supported yet" % (bare(name), p))
+        parts.append('.%s ( %s )' % (p, expr_text(bits)))
+    return '\n  %s %s ( %s )' % (typ, name, ' , '.join(parts))
+
+
+def regroup(mods, top, moves, dirs):
+    r = Regrouper(mods, top, dirs)
+    # one hierarchy level at a time: (parent path, block, [cells]) for each step
+    pend = []
+    for cell, block in moves:
+        cs, bs = segs(cell), segs(block)
+        par = cs[:-1]
+        if bs[:len(par)] != par or len(bs) <= len(par):
+            raise NetlistError("move %s -> %s: the block is not below the cell's parent" % (cell, block))
+        pend.append((par, cs[-1], bs[len(par):]))
+    while pend:
+        groups = {}
+        for par, c, rest in pend:
+            groups.setdefault((tuple(par), rest[0]), []).append(c)
+        nxt = []
+        for (par, blk), cells in sorted(groups.items()):
+            r.move(r.module_at(list(par)), '/'.join(par), blk, cells)
+        for par, c, rest in pend:
+            if len(rest) > 1:
+                nxt.append((par + [rest[0]], c, rest[1:]))
+        pend = nxt
+    return r
+
+
+def write(mods, top, path):
+    order, seen = [], set()
+
+    def visit(m):
+        if m in seen:
+            return
+        seen.add(m)
+        for kind, _, typ, _ in mods[m].stmts:
+            if kind == 'inst' and typ in mods:
+                visit(typ)
+        order.append(m)
+    visit(top)
+    op = gzip.open if path.endswith('.gz') else open
+    with op(path, 'wt') as f:
+        f.write("// netlist_regroup: cells moved into the blocks they belong to\n")
+        for m in order:
+            mod = mods[m]
+            f.write(mod.header.strip('\n') + '\n')
+            for kind, stmt, _, _ in mod.stmts:
+                f.write(stmt.strip('\n') + ' ;\n')
+            f.write('endmodule\n\n')
+
+
+def verify(a, b, top, moves_path):
+    pa, ca = pin_nets(a, top)
+    pb, cb = pin_nets(b, top)
+    mv = {}
+    for cell, block in read_moves(moves_path):
+        cs = segs(cell)
+        mv['/'.join(cs)] = '/'.join(segs(block) + [cs[-1]])
+    ca = {mv.get(k, k): v for k, v in ca.items()}
+    pa = {(mv.get(i, i), p, k): n for (i, p, k), n in pa.items()}
+    bad = 0
+    if ca != cb:
+        only_a, only_b = set(ca) - set(cb), set(cb) - set(ca)
+        print("cells differ: %d only in a, %d only in b" % (len(only_a), len(only_b)))
+        for i in list(only_a)[:5] + list(only_b)[:5]:
+            print("   ", i)
+        bad += 1
+    fwd, rev, wrong = {}, {}, 0
+    missing = [k for k in pa if k not in pb]
+    for k, na in pa.items():
+        nb = pb.get(k)
+        if nb is None:
+            continue
+        if isinstance(na, str) or isinstance(nb, str):
+            if na != nb:
+                wrong += 1
+            continue
+        if fwd.setdefault(na, nb) != nb or rev.setdefault(nb, na) != na:
+            wrong += 1
+            if wrong <= 5:
+                print("   pin %s: net %s in a, %s in b" % (k, na, nb))
+    if missing:
+        print("%d pin bit(s) connected in a are not in b" % len(missing))
+        for k in missing[:5]:
+            print("   ", k)
+        bad += 1
+    if wrong:
+        print("%d pin(s) on a net that does not match" % wrong)
+        bad += 1
+    print("%s: %d leaf cells, %d pin bits, %d nets -- %s"
+          % (top, len(ca), len(pa), len(fwd), "same circuit" if not bad else "DIFFERENT"))
+    return 0 if not bad else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('inp')
+    ap.add_argument('out')
+    ap.add_argument('--top', required=True)
+    ap.add_argument('--moves', required=True, help='cell<TAB>block lines, or Photon glue output')
+    ap.add_argument('--stubs', help='cell stubs (pin directions); without them output pins go by name')
+    ap.add_argument('--verify', action='store_true', help='check two netlists are the same circuit')
+    a = ap.parse_args()
+    sys.setrecursionlimit(100000)
+    t0 = time.time()
+    try:
+        if a.verify:
+            return verify(a.inp, a.out, a.top, a.moves)
+        mods = read_netlist(a.inp)
+        if a.top not in mods:
+            raise NetlistError("no module %s in %s" % (a.top, a.inp))
+        moves = read_moves(a.moves)
+        r = regroup(mods, a.top, moves, Dirs(a.stubs))
+        write(mods, a.top, a.out)
+    except NetlistError as e:
+        sys.stderr.write("netlist_regroup: %s\n" % e)
+        return 2
+    sys.stderr.write("regrouped %d cell(s): %d new input and %d new output port(s), %d wire(s), "
+                     "%d port bit(s) cut, %d module(s) copied, %.0fs\n"
+                     % (r.moved, r.new_ports['input'], r.new_ports['output'], r.wires, r.cut, r.copies,
+                        time.time() - t0))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
