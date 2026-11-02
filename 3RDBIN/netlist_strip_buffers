@@ -2,7 +2,7 @@
 """Take the buffer and inverter-pair trees out of a gate-level netlist.
 
     netlist_strip_buffers <in.v[.gz]> <out.v[.gz]> --top <module> --function_map <map>
-                          [--stubs cells.v] [--keep REGEX] [--keep_sdc FILE]
+                          [--stubs cells.v] [--keep REGEX] [--keep_sdc FILE] [--dont_touch REGEX]
     netlist_strip_buffers --verify <in.v[.gz]> <out.v[.gz]> --top <module> --function_map <map>
 
 WHAT IT IS FOR
@@ -32,8 +32,10 @@ and delay cells are never touched.
 Merging is per module and bit by bit.  When the output net is a port of the
 module, the input net is renamed to the port instead.  A buffer between two
 ports, or from a constant to a port, stays -- a module port cannot be joined
-to another one without an assign.  So does any instance matching --keep, and
-any named in the --keep_sdc file.  A tree that crosses a module boundary is
+to another one without an assign.  So does any instance matching --keep, any
+named in the --keep_sdc file, and any whose name marks it don't-touch
+(--dont_touch, by default `d0nt`: a design's hand-placed scan muxes and
+standard buffers -- one ties test mode off -- are named that way).  A tree that crosses a module boundary is
 stripped on both sides and the port stays, so the driver reaches every sink
 through the port.
 
@@ -173,8 +175,9 @@ def inst_paths(mods, top):
 
 
 class Stripper:
-    def __init__(self, kinds, keep_re, keep_names):
+    def __init__(self, kinds, keep_re, keep_names, dont_touch):
         self.kinds, self.keep_re, self.keep_names = kinds, keep_re, keep_names
+        self.dont_touch = dont_touch
         self.removed = {'BUF': 0, 'INV': 0}
         self.kept = {}
 
@@ -194,6 +197,9 @@ class Stripper:
                 full = (path + '/' if path else '') + bare(name) if path is not None else None
                 if (self.keep_re and self.keep_re.search(bare(name))) or (full and full in self.keep_names):
                     self.note_kept('--keep / --keep_sdc')
+                    continue
+                if self.dont_touch and self.dont_touch.search(bare(name)):
+                    self.note_kept("don't touch (--dont_touch)")
                     continue
                 pp = self.kinds.pins(typ, [p for p, _ in conns])
                 cm = dict(conns)
@@ -313,7 +319,7 @@ class Stripper:
         return out, len(removed)
 
 
-def strip(mods, top, out, kinds, keep_re, keep_names):
+def strip(mods, top, out, kinds, keep_re, keep_names, dont_touch):
     reach, order = set(), []
 
     def visit(m):
@@ -326,7 +332,7 @@ def strip(mods, top, out, kinds, keep_re, keep_names):
         order.append(m)
     visit(top)
     paths = inst_paths(mods, top)
-    s = Stripper(kinds, keep_re, keep_names)
+    s = Stripper(kinds, keep_re, keep_names, dont_touch)
     per = []
     op = gzip.open if out.endswith('.gz') else open
     t0 = time.time()
@@ -481,6 +487,8 @@ def main():
     ap.add_argument('--stubs', help='cell stubs (Verilog) for pin directions; else Z/ZN/Y/X/O/Q are outputs')
     ap.add_argument('--keep', help='leave instances whose name matches this regex')
     ap.add_argument('--keep_sdc', help='leave every instance this SDC names')
+    ap.add_argument('--dont_touch', default='d0nt',
+                    help="leave instances whose name matches this regex (default d0nt; '' for none)")
     ap.add_argument('--verify', action='store_true',
                     help='check that the two netlists are the same logic instead')
     a = ap.parse_args()
@@ -493,7 +501,8 @@ def main():
         if a.top not in mods:
             raise NetlistError("no module %s in %s" % (a.top, a.inp))
         keep_names = sdc_names(a.keep_sdc) if a.keep_sdc else set()
-        strip(mods, a.top, a.out, kinds, re.compile(a.keep) if a.keep else None, keep_names)
+        strip(mods, a.top, a.out, kinds, re.compile(a.keep) if a.keep else None, keep_names,
+              re.compile(a.dont_touch) if a.dont_touch else None)
     except NetlistError as e:
         sys.stderr.write("netlist_strip_buffers: %s\n" % e)
         return 2
