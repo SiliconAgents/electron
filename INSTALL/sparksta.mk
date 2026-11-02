@@ -45,6 +45,12 @@ SPARKSTA_WIRE_MODEL ?=
 # transition (0.017 on one modern node: the median at the clock pins of an FC
 # route_opt).
 SPARKSTA_CLOCK_SLEW ?=
+# The cell functions (PHOTON_CELL_FUNCS: <node>_cell_functions.tsv beside the
+# arc store), so case analysis carries constants through the logic: a tie
+# cell's 0 through a scan mux, scan enable tied off at every flop.  Empty: a
+# held pin cuts its own net and nothing beyond, as before.  Needs a Photon
+# with constant propagation; an older one ignores it.
+SPARKSTA_CELL_FUNCS ?=
 # The clock, for comparing with a signoff timer -- never needed otherwise.
 # Empty or "ideal": every clock pin at the edge, as always.  "propagated":
 # Photon times the clock tree in the netlist (a routed one, with its SPEF) and
@@ -92,7 +98,7 @@ SPARKSTA_ROUNDS ?= 5
 SPARKSTA_ADVISE_MEM ?= 64g
 _sparksta_comma := ,
 # what Photon reads from its environment, in front of each spark-shell
-_sparksta_env = $(if $(SPARKSTA_CLOCK_SLEW),PHOTON_CLOCK_SLEW=$(SPARKSTA_CLOCK_SLEW) )
+_sparksta_env = $(if $(SPARKSTA_CLOCK_SLEW),PHOTON_CLOCK_SLEW=$(SPARKSTA_CLOCK_SLEW) )$(if $(SPARKSTA_CELL_FUNCS),PHOTON_CELL_FUNCS=$(abspath $(SPARKSTA_CELL_FUNCS)) )
 
 # Already inside the image (TESTS run there: "make app" first) spark-shell is
 # simply on PATH, and apptainer is not; outside it, go in.

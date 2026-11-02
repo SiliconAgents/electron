@@ -3,7 +3,7 @@
 
   plan_place start  <plan dir> --load <tcl> --netlist <v[.gz]> --top <module>
                     --spec <file> --kb <dir> [--sdc <sdc>] [--case '<cell>/<pin>=0|1 ...']
-                    [--clock_slew <ns>] [server and session options]
+                    [--clock_slew <ns>] [--cell_funcs <tsv>] [server and session options]
   plan_place auto   <plan dir> [--n 3]
   plan_place try    <plan dir> ungroup <parent module> <child module>
   plan_place try    <plan dir> control <module>
@@ -204,6 +204,7 @@ def cmd_start(a):
     s["sdc"] = os.path.abspath(a.sdc) if a.sdc else ""
     s["case"] = a.case.strip()
     s["clock_slew"] = a.clock_slew
+    s["cell_funcs"] = os.path.abspath(a.cell_funcs) if a.cell_funcs else ""
     if s["sdc"] and not os.path.isfile(s["sdc"]):
         log(d, f"no SDC {s['sdc']}"); return 1
     log(d, f"timing: sdc {s['sdc'] or '(none: ports untimed, no exceptions)'}; case {s['case'] or '(none)'}; "
@@ -262,7 +263,8 @@ cd {d} && apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /pro
         for f in ("photon.sca", "wireplan.sca", "size.sca", "repeat.sca", "photon_server.sca"):
             fh.write(open(os.path.join(a.pyspark, "scala", f)).read())
     # bsub hands the job its environment, and apptainer the container's
-    env = "".join(f"{k}={shlex.quote(v)} " for k, v in (("PHOTON_CASE", s["case"]), ("PHOTON_CLOCK_SLEW", s["clock_slew"])) if v)
+    env = "".join(f"{k}={shlex.quote(v)} " for k, v in (("PHOTON_CASE", s["case"]), ("PHOTON_CLOCK_SLEW", s["clock_slew"]),
+                                                          ("PHOTON_CELL_FUNCS", s.get("cell_funcs", ""))) if v)
     r = sh(f"source /etc/profile.d/modules.sh; module load flow >/dev/null 2>&1; {env}bsub -q {a.queue} -n 16 "
            f"-R 'select[mem>={a.server_mem}] rusage[mem={a.server_mem}] span[hosts=1]' -J plan_photon "
            f"-o {d}/server.%J.out apptainer exec --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /tmp:/tmp {a.sif} "
@@ -309,7 +311,7 @@ cd {d} && apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /pro
         do_try(d, s, ("control", target), mods, paths)
     sess = {"record": "session", "session": s["session"], "design": kb_design(s), "tools": tool_commits(s),
             "cells": mods[s["top"]]["cells"], "predictor": "repeated+size3", "baseline": s["baseline"],
-            "timing": {"sdc": s["sdc"], "case": s["case"], "clock_slew": s["clock_slew"]},
+            "timing": {"sdc": s["sdc"], "case": s["case"], "clock_slew": s["clock_slew"], "cell_funcs": s.get("cell_funcs", "")},
             "note": "plan_place start"}
     if "noise" in s:
         sess["noise_tns"] = s["noise"]
@@ -551,6 +553,7 @@ def main():
     x.add_argument("--sdc", default="", help="the block's SDC, as make sta takes it (SPARKSTA_SDC)")
     x.add_argument("--case", default="", help="pins held for the run's mode, '<cell>/<pin>=0|1 ...' (SPARKSTA_CASE)")
     x.add_argument("--clock_slew", default="", help="the clock pins' transition, ns (SPARKSTA_CLOCK_SLEW)")
+    x.add_argument("--cell_funcs", default="", help="cell functions for constant propagation (SPARKSTA_CELL_FUNCS)")
     x.add_argument("--room", default="density 0.9 5",
                    help="photon_server room mode for sizing: 'density <cap> <tile um>' (default), 'row' or 'none'")
     x.set_defaults(f=cmd_start)
