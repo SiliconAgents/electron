@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Hold the cells that join two blocks on the edge the blocks share.
+
+    hier_place_all ... -cells_anchor "<electron>/3RDBIN/glue_anchor <glue file> [--free]"
+
+hier_place_cells runs it as `<command> <nodefile> <graph>` after the blocks
+of a module are placed and before its own cells are; it rewrites the nodefile.
+
+WHAT IT IS FOR
+
+A cell owned by no block is placed after the blocks, in whatever room they
+leave.  One that joins two blocks belongs where they meet; when they abut
+there is no room there, and it goes to free space far from both, and every
+critical path through it goes out and back.  Photon's `glue` command finds
+them ("bridge X -> Y", with the block before and after the cell on its worst
+path).  This puts each one, before the cell pass, at the middle of the edge X
+and Y share -- or of the gap between them -- and holds it there (FIXED; with
+--free it only starts there).  legalize_flat then moves it to the nearest
+free row, which the plan should leave along that edge: the glue lane.
+
+The glue file is Photon glue's output as it is; its bridge lines are used.
+A block named below a child of this module (`u_a/u_b`) is taken as that child
+(`u_a`), which is what this module's placement knows.  A bridge between two
+blocks under the same child is left alone -- the cell belongs inside that
+child, which is netlist_regroup's job -- and so is any cell or block the
+nodefile does not have, so the same command can be given for every module.
+"""
+import sys
+
+
+def bare(n):
+    n = n.strip()
+    return n[1:] if n.startswith('\\') else n
+
+
+def main():
+    a = [x for x in sys.argv[1:] if not x.startswith('--')]
+    free = '--free' in sys.argv
+    if len(a) < 2:
+        sys.exit(__doc__)
+    glue, nodefile = a[0], a[1]
+    want = {}
+    for line in open(glue):
+        f = line.rstrip('\n').split('\t')
+        if line.startswith('#') or len(f) < 5 or f[3] != 'bridge' or ' -> ' not in f[4]:
+            continue
+        x, y = f[4].split(' -> ', 1)
+        want[bare(f[0])] = (x, y)
+    lines = open(nodefile).read().split('\n')
+    box = {}
+    for l in lines:
+        f = l.split()
+        if len(f) >= 8 and f[2] == 'INST' and f[5] in ('FIXED', 'PLACED'):
+            try:
+                x, y, w, h = float(f[6]), float(f[7]), float(f[3]), float(f[4])
+            except ValueError:
+                continue
+            box[bare(f[1])] = (x, y, x + w, y + h)
+
+    def blk(path):
+        p = bare(path)
+        return p if p in box else p.split('/', 1)[0]
+
+    def mid(a0, a1, b0, b1):
+        lo, hi = max(a0, b0), min(a1, b1)
+        return (lo + hi) / 2.0          # the overlap's middle, or the gap's
+
+    out, held, same, missing = [], 0, 0, 0
+    for l in lines:
+        f = l.split()
+        if len(f) >= 6 and f[2] == 'INST' and bare(f[1]) in want:
+            bx, by = (blk(n) for n in want[bare(f[1])])
+            if bx == by:
+                same += 1
+            elif bx not in box or by not in box:
+                missing += 1
+            else:
+                A, B = box[bx], box[by]
+                cx, cy = mid(A[0], A[2], B[0], B[2]), mid(A[1], A[3], B[1], B[3])
+                w, h = float(f[3]), float(f[4])
+                rest = [t for t in f[6:] if '=' in t]
+                f = f[:5] + ['PLACED' if free else 'FIXED', '%.4f' % (cx - w / 2), '%.4f' % (cy - h / 2)] + rest
+                l = ' '.join(f)
+                held += 1
+        out.append(l)
+    if held:
+        open(nodefile, 'w').write('\n'.join(out))
+    if held or same or missing:
+        sys.stderr.write("glue_anchor: %d bridge cell(s) %s on their blocks' shared edge; %d between two blocks "
+                         "of one child, %d whose block is not here, left alone\n"
+                         % (held, 'started' if free else 'held', same, missing))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
