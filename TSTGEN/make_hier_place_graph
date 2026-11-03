@@ -1760,11 +1760,29 @@ foreach my $group ( @groups ) {
   $netCnt++;
   my $w = 1;
   foreach my $gnet ( @groupNets ) { $w = $netWeight{$gnet} if ( exists $netWeight{$gnet} && $netWeight{$gnet} > $w ); }
+  #<!-- ELECTRON_STAR_NORM=1: a k-pin net's star pulls with 1/(k-1) per edge,
+  #     the whole net weighing what a two-pin net does.  Unscaled, a 5,000-pin
+  #     reset or scan net is 4,999 springs to its driver and outvotes the local
+  #     logic every cell actually talks to: on a 900k-cell module the
+  #     quadratic lower bound came out at 24 um an edge, against 4 um a net in
+  #     another tool's placement of the same logic. -->
+  $w = $w / (scalar(@nodes) - 1) if ( $ENV{ELECTRON_STAR_NORM} );
   my $wcol = "";
-  if ( $w > 1 ) { $wcol = sprintf(" %.4g", $w); $wtCnt++; $wtMax = $w if ( $w > $wtMax ); }
+  if ( $w != 1 ) { $wcol = sprintf(" %.4g", $w); $wtCnt++ if ( $w > 1 ); $wtMax = $w if ( $w > $wtMax ); }
+  #<!-- ELECTRON_PORT_WEIGHT=<f>: an edge to one of the module's own ports
+  #     pulls with f of its weight.  The ports sit on the module's edge, and
+  #     at full weight every chain of logic that reaches one is stretched out
+  #     to it; on a 924k-cell module 0.1 took its own nets from 13.6 to 12.0
+  #     um each (star weights and --linear on in both). -->
+  my $portW = $ENV{ELECTRON_PORT_WEIGHT};
   foreach my $node ( @nodes ) {
     next if ( $node == $centre );
-    print WRITE_PSEUDO_GRAPH "$centre $node$wcol\n";
+    my $col = $wcol;
+    if ( defined $portW && $portW ne ""
+         && ( ! exists $PSEUDO_VINST_ALREADY{$module}{$uniq{$node}} || ! exists $PSEUDO_VINST_ALREADY{$module}{$uniq{$centre}} ) ) {
+      $col = sprintf(" %.4g", $w * $portW);
+    }
+    print WRITE_PSEUDO_GRAPH "$centre $node$col\n";
     $edgeCnt++;
   }
 }

@@ -25,7 +25,7 @@ by recursive bisection over a capacity map gives a spread upper bound; the
 next quadratic solve is pulled toward that spread by a weight that grows each
 round.  Fixed blocks have no capacity, so no cell is spread into one.
 """
-import argparse, json, sys, time
+import argparse, json, os, sys, time
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -180,6 +180,16 @@ def main():
                     help="bin edge in row heights (default 8)")
     ap.add_argument("--region", type=float, nargs=4, metavar=("X0", "Y0", "X1", "Y1"),
                     help="place every movable cell inside this rectangle (hier_place_all --own_fence)")
+    ap.add_argument("--linear", type=float, default=float(os.environ.get("HIER_QP_LINEAR", "0") or 0),
+                    help="reweight every edge by 1/max(length, this um) per solve, x and y apart, so "
+                         "the quadratic solve tracks linear wirelength; 0 = off (default "
+                         "$HIER_QP_LINEAR, which hier_place_all's cell pass inherits)")
+    ap.add_argument("--stop_gap", type=float, default=float(os.environ.get("HIER_QP_STOP_GAP", "0.05") or 0.05),
+                    help="stop once the spread is within this fraction of the solve (default 0.05, "
+                         "$HIER_QP_STOP_GAP); 0 runs every --iters")
+    ap.add_argument("--alpha", type=float, default=float(os.environ.get("HIER_QP_ALPHA", "0.01") or 0.01),
+                    help="pull toward the spread per round, times the round and the mean diagonal "
+                         "(default 0.01, $HIER_QP_ALPHA)")
     ap.add_argument("--keepout", type=float, nargs=4, action="append", default=[], metavar=("X0", "Y0", "X1", "Y1"),
                     help="no cell in this rectangle, as if a fixed block were there; repeatable (set_placement_blockage)")
     a, _unknown = ap.parse_known_args()   # hier_place's own switches are accepted and ignored
@@ -222,6 +232,16 @@ def main():
     # Laplacian over movable cells; edges to fixed nodes go to the right-hand side
     am, bm = movable[ea], movable[eb]
     both = am & bm
+    one_ = am ^ bm
+    mv_ = np.where(am[one_], ea[one_], eb[one_]); fx_ = np.where(am[one_], eb[one_], ea[one_])
+    def system(wt, coord):
+        wb_, w1_ = wt[both], wt[one_]
+        r = np.concatenate([slot[ea[both]], slot[eb[both]], slot[ea[both]], slot[eb[both]], slot[mv_]])
+        c = np.concatenate([slot[eb[both]], slot[ea[both]], slot[ea[both]], slot[eb[both]], slot[mv_]])
+        v = np.concatenate([-wb_, -wb_, wb_, wb_, w1_])
+        Lm = sp.csr_matrix((v, (r, c)), shape=(m, m)) + 1e-6 * sp.identity(m)
+        rhs = np.bincount(slot[mv_], weights=w1_ * coord[fx_], minlength=m).astype(float)
+        return Lm.tocsr(), rhs
     rows = np.concatenate([slot[ea[both]], slot[eb[both]], slot[ea[both]], slot[eb[both]]])
     cols = np.concatenate([slot[eb[both]], slot[ea[both]], slot[ea[both]], slot[eb[both]]])
     wb = ew[both]
@@ -263,6 +283,32 @@ def main():
     xs, _ = spla.cg(L, bx, x0=x0, rtol=1e-6, maxiter=2000)
     ys, _ = spla.cg(L, by, x0=y0, rtol=1e-6, maxiter=2000)
     cx[mi], cy[mi] = xs, ys
+    Lx, bxx, Ly, byy = L, bx, L, by
+    #<!-- --linear: a squared wirelength stretches every chain of logic evenly
+    #     between the fixed pins it ends at, so a module whose logic runs out
+    #     to ports on its edge comes out with long edges everywhere: on a 924k
+    #     cell module the very first solve, before any spreading, averaged 16.5
+    #     um an edge.  Weighting each edge by 1/|d| at the current spot (x and
+    #     y apart, GORDIAN-L) makes sum w d^2 equal sum |d| there, so the next
+    #     solve minimises linear wirelength instead and short edges stay short.
+    #     The floor stops an edge of length 0 weighing infinitely.  Measured on
+    #     that module's own nets: 33.4 um a net as before, 20.1 with --linear
+    #     1.0, 14.3 with the graph's star weights also normalised
+    #     (ELECTRON_STAR_NORM). -->
+    def relin():
+        # GORDIAN-L: weight 1/|d| so sum w d^2 = sum |d| at the current spot
+        wx = ew / np.maximum(np.abs(cx[ea] - cx[eb]), a.linear)
+        wy = ew / np.maximum(np.abs(cy[ea] - cy[eb]), a.linear)
+        Lx_, bx_ = system(wx, cx); Ly_, by_ = system(wy, cy)
+        bx_ += 1e-6 * dcx; by_ += 1e-6 * dcy
+        return Lx_, bx_, Ly_, by_
+    if a.linear > 0:
+        for _ in range(3):
+            Lx, bxx, Ly, byy = relin()
+            xs, _ = spla.cg(Lx, bxx, x0=cx[mi], rtol=1e-6, maxiter=1000)
+            ys, _ = spla.cg(Ly, byy, x0=cy[mi], rtol=1e-6, maxiter=1000)
+            cx[mi], cy[mi] = xs, ys
+            print(f"  linearised solve: lower bound {hpwl(cx, cy, ea, eb):12.1f}")
     lb = hpwl(cx, cy, ea, eb)
     best = None
     iters = 0
@@ -274,12 +320,17 @@ def main():
         if best is None or ub < best[0]:
             best = (ub, sx.copy(), sy.copy())
         print(f"  iter {it:2d}: lower bound {lb:12.1f}  spread {ub:12.1f}  gap {100*(ub-lb)/max(ub,1e-9):5.1f}%")
-        if ub - lb < 0.05 * ub:
+        if ub - lb < a.stop_gap * ub:
             break
-        alpha = 0.01 * (1 + it) * (L.diagonal().mean())
-        A = (L + alpha * sp.identity(m)).tocsr()
-        xs, _ = spla.cg(A, bx + alpha * sx, x0=cx[mi], rtol=1e-6, maxiter=1000)
-        ys, _ = spla.cg(A, by + alpha * sy, x0=cy[mi], rtol=1e-6, maxiter=1000)
+        if a.linear > 0:
+            Lx, bxx, Ly, byy = relin()
+        #<!-- with --linear the solve and the spread meet within 5% after about four
+        #     rounds, and stopping there keeps the coarse spread.  A smaller pull
+        #     run every round lets the solve settle the cells into it: 12.0 -> 10.7
+        #     um a net on the 924k-cell module (--stop_gap 0 --alpha 0.003). -->
+        ax = a.alpha * (1 + it) * (Lx.diagonal().mean()); ay = a.alpha * (1 + it) * (Ly.diagonal().mean())
+        xs, _ = spla.cg((Lx + ax * sp.identity(m)).tocsr(), bxx + ax * sx, x0=cx[mi], rtol=1e-6, maxiter=1000)
+        ys, _ = spla.cg((Ly + ay * sp.identity(m)).tocsr(), byy + ay * sy, x0=cy[mi], rtol=1e-6, maxiter=1000)
         cx[mi], cy[mi] = xs, ys
         lb = hpwl(cx, cy, ea, eb)
     _, sx, sy = best
