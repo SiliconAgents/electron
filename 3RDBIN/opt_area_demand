@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""How much area an optimisation wants in each block of the plan.
+
+    opt_area_demand --def placed.def --plan plan.tsv --cells cell_table.tsv
+                    --resize <prefix>.resize.tsv --eco <prefix>.eco.tsv
+                    [--util 0.70] [-o demand.tsv]
+
+WHAT IT IS FOR
+
+Photon's place_opt with no room limit (SPARKSTA_ROOM=none) sizes every cell
+and puts every repeater where timing wants it, overlapping whatever is there.
+Its timing is the ceiling this placement can reach; the area it added, and
+where, says which blocks the plan has made too small for that timing.  A
+failing path in a block with room to spare is a logic or placement problem;
+one in a block that needs 30% more area than it has is the plan's.
+
+WHAT IT COUNTS
+
+Per block of the plan (bin/plan_blocks' output: every level, the die's frame),
+inclusive of everything below it:
+  - the standard cells it holds now (by instance name, the deepest block whose
+    path prefixes it), at the cell table's areas;
+  - what sizing added: area(to) - area(from) for each RESIZE / resize.tsv line;
+  - what the repeater trees added: each BUF at its place, in the deepest block
+    whose box holds it (a repeater belongs to where it sits, not to a module);
+and the utilisation of the block's box before and after, and how much area the
+box would need to stay at --util after.  Cells and buffers outside every block
+are the parent's own -- "(top)" for the die.
+"""
+import argparse
+import collections
+import gzip
+import re
+import sys
+
+
+def opener(p):
+    return gzip.open(p, 'rt') if p.endswith('.gz') else open(p)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--def', dest='deff', required=True)
+    ap.add_argument('--plan', required=True, help="bin/plan_blocks output")
+    ap.add_argument('--cells', required=True, help='Photon cell table (cell, vt, area, ...)')
+    ap.add_argument('--resize', help='<prefix>.resize.tsv (inst from to ...)')
+    ap.add_argument('--eco', help='<prefix>.eco.tsv: BUF lines')
+    ap.add_argument('--util', type=float, default=0.70, help='target utilisation for the area needed (0.70)')
+    ap.add_argument('-o', '--out', default='-')
+    a = ap.parse_args()
+
+    area = {}
+    for l in open(a.cells):
+        if l.startswith('#') or l.startswith('cell\t'):
+            continue
+        f = l.split('\t')
+        try:
+            area[f[0]] = float(f[2])
+        except (IndexError, ValueError):
+            pass
+
+    blocks = {}                      # path -> (x0, y0, x1, y1)
+    for l in open(a.plan):
+        f = l.rstrip('\n').split('\t')
+        if l.startswith('#') or len(f) < 11 or f[10] != 'block':
+            continue
+        path = ((f[1] + '/' if f[1] not in ('', '-', '.') else '') + f[2]).replace('\\', '')
+        x, y, w, h = map(float, f[4:8])
+        blocks[path] = (x, y, x + w, y + h)
+    if not blocks:
+        sys.exit("opt_area_demand: no block lines in %s" % a.plan)
+    by_depth = sorted(blocks, key=lambda p: -p.count('/'))
+
+    def owner_name(inst):
+        p = inst.replace('\\', '').split('/')
+        for k in range(len(p) - 1, 0, -1):
+            q = '/'.join(p[:k])
+            if q in blocks:
+                return q
+        return '(top)'
+
+    def owner_xy(x, y):
+        for p in by_depth:
+            b = blocks[p]
+            if b[0] <= x < b[2] and b[1] <= y < b[3]:
+                return p
+        return '(top)'
+
+    cells = collections.Counter()
+    n_cells = collections.Counter()
+    unknown = set()
+    dbu, sec = 1.0, None
+    ref_of = {}
+    for l in opener(a.deff):
+        if sec is None:
+            if l.startswith('UNITS DISTANCE MICRONS'):
+                dbu = float(l.split()[3])
+            elif l.startswith('COMPONENTS '):
+                sec = 'C'
+            continue
+        if l.startswith('END COMPONENTS'):
+            break
+        m = re.match(r'\s*- (\S+) (\S+)', l)
+        if not m:
+            continue
+        inst, ref = m.group(1).replace('\\', ''), m.group(2)
+        ref_of[inst] = ref
+        if ref not in area:
+            unknown.add(ref)
+            continue
+        o = owner_name(inst)
+        cells[o] += area[ref]
+        n_cells[o] += 1
+
+    sized = collections.Counter()
+    n_sized = 0
+    if a.resize:
+        for l in open(a.resize):
+            f = l.rstrip('\n').split('\t')
+            if l.startswith('inst\t') or len(f) < 3:
+                continue
+            fr, to = area.get(f[1]), area.get(f[2])
+            if fr is None or to is None:
+                continue
+            sized[owner_name(f[0])] += to - fr
+            n_sized += 1
+
+    bufs = collections.Counter()
+    n_bufs = collections.Counter()
+    if a.eco:
+        for l in open(a.eco):
+            f = l.rstrip('\n').split('\t')
+            if f[0] != 'BUF' or len(f) < 5:
+                continue
+            o = owner_xy(int(f[3]) / dbu, int(f[4]) / dbu)
+            bufs[o] += area.get(f[2], 0.0)
+            n_bufs[o] += 1
+
+    # inclusive: a block holds everything below it
+    paths = sorted(blocks) + ['(top)']
+
+    def incl(cnt, p):
+        if p == '(top)':
+            return sum(cnt.values())
+        return sum(v for k, v in cnt.items() if k == p or k.startswith(p + '/'))
+
+    out = sys.stdout if a.out == '-' else open(a.out, 'w')
+    out.write("block\tbox_um2\tcells\tcell_um2\tutil_now\tsizing_um2\tbuffers\tbuffer_um2\tutil_after\t"
+              "box_needed_um2\tgrow_pct\n")
+    rows = []
+    for p in paths:
+        if p == '(top)':
+            box = 0.0
+        else:
+            b = blocks[p]
+            box = (b[2] - b[0]) * (b[3] - b[1])
+        c, s, bu = incl(cells, p), incl(sized, p), incl(bufs, p)
+        nc, nb = incl(n_cells, p), incl(n_bufs, p)
+        after = c + s + bu
+        need = after / a.util
+        u0 = c / box if box else float('nan')
+        u1 = after / box if box else float('nan')
+        grow = 100.0 * (need - box) / box if box else float('nan')
+        rows.append((p, box, nc, c, u0, s, nb, bu, u1, need, grow))
+    for r in rows:
+        out.write("%s\t%.0f\t%d\t%.0f\t%.3f\t%.0f\t%d\t%.0f\t%.3f\t%.0f\t%.1f\n" % r)
+    if out is not sys.stdout:
+        out.close()
+    sys.stderr.write("opt_area_demand: %d block(s); %d resize(s), %d buffer(s); %d cell type(s) with no area "
+                     "(macros, physical cells) left out\n" % (len(blocks), n_sized, sum(n_bufs.values()), len(unknown)))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
