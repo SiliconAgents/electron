@@ -176,7 +176,10 @@ endef
 # buffer/inverter trees, glue outside the child it serves, spread
 # hierarchies, block pairs, and suggested moves scored on the paths.
 # Writes <prefix>.summary.txt and a .tsv per check; .moves.tsv is in
-# moveby's format.  Read-only: it changes nothing.
+# moveby's format.  SPARKSTA_AUDIT_ROUNDS=<n> puts the moves in and goes
+# again n-1 times (each round re-timed): .rounds.tsv, .moves_r<n>.tsv, and
+# .moves_by_hier.tsv -- where each hierarchy's critical cells want to go,
+# for the plan.  Read-only: it changes nothing.
 # $(call SPARKSTA_AUDIT,placed_sgraph,store,corner,period_ns,out_prefix)
 define SPARKSTA_AUDIT
 	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to audit $(1)"; exit 0; fi; \
@@ -186,7 +189,7 @@ define SPARKSTA_AUDIT
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5).summary.txt; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/placeaudit.sca > $(5).audit.sca; \
-	 echo 'placeAudit("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4)$(if $(SPARKSTA_PS_PER_UM),$(_sparksta_comma) psPerUm = $(SPARKSTA_PS_PER_UM))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).audit.sca; \
+	 echo 'placeAudit("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4)$(if $(SPARKSTA_PS_PER_UM),$(_sparksta_comma) psPerUm = $(SPARKSTA_PS_PER_UM))$(if $(SPARKSTA_AUDIT_ROUNDS),$(_sparksta_comma) rounds = $(SPARKSTA_AUDIT_ROUNDS))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).audit.sca; \
 	 echo 'System.exit(0)' >> $(5).audit.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
 	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
