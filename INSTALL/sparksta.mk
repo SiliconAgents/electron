@@ -167,6 +167,34 @@ define SPARKSTA_ADVISE
 	 test -s "$(5).summary.txt" || { echo "sparksta: no $(5).summary.txt, see $(5).advise.log"; exit 1; }; fi
 endef
 
+# Photon's placement audit (placeaudit.sca) on a PLACED sgraph, before
+# place_opt: every wire charged its length x SPARKSTA_PS_PER_UM (default
+# 0.44, fitted on one 2.4M-instance tile; placeaudit_fit.py refits it against a
+# design's place_opt STA) and nothing else, each endpoint's worst path, why
+# it fails (logic, far ends, too many stages, detour) and where the wire
+# goes: zigzag per cell, cells a placer cutting nets at 100 pins cannot see,
+# buffer/inverter trees, glue outside the child it serves, spread
+# hierarchies, block pairs, and suggested moves scored on the paths.
+# Writes <prefix>.summary.txt and a .tsv per check; .moves.tsv is in
+# moveby's format.  Read-only: it changes nothing.
+# $(call SPARKSTA_AUDIT,placed_sgraph,store,corner,period_ns,out_prefix)
+define SPARKSTA_AUDIT
+	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to audit $(1)"; exit 0; fi; \
+	 test -f "$(1)" || { echo "sparksta: $(1) does not exist -- run the placement first"; exit 1; }; \
+	 test -d "$(2)/arcs" || { echo "sparksta: no arc store at $(2)"; exit 1; }; \
+	 test -f "$(PYSPARK)/scala/placeaudit.sca" || { echo "sparksta: $(PYSPARK) has no placeaudit.sca -- this Photon is older than the audit"; exit 1; }; \
+	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
+	 mkdir -p $(dir $(5)); rm -f $(5).summary.txt; \
+	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/placeaudit.sca > $(5).audit.sca; \
+	 echo 'placeAudit("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4)$(if $(SPARKSTA_PS_PER_UM),$(_sparksta_comma) psPerUm = $(SPARKSTA_PS_PER_UM))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).audit.sca; \
+	 echo 'System.exit(0)' >> $(5).audit.sca
+	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
+	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
+	    --jars $(PYSPARK)/scala/build/photon.jar -i $(abspath $(5)).audit.sca < /dev/null" > $(5).audit.log 2>&1; \
+	 sed -n '/^placeAudit: \//,$$p' $(5).audit.log; grep -E 'rror|xception' $(5).audit.log | head -5; \
+	 test -s "$(5).summary.txt" || { echo "sparksta: no $(5).summary.txt, see $(5).audit.log"; exit 1; }; fi
+endef
+
 # Photon builds the repeater trees and places them in the whitespace
 # itself (repeat.sca), then times the result: <prefix>.eco.tsv for electron's
 # apply_eco, <prefix>.sgraph (the graph with the trees in), <prefix>.repeat.txt
