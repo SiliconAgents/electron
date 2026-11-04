@@ -26,7 +26,7 @@ DOCSWORK := .docswork
 INCONTAINER = apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd \
 	--bind /home/$$USER:/home/$$USER $(PPSIF) bash -c
 
-check: check-load check-syntax
+check: check-load check-syntax check-host
 
 # The check that matters.  perl -c does NOT execute a runtime require, so it
 # cannot tell you whether the fragments load -- a file missing its trailing "1;"
@@ -61,6 +61,20 @@ check-syntax: .frags.txt
 	  done < .frags.txt; \
 	  echo "  $$n fragment(s) checked, $$bad to look at (see the note above this target)"'
 	@rm -f .frags.txt
+
+# The one exception to "everything runs in the container": a script that
+# submits to LSF has to run on the host, where bsub is, and the host's python3
+# is whatever comes first on the user's PATH -- on RHEL8 /usr/bin/python3 is
+# 3.6.  So those scripts name /usr/bin/python3 and keep to 3.6: no
+# capture_output=, text= or add_subparsers(required=).  --help builds the
+# whole argument parser, which is where the last one fails.
+HOST_PY = 3RDBIN/plan_place
+check-host:
+	@echo "=== host scripts under /usr/bin/python3 ($$(/usr/bin/python3 -V 2>&1)) ==="
+	@bad=0; for f in $(HOST_PY); do \
+	  /usr/bin/python3 $$f --help >/dev/null 2>&1 || { echo "  FAIL $$f --help"; bad=1; }; \
+	  grep -nE "capture_output|text=True|add_subparsers\(.*required" $$f | sed "s|^|  3.7 only: $$f:|" | grep . && bad=1; \
+	done; [ $$bad = 0 ] && echo "  $(words $(HOST_PY)) script(s) OK" || exit 1
 
 # The require list, built on the host where the quoting is simple.  A .nopath
 # line reads  require "$$BEEHOME/DIR/file";  so strip up to the first slash.
@@ -101,4 +115,4 @@ slang-plugin:
 app:
 	apptainer shell --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$$USER:/home/$$USER $(PPSIF)
 
-.PHONY: check check-load check-syntax app docs slang-plugin
+.PHONY: check check-load check-syntax check-host app docs slang-plugin

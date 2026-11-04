@@ -91,6 +91,14 @@ if ! out="$(make check-load 2>&1)"; then
 fi
 echo "$out" | grep -E "loads|FAIL" | sed 's/^/  /' >&2
 
+# The scripts that run on the host (they submit to LSF) under the host's own
+# /usr/bin/python3, 3.6 on RHEL8 -- not the container's 3.10.
+say "host scripts under /usr/bin/python3"
+if ! out="$(make check-host 2>&1)"; then
+  echo "$out" | sed 's/^/  /' >&2
+  fail "a host script needs a newer python than /usr/bin/python3"
+fi
+
 # Advisory: reported, never blocking, because its six standing failures are
 # artefacts of checking a fragment outside the wrapper that imports its names.
 say "perl -c over every required fragment (advisory)"

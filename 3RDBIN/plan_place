@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 """plan_place: explore how a design should be placed, and write it down.
 
   plan_place start  <plan dir> --load <tcl> --netlist <v[.gz]> --top <module>
@@ -80,8 +80,11 @@ def tail(path, n=400000):
         return ""
 
 
+#<!-- runs on the host, where it submits to LSF, so under /usr/bin/python3
+#     (3.6 on RHEL8): none of the 3.7 subprocess keywords -->
 def sh(cmd, **kw):
-    return subprocess.run(cmd, shell=True, capture_output=True, text=True, **kw)
+    return subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True, **kw)
 
 
 # ------------------------------------------------------------ structure --
@@ -153,7 +156,7 @@ def job_alive(j):
 
 
 def pq(s, query, timeout=7200):
-    r = sh(f"python3 {s['pyspark']}/scala/pq.py {s['ep']} {shlex.quote(query)}", timeout=timeout)
+    r = sh(f"{sys.executable} {s['pyspark']}/scala/pq.py {s['ep']} {shlex.quote(query)}", timeout=timeout)
     return [l for l in r.stdout.splitlines() if not l.startswith(">>>") and "round trip" not in l]
 
 
@@ -531,7 +534,8 @@ def cmd_stop(a):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sp = ap.add_subparsers(dest="cmd", required=True)
+    sp = ap.add_subparsers(dest="cmd")
+    sp.required = True                   # the keyword is 3.7
     x = sp.add_parser("start"); x.add_argument("dir")
     x.add_argument("--load", required=True, help="tcl: read, elaborate, floorplan -- up to the placement")
     x.add_argument("--netlist", required=True); x.add_argument("--top", required=True)

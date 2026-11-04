@@ -31,9 +31,10 @@ and `synthesize` maps about 2% more cells. `yosys -V` inside the image says
 which one you have.
 
 ```
-make check              # both checks below, in the container
+make check              # the three checks below
 make check-load         # the one that matters: loads all three tools for real
 make check-syntax       # perl -c on all 323 required fragments
+make check-host         # host-run scripts under /usr/bin/python3 (3.6)
 make app                # interactive shell in that image
 ```
 
@@ -46,7 +47,7 @@ git config core.hooksPath INSTALL/hooks
 ```
 
 It builds, then runs `check-load`, and refuses the push if a tool fails to
-load — naming the file. About 15 seconds. `check-syntax` is advisory and never
+load — naming the file. It also refuses on `check-host`. About 15 seconds. `check-syntax` is advisory and never
 blocks, because its six standing failures are artefacts. `git push
 --no-verify` or `ELECTRON_SKIP_PREPUSH=1` skips it;
 `ELECTRON_PREPUSH_TESTS=1` adds `TESTS/nangate_all`. On a machine with no
@@ -59,6 +60,14 @@ apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$USER:/h
   INSTALL/podman/pysparkpp.sif \
   bash -c 'cd <workarea> && PATH=/usr/bin:$PATH <repo>/electron --nogui --cleanlog --nolog -f run.tcl'
 ```
+
+The one exception is a script that submits to LSF (`3RDBIN/plan_place`):
+`bsub` is on the host, not in the image, so it runs there under
+`/usr/bin/python3` — **3.6** on RHEL8, not the image's 3.10 and not whatever
+comes first on a user's PATH. Keep such scripts to the standard library and to
+3.6: no `capture_output=`, `text=` or `add_subparsers(required=)`. List a new
+one in the Makefile's `HOST_PY`; `make check-host` runs each one's `--help`
+under 3.6 and greps for those keywords.
 
 **`bash -c`, not `bash -lc`.** A login shell sources the host `~/.bashrc`
 through the bound home directory, which puts a miniconda ahead of `/usr/bin`;
