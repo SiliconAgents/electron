@@ -40,6 +40,20 @@ everything else is written back as it was read.
 
 An SDC that names a moved cell by its old path no longer matches it.
 
+--group: NEW BLOCKS FROM NAME PREFIXES
+
+Another tool's netlist often keeps a structure only in its cell names: the
+40 entries of a queue flattened into one module as `u_q/entry[0].*`,
+`u_q/entry[1].*`..., so a placer cannot hold an entry together or lay the
+entries out as the array they are.  `--group <file>` makes the blocks back:
+one a line, `block <TAB> prefix [<TAB> prefix ...]`, the block a new
+instance path (`u_a/stq_bank0`: instance stq_bank0 of a new module, inside
+u_a's module) and every instance of that module whose name starts with one
+of the prefixes (names relative to the module, without the escape) moved
+into it, by the same rules as --moves.  Cells and blocks both move.  The
+moves it made are written to <out>.group_moves.tsv, for --verify.  The
+parent module must have one instance.
+
 --verify
 
 Flattens both netlists and checks they are the same circuit: the same leaf
@@ -340,6 +354,51 @@ def emit(typ, name, conns):
     return '\n  %s %s ( %s )' % (typ, name, ' , '.join(parts))
 
 
+def read_groups(path):
+    """[(block path, [prefixes])] from `block<TAB>prefix[<TAB>prefix...]` lines"""
+    out = []
+    for line in open(path):
+        if not line.strip() or line.startswith('#'):
+            continue
+        f = [x for x in line.rstrip('\n').split('\t') if x]
+        if len(f) < 2:
+            raise NetlistError("--group: not `block<TAB>prefix...`: %s" % line.strip())
+        out.append((f[0], f[1:]))
+    return out
+
+
+def make_groups(mods, top, groups, dirs):
+    """an empty block per group, and the moves that fill it"""
+    r = Regrouper(mods, top, dirs)
+    moves = []
+    for block, prefixes in groups:
+        bs = segs(block)
+        par, name = bs[:-1], bs[-1]
+        if not re.fullmatch(r'[A-Za-z_][\w$]*', name):
+            raise NetlistError("--group: block name %s must be a plain identifier" % name)
+        P = r.module_at(par)
+        if r.uses.get(P.name, 0) > 1:
+            raise NetlistError("--group: %s has %d instances; a new block in it would appear in all" % (P.name, r.uses[P.name]))
+        if name in P.insts or name in P.names:
+            raise NetlistError("--group: %s already has a %s" % (P.name, name))
+        mname, n = '%s_%s' % (P.name, name), 1
+        while mname in mods:
+            mname, n = '%s_%s_%d' % (P.name, name, n), n + 1
+        M = Module(mname, 'module %s ( );' % esc(mname))
+        mods[mname] = M
+        P.stmts.append(['inst', '\n  %s %s (  )' % (esc(mname), name), mname, name])
+        P.insts.add(name)
+        hit = 0
+        for k, _, _, nm in P.stmts:
+            if k == 'inst' and nm != name and any(bare(nm).startswith(pf) for pf in prefixes):
+                moves.append(('/'.join(par + [nm]), block))
+                hit += 1
+        if not hit:
+            raise NetlistError("--group: no instance of %s starts with %s" % (P.name, ' or '.join(prefixes)))
+        sys.stderr.write("group %s: %d instance(s) into new module %s\n" % (block, hit, mname))
+    return moves
+
+
 def regroup(mods, top, moves, dirs):
     r = Regrouper(mods, top, dirs)
     # one hierarchy level at a time: (parent path, block, [cells]) for each step
@@ -394,8 +453,18 @@ def verify(a, b, top, moves_path):
     for cell, block in read_moves(moves_path):
         cs = segs(cell)
         mv['/'.join(cs)] = '/'.join(segs(block) + [cs[-1]])
-    ca = {mv.get(k, k): v for k, v in ca.items()}
-    pa = {(mv.get(i, i), p, k): n for (i, p, k), n in pa.items()}
+    # a moved block takes its leaf cells with it: rename by the longest moved
+    # path the leaf is at or under
+    def ren(k):
+        j = len(k)
+        while j > 0:
+            hit = mv.get(k[:j])
+            if hit is not None:
+                return hit + k[j:]
+            j = k.rfind('/', 0, j)
+        return k
+    ca = {ren(k): v for k, v in ca.items()}
+    pa = {(ren(i), p, k): n for (i, p, k), n in pa.items()}
     bad = 0
     if ca != cb:
         only_a, only_b = set(ca) - set(cb), set(cb) - set(ca)
@@ -436,19 +505,30 @@ def main():
     ap.add_argument('inp')
     ap.add_argument('out')
     ap.add_argument('--top', required=True)
-    ap.add_argument('--moves', required=True, help='cell<TAB>block lines, or Photon glue output')
+    ap.add_argument('--moves', help='cell<TAB>block lines, or Photon glue output')
+    ap.add_argument('--group', help='block<TAB>prefix... lines: new blocks from name prefixes')
     ap.add_argument('--stubs', help='cell stubs (pin directions); without them output pins go by name')
     ap.add_argument('--verify', action='store_true', help='check two netlists are the same circuit')
     a = ap.parse_args()
     sys.setrecursionlimit(100000)
     t0 = time.time()
     try:
+        if not a.moves and not a.group:
+            raise NetlistError("give --moves, --group or both")
         if a.verify:
+            if not a.moves:
+                raise NetlistError("--verify needs --moves (a --group run wrote <out>.group_moves.tsv)")
             return verify(a.inp, a.out, a.top, a.moves)
         mods = read_netlist(a.inp)
         if a.top not in mods:
             raise NetlistError("no module %s in %s" % (a.top, a.inp))
-        moves = read_moves(a.moves)
+        moves = read_moves(a.moves) if a.moves else []
+        if a.group:
+            gm = make_groups(mods, a.top, read_groups(a.group), Dirs(a.stubs))
+            with open(re.sub(r'(\.v)?(\.gz)?$', '', a.out) + '.group_moves.tsv', 'w') as f:
+                for c, b in gm:
+                    f.write('%s\t%s\n' % (c, b))
+            moves += gm
         r = regroup(mods, a.top, moves, Dirs(a.stubs))
         write(mods, a.top, a.out)
     except NetlistError as e:
