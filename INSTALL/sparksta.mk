@@ -234,6 +234,20 @@ endef
 # carries the whole net, and the wire-only rule left a size-1 gate driving 721
 # um of address net because its 151 ps of wire beat 188 ps repeated.  Only for
 # a gain over SPARKSTA_REPEAT_DRIVER_MIN_PS (default 5).
+# SPARKSTA_DETOUR=<um> first moves every cell placed that far or more from
+# its best spot there -- the median of its nets' other-pin boxes, every other
+# cell held -- inside its block (+2 um), before the trees are planned: cells
+# whose nets the cell pass dropped (100 pins and up) float to a block edge,
+# and the trees and sizing then work from where they should be.  Cells on a
+# clock net or a net over 2000 pins stay.  The moves open the ECO as MOVE
+# lines and legalize_flat --incremental settles them; the log lists the
+# blocks whose cells want out, a sign the block is misplaced.  On a 2.4M-cell
+# tile, 20: 25.5k cells, 2,341 -> 256 mm of their extra wire, a median 0.13
+# um from target after legalizing, seconds of compute.
+# SPARKSTA_DETOUR_SWEEPS (default 4) rounds of it: a chain of detoured cells
+# (a tree driving a tree) settles over several, and it stops early when a
+# round moves nothing.  SPARKSTA_DETOUR_MARGIN (default 2) um is how far
+# past its block's box a cell may go.
 # SPARKSTA_ROOM=none is the ceiling: no room limit for sizing (with
 # SPARKSTA_TALL_PS, one-row cells may become taller ones too) and every tree
 # buffer at its target point -- what timing the placement could reach, and,
@@ -248,7 +262,7 @@ define SPARKSTA_REPEAT
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
 	 mkdir -p $(dir $(5)); rm -f $(5).eco.tsv; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca $(PYSPARK)/scala/repeat.sca > $(5).repeat.sca; \
-	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_REFUSALS),$(_sparksta_comma) refusals = true)$(if $(filter 1,$(SPARKSTA_REPEAT_DRIVER)),$(_sparksta_comma) driverAware = true$(if $(SPARKSTA_REPEAT_DRIVER_MIN_PS),$(_sparksta_comma) driverMinPs = $(SPARKSTA_REPEAT_DRIVER_MIN_PS)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).repeat.sca; \
+	 echo 'repeatPlace("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", maxFanout = $(or $(SPARKSTA_MAX_FANOUT),16), sizeRounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_ROOM),$(_sparksta_comma) room = "$(SPARKSTA_ROOM)")$(if $(SPARKSTA_TALL_PS),$(_sparksta_comma) tallNs = $(SPARKSTA_TALL_PS) / 1000.0)$(if $(SPARKSTA_FANOUT),$(_sparksta_comma) fanoutAbove = $(SPARKSTA_FANOUT))$(if $(SPARKSTA_REPEAT_SHIFT),$(_sparksta_comma) shift = true)$(if $(SPARKSTA_REFUSALS),$(_sparksta_comma) refusals = true)$(if $(SPARKSTA_DETOUR),$(_sparksta_comma) detourUm = $(SPARKSTA_DETOUR)$(if $(SPARKSTA_DETOUR_SWEEPS),$(_sparksta_comma) detourSweeps = $(SPARKSTA_DETOUR_SWEEPS))$(if $(SPARKSTA_DETOUR_MARGIN),$(_sparksta_comma) detourMargin = $(SPARKSTA_DETOUR_MARGIN)))$(if $(filter 1,$(SPARKSTA_REPEAT_DRIVER)),$(_sparksta_comma) driverAware = true$(if $(SPARKSTA_REPEAT_DRIVER_MIN_PS),$(_sparksta_comma) driverMinPs = $(SPARKSTA_REPEAT_DRIVER_MIN_PS)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel = "$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm = $(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm = $(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).repeat.sca; \
 	 echo 'System.exit(0)' >> $(5).repeat.sca
 	@if [ -n "$(PYSPARK)" ]; then $(SPARKSTA_EXEC) \
 	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
