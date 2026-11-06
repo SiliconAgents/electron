@@ -337,6 +337,30 @@ if ( @bad ) {
         "@bad[0 .. ( $#bad < 4 ? $#bad : 4 )]\n";
   return;
 }
+#<!-- What the script before this held FIXED at the top -- the floorplan's
+#     macros and ports, from read_pseudo_nodefile -- is put back after the
+#     reload below.  The committed floorplan keeps where they are but not that
+#     they are fixed, so without this the block legalizer saw no macro fields
+#     (51k um2 of obstacles where there are 287k), solved the budget at 47.5%
+#     instead of 55.5% and grew a re-placed block 17%.  Their places come from
+#     the script too, so a state from a tile with other macro places takes
+#     this one's. -->
+my (%fixInst, %fixPin) = ();
+if ( exists $PSEUDO_VINST_ALREADY{$top} ) {
+  foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$top}} ) {
+    next if ( $inst eq "PIN" );
+    my $V = $PSEUDO_VINST_ALREADY{$top}{$inst};
+    my $st = $V->dbPimDBGetInstStatus;
+    next unless ( defined $st && $st eq "FIXED" );
+    $fixInst{$inst} = [ [ $V->dbPimDBGetInstRelBbox ], $V->dbPimDBGetInstOrient ];
+  }
+}
+if ( exists $PSEUDO_MODULE_ALREADY{$top} ) {
+  foreach my $pin ( $PSEUDO_MODULE_ALREADY{$top}->dbaTstgenGetPins ) {
+    next unless ( $PSEUDO_MODULE_ALREADY{$top}->dbaTstgenGetPinStatus($pin) == 3 );
+    $fixPin{$pin} = [ $PSEUDO_MODULE_ALREADY{$top}->dbaTstgenGetPinRect($pin) ];
+  }
+}
 my %newId = ();
 foreach my $old ( sort { $a <=> $b } keys %{$s->{fp}} ) {
   my $id = $GLOBAL->dbfGlobalGetNextFlplanID;
@@ -361,6 +385,25 @@ $FLOORPLAN_LOOKUP{$_} = $newId{ $s->{lk}{$_} } foreach ( keys %{$s->{lk}} );
 %HIER_OWN_REGION = %{ $s->{own} || {} };
 printf("INFO-RD_HR_ST : 006 : %d module floorplan(s) of %s read from %s\n", scalar(keys %{$s->{fpid}}), $top, $in);
 &editModule("-module", $top);
+my ($nI, $nP) = (0, 0);
+foreach my $inst ( keys %fixInst ) {
+  next unless ( exists $PSEUDO_VINST_ALREADY{$top}{$inst} );
+  my $V = $PSEUDO_VINST_ALREADY{$top}{$inst};
+  $V->dbPimDBSetInstRelBbox(@{$fixInst{$inst}[0]}) if ( @{$fixInst{$inst}[0]} );
+  $V->dbPimDBSetInstOrient($fixInst{$inst}[1]) if ( defined $fixInst{$inst}[1] );
+  $V->dbPimDBSetInstStatus("FIXED");
+  $nI++;
+}
+foreach my $pin ( keys %fixPin ) {
+  next unless ( $PSEUDO_MODULE_ALREADY{$top}->dbaTstgenHasPin($pin) );
+  if ( @{$fixPin{$pin}} ) {
+    $PSEUDO_MODULE_ALREADY{$top}->dbaTstgenWipePinRect($pin);
+    $PSEUDO_MODULE_ALREADY{$top}->dbaTstgenAddPinRect($pin, $_) foreach ( @{$fixPin{$pin}} );
+  }
+  $PSEUDO_MODULE_ALREADY{$top}->dbaTstgenSetPinStatus($pin, "FIXED");
+  $nP++;
+}
+print "INFO-RD_HR_ST : 007 : $nI instance(s) and $nP port(s) of $top held FIXED again, as the script before this placed them\n" if ( $nI || $nP );
 &hier2flat("--physical");
 my $t1 = new Benchmark;
 print "Command read_hier_state took:", timestr(timediff($t1, $t0)), "\n";
