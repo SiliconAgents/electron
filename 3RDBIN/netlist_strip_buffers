@@ -481,9 +481,9 @@ def main():
     ap.add_argument('--top', required=True)
     ap.add_argument('--function_map', required=True,
                     help="the config's cell-func-map: pattern, function, family per line")
-    ap.add_argument('--base_regex', default=r'(.*?)D\d+BWP',
-                    help='the base name a map pattern is matched against (default: the name '
-                         'up to the drive strength)')
+    ap.add_argument('--base_regex', required=True,
+                    help="the library's cell naming: group 1 is the base name a map pattern is "
+                         "matched against, the name up to the drive strength (e.g. '(.*?)_D\\d+_')")
     ap.add_argument('--stubs', help='cell stubs (Verilog) for pin directions; else Z/ZN/Y/X/O/Q are outputs')
     ap.add_argument('--keep', help='leave instances whose name matches this regex')
     ap.add_argument('--keep_sdc', help='leave every instance this SDC names')

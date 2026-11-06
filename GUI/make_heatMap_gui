@@ -3,7 +3,6 @@
 ##################################################################################################
 #sub plot_heat_map {
 #  #%PIN2ACTIVITY = ();
-#  #&read_tcf("-tcf", "/projects3/falcon/work/dcermak/falcon_revB2_sprint_28_81a/digital/tb/mcu_top/.gatesim_dsp/validation/power/coremark_cache_directmap/xmsim.tcf");
 #  &create_heat_map_gcells;
 #
 #  my @heat_map_colors = ("#000000", "#303030", "#302E9B", "#000082", "#0001FC", "#2B67FD", "#99CDFC", "#2DD1CA", "#008001", "#9AD000", "#FED000", "#756264", "#9B5B59", "#FE6700", "#FD0002", "#DAB711", "#E3E103");

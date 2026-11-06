@@ -973,7 +973,7 @@ open(WRITE_LIB,">$cellName.genlib");
 
                      #--------------- Writing testbench for dfall & slewf --------------------------#
                      open(WRITE,">$file-dfall-$rel_pin-$input_slew_value-$op_cap-$p_join-$type");
-                     print WRITE ".title Fanout Versus Delay (TSMC)\n";
+                     print WRITE ".title Fanout Versus Delay\n";
                      print WRITE "\n";
                      print WRITE ".param vdd=$vdd_pri_val\n";
                      if($vdd_sec_val eq ""){
@@ -1062,7 +1062,7 @@ open(WRITE_LIB,">$cellName.genlib");
 
                      #--------------- Writing testbench for drise & slewr --------------------------#
                      open(WRITE,">$file-drise-$rel_pin-$input_slew_value-$op_cap-$p_join-$type");
-                     print WRITE ".title Fanout Versus Delay (TSMC)\n";
+                     print WRITE ".title Fanout Versus Delay\n";
                      print WRITE "\n";
                      print WRITE ".param vdd=$vdd_pri_val\n";
                      if($vdd_sec_val eq ""){
@@ -3486,7 +3486,7 @@ foreach my $port (@cell_data){
       my $op_cap_val_1_with_unit = $opcap[0].""."e-12";
       if($clkval == 1 && $rsnval == 1){
         open(WRITE,">$file-dfall-$clk-$clkval-$port_reset-$rsnval");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n"; 
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -3617,7 +3617,7 @@ foreach my $port (@cell_data){
       }elsif($clkval == 1 && $rsnval == 0){
          #---------------------------------------check value of clock-1/rsn-0-------------------------------------------------#
          open(WRITE,">$file-dfall-$clk-$clkval-$port_reset-$rsnval");
-         print WRITE ".title Fanout Versus Delay (TSMC)\n";
+         print WRITE ".title Fanout Versus Delay\n";
          print WRITE "\n"; 
          print WRITE ".param vdd=$vdd_pri_val\n";
          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -3748,7 +3748,7 @@ foreach my $port (@cell_data){
        }elsif($clkval == 0 && $rsnval == 1){
          #---------------------------------------check value of clock-0/rsn-1--------------------------------------------------#
          open(WRITE,">$file-dfall-$clk-$clkval-$port_reset-$rsnval");
-         print WRITE ".title Fanout Versus Delay (TSMC)\n";
+         print WRITE ".title Fanout Versus Delay\n";
          print WRITE "\n"; 
          print WRITE ".param vdd=$vdd_pri_val\n";
          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -3879,7 +3879,7 @@ foreach my $port (@cell_data){
        }elsif($clkval == 0 && $rsnval == 0){
           #---------------------------------------check value of clock-0/rsn-0-------------------------------------------#
           open(WRITE,">$file-dfall-$clk-$clkval-$port_reset-$rsnval");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n"; 
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -4057,7 +4057,7 @@ foreach my $port (@cell_data){
         if($get_n2_val == 0){
         #-------------------------------writing test bench for dclkfall------------------------------------------------#
           open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -4180,7 +4180,7 @@ foreach my $port (@cell_data){
           close(WRITE);
           #-------------------------------writing test bench for dclkrise----------------------------------------#
           open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -4330,7 +4330,7 @@ foreach my $port (@cell_data){
         }elsif($get_n2_val == 1){
         #------------------------------writing test bench for dclkfall (if clk == 1)-----------------------------------# 
           open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap");
-          print WRITE".title Fanout Versus Delay (TSMC)\n";
+          print WRITE".title Fanout Versus Delay\n";
           print WRITE"\n";
           print WRITE".param vdd=$vdd_pri_val\n";
           print WRITE".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -4454,7 +4454,7 @@ foreach my $port (@cell_data){
           close(WRITE);
           #-----------------------------writing test bench for dclkrise------------------------------------------------#
           open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -4840,7 +4840,7 @@ foreach my $port (@cell_data){
 }#foreach port 
 ####################################write test bench for flop (low to high)######################################
 open(WRITE,">$file-low_to_high"); 
-  print WRITE ".title Fanout Versus Delay (TSMC)\n";
+  print WRITE ".title Fanout Versus Delay\n";
   print WRITE "\n";
   print WRITE ".param vdd=$vdd_pri_val\n";
   print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -4942,7 +4942,7 @@ chomp();
 close(READ_LOG);
 #---------------------------write test bench for flop (high to low)--------------------------------------# 
 open(WRITE,">$file-high_to_low"); 
-  print WRITE ".title Fanout Versus Delay (TSMC)\n";
+  print WRITE ".title Fanout Versus Delay\n";
   print WRITE "\n";
   print WRITE ".param vdd=$vdd_pri_val\n";
   print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -5089,7 +5089,7 @@ open(WRITE_GENLIB,">$cellName.genlib");
       #--------------------------------------write test bench for dclkfall---------------------------#
       if($low_to_high == 1){
         open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap-low_to_high"); 
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -5181,7 +5181,7 @@ open(WRITE_GENLIB,">$cellName.genlib");
         close(WRITE);
         #------------------------------------------------------write test bench for dclkrise-----------------------------------------------#
         open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap-low_to_high"); 
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -5305,7 +5305,7 @@ open(WRITE_GENLIB,">$cellName.genlib");
       #--------------------------------------------write test bench for high to low-------------------------------------#
       if($high_to_low == 1){
         open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap-high_to_low"); 
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -5397,7 +5397,7 @@ open(WRITE_GENLIB,">$cellName.genlib");
         close(WRITE);
         #-----------------------------------write test bench for dclkrise-----------------------------------------------#
         open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap-high_to_low"); 
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -5761,7 +5761,7 @@ if ($reset_exists == 1){
         my $n1_vl = $n1_value[$n1val];
         if($ck_value == 0 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vdd"){
         open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -5869,7 +5869,7 @@ if ($reset_exists == 1){
         #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vdd"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq ""); 
@@ -5977,7 +5977,7 @@ if ($reset_exists == 1){
           #-----------------------------------------------------------------------------------------------------------------------------------#
         }elsif ($ck_value == 0 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vdd"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -6085,7 +6085,7 @@ if ($reset_exists == 1){
           #------------------------------------------------------------------------------------------------------------------------------------#
         }elsif ($ck_value == 1 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vdd"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -6193,7 +6193,7 @@ if ($reset_exists == 1){
           #---------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 0 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -6301,7 +6301,7 @@ if ($reset_exists == 1){
           #--------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -6409,7 +6409,7 @@ if ($reset_exists == 1){
           #-----------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 0 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -6517,7 +6517,7 @@ if ($reset_exists == 1){
           #-----------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 1 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -6625,7 +6625,7 @@ if ($reset_exists == 1){
           #-------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 0 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vdd"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -6733,7 +6733,7 @@ if ($reset_exists == 1){
           #-----------------------------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vdd"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -6841,7 +6841,7 @@ if ($reset_exists == 1){
           #-------------------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 0 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vdd"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -6949,7 +6949,7 @@ if ($reset_exists == 1){
           #---------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 1 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vdd"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -7057,7 +7057,7 @@ if ($reset_exists == 1){
           #---------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 0 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -7165,7 +7165,7 @@ if ($reset_exists == 1){
           #----------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -7273,7 +7273,7 @@ if ($reset_exists == 1){
           #---------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 0 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -7381,7 +7381,7 @@ if ($reset_exists == 1){
           #-------------------------------------------------------------------------------------------------------------------------------------#
         }elsif($ck_value == 1 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vss"){
           open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -7505,7 +7505,7 @@ if ($reset_exists == 1){
         my $n1_val = $n1_value[$n];
         if($clkval == 0 && $n1_val == 0 && $n3_val eq "vdd"){
           open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -7610,7 +7610,7 @@ if ($reset_exists == 1){
           #---------------------------------------------------------------------------------------#
         }elsif($clkval == 1 && $n1_val == 0 && $n3_val eq "vdd"){
           open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val"); 
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -7715,7 +7715,7 @@ if ($reset_exists == 1){
           #------------------------------------------------------------------------------------------#      
         }elsif($clkval == 0 && $n1_val == 0 && $n3_val eq "vss"){
           open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -7820,7 +7820,7 @@ if ($reset_exists == 1){
           #--------------------------------------------------------------------------------------------# 
         }elsif($clkval == 1 && $n1_val == 0 && $n3_val eq "vss"){
           open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -7925,7 +7925,7 @@ if ($reset_exists == 1){
           #---------------------------check the value of clock ---------------------------------------------#
         }elsif($clkval == 0 && $n1_val == 1 && $n3_val eq "vdd"){
           open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -8028,7 +8028,7 @@ if ($reset_exists == 1){
          #---------------------------------------------------------------------------------------------#
         }elsif($clkval == 1 && $n1_val == 1 && $n3_val eq "vdd"){
          open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val");
-         print WRITE ".title Fanout Versus Delay (TSMC)\n";
+         print WRITE ".title Fanout Versus Delay\n";
          print WRITE "\n";
          print WRITE ".param vdd=$vdd_pri_val\n";
          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -8131,7 +8131,7 @@ if ($reset_exists == 1){
         #-------------------------------------------------------------------------------------------------#      
         }elsif($clkval == 0 && $n1_val == 1 && $n3_val eq "vss"){
           open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -8234,7 +8234,7 @@ if ($reset_exists == 1){
           #-------------------------------------------------------------------------------------------------------# 
         }elsif($clkval == 1 && $n1_val == 1 && $n3_val eq "vss"){
           open(WRITE,">$file-$clk-$clkval-n1_$n1_val-n3_$n3_val");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -8362,7 +8362,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
     my $set_up_time_for_rise_nanosecond = "";
     my $set_up_time_for_fall_nanosecond = "";
     open(WRITE,">$file-setup_for_rise-n1_n2_delay_0-$input_slew_data-$input_slew_clk");
-    print WRITE ".title Fanout Versus Delay (TSMC)\n";
+    print WRITE ".title Fanout Versus Delay\n";
     print WRITE "\n";
     print WRITE ".param vdd=$vdd_pri_val\n";
     print WRITE ".param vddsec=$vdd_pri_val\n"if($vdd_sec_val eq "");
@@ -8472,7 +8472,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
       while ($n3_transistion_found == 0){
         my $n3_firstrise = "";
         open(WRITE,">$file-setup_for_rise-$input_slew_data-$input_slew_clk-$power_param");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -8589,7 +8589,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
         while($n3_transistion_found_for_rise == 1){
         my $n3_first_rise = "";
         open(WRITE,">$file-setup_for_rise-$input_slew_data-$input_slew_clk-$power_param");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -8705,7 +8705,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
     }#else
     #-------------------------------------------------test bench for setup time for n3_first_fall------------------------------# 
     open(WRITE,">$file-setup_for_fall-n1_n2_delay_0-$input_slew_data-$input_slew_clk");
-    print WRITE ".title Fanout Versus Delay (TSMC)\n";
+    print WRITE ".title Fanout Versus Delay\n";
     print WRITE "\n";
     print WRITE ".param vdd=$vdd_pri_val\n";
     print WRITE ".param vddsec=$vdd_pri_val\n"if($vdd_sec_val eq "");
@@ -8814,7 +8814,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
       while ($n3_transistion_found == 0){
         my $n3_firstfall = "";
         open(WRITE,">$file-setup_for_fall-$input_slew_data-$input_slew_clk-$power_param");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -8931,7 +8931,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
        while($n3_transistion_found == 1){
        my $n3_firstfall = "";
        open(WRITE,">$file-setup_for_fall-$input_slew_data-$input_slew_clk-$power_param");
-       print WRITE ".title Fanout Versus Delay (TSMC)\n";
+       print WRITE ".title Fanout Versus Delay\n";
        print WRITE "\n";
        print WRITE ".param vdd=$vdd_pri_val\n";
        print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9049,7 +9049,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
       my $n3firstrise = "";
       my $set_up_time_for_rise_second = $set_up_time_for_rise_nanosecond.""."e-9"; 
       open(WRITE,">$file-hold_for_rise-n1_n1_delay_0-$input_slew_data-$input_slew_clk");
-      print WRITE ".title Fanout Versus Delay (TSMC)\n";
+      print WRITE ".title Fanout Versus Delay\n";
       print WRITE "\n";
       print WRITE ".param vdd=$vdd_pri_val\n";
       print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9163,7 +9163,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
          while ($n3_transistion_found_for_hold == 1){
          my $n3_first_rise = "";
          open(WRITE,">$file-hold_for_rise-$input_slew_data-$input_slew_clk-$power_param_for_hold");
-         print WRITE ".title Fanout Versus Delay (TSMC)\n";
+         print WRITE ".title Fanout Versus Delay\n";
          print WRITE "\n";
          print WRITE ".param vdd=$vdd_pri_val\n";
          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9287,7 +9287,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
        my $n3firstrise = "";
        my $set_up_time_for_rise_second = $set_up_time_for_rise_nanosecond.""."e-9"; 
        open(WRITE,">$file-hold_for_rise-n1_n1_delay_0-$input_slew_data-$input_slew_clk");
-       print WRITE ".title Fanout Versus Delay (TSMC)\n";
+       print WRITE ".title Fanout Versus Delay\n";
        print WRITE "\n";
        print WRITE ".param vdd=$vdd_pri_val\n";
        print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9402,7 +9402,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
          while ($n3_transistion_found_for_hold == 1){
            my $n3_first_rise = "";
          open(WRITE,">$file-hold_for_rise-$input_slew_data-$input_slew_clk-$power_param_for_hold");
-         print WRITE ".title Fanout Versus Delay (TSMC)\n";
+         print WRITE ".title Fanout Versus Delay\n";
          print WRITE "\n";
          print WRITE ".param vdd=$vdd_pri_val\n";
          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9528,7 +9528,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
       my $n3firstfall = "";
       my $set_up_time_for_fall_second = $set_up_time_for_fall_nanosecond.""."e-9"; 
       open(WRITE,">$file-hold_for_fall-n1_n1_delay_0-$input_slew_data-$input_slew_clk");
-      print WRITE ".title Fanout Versus Delay (TSMC)\n";
+      print WRITE ".title Fanout Versus Delay\n";
       print WRITE "\n";
       print WRITE ".param vdd=$vdd_pri_val\n";
       print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9642,7 +9642,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
         while ($n3_transistion_found_for_hold == 1){
           my $n3_first_fall = "";
           open(WRITE,">$file-hold_for_fall-$input_slew_data-$input_slew_clk-$power_param_for_hold");
-          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+          print WRITE ".title Fanout Versus Delay\n";
           print WRITE "\n";
           print WRITE ".param vdd=$vdd_pri_val\n";
           print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9766,7 +9766,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
        my $n3firstfall = "";
        my $set_up_time_for_fall_second = $set_up_time_for_fall_nanosecond.""."e-9";
        open(WRITE,">$file-hold_for_fall-n1_n1_delay_0-$input_slew_data-$input_slew_clk");
-       print WRITE ".title Fanout Versus Delay (TSMC)\n";
+       print WRITE ".title Fanout Versus Delay\n";
        print WRITE "\n";
        print WRITE ".param vdd=$vdd_pri_val\n";
        print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -9881,7 +9881,7 @@ for(my $in_slew_clk=0;$in_slew_clk<=$#input_slew_clock;$in_slew_clk++){
          while ($n3_transistion_found_for_hold == 1){
            my $n3_first_fall = "";
            open(WRITE,">$file-hold_for_fall-$input_slew_data-$input_slew_clk-$power_param_for_hold");
-           print WRITE ".title Fanout Versus Delay (TSMC)\n";
+           print WRITE ".title Fanout Versus Delay\n";
            print WRITE "\n";
            print WRITE ".param vdd=$vdd_pri_val\n";
            print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10052,7 +10052,7 @@ my @dclkfall_list = ();
       if($get_clk_val == 0 && $get_n1_val == 0 && $get_n3_val eq "vdd"){
       #--------------------------------------write test bench for dclkfall---------------------------#
         open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10144,7 +10144,7 @@ my @dclkfall_list = ();
         close (WRITE);
         #-----------------------------------------------write test bench for dlclkrise----------------------------------------------------------------------------------------------------------------------------------#
         open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10266,7 +10266,7 @@ my @dclkfall_list = ();
       #-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
       }elsif($get_clk_val == 1 && $get_n1_val == 0 && $get_n3_val eq "vdd"){
         open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10358,7 +10358,7 @@ my @dclkfall_list = ();
         close(WRITE);
   #------------------------------------------------------------write test bench for dclkrise-----------------------------------------------------#
         open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10480,7 +10480,7 @@ my @dclkfall_list = ();
       }elsif($get_clk_val == 0 && $get_n1_val == 0 && $get_n3_val eq "vss"){
         #----------------------------------------write test bench for dclkfall-----------------------------------------------#
          open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-         print WRITE ".title Fanout Versus Delay (TSMC)\n";
+         print WRITE ".title Fanout Versus Delay\n";
          print WRITE "\n";
          print WRITE ".param vdd=$vdd_pri_val\n";
          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10572,7 +10572,7 @@ my @dclkfall_list = ();
          close(WRITE);
   #----------------------------------------------------write test bench for dclkrise------------------------------------------------#
          open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-         print WRITE ".title Fanout Versus Delay (TSMC)\n";
+         print WRITE ".title Fanout Versus Delay\n";
          print WRITE "\n";
          print WRITE ".param vdd=$vdd_pri_val\n";
          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10694,7 +10694,7 @@ my @dclkfall_list = ();
       }elsif($get_clk_val == 1 && $get_n1_val == 0 && $get_n3_val eq "vss"){
   #----------------------------------------write test bench for dclkfall----------------------------------------------------#
         open(WRITE,">$file-dclkfall-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=$vdd_pri_val\n";
         print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -10786,7 +10786,7 @@ my @dclkfall_list = ();
         close (WRITE);
    #------------------------------------------write test bench for dclkrise-----------------------------------------------#
         open(WRITE,">$file-dclkrise-$input_slew_value-$op_cap-clk_$get_clk_val-n1_$get_n1_val-n3_$get_n3_val");
-        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+        print WRITE ".title Fanout Versus Delay\n";
         print WRITE "\n";
         print WRITE ".param vdd=5\n";
         print WRITE ".param vddsec=5\n";
@@ -11145,7 +11145,7 @@ close (WRITE_GENLIB);
 #        my $n1_vl = $n1_value[$n1val];
 #        if($ck_value == 0 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -11258,7 +11258,7 @@ close (WRITE_GENLIB);
 #          #-------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -11371,7 +11371,7 @@ close (WRITE_GENLIB);
 #          #-------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 0 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -11485,7 +11485,7 @@ close (WRITE_GENLIB);
 #          #------------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -11599,7 +11599,7 @@ close (WRITE_GENLIB);
 #          #---------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 0 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -11713,7 +11713,7 @@ close (WRITE_GENLIB);
 #          #--------------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 0 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl"); 
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -11827,7 +11827,7 @@ close (WRITE_GENLIB);
 #          #-----------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 0 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl"); 
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -11941,7 +11941,7 @@ close (WRITE_GENLIB);
 #          #-----------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 1 && $n1_vl == 0 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -12055,7 +12055,7 @@ close (WRITE_GENLIB);
 #          #-------------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 0 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -12167,7 +12167,7 @@ close (WRITE_GENLIB);
 #          #-----------------------------------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -12279,7 +12279,7 @@ close (WRITE_GENLIB);
 #          #-------------------------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 0 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl"); 
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -12391,7 +12391,7 @@ close (WRITE_GENLIB);
 #          #---------------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vdd"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -12503,7 +12503,7 @@ close (WRITE_GENLIB);
 #          #---------------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 0 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -12615,7 +12615,7 @@ close (WRITE_GENLIB);
 #          #----------------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 0 && $n1_vl == 1 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -12727,7 +12727,7 @@ close (WRITE_GENLIB);
 #          #--------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 0 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl"); 
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -12839,7 +12839,7 @@ close (WRITE_GENLIB);
 #          #---------------------------------------------------------------------------------------------------------------------------#
 #        }elsif($ck_value == 1 && $reset_val == 1 && $n1_vl == 1 && $n3_vl eq "vss"){
 #          open(WRITE,">$file-$clk-$ck_value-$reset_port-$reset_val-n1_$n1_vl-n3_$n3_vl");
-#          print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#          print WRITE ".title Fanout Versus Delay\n";
 #          print WRITE "\n";
 #          print WRITE ".param vdd=$vdd_pri_val\n";
 #          print WRITE ".param vddsec=$vdd_pri_val\n" if ($vdd_sec_val eq "");
@@ -12972,7 +12972,7 @@ close (WRITE_GENLIB);
 #    my $set_up_time_for_rise_nanosecond = "";
 #    my $set_up_time_for_fall_nanosecond = "";
 #    open(WRITE,">$file-setup_for_rise-n1_n2_delay_0-$input_slew_data-$input_slew_clk");
-#    print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#    print WRITE ".title Fanout Versus Delay\n";
 #    print WRITE "\n";
 #    print WRITE ".param vdd=$vdd_pri_val\n";
 #    print WRITE ".param vddsec=$vdd_pri_val\n"if($vdd_sec_val eq "");
@@ -13088,7 +13088,7 @@ close (WRITE_GENLIB);
 #      while ($n3_transistion_found == 0){
 #        my $n3_firstrise = "";
 #        open(WRITE,">$file-setup_for_rise-$input_slew_data-$input_slew_clk-$power_param");
-#        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#        print WRITE ".title Fanout Versus Delay\n";
 #        print WRITE "\n";
 #        print WRITE ".param vdd=$vdd_pri_val\n";
 #        print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -13214,7 +13214,7 @@ close (WRITE_GENLIB);
 #        while($n3_transistion_found_for_rise == 1){
 #        my $n3_first_rise = "";
 #        open(WRITE,">$file-setup_for_rise-$input_slew_data-$input_slew_clk-$power_param");
-#        print WRITE ".title Fanout Versus Delay (TSMC)\n";
+#        print WRITE ".title Fanout Versus Delay\n";
 #        print WRITE "\n";
 #        print WRITE ".param vdd=$vdd_pri_val\n";
 #        print WRITE ".param vddsec=$vdd_pri_val\n" if($vdd_sec_val eq "");
@@ -13989,7 +13989,7 @@ while (1){
   my $n1_n2_delay = 20/(2**$power_param);
   $n1_n2_delay = $n1_n2_delay*1e-09;
   open(WRITE,">$file-$active_input_trans-$output_transition-$n1_n2_delay-$input_slew_data-$input_slew_clk-$opcap_val-$active_clk_state-$cell_trigger-$timing_type");
-  print WRITE ".title Fanout Versus Delay (TSMC)\n";
+  print WRITE ".title Fanout Versus Delay\n";
   print WRITE "\n";
   print WRITE ".options method=gear\n";
   print WRITE "\n";

@@ -1272,7 +1272,7 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                 few percent get the pull\n";
   print "                           -net_prefix <inst path>\n";
   print "                                 what to strip from a flat net name to get this\n";
-  print "                                 module's own (e.g. mc_fp); hier_place_all sets it\n";
+  print "                                 module's own (e.g. blk); hier_place_all sets it\n";
   print "                                 for every instance path it reached the module by\n";
   return;
 }

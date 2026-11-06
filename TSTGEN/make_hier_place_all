@@ -2076,9 +2076,9 @@ if ( $only ne "" ) {
 else {
   &dbfTstgenHierPlaceWalk($top, 0, $top, $maxDepth, \@order, \%seen, \%instCnt);
 }
-#<!-- -net_weights names FLAT nets (mc_fp/foo); write_pseudo_graph finds a
+#<!-- -net_weights names FLAT nets (blk/foo); write_pseudo_graph finds a
 #     module's own by stripping each instance path the walk reached it by,
-#     less the top's name (mc2/mc_fp -> mc_fp; the top itself -> "") -->
+#     less the top's name (top/blk -> blk; the top itself -> "") -->
 %HIER_PLACE_NET_PREFIXES = ();
 my $fpSpec = {};
 if ( $fpSpecFile ne "" ) {

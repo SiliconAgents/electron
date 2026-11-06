@@ -86,7 +86,7 @@ SPARKSTA_CASE ?=
 # the Vts it may use (empty: every Vt in the table; "any" for a table with no
 # Vt column), its sizing rounds, and its Spark driver memory -- a 2.9M-cell
 # design peaked near 37 GB.  Which Vts a block may use is a methodology
-# choice, so the block's flow sets it (N02 blocks: svt,lvt,ulvt).
+# choice, so the block's flow sets it (e.g. svt,lvt,ulvt).
 # SPARKSTA_SEQ_VTS: the Vts a flop or latch may take (empty: any of the above).
 # SPARKSTA_VT_CAP=<vt>[,<vt>]:<fraction>: those Vts on at most that share of the
 # cells, the most negative paths first (slvt:0.12 -- "SLVT under 12%").

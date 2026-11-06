@@ -14,7 +14,7 @@ its channel length, rather than at the end), the
 family column is the name after its stem and drive with that group taken out,
 so the Vts of one footprint can replace each other.  A family with no such
 pattern leaves the column empty and Photon reads the family from the name
-(the Vt as a suffix, N02's BWP...CPDSVT).
+(the Vt as the last part of the name).
 
 One row per cell:
 
@@ -81,7 +81,7 @@ CELL_RE = re.compile(r'^\s*cell\s*\(\s*"?([^")\s]+)"?\s*\)')
 PIN_RE = re.compile(r'^\s*pin\s*\(\s*"?([^")\s]+)"?\s*\)')
 KV_RE = re.compile(r'^\s*(\w+)\s*:\s*"?([^";]*)"?\s*;')
 SEQ_RE = re.compile(r"^\s*(ff|latch|statetable|ff_bank|latch_bank)\s*\(")
-# without --config, the Vt is guessed from N02's file names; with it, the
+# without --config, the Vt is guessed from the liberty file names; with it, the
 # config says which Vt each liberty is
 VT_RE = re.compile(r"_(svt|lvt|lvtll|ulvt|ulvtll|elvt)(?:tt|ss|ff)", re.I)
 
@@ -236,8 +236,8 @@ def main():
         synth = e.get("std-cell-synth-libs") or {}
         if not synth:
             sys.exit("liberty_sizing: the entry has no std-cell-synth-libs")
-        # a synthesis list may carry memory liberties beside the cells (N02's
-        # does, for yosys); a liberty the entry declares as a macro is not a
+        # a synthesis list may carry memory liberties beside the cells (one
+        # library's does, for yosys); a liberty the entry declares as a macro is not a
         # standard cell and is not sized
         macros = set(e.get("macro-libs") or []) | {p for v in (e.get("macro-sta-libs") or {}).values() for p in v}
         jobs = [(p, vt) for vt, ps in synth.items() for p in ps if p not in macros] + list(a.liberty)
