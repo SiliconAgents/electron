@@ -227,11 +227,28 @@ def cmd_start(a):
     #     opened again -- edit_module reloads the module's pseudo model and the
     #     held places with it -->
     opened = re.search(r"^\s*edit_module\s+--top\b", loadtxt, re.M) and not pre
+    #<!-- --from: a placement already made, loaded instead of placed again --
+    #     the state make place saved, else rebuilt from its DEF and block
+    #     layouts.  Tries are then judged against that run. -->
+    place = f"hier_place_all {s['place_args']} {a.place_extra} -floorplan_spec {spec}"
+    if a.from_place:
+        src = os.path.abspath(a.from_place)
+        if pre:
+            log(d, "--from loads a placement of the netlist as it is; it cannot take --pre_ungroup"); return 1
+        state = os.path.join(src, f"{a.top}.hier_state")
+        defs = [f for f in (os.path.join(src, f"{a.top}.hier.def"), os.path.join(src, f"{a.top}.hier.def.gz")) if os.path.isfile(f)]
+        if os.path.isfile(state):
+            place = f"read_hier_state -input {state}"
+        elif defs:
+            place = f"read_hier_placement -def {defs[0]} -blocks {src}"
+        else:
+            log(d, f"--from {src}: no {a.top}.hier_state and no {a.top}.hier.def"); return 1
+        s["from"] = place
+        log(d, f"placement from {src}: {place.split()[0]}")
     with open(os.path.join(d, "load.tcl"), "w") as fh:
         fh.write(loadtxt)
         fh.write("".join(x + "\n" for x in pre))
-        fh.write(("" if opened else "edit_module --top\n") +
-                 f"hier_place_all {s['place_args']} {a.place_extra} -floorplan_spec {spec}\nshell echo PLAN_READY\n")
+        fh.write(("" if opened else "edit_module --top\n") + place + "\nshell echo PLAN_READY\n")
     job = os.path.join(d, "session_job.sh")
     with open(job, "w") as fh:
         fh.write(f"""#!/bin/bash
@@ -245,13 +262,15 @@ cd {d} && apptainer exec --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /pro
            f"-o {d}/session_job.%J.out {job}", executable="/bin/bash")
     s["session_job"] = re.search(r"Job <(\d+)>", r.stdout).group(1)
     save(d, s)
-    log(d, f"session: LSF job {s['session_job']}, placing the whole design (about 16 min on 3M instances)")
+    log(d, f"session: LSF job {s['session_job']}, " + ("loading the placement" if a.from_place else "placing the whole design (about 40 min on 3M instances)"))
     t0 = time.time()
     while "PLAN_READY" not in tail(f"{d}/session.log"):
         if not job_alive(s["session_job"]) and time.time() - t0 > 120:
             log(d, "session died -- see session.log"); return 1
         time.sleep(20)
-    log(d, f"placed in {time.time() - t0:.0f} s")
+    log(d, f"{'loaded' if a.from_place else 'placed'} in {time.time() - t0:.0f} s")
+    if "ERR-RD_HR_" in tail(f"{d}/session.log"):
+        log(d, "the placement did not load -- see session.log"); return 1
     t = session_cmd(d, s, [f"write_sgraph -output {d}/base.sgraph"], "base")
     log(d, f"timing graph written in {t:.0f} s")
     # the Photon server: the flow's corner and wire model, long nets as planned repeaters
@@ -553,6 +572,9 @@ def main():
     x.add_argument("--place_args", default="", help="the hier_place_all options (default: the slicing set); "
                    "a tile placed among fixed macros passes its own, --legalize_blocks and its -block_targets")
     x.add_argument("--place_extra", default="", help="more hier_place_all options for the placement, e.g. --child_pins")
+    x.add_argument("--from", dest="from_place", default="",
+                   help="a make place directory (workarea/place) to load instead of placing: its <top>.hier_state, "
+                        "else its <top>.hier.def and <module>.blocks.placed.tsv")
     x.add_argument("--pre_ungroup", default="", help="a plan.ungroup: instances dissolved before placing")
     x.add_argument("--sdc", default="", help="the block's SDC, as make sta takes it (SPARKSTA_SDC)")
     x.add_argument("--case", default="", help="pins held for the run's mode, '<cell>/<pin>=0|1 ...' (SPARKSTA_CASE)")

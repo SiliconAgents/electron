@@ -1,0 +1,370 @@
+#<!-- A placed hierarchy, loaded instead of placed again.
+#
+#     hier_place_all leaves its result in two places: the flat database, which
+#     write_def writes, and one committed floorplan per module -- its box, its
+#     child blocks' boxes, its own cells relative to its corner, the pins its
+#     parent projected onto it.  The second is what hier_place_all -only and
+#     --keep_shapes work from, and a flat DEF does not hold it.  Without it the
+#     only way back to a placement a later session can re-place one module of
+#     is to place the whole design again: 36 to 44 minutes on a 3M-cell tile.
+#
+#     write_hier_state / read_hier_state   the committed floorplans, saved
+#                                          after hier_place_all and read back
+#                                          as they were.
+#     read_hier_placement                  the same state rebuilt from what an
+#                                          older run left: its flat DEF and its
+#                                          <module>.blocks.placed.tsv files.
+#
+#     Both go after the script that read the netlist and the floorplan, in
+#     place of hier_place_all, and leave the session where hier_place_all
+#     would: the top open, the flat database rebuilt by hier2flat. -->
+
+
+#<!-- read_hier_placement: a placed hierarchy rebuilt top down, as the walk
+#     placed it.  Each module is opened, its child blocks put in the boxes its
+#     .blocks.placed.tsv gives, its own cells where the DEF has them less the
+#     module's corner, the children's pins projected as --child_pins projects
+#     them, and committed -- the walk's own steps with the placers taken out.
+#     A module with several instances has one floorplan, taken from the first
+#     instance the walk reaches; where the others disagree the check at the
+#     end says so. -->
+sub read_hier_placement {
+
+use Benchmark;
+my $t0 = new Benchmark;
+
+my ($defFile, $blocksDir, $childPins, $fanoutLimit) = ("", "", 1, 0);
+for ( my $i = 0 ; $i < @_ ; $i++ ) {
+  if    ( $_[$i] eq "-def" )            { $defFile = $_[$i+1]; }
+  elsif ( $_[$i] eq "-blocks" )         { $blocksDir = $_[$i+1]; }
+  elsif ( $_[$i] eq "--no_child_pins" ) { $childPins = 0; }
+  elsif ( $_[$i] eq "-fanout_limit" )   { $fanoutLimit = $_[$i+1]; }
+}
+if ( @_ == 0 || $_[0] eq "-h" || $defFile eq "" ) {
+  print "Usage : read_hier_placement -def <placed DEF> [-blocks <dir>]\n";
+  print "                       -def <file>        the flat placement hier_place_all left (.gz too),\n";
+  print "                                          before or after legalize_flat\n";
+  print "                       -blocks <dir>      where its <module>.blocks.placed.tsv files are,\n";
+  print "                                          default the DEF's directory\n";
+  print "                       --no_child_pins    leave the children's pins to them (hier_place_all\n";
+  print "                                          --no_child_pins)\n";
+  print "                       -fanout_limit <n>  as hier_place_all's, for the pins\n";
+  print "        After the script that read the netlist and the floorplan, in place of\n";
+  print "        hier_place_all: each module's committed floorplan rebuilt from the DEF and\n";
+  print "        the block layouts, so hier_place_all -only / --keep_shapes can re-place\n";
+  print "        one module of it.  Ends with the top open and hier2flat run.\n";
+  return;
+}
+unless ( -r $defFile ) {
+  print "ERR-RD_HR_PL : 001 : cannot read $defFile\n";
+  return;
+}
+if ( $blocksDir eq "" ) {
+  $blocksDir = $defFile;
+  $blocksDir =~ s{/[^/]*$}{};
+  $blocksDir = "." if ( $blocksDir eq $defFile );
+}
+my $top = $GLOBAL->dbfGlobalGetTOP;
+unless ( defined $top && exists $MODULE_ALREADY{$top} ) {
+  print "ERR-RD_HR_PL : 002 : no top module; read and elaborate the netlist first\n";
+  return;
+}
+my $dbu = $GLOBAL->dbfGlobalGetDBU;
+
+#<!-- the components: name => [x, y, orient, status], in the DEF's units -->
+my ($defUnits, %comp) = (0);
+{
+  my $fh;
+  my $ok = ( $defFile =~ m/\.gz$/ ) ? open($fh, "-|", "gzip", "-dc", $defFile) : open($fh, "<", $defFile);
+  unless ( $ok ) {
+    print "ERR-RD_HR_PL : 003 : cannot open $defFile : $!\n";
+    return;
+  }
+  my ($in, $name) = (0, undef);
+  while ( my $l = <$fh> ) {
+    if ( ! $in ) {
+      $defUnits = $1 if ( $l =~ m/^\s*UNITS\s+DISTANCE\s+MICRONS\s+(\d+)/ );
+      $in = 1 if ( $l =~ m/^\s*COMPONENTS\b/ );
+      next;
+    }
+    last if ( $l =~ m/^\s*END\s+COMPONENTS/ );
+    $name = $1 if ( $l =~ m/^\s*-\s+(\S+)/ );
+    if ( defined $name && $l =~ m/\+\s*(PLACED|FIXED)\s*\(\s*(-?[\d.]+)\s+(-?[\d.]+)\s*\)\s*(\w+)/ ) {
+      $comp{$name} = [ $2, $3, $4, $1 ];
+      undef $name;
+    }
+  }
+  close($fh);
+}
+unless ( %comp && $defUnits > 0 ) {
+  print "ERR-RD_HR_PL : 004 : no placed components in $defFile\n";
+  return;
+}
+#<!-- the DEF's units to the session's: every location below is in DBU -->
+my $scale = $dbu / $defUnits;
+printf("INFO-RD_HR_PL : 005 : %d placed component(s) read from %s\n", scalar(keys %comp), $defFile);
+
+#<!-- the walk hier_place_all makes: every module once, parents first -->
+my (@order, %seen, %instCnt);
+&dbfTstgenHierPlaceWalk($top, 0, $top, -1, \@order, \%seen, \%instCnt);
+
+#<!-- the block layouts: module => { inst => [x, y, w, h] }, microns, in the
+#     module's own frame -->
+my %blocks = ();
+my %own = ();
+my @noLayout = ();
+foreach my $rec ( @order ) {
+  my $mod = $rec->[0];
+  my @kids = grep { my $c = $MODULE_ALREADY{$mod}->dbVNOMGetHierInstCell($_);
+                    defined $c && exists $MODULE_ALREADY{$c} } $MODULE_ALREADY{$mod}->dbVNOMGetHierInst;
+  next unless ( @kids );
+  my $f = "$mod.blocks.placed.tsv";
+  $f =~ s/[\/\\\[\]]/_/g;
+  my $fh;
+  unless ( open($fh, "<", "$blocksDir/$f") ) {
+    push(@noLayout, $mod);
+    next;
+  }
+  while ( my $l = <$fh> ) {
+    chomp($l);
+    my ($k, $inst, $x, $y, $w, $h) = split(/\t/, $l);
+    next unless ( defined $h && $k eq "BLOCK" );
+    if ( $inst eq "__own__" ) { $own{$mod} = [ $x, $y, $x + $w, $y + $h ]; next; }
+    $blocks{$mod}{$inst} = [ $x, $y, $w, $h ];
+  }
+  close($fh);
+  my @missing = grep { ! exists $blocks{$mod}{$_} } @kids;
+  if ( @missing ) {
+    print "ERR-RD_HR_PL : 006 : $blocksDir/$f has no box for " . scalar(@missing) . " of ${mod}'s " .
+          scalar(@kids) . " block(s): @missing[0 .. ( $#missing < 4 ? $#missing : 4 )]\n";
+    return;
+  }
+}
+if ( @noLayout ) {
+  print "ERR-RD_HR_PL : 007 : no block layout for " . scalar(@noLayout) . " module(s) with child blocks in $blocksDir: " .
+        "@noLayout[0 .. ( $#noLayout < 4 ? $#noLayout : 4 )]\n";
+  print "ERR-RD_HR_PL : 008 : a run that laid its blocks out with --legalize_blocks writes one per such module\n";
+  return;
+}
+
+my %origin = ( $top => [ 0, 0 ] );     # walk path => its corner in the die, DBU
+my %size = ();                         # module => [w, h], microns
+my %childPinsDone = ();
+my ($nCells, $nMissing, $nOutside, $nMods) = (0, 0, 0, 0);
+my %outsideBy = ();
+foreach my $rec ( @order ) {
+  my ($mod, $depth, $path) = @$rec;
+  my ($openW, $openH) = &dbfTstgenHierPseudoSize($mod);
+  unless ( $TOP_MODULE eq $mod && exists $PSEUDO_VINST_ALREADY{$mod} && $openW > 0 && $openH > 0 ) {
+    &editModule("-module", $mod);
+  }
+  unless ( exists $PSEUDO_MODULE_ALREADY{$mod} ) {
+    print "ERR-RD_HR_PL : 009 : $mod could not be opened\n";
+    return;
+  }
+  $PSEUDO_MODULE_ALREADY{$mod}->dbaTstgenSetSize(0, 0, @{$size{$mod}}) if ( exists $size{$mod} );
+  my ($ox, $oy) = @{$origin{$path}};
+  my $prefix = $path;
+  $prefix =~ s{^\Q$top\E/?}{};
+  my ($w, $h) = exists $size{$mod} ? @{$size{$mod}} : (0, 0);
+  my $slack = 2;    #<!-- microns a cell may hang over its module's edge -->
+  foreach my $inst ( keys %{$PSEUDO_VINST_ALREADY{$mod}} ) {
+    next if ( $inst eq "PIN" );
+    my $V = $PSEUDO_VINST_ALREADY{$mod}{$inst};
+    my $ref = $V->dbPimDBGetInstCellref;
+    if ( exists $blocks{$mod}{$inst} ) {
+      my ($x, $y, $bw, $bh) = @{$blocks{$mod}{$inst}};
+      $V->dbPimDBSetInstRelBbox($x, $y, $x + $bw, $y + $bh);
+      $V->dbPimDBSetInstOrient("N");
+      $V->dbPimDBSetInstStatus("PLACED");
+      $PSEUDO_MODULE_ALREADY{$ref}->dbaTstgenSetSize(0, 0, $bw, $bh) if ( exists $PSEUDO_MODULE_ALREADY{$ref} );
+      $size{$ref} = [ $bw, $bh ] unless ( exists $size{$ref} );
+      $origin{"$path/$inst"} = [ $ox + $x * $dbu, $oy + $y * $dbu ];
+      next;
+    }
+    next unless ( defined $ref && exists $PLDB{$ref} );
+    my $c = $comp{ $prefix eq "" ? $inst : "$prefix/$inst" };
+    unless ( defined $c ) { $nMissing++; next; }
+    my $rx = ( $c->[0] * $scale - $ox ) / $dbu;
+    my $ry = ( $c->[1] * $scale - $oy ) / $dbu;
+    my ($cw, $ch) = $PLDB{$ref}->dbMdbGetSize;
+    $V->dbPimDBSetInstRelBbox( &utilLocToBbox($rx, $ry, $c->[2], $cw, $ch) );
+    $V->dbPimDBSetInstOrient($c->[2]);
+    $V->dbPimDBSetInstStatus( $c->[3] eq "FIXED" ? "FIXED" : "PLACED" );
+    $nCells++;
+    if ( $w > 0 && ( $rx < -$slack || $ry < -$slack || $rx > $w + $slack || $ry > $h + $slack ) ) {
+      $nOutside++;
+      $outsideBy{$mod}++;
+    }
+  }
+  $HIER_OWN_REGION{$mod} = $own{$mod} if ( exists $own{$mod} );
+  if ( $childPins ) {
+    &dbfTstgenHierProjectChildPins($mod, \%childPinsDone, $fanoutLimit, 0);
+  }
+  &commitModule("-module", $mod, "--physical_only");
+  $nMods++;
+}
+printf("INFO-RD_HR_PL : 010 : %d module(s) committed, %d cell(s) placed from the DEF, %d not in it\n",
+       $nMods, $nCells, $nMissing);
+if ( $nOutside ) {
+  my @worst = ( sort { $outsideBy{$b} <=> $outsideBy{$a} } keys %outsideBy )[0 .. 2];
+  printf("WARN-RD_HR_PL : 011 : %d cell(s) more than 2 um outside their module's box, most in %s -- a block layout\n",
+         $nOutside, join(", ", map { "$_ ($outsideBy{$_})" } grep { defined } @worst));
+  print "WARN-RD_HR_PL : 012 : that does not belong to this DEF reads this way\n";
+}
+
+if ( $TOP_MODULE ne $top ) {
+  &editModule("-module", $top);
+}
+&hier2flat("--physical");
+
+#<!-- the check: every cell where the DEF has it.  A module with several
+#     instances got the first one's arrangement; the others land wherever
+#     that puts them, and if the DEF placed them differently it shows here. -->
+my ($nSame, $nDiff) = (0, 0);
+my %diffBy = ();
+foreach my $name ( keys %comp ) {
+  next unless ( exists $CADB{$name} );
+  my @l = $CADB{$name}->dbCadbGetLoc;
+  my $c = $comp{$name};
+  if ( abs($l[0] - $c->[0] * $scale) <= 1 && abs($l[1] - $c->[1] * $scale) <= 1 ) { $nSame++; next; }
+  $nDiff++;
+  my ($chain, $mods) = &dbfHierSplitFlatName($name);
+  $diffBy{ $mods->[-1] }++;
+}
+my $nOther = scalar(keys %comp) - $nSame - $nDiff;
+printf("INFO-RD_HR_PL : 013 : %d of %d DEF component(s) back where the DEF has them%s\n",
+       $nSame, $nSame + $nDiff, $nOther ? ", $nOther not in the netlist (taps, endcaps) left out" : "");
+if ( $nDiff ) {
+  my @worst = ( sort { $diffBy{$b} <=> $diffBy{$a} } keys %diffBy )[0 .. 2];
+  printf("WARN-RD_HR_PL : 014 : %d cell(s) elsewhere, most in %s: a module with several instances placed\n",
+         $nDiff, join(", ", map { "$_ ($diffBy{$_})" } grep { defined } @worst));
+  print "WARN-RD_HR_PL : 015 : differently in each, which one floorplan cannot hold\n";
+}
+my $t1 = new Benchmark;
+print "Command read_hier_placement took:", timestr(timediff($t1, $t0)), "\n";
+
+}# sub read_hier_placement
+
+
+#<!-- The state: every floorplan a module of the hierarchy is committed to,
+#     the names they are looked up by, each module's floorplan ID, and the own
+#     regions --own_fence placed into.  Floorplan IDs are the session's own, so
+#     read_hier_state gives each one a new ID rather than trusting the saved
+#     ones not to collide. -->
+sub write_hier_state {
+
+my $out = "";
+for ( my $i = 0 ; $i < @_ ; $i++ ) {
+  $out = $_[$i+1] if ( $_[$i] eq "-output" );
+}
+if ( @_ == 0 || $_[0] eq "-h" || $out eq "" ) {
+  print "Usage : write_hier_state -output <file>\n";
+  print "        After hier_place_all: every module's committed floorplan, for read_hier_state\n";
+  print "        to load in a later session instead of placing the design again.  gzip'd.\n";
+  return;
+}
+my $top = $GLOBAL->dbfGlobalGetTOP;
+my (%fpid, %fp, %lk, %leaves);
+my (@order, %seen, %instCnt);
+&dbfTstgenHierPlaceWalk($top, 0, $top, -1, \@order, \%seen, \%instCnt);
+foreach my $rec ( @order ) {
+  my $m = $rec->[0];
+  my $id = &dbfTstgenHierModuleFlplanID($m);
+  next unless ( $id && exists $FLOORPLAN_ALREADY{$id} );
+  $fpid{$m} = $id;
+  $fp{$id} = $FLOORPLAN_ALREADY{$id};
+  $leaves{$m} = scalar( my @l = $MODULE_ALREADY{$m}->dbVNOMGetLeafInst );
+}
+foreach my $key ( keys %FLOORPLAN_LOOKUP ) {
+  $lk{$key} = $FLOORPLAN_LOOKUP{$key} if ( exists $fp{ $FLOORPLAN_LOOKUP{$key} } );
+}
+my $fh;
+unless ( open($fh, "|-", "gzip -1 > '$out'") ) {
+  print "ERR-WR_HR_ST : 001 : cannot write $out : $!\n";
+  return;
+}
+Storable::nstore_fd({ version => 1, top => $top, dbu => $GLOBAL->dbfGlobalGetDBU, fpid => \%fpid, fp => \%fp,
+                      lk => \%lk, leaves => \%leaves, own => { %HIER_OWN_REGION } }, $fh);
+close($fh);
+printf("INFO-WR_HR_ST : 002 : %d module floorplan(s) of %s written to %s\n", scalar(keys %fpid), $top, $out);
+
+}# sub write_hier_state
+
+
+sub read_hier_state {
+
+use Benchmark;
+my $t0 = new Benchmark;
+my $in = "";
+for ( my $i = 0 ; $i < @_ ; $i++ ) {
+  $in = $_[$i+1] if ( $_[$i] eq "-input" );
+}
+if ( @_ == 0 || $_[0] eq "-h" || $in eq "" ) {
+  print "Usage : read_hier_state -input <file>\n";
+  print "        What write_hier_state saved, after the script that read the same netlist and\n";
+  print "        floorplan, in place of hier_place_all.  Ends with the top open and hier2flat run.\n";
+  return;
+}
+my $fh;
+unless ( -r $in && open($fh, "-|", "gzip", "-dc", $in) ) {
+  print "ERR-RD_HR_ST : 001 : cannot read $in\n";
+  return;
+}
+my $s = eval { Storable::fd_retrieve($fh) };
+close($fh);
+unless ( defined $s && ref $s eq "HASH" && $s->{version} == 1 ) {
+  print "ERR-RD_HR_ST : 002 : $in is not a write_hier_state file\n";
+  return;
+}
+my $top = $GLOBAL->dbfGlobalGetTOP;
+unless ( $s->{top} eq $top ) {
+  print "ERR-RD_HR_ST : 003 : $in holds $s->{top}, the design here is $top\n";
+  return;
+}
+unless ( $s->{dbu} == $GLOBAL->dbfGlobalGetDBU ) {
+  print "ERR-RD_HR_ST : 004 : $in is in $s->{dbu} DBU, this session in " . $GLOBAL->dbfGlobalGetDBU . "\n";
+  return;
+}
+#<!-- the same netlist: every module, with as many cells of its own -->
+my @bad = ();
+foreach my $m ( sort keys %{$s->{fpid}} ) {
+  my $n = exists $MODULE_ALREADY{$m} ? scalar( my @l = $MODULE_ALREADY{$m}->dbVNOMGetLeafInst ) : -1;
+  push(@bad, $m) unless ( $n == $s->{leaves}{$m} );
+}
+if ( @bad ) {
+  print "ERR-RD_HR_ST : 005 : " . scalar(@bad) . " module(s) missing or changed since $in was written: " .
+        "@bad[0 .. ( $#bad < 4 ? $#bad : 4 )]\n";
+  return;
+}
+my %newId = ();
+foreach my $old ( sort { $a <=> $b } keys %{$s->{fp}} ) {
+  my $id = $GLOBAL->dbfGlobalGetNextFlplanID;
+  $newId{$old} = $id;
+  $FLOORPLAN_ALREADY{$id} = $s->{fp}{$old};
+  $FLOORPLAN_ALREADY{$id}->dbFlplanSetID($id);
+}
+#<!-- what this session had for those modules -- the top's, from the
+#     floorplan read -- goes, with every name it was looked up by -->
+my %gone = ();
+my %isNew = map { $_ => 1 } values %newId;
+foreach my $m ( keys %{$s->{fpid}} ) {
+  my $was = &dbfTstgenHierModuleFlplanID($m);
+  $gone{$was} = 1 if ( $was && exists $FLOORPLAN_ALREADY{$was} && ! $isNew{$was} );
+  $MODULE_ALREADY{$m}->dbVNOMSetFloorplanID( $newId{ $s->{fpid}{$m} } );
+}
+foreach my $key ( keys %FLOORPLAN_LOOKUP ) {
+  delete $FLOORPLAN_LOOKUP{$key} if ( $gone{ $FLOORPLAN_LOOKUP{$key} } );
+}
+delete $FLOORPLAN_ALREADY{$_} foreach ( keys %gone );
+$FLOORPLAN_LOOKUP{$_} = $newId{ $s->{lk}{$_} } foreach ( keys %{$s->{lk}} );
+%HIER_OWN_REGION = %{ $s->{own} || {} };
+printf("INFO-RD_HR_ST : 006 : %d module floorplan(s) of %s read from %s\n", scalar(keys %{$s->{fpid}}), $top, $in);
+&editModule("-module", $top);
+&hier2flat("--physical");
+my $t1 = new Benchmark;
+print "Command read_hier_state took:", timestr(timediff($t1, $t0)), "\n";
+
+}# sub read_hier_state
+
+1;
