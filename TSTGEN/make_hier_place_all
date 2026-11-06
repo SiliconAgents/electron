@@ -1773,6 +1773,7 @@ my $weightPower = 3;
 my $fpSpecFile = "";
 my $keepShapes = 0;
 my $only = "";
+my $replace = "";
 my $cellsAnchor = "";
 my $freeFlops = 0;
 my $seqAnchorLimit = 2000;
@@ -1842,6 +1843,13 @@ if ( $noOfArguments > 0 && ($_[0] eq '-h' || $_[0] eq '-help' || $_[0] eq 'HELP'
   print "                                          with --keep_shapes: its children move as\n";
   print "                                          blocks by its -floorplan_spec line, its own\n";
   print "                                          cells are placed again, nothing else moves\n";
+  print "                       -replace <m,m|changed>  with --keep_shapes: the top and these modules'\n";
+  print "                                          subtrees are placed again, the rest kept as\n";
+  print "                                          committed and moved as blocks.  \"changed\" adds\n";
+  print "                                          every top-level block whose -block_targets shape\n";
+  print "                                          its committed box does not have; a top-level\n";
+  print "                                          block named here is sized afresh, a deeper one\n";
+  print "                                          keeps its box.  After read_hier_state\n";
   print "                       -cells_anchor <command> hier_place_cells -anchor for every module\n";
   print "                                          placed (with -only, that one): e.g.\n";
   print "                                          3RDBIN/array_anchor for a register file\n";
@@ -1987,6 +1995,7 @@ for (my $i = 0; $i < $noOfArguments; $i++) {
   elsif ($_[$i] eq "-floorplan_spec"){ $fpSpecFile = $_[$i+1]; }
   elsif ($_[$i] eq "--keep_shapes")  { $keepShapes = 1; }
   elsif ($_[$i] eq "-only")          { $only = $_[$i+1]; }
+  elsif ($_[$i] eq "-replace")       { $replace = $_[$i+1]; }
   elsif ($_[$i] eq "-cells_anchor")  { $cellsAnchor = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot")      { $snapPrefix = $_[$i+1]; }
   elsif ($_[$i] eq "-snapshot_args") { $snapArgs = $_[$i+1]; }
@@ -2021,6 +2030,10 @@ my %instCnt = ();
 #     of -floorplan_spec, its own cells placed again.  The fast loop one level
 #     down: the parent is not touched, so nothing outside the module moves. -->
 my @onlyPaths = ();
+if ( $replace ne "" && ( ! $keepShapes || $only ne "" || $maxDepth >= 0 ) ) {
+  print "ERR-TST-HR_PL_ALL : 080 : -replace re-places parts of a placed design; it needs --keep_shapes, and not -only or -depth\n";
+  return;
+}
 if ( $only ne "" ) {
   unless ( exists $MODULE_ALREADY{$only} ) {
     print "ERR-TST-HR_PL_ALL : 047 : -only $only: no such module\n";
@@ -2055,7 +2068,7 @@ if ( $only ne "" ) {
 #     legalize_flat, whose legal positions the shift then keeps. -->
 %HIER2FLAT_RIGID = ();
 my $rigidMod = ( $only ne "" ) ? $only : $top;
-if ( $keepShapes && ( $only ne "" || $maxDepth == 0 ) && ! $noFlatten && $top eq $GLOBAL->dbfGlobalGetTOP ) {
+if ( $keepShapes && ( $only ne "" || $maxDepth == 0 || $replace ne "" ) && ! $noFlatten && $top eq $GLOBAL->dbfGlobalGetTOP ) {
   my $rf = &get_floorplanID_of_module($rigidMod);
   if ( $rf != -1 && exists $FLOORPLAN_ALREADY{$rf} ) {
     my %kids = ();
@@ -2172,6 +2185,96 @@ if ( $netWeights ne "" ) {
   print "INFO-TST-HR_PL_ALL : 036 : cell placement weighted for timing from $netWeights (scale $weightScale, power $weightPower)\n";
 }
 
+#<!-- -replace: a placed design with a few blocks changed.  The top is placed
+#     again toward its targets, every block outside the named subtrees keeps
+#     its shape and contents and moves rigidly (--keep_shapes), and each named
+#     module is placed again with everything under it, as the full walk would.
+#     A block directly under the top is sized afresh -- its targets may have
+#     changed its shape; one deeper keeps its box, which its kept parent holds.
+#     A module below a named one that is also used under a kept module would
+#     need two shapes at once, so it is refused.
+#     "changed": a top-level block whose committed box is not the shape its
+#     -block_targets line asks for -- the shape the legalizer would start it at
+#     (h= sets the height and the area the width, w= the other way round), or
+#     outside its min/max -- by more than 1% or 1 um. -->
+my %replaceSet = ();
+my %reshape = ();
+if ( $replace ne "" ) {
+  my %allPaths = ();
+  &dbfTstgenHierAllInstPaths($top, "", \%allPaths);
+  my %parents = ();
+  my $kidsOf = sub {
+    my ($m) = @_;
+    return () unless ( exists $MODULE_ALREADY{$m} );
+    return grep { defined $_ && exists $MODULE_ALREADY{$_} } map { $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($_) } $MODULE_ALREADY{$m}->dbVNOMGetHierInst;
+  };
+  foreach my $m ( keys %allPaths ) { $parents{$_}{$m} = 1 foreach ( $kidsOf->($m) ); }
+  my (@roots, @bad) = ();
+  foreach my $r ( split(/,/, $replace) ) {
+    next if ( $r eq "" );
+    if ( $r ne "changed" ) {
+      if ( exists $allPaths{$r} && $r ne $top ) { push(@roots, $r); } else { push(@bad, $r); }
+      next;
+    }
+    my ($W, $H) = &dbfTstgenHierPseudoSize($top);
+    foreach my $inst ( sort keys %{$blockTargets->{$top} || {}} ) {
+      next if ( $inst eq "*" );
+      my $ref = $MODULE_ALREADY{$top}->dbVNOMGetHierInstCell($inst);
+      next unless ( defined $ref && exists $MODULE_ALREADY{$ref} );
+      my ($cw, $ch) = &dbfTstgenHierCommittedSize($ref);
+      my $sp = &dbfTstgenHierShapeSpec($blockTargets->{$top}{$inst}[2]);
+      next unless ( $cw > 0 && $ch > 0 && $W > 0 && $H > 0 && defined $sp && %$sp && ! $sp->{hstack} );
+      my $a = $cw * $ch;
+      my ($ew, $eh) = exists $sp->{h}    ? ( $a / ( $sp->{h} * $H ), $sp->{h} * $H )
+                    : exists $sp->{w}    ? ( $sp->{w} * $W, $a / ( $sp->{w} * $W ) )
+                    : exists $sp->{hmax} ? ( $a / ( $sp->{hmax} * $H ), $sp->{hmax} * $H )
+                    :                      ( $cw, $ch );
+      my $off = sub { my ($x, $y) = @_; return abs($x - $y) > ( 0.01 * $y > 1 ? 0.01 * $y : 1 ); };
+      my $why = $off->($cw, $ew) || $off->($ch, $eh) ? sprintf("%.1f x %.1f um, the targets start it at %.1f x %.1f", $cw, $ch, $ew, $eh)
+              : ( exists $sp->{wmax} && $cw > $sp->{wmax} * $W + 1 ) ? sprintf("%.1f um wide, the targets allow %.1f", $cw, $sp->{wmax} * $W)
+              : ( exists $sp->{hmax} && $ch > $sp->{hmax} * $H + 1 ) ? sprintf("%.1f um tall, the targets allow %.1f", $ch, $sp->{hmax} * $H)
+              : ( exists $sp->{w} && $cw < $sp->{w} * $W - 1 )       ? sprintf("%.1f um wide, the targets want %.1f", $cw, $sp->{w} * $W)
+              : ( exists $sp->{h} && $ch < $sp->{h} * $H - 1 )       ? sprintf("%.1f um tall, the targets want %.1f", $ch, $sp->{h} * $H)
+              : "";
+      next if ( $why eq "" );
+      print "INFO-TST-HR_PL_ALL : 081 : -replace changed: $ref ($inst) is $why\n";
+      push(@roots, $ref);
+    }
+  }
+  if ( @bad ) {
+    print "ERR-TST-HR_PL_ALL : 082 : -replace: @bad " . ( @bad > 1 ? "are" : "is" ) . " not a module under $top\n";
+    return;
+  }
+  my %isRoot = map { $_ => 1 } @roots;
+  my @todo = @roots;
+  while ( defined( my $m = shift @todo ) ) {
+    next if ( $replaceSet{$m}++ );
+    push(@todo, $kidsOf->($m));
+  }
+  my @shared = ();
+  foreach my $m ( sort keys %replaceSet ) {
+    my @kept = grep { $_ ne $top && ! $replaceSet{$_} } sort keys %{$parents{$m} || {}};
+    if ( ! @kept )        { $reshape{$m} = 1; }
+    elsif ( ! $isRoot{$m} ) { push(@shared, "$m (under @kept)"); }
+  }
+  if ( @shared ) {
+    print "ERR-TST-HR_PL_ALL : 083 : -replace: placing again a module that kept blocks also use would change them too: @shared\n";
+    return;
+  }
+  @order = grep { $_->[0] eq $top || $replaceSet{$_->[0]} } @order;
+  #<!-- hier2flat moves the cells of the top's kept blocks with them; a block
+  #     that holds anything placed again has its cells looked up instead -->
+  if ( exists $HIER2FLAT_RIGID{module} ) {
+    my %rebuild = ();
+    foreach my $m ( keys %replaceSet ) {
+      foreach my $P ( @{$allPaths{$m} || []} ) { $rebuild{ ( split(m{/}, $P) )[0] } = 1 if ( $P ne "" ); }
+    }
+    $HIER2FLAT_RIGID{rebuild} = \%rebuild;
+  }
+  printf("INFO-TST-HR_PL_ALL : 084 : -replace: %d module(s) placed again under %s (%s), %d of them sized afresh; the rest keep their placement\n",
+         scalar(keys %replaceSet), $top, scalar(@roots) ? join(" ", sort keys %isRoot) : "none", scalar(keys %reshape));
+}
+
 my $modCnt = @order;
 print "INFO-TST-HR_PL_ALL : 003 : $modCnt module(s) to place under $top\n";
 foreach my $rec ( @order ) {
@@ -2222,7 +2325,7 @@ my %sliceShape = ();    #<!-- module => [w, h] a slicing fixed -->
 if ( $keepShapes ) {
   my $n = 0;
   foreach my $m ( sort keys %MODULE_ALREADY ) {
-    next if ( $m eq $top );
+    next if ( $m eq $top || $reshape{$m} );
     my ($cw, $ch) = &dbfTstgenHierCommittedSize($m);
     next unless ( $cw > 0 && $ch > 0 );
     $sliceShape{$m} = [ $cw, $ch ];

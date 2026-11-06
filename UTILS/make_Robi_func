@@ -1543,13 +1543,16 @@ sub hier2flat{
 #     under one moves by exactly as much as the child did: shift those.  Only
 #     the module's own cells go through the floorplan lookup, and only theirs
 #     get a new box; everything outside the module is left alone.  Any child
-#     that is new, gone or turned and it is the full rebuild.  What moved is
-#     kept in %HIER2FLAT_LAST for write_moves. -->
+#     that is new, gone or turned and it is the full rebuild.  A child in
+#     {rebuild} (hier_place_all -replace placed something inside it again)
+#     has its cells looked up like the module's own.  What moved is kept in
+#     %HIER2FLAT_LAST for write_moves. -->
         my (%rigidD, @rigidTop, @rigidPaths);
         my ($rigid, $rigidShifted, $rigidOut) = ( exists $HIER2FLAT_RIGID{module} ? 1 : 0, 0, 0 );
         my $rf = $rigid ? &get_floorplanID_of_module($HIER2FLAT_RIGID{module}) : -1;
         if ( $rigid ) {
           my $was = $HIER2FLAT_RIGID{kids};
+          my $rebuild = $HIER2FLAT_RIGID{rebuild} || {};
           @rigidPaths = @{ $HIER2FLAT_RIGID{paths} };
           my @now = ( $rf != -1 && exists $FLOORPLAN_ALREADY{$rf} ) ? $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstList : ();
           $rigid = 0 if ( $rf == -1 || @now != scalar(keys %$was) );
@@ -1557,6 +1560,7 @@ sub hier2flat{
             last unless ( $rigid );
             my @e = $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstExtent($c);
             my $o = $FLOORPLAN_ALREADY{$rf}->dbFlplanGetHierInstOrient($c);
+            next if ( $rebuild->{$c} && @e == 4 && exists $was->{$c} );
             if ( @e != 4 || ! exists $was->{$c} || $was->{$c}[2] ne $o ) { $rigid = 0; last; }
             $rigidD{$c} = [ $e[0] - $was->{$c}[0], $e[1] - $was->{$c}[1] ];
           }
