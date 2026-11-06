@@ -423,21 +423,28 @@ if ( exists $PLDB{$cellref} ) {
   }
   return (-1);
 }
+#<!-- A block's port lists are built into hashes once per module and kept in
+#     %TSTGEN_PIN_DIRS, which write_pseudo_graph empties on entry.  Building
+#     them on every call was 91% of write_pseudo_graph on a top level of 185
+#     blocks with thousands of ports each: 305 s and 615 s for its two graphs,
+#     because nearly every net there touches a block. -->
 if ( exists $PSEUDO_MODULE_ALREADY{$cellref} ) {
-  my %out = map { $_ => 1 } $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetOutput;
-  if ( exists $out{$pin} || exists $out{$base} ) {
+  my $d = $TSTGEN_PIN_DIRS{"P:$cellref"} //= {
+    out => { map { $_ => 1 } $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetOutput },
+    in  => { map { $_ => 1 } ( $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetInput,
+                               $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetBidi ) } };
+  if ( exists $d->{out}{$pin} || exists $d->{out}{$base} ) {
     return (1);
   }
-  my %in = map { $_ => 1 } ( $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetInput,
-                             $PSEUDO_MODULE_ALREADY{$cellref}->dbaTstgenGetBidi );
-  if ( exists $in{$pin} || exists $in{$base} ) {
+  if ( exists $d->{in}{$pin} || exists $d->{in}{$base} ) {
     return (0);
   }
   return (-1);
 }
 if ( exists $MODULE_ALREADY{$cellref} ) {
-  my %out = map { $_ => 1 } $MODULE_ALREADY{$cellref}->dbVNOMGetOutput;
-  if ( exists $out{$pin} || exists $out{$base} ) {
+  my $d = $TSTGEN_PIN_DIRS{"V:$cellref"} //= {
+    out => { map { $_ => 1 } $MODULE_ALREADY{$cellref}->dbVNOMGetOutput } };
+  if ( exists $d->{out}{$pin} || exists $d->{out}{$base} ) {
     return (1);
   }
   return (0);
@@ -1293,6 +1300,8 @@ unless ( defined $module && $module ne "" && exists $PSEUDO_MODULE_ALREADY{$modu
 }
 #<!-- read by dbfTstgenPseudoIsAnchor; set for this call only -->
 $TSTGEN_BLOCK_ANCHORS = $blockAnchors;
+#<!-- dbfTstgenHierPinDrives' port hashes: ports can change between calls -->
+%TSTGEN_PIN_DIRS = ();
 unless ( defined $nodeFile && $nodeFile ne "" ) { $nodeFile = "$module.pseudo.nodefile"; }
 unless ( defined $graphFile && $graphFile ne "" ) { $graphFile = "$module.pseudo.txt"; }
 
