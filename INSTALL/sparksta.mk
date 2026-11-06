@@ -242,8 +242,11 @@ endef
 # clock net or a net over 2000 pins stay.  The moves open the ECO as MOVE
 # lines and legalize_flat --incremental settles them; the log lists the
 # blocks whose cells want out, a sign the block is misplaced.  On a 2.4M-cell
-# tile, 20: 25.5k cells, 2,341 -> 256 mm of their extra wire, a median 0.13
-# um from target after legalizing, seconds of compute.
+# tile, 20: 25.5k cells, 2,341 -> 256 mm of their extra wire, seconds of
+# compute; after place_opt, applied and legalized, TNS -28,691 -> -26,237
+# (-8.6%), WNS -0.764 -> -0.734, 5% fewer repeaters.  Legalizing takes back
+# about a quarter of the gain place_opt's own STA saw (-11.8%): push sizing
+# fills the rows around the moved cells before they are legal.
 # SPARKSTA_DETOUR_SWEEPS (default 4) rounds of it: a chain of detoured cells
 # (a tree driving a tree) settles over several, and it stops early when a
 # round moves nothing.  SPARKSTA_DETOUR_MARGIN (default 2) um is how far
