@@ -35,7 +35,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
   print "                       [-patch <rules.py>] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
-  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [-module_opts <file>] [-kb <dir>] [--booth] [--name_registers]\n";
+  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [-module_opts <file>] [-kb <dir>] [-reuse <hs/netlists>] [--booth] [--name_registers]\n";
   print "                       [-leaf_wrappers <glob>[,<glob>] [-leaf_soft <param>=<value>]\n";
   print "                        [-leaf_soft_mode resize|dissolve] [-leaf_hard <glob>[,<glob>]]\n";
   print "                        [-leaf_drop <glob>[,<glob>]]]\n";
@@ -84,6 +84,10 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        of the area pass: a priority or mux chain written as\n";
   print "                        a loop becomes a tree.  FMA unit of a 434k-cell core:\n";
   print "                        abc delay -31%, area +3.8%\n";
+  print "        -reuse          an earlier run's netlist directory (<out>/netlists): a\n";
+  print "                        module whose RTL and settings are unchanged takes its\n";
+  print "                        netlist from there instead of abc -- a plan change\n";
+  print "                        synthesises only what it changed.  Default \$PLAN_REUSE\n";
   print "        -kb             a plan knowledge base (3RDBIN/plan_kb): every module with a\n";
   print "                        synthesis plan there, by structure, takes it -- after\n";
   print "                        -module_opts, which wins.  Default: \$PLAN_KB, which the\n";
@@ -159,6 +163,7 @@ my $abcKeep = 0;
 my $abcBalance = 0;
 my $moduleOpts = ( defined $PLAN_MODULE_OPTS ) ? $PLAN_MODULE_OPTS : "";
 my $planKb = ( defined $PLAN_KB ) ? $PLAN_KB : "";
+my $reuseDir = ( defined $PLAN_REUSE ) ? $PLAN_REUSE : "";
 my $booth = 0;
 my $nameRegs = 0;
 my $leafWrappers = "";
@@ -196,6 +201,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "--abc_balance"){$abcBalance = 1;}
   if($_[$i] eq "-module_opts"){$moduleOpts = $_[$i+1];}
   if($_[$i] eq "-kb"){$planKb = $_[$i+1];}
+  if($_[$i] eq "-reuse"){$reuseDir = $_[$i+1];}
   if($_[$i] eq "--booth"){$booth = 1;}
   if($_[$i] eq "--name_registers"){$nameRegs = 1;}
   if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
@@ -608,6 +614,14 @@ $inner .= " --flatten-modules '$flattenModules'" if ( $flattenModules ne "" );
 $inner .= " --adder $adder" if ( $adder ne "" );
 $inner .= " --abc-keep-structure" if ( $abcKeep );
 $inner .= " --abc-balance" if ( $abcBalance );
+if ( $reuseDir ne "" ) {
+  if ( -d $reuseDir ) {
+    $inner .= " --reuse $reuseDir";
+    print "INFO-PAR-HR_SYN : 087 : modules unchanged since $reuseDir are taken from it, not synthesised again\n";
+  } else {
+    print "INFO-PAR-HR_SYN : 088 : -reuse $reuseDir does not exist: everything is synthesised\n";
+  }
+}
 #<!-- per-module abc settings: the tile's own (-module_opts) first, then the
 #     plan KB's for every module whose structure has a plan there (plan_kb
 #     synth-opts, by fingerprint); yosys_bottom_up takes the first line that

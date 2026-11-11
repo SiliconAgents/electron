@@ -41,8 +41,10 @@ import argparse
 import concurrent.futures as cf
 import fnmatch
 import gzip
+import hashlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -448,10 +450,60 @@ def prune_stubs(stub_file, il, dest):
     return dest
 
 
+# REUSE -- --reuse <an earlier run's netlist directory>.  A plan change touches
+# a few modules; the other few hundred would be synthesised again to the same
+# netlist, 12 of 16 minutes of an ls-class run.  A module whose KEY matches the
+# earlier run's has its netlist and log copied instead.  The key is everything
+# the job's result depends on: the text of its RTLIL and of every module
+# flattened into it (`src` attributes left out -- they hold the path as seen
+# from the run directory), its abc options (the constraints file by content),
+# the liberty, the adder, the maps, the stubs, and its children by NAME --
+# a parent reads a child as an interface only, so a child synthesised again
+# with another plan does not make the parent's netlist stale.
+def _strip_src(path):
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for line in fh:
+            if not line.lstrip().startswith(b"attribute \\src"):
+                h.update(line)
+    return h.hexdigest()
+
+
+def job_key(name, src, absorb, children, abc, stubs, args):
+    h = hashlib.sha1()
+    for f in [src] + re.findall(r"^read_rtlil (\S+)$", absorb, re.M):
+        h.update(_strip_src(f).encode())
+    m = re.search(r"-constr (\S+)", abc)
+    if m and os.path.exists(m.group(1)):
+        abc = abc.replace(m.group(1), open(m.group(1)).read())
+    h.update(abc.encode())
+    for f in (args.latchmap, args.aldffmap, stubs):
+        if f and os.path.exists(f):
+            h.update(open(f, "rb").read())
+    kids = sorted(os.path.basename(p)[:-2] for p in re.findall(r"^read_verilog -lib (\S+)$", children, re.M))
+    h.update(("|".join([name, args.liberty, args.adder or "", str(args.booth), str(args.name_registers)] + kids)).encode())
+    return h.hexdigest()
+
+
 def run_one(job):
     name, copies, src, args, children, absorb, stubs, abc, mode = job
     dest = os.path.join(args.out, name + ".v")
     log = os.path.join(args.out, name + ".log")
+    key = job_key(name, src, absorb, children, abc, stubs, args)
+    if args.reuse:
+        old = os.path.join(args.reuse, name)
+        if (os.path.exists(old + ".v") and os.path.exists(old + ".log") and os.path.exists(old + ".key")
+                and open(old + ".key").read().strip() == key):
+            t = time.time()
+            shutil.copyfile(old + ".v", dest)
+            shutil.copyfile(old + ".log", log)
+            with open(os.path.join(args.out, name + ".key"), "w") as fh:
+                fh.write(key + "\n")
+            tail = open(log, errors="replace").read().split("Printing statistics.")[-1]
+            m = _CELLS.search(tail)
+            return {"name": name, "copies": copies, "cells": int(m.group(1)) if m else 0, "rc": 0,
+                    "err": "", "secs": time.time() - t, "log": log, "dest": dest,
+                    "fallback": False, "retried": False, "reused": True}
     # `flatten` leaves the absorbed modules DEFINED but no longer instantiated,
     # and write_verilog would then emit each of them into every netlist that
     # absorbed it -- the same module defined in a dozen files. The second
@@ -521,9 +573,12 @@ def run_one(job):
             rc = 1
             err = (f"unmapped sequential logic written as RTL: '{m.group(0).strip()[:160]}' "
                    f"-- a flop or latch no library cell implements")
+    if rc == 0:
+        with open(os.path.join(args.out, name + ".key"), "w") as fh:
+            fh.write(key + "\n")
     return {"name": name, "copies": copies, "cells": cells, "rc": rc,
             "err": err, "secs": time.time() - t, "log": log, "dest": dest,
-            "fallback": fallback, "retried": retried}
+            "fallback": fallback, "retried": retried, "reused": False}
 
 
 def main():
@@ -598,6 +653,9 @@ def main():
                     help="per-module abc target and script: lines <module or glob> "
                          "<TAB> <ps, or - for --abc-delay> <TAB> area|balance|keep; "
                          "every other module keeps the run's own")
+    ap.add_argument("--reuse", metavar="DIR",
+                    help="an earlier run's --out: a module whose inputs and settings are "
+                         "unchanged takes its netlist from there instead of being synthesised")
     ap.add_argument("--verify", action="store_true",
                     help="reload every netlist afterwards and let yosys walk "
                          "the hierarchy for the real cell count")
@@ -769,7 +827,9 @@ def main():
         # drop instances a parent turns out not to use. On one large design it
         # comes out 7% over what reloading the netlists actually counts, which
         # is what --verify is for.
+        reused = sum(1 for r in rows if r.get("reused"))
         print(f"level {L:>2}: {len(rows):>3} module(s), {len(bad)} failed, "
+              + (f"{reused} reused, " if args.reuse else "") +
               f"{cells:>9,} cells ({weighted:>12,} x pre-synth copies), "
               f"{time.time() - t:>6.1f}s")
         if bad:
