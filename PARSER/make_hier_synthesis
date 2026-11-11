@@ -35,7 +35,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
   print "                       [-patch <rules.py>] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
-  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [--booth] [--name_registers]\n";
+  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [-module_opts <file>] [-kb <dir>] [--booth] [--name_registers]\n";
   print "                       [-leaf_wrappers <glob>[,<glob>] [-leaf_soft <param>=<value>]\n";
   print "                        [-leaf_soft_mode resize|dissolve] [-leaf_hard <glob>[,<glob>]]\n";
   print "                        [-leaf_drop <glob>[,<glob>]]]\n";
@@ -84,6 +84,17 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        of the area pass: a priority or mux chain written as\n";
   print "                        a loop becomes a tree.  FMA unit of a 434k-cell core:\n";
   print "                        abc delay -31%, area +3.8%\n";
+  print "        -kb             a plan knowledge base (3RDBIN/plan_kb): every module with a\n";
+  print "                        synthesis plan there, by structure, takes it -- after\n";
+  print "                        -module_opts, which wins.  Default: \$PLAN_KB, which the\n";
+  print "                        tile kit sets (set PLAN_KB <dir>)\n";
+  print "        -module_opts    (default \$PLAN_MODULE_OPTS, which the tile kit sets to\n";
+  print "                        the tile's plan in progress) abc's target and script\n";
+  print "                        per module: lines <module or\n";
+  print "                        glob> TAB <ps, or - for -abc_delay> TAB area|balance|keep;\n";
+  print "                        the rest keep the run's.  A 64-bit prefix adder that\n";
+  print "                        mapped 17 gates / 245 ps at -abc_delay 312 came out\n";
+  print "                        8 gates / 88 ps with 60 ps and balance, +31% cells\n";
   print "        --booth         multipliers as Booth-encoded trees (yosys booth), not\n";
   print "                        techmap's array: ~4% less area, no faster after abc\n";
   print "        --name_registers  each flop and latch named after its register,\n";
@@ -146,6 +157,8 @@ my $abcTimeout = "";
 my $adder = "";
 my $abcKeep = 0;
 my $abcBalance = 0;
+my $moduleOpts = ( defined $PLAN_MODULE_OPTS ) ? $PLAN_MODULE_OPTS : "";
+my $planKb = ( defined $PLAN_KB ) ? $PLAN_KB : "";
 my $booth = 0;
 my $nameRegs = 0;
 my $leafWrappers = "";
@@ -181,6 +194,8 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-adder"){$adder = $_[$i+1];}
   if($_[$i] eq "--abc_keep_structure"){$abcKeep = 1;}
   if($_[$i] eq "--abc_balance"){$abcBalance = 1;}
+  if($_[$i] eq "-module_opts"){$moduleOpts = $_[$i+1];}
+  if($_[$i] eq "-kb"){$planKb = $_[$i+1];}
   if($_[$i] eq "--booth"){$booth = 1;}
   if($_[$i] eq "--name_registers"){$nameRegs = 1;}
   if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
@@ -593,6 +608,37 @@ $inner .= " --flatten-modules '$flattenModules'" if ( $flattenModules ne "" );
 $inner .= " --adder $adder" if ( $adder ne "" );
 $inner .= " --abc-keep-structure" if ( $abcKeep );
 $inner .= " --abc-balance" if ( $abcBalance );
+#<!-- per-module abc settings: the tile's own (-module_opts) first, then the
+#     plan KB's for every module whose structure has a plan there (plan_kb
+#     synth-opts, by fingerprint); yosys_bottom_up takes the first line that
+#     matches, so the tile's own win. -->
+if ( $moduleOpts ne "" && ! -f $moduleOpts ) { print "ERROR-PAR-HR_SYN : 082 : -module_opts $moduleOpts does not exist\n"; return; }
+my @optFiles = ( $moduleOpts ne "" ) ? ( $moduleOpts ) : ();
+if ( $planKb ne "" && $noRun != 1 ) {
+  if ( ! -d $planKb ) {
+    print "INFO-PAR-HR_SYN : 084 : plan KB $planKb does not exist yet: no synthesis plans applied\n";
+  } else {
+    my $kbOpts = "$outDir/module_opts.kb.tsv";
+    my $kbCmd = &dbfElectronToolCommand("python3", "python3 -I $beehome/3RDBIN/plan_kb synth-opts --kb $planKb --levels $levelDir --out $kbOpts", "$outDir/plan_kb.log");
+    system($kbCmd) if ( defined $kbCmd );
+    if ( -f $kbOpts ) {
+      my $n = grep { !/^#/ && /\S/ } do { open(my $kf, "<", $kbOpts); <$kf> };
+      print "INFO-PAR-HR_SYN : 085 : $n module(s) take a synthesis plan from the plan KB $planKb (see $outDir/plan_kb.log)\n";
+      push(@optFiles, $kbOpts) if ( $n > 0 );
+    } else {
+      print "WARN-PAR-HR_SYN : 086 : plan_kb did not answer; no synthesis plans applied (see $outDir/plan_kb.log)\n";
+    }
+  }
+}
+if ( @optFiles ) {
+  my $used = "$outDir/module_opts.used.tsv";
+  if ( open(my $uf, ">", $used) ) {
+    foreach my $f ( @optFiles ) { open(my $in, "<", $f); print $uf $_ while ( <$in> ); close($in); }
+    close($uf);
+  }
+  $inner .= " --module-opts $used";
+  print "INFO-PAR-HR_SYN : 083 : per-module abc target and script from " . join(" then ", @optFiles) . "\n";
+}
 $inner .= " --booth" if ( $booth );
 $inner .= " --name-registers" if ( $nameRegs );
 print "INFO-PAR-HR_SYN : 076 : adders built " . ( $adder ne "" ? $adder : "brent_kung" ) .

@@ -449,7 +449,7 @@ def prune_stubs(stub_file, il, dest):
 
 
 def run_one(job):
-    name, copies, src, args, children, absorb, stubs = job
+    name, copies, src, args, children, absorb, stubs, abc, mode = job
     dest = os.path.join(args.out, name + ".v")
     log = os.path.join(args.out, name + ".log")
     # `flatten` leaves the absorbed modules DEFINED but no longer instantiated,
@@ -475,7 +475,7 @@ def run_one(job):
     # plain mapping and the fallback is reported; sizing such a module is left
     # to the placement-aware step.
     fallback = False
-    limit = args.abc_timeout if args.abc_delay else 0
+    limit = args.abc_timeout if "-D " in abc else 0
     # One retry when abc itself crashes.  yosys-abc has died on an internal
     # assertion ("Vec_StrEntry ... failed", status 86) on a module that
     # mapped cleanly on each of 11 replays of the same command, 8 of them in
@@ -483,16 +483,15 @@ def run_one(job):
     # is retried -- anything else fails the same way twice.
     retried = False
     try:
-        p = subprocess.run([args.yosys, "-p", script(args.abc_opts)], capture_output=True,
+        p = subprocess.run([args.yosys, "-p", script(abc)], capture_output=True,
                            text=True, timeout=limit or None)
         if p.returncode != 0 and "ABC failed" in p.stdout + p.stderr:
             retried = True
-            p = subprocess.run([args.yosys, "-p", script(args.abc_opts)], capture_output=True,
+            p = subprocess.run([args.yosys, "-p", script(abc)], capture_output=True,
                                text=True, timeout=limit or None)
     except subprocess.TimeoutExpired:
         fallback = True
-        p = subprocess.run([args.yosys, "-p", script("-fast " if args.abc_fast
-                                                     else f'-script "{ABC_PLAIN_KEEP if args.abc_keep_structure else ABC_PLAIN}" ')],
+        p = subprocess.run([args.yosys, "-p", script(args.abc_for(0, mode))],
                            capture_output=True, text=True)
     with open(log, "w") as fh:
         if fallback:
@@ -595,6 +594,10 @@ def main():
     ap.add_argument("--abc-load", type=float, metavar="FF",
                     help="with --abc-delay: the load on each module's outputs, "
                          "in fF (default: four median input pins)")
+    ap.add_argument("--module-opts", metavar="FILE",
+                    help="per-module abc target and script: lines <module or glob> "
+                         "<TAB> <ps, or - for --abc-delay> <TAB> area|balance|keep; "
+                         "every other module keeps the run's own")
     ap.add_argument("--verify", action="store_true",
                     help="reload every netlist afterwards and let yosys walk "
                          "the hierarchy for the real cell count")
@@ -608,11 +611,30 @@ def main():
     args.aldffmap = os.path.abspath(os.path.join(args.out, "aldff_map.v"))
     with open(args.aldffmap, "w") as fh:
         fh.write(aldff_map())
-    def front(sc):
-        return sc.replace(ABC_AREA_FRONT, ABC_BALANCE_FRONT, 1) if args.abc_balance else sc
-    args.abc_opts = "-fast " if args.abc_fast else \
-        f'-script "{front(ABC_PLAIN_KEEP if args.abc_keep_structure else ABC_PLAIN)}" '
-    if args.abc_delay:
+    # PER-MODULE ABC -- --module-opts.  One target and one script for every
+    # module is what lets abc's area pass collapse a fast structure wherever a
+    # module meets its target alone: a 64-bit prefix adder whose inputs
+    # arrive 187 ps into a 312 ps cycle mapped as 17 gates, 245 ps, against
+    # -D 312.  A tighter -D alone only upsized the same chain (155 ps); with
+    # the area pass replaced it came back as a prefix adder -- balance 8
+    # gates, 88 ps, +31% cells; keep-structure 7 gates, 79 ps, +46%.  So a
+    # module can be given its own target and script: lines
+    #     <module or glob> <TAB> <ps or -> <TAB> area|balance|keep
+    # (ps "-": the run's own -D), first match wins; every other module keeps
+    # the run's.  hier_synthesis writes the table from Photon's per-module
+    # delay budgets.
+    mode0 = "keep" if args.abc_keep_structure else "balance" if args.abc_balance else "area"
+    mopts = []
+    if args.module_opts:
+        for ln in open(args.module_opts):
+            if not ln.strip() or ln.startswith("#"):
+                continue
+            f = ln.rstrip("\n").split("\t")
+            if len(f) < 3 or f[2] not in ("area", "balance", "keep") or not re.fullmatch(r"-|[0-9.]+", f[1]):
+                sys.exit(f"yosys_bottom_up: --module-opts: not <module> <ps or -> <area|balance|keep>: {ln.strip()}")
+            mopts.append((f[0], None if f[1] == "-" else float(f[1]), f[2]))
+    constr = None
+    if args.abc_delay or any(d for _, d, _ in mopts):
         driver, load = args.abc_driver, args.abc_load
         if driver is None or load is None:
             t0 = time.time()
@@ -625,15 +647,29 @@ def main():
         constr = os.path.abspath(os.path.join(args.out, "abc.constr"))
         with open(constr, "w") as fh:
             fh.write(f"set_driving_cell {driver}\nset_load {load:.4f}\n")
-        if not args.abc_fast:
-            script = front(ABC_SIZED_KEEP if args.abc_keep_structure else ABC_SIZED)
-            if args.abc_no_buffer:
-                script = script.replace("&put;buffer;", "&put;")
-            args.abc_opts = f'-script "{script}" '
-        args.abc_opts += f"-constr {constr} -D {args.abc_delay:g} "
+    def abc_for(delay, mode):
+        """abc's options for one module: its target (0: none) and script"""
+        if args.abc_fast:
+            return "-fast "
+        def front(sc):
+            return sc.replace(ABC_AREA_FRONT, ABC_BALANCE_FRONT, 1) if mode == "balance" else sc
+        if not delay:
+            return f'-script "{front(ABC_PLAIN_KEEP if mode == "keep" else ABC_PLAIN)}" '
+        script = front(ABC_SIZED_KEEP if mode == "keep" else ABC_SIZED)
+        if args.abc_no_buffer:
+            script = script.replace("&put;buffer;", "&put;")
+        return f'-script "{script}" -constr {constr} -D {delay:g} '
+    args.abc_for = abc_for
+    def module_abc(name):
+        for g, d, m in mopts:
+            if fnmatch.fnmatchcase(name, g):
+                return abc_for(d if d is not None else args.abc_delay, m), m, True
+        return abc_for(args.abc_delay, mode0), mode0, False
+    if args.abc_delay:
         print(f"yosys_bottom_up: {'sizing' if args.abc_no_buffer else 'buffering and sizing'} on: -D {args.abc_delay:g} ps, "
               f"inputs driven by {driver}, outputs loaded {load:.3f} fF"
               + ("; no fanout trees (--abc-no-buffer)" if args.abc_no_buffer else ""))
+    per_module = []
 
     levels = sorted(
         (int(d[3:]), os.path.join(args.levels, d))
@@ -706,7 +742,10 @@ def main():
             paths = done if kids is None else \
                 [done_by_name[k] for k in sorted(kids) if k in done_by_name]
             children = "\n".join(f"read_verilog -lib {p}" for p in paths)
-            jobs.append((n, c, il[n], args, children, absorb, job_stubs))
+            abc, mode, own = module_abc(n)
+            if own:
+                per_module.append(f"{n} ({mode}{', -D ' + abc.split('-D ')[1].strip() if '-D ' in abc else ''})")
+            jobs.append((n, c, il[n], args, children, absorb, job_stubs, abc, mode))
         t = time.time()
         rows = []
         with cf.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
@@ -741,6 +780,9 @@ def main():
                 return 1
         done += [r["dest"] for r in rows if r["rc"] == 0]
 
+    if mopts:
+        print(f"yosys_bottom_up: --module-opts: {len(per_module)} module(s) with their own target or script"
+              + (f": {', '.join(per_module)}" if per_module else " -- no line matched a module synthesised here"))
     print(f"\nyosys_bottom_up: {len(done)} netlist(s) in {args.out}, "
           f"{time.time() - grand:.1f}s total")
     if failed_any:

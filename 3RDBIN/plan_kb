@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""A tile's plans, kept for the runs after it: what plan mode decided, applied
+by run mode.
+
+  plan_kb synth-save --kb <dir> --levels <hs/lvl> --opts <module_opts.tsv>
+                     [--tile <name>] [--note <text>]
+  plan_kb synth-opts --kb <dir> --levels <hs/lvl> --out <module_opts.tsv>
+  plan_kb list --kb <dir>
+
+The knowledge base is a directory of the user's work area for a project,
+never this repository.  It holds ADOPTED plans -- what plan mode found and the
+user accepted -- not a record of every run.
+
+SYNTHESIS PLANS (<kb>/synth_plans.tsv) are per module STRUCTURE: abc's target
+and script for a module (yosys_bottom_up --module-opts: a target in ps, and
+area, balance or keep).  A module is its fingerprint, so a plan made on one
+tile applies wherever the same structure appears -- a library adder fixed on
+one tile is fixed on every tile that uses it.
+
+  synth-save   the tile's module_opts.tsv, each module (or glob) resolved to
+               its fingerprint in the tile's last synthesis (hs/lvl), saved
+               over any plan the KB had for that fingerprint
+  synth-opts   for a synthesis about to run: every module of its hs/lvl with
+               a plan in the KB, as module_opts lines (hier_synthesis -kb)
+
+THE FINGERPRINT is rtlil_bottom_up's normalised body (yosys_dedup's: local
+names canonical, child types stripped) with the `src` attributes left out,
+and the children's fingerprints folded in.  `src` holds the source path as
+seen from the run directory: the same RTL extracted by two runs of one tile,
+eight and eleven directories deep, hashed differently with it and the same
+without it.
+"""
+import argparse
+import datetime
+import fnmatch
+import hashlib
+import os
+import sys
+from importlib.machinery import SourceFileLoader
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+_yd = SourceFileLoader("yosys_dedup", os.path.join(HERE, "yosys_dedup")).load_module()
+SYNTH = "synth_plans.tsv"
+HEAD = "# fingerprint\tps\tmode\tmodule\ttile\tsaved\tnote\n"
+MODES = ("area", "balance", "keep")
+
+
+def design(levels):
+    """canonical module -> (its .il, its children)"""
+    il = {}
+    for d in os.listdir(levels):
+        if d.startswith("lvl") and d[3:].isdigit():
+            for f in os.listdir(os.path.join(levels, d)):
+                if f.endswith(".il"):
+                    il[f[:-3]] = os.path.join(levels, d, f)
+    kids = {}
+    with open(os.path.join(levels, "DESIGN.tsv")) as fh:
+        for ln in fh:
+            if ln.startswith("#"):
+                continue
+            f = ln.rstrip("\n").split("\t")
+            kids[f[0]] = [] if len(f) < 5 or f[4] == "-" else [c.split(":")[0] for c in f[4].split(",")]
+    return il, kids
+
+
+def fingerprints(levels):
+    il, kids = design(levels)
+    local, memo = {}, {}
+
+    def body(m):
+        if m not in local:
+            canon, b = _yd.Canon(), []
+            with open(il[m], errors="replace") as fh:
+                for line in fh:
+                    s = line.strip()
+                    if s.startswith(("attribute \\src", "module ")):
+                        continue
+                    n = _yd.normalise(line, canon)
+                    if n:
+                        b.append(n)
+            local[m] = hashlib.sha1("\n".join(b).encode()).hexdigest()
+        return local[m]
+
+    def fp(m, stack=()):
+        if m not in memo:
+            ks = sorted(fp(k, stack + (m,)) for k in kids.get(m, []) if k in il and k not in stack)
+            memo[m] = hashlib.sha1((body(m) + "|" + ",".join(ks)).encode()).hexdigest()[:16] if ks else body(m)[:16]
+        return memo[m]
+
+    return {m: fp(m) for m in il}
+
+
+def read_plans(kb):
+    path = os.path.join(kb, SYNTH)
+    plans = {}
+    if os.path.exists(path):
+        with open(path) as fh:
+            for ln in fh:
+                if ln.startswith("#") or not ln.strip():
+                    continue
+                f = ln.rstrip("\n").split("\t") + [""] * 7
+                plans[f[0]] = f[:7]
+    return plans
+
+
+def cmd_synth_save(a):
+    fps = fingerprints(a.levels)
+    opts = []
+    with open(a.opts) as fh:
+        for ln in fh:
+            if ln.startswith("#") or not ln.strip():
+                continue
+            f = ln.rstrip("\n").split("\t")
+            if len(f) < 3 or f[2] not in MODES:
+                sys.exit(f"plan_kb: {a.opts}: not <module> <ps or -> <area|balance|keep>: {ln.strip()}")
+            opts.append(f[:3])
+    os.makedirs(a.kb, exist_ok=True)
+    plans = read_plans(a.kb)
+    today = datetime.date.today().isoformat()
+    saved = 0
+    for g, ps, mode in opts:
+        hits = sorted(m for m in fps if fnmatch.fnmatchcase(m, g))
+        if not hits:
+            print(f"plan_kb: {g}: no module of this synthesis matches -- not saved")
+        for m in hits:
+            old = plans.get(fps[m])
+            plans[fps[m]] = [fps[m], ps, mode, m, a.tile or "", today, a.note or ""]
+            saved += 1
+            print(f"plan_kb: {m} ({fps[m]}): {mode}, {ps} ps" + (f" -- replaces {old[2]}, {old[1]} ps" if old else ""))
+    with open(os.path.join(a.kb, SYNTH) + ".new", "w") as fh:
+        fh.write(HEAD)
+        for k in sorted(plans):
+            fh.write("\t".join(plans[k]) + "\n")
+    os.replace(os.path.join(a.kb, SYNTH) + ".new", os.path.join(a.kb, SYNTH))
+    print(f"plan_kb: {saved} synthesis plan(s) saved; {len(plans)} in {os.path.join(a.kb, SYNTH)}")
+
+
+def cmd_synth_opts(a):
+    plans = read_plans(a.kb)
+    with open(a.out, "w") as fh:
+        fh.write("# from the plan KB " + a.kb + "\n")
+        n = 0
+        if plans:
+            for m, fp in sorted(fingerprints(a.levels).items()):
+                p = plans.get(fp)
+                if p:
+                    fh.write(f"{m}\t{p[1]}\t{p[2]}\n")
+                    n += 1
+                    print(f"plan_kb: {m}: {p[2]}, {p[1]} ps -- planned {p[5]}" + (f" on {p[4]}" if p[4] else "")
+                          + (f" ({p[6]})" if p[6] else ""))
+    print(f"plan_kb: {n} module(s) of this synthesis have a plan in {a.kb}")
+
+
+def cmd_list(a):
+    plans = read_plans(a.kb)
+    for p in sorted(plans.values(), key=lambda p: (p[4], p[3])):
+        print("\t".join(p))
+    print(f"plan_kb: {len(plans)} synthesis plan(s)")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sp = ap.add_subparsers(dest="cmd")
+    x = sp.add_parser("synth-save")
+    x.add_argument("--kb", required=True); x.add_argument("--levels", required=True); x.add_argument("--opts", required=True)
+    x.add_argument("--tile"); x.add_argument("--note"); x.set_defaults(f=cmd_synth_save)
+    x = sp.add_parser("synth-opts")
+    x.add_argument("--kb", required=True); x.add_argument("--levels", required=True); x.add_argument("--out", required=True)
+    x.set_defaults(f=cmd_synth_opts)
+    x = sp.add_parser("list")
+    x.add_argument("--kb", required=True); x.set_defaults(f=cmd_list)
+    a = ap.parse_args()
+    if not getattr(a, "f", None):
+        ap.print_help(); return 1
+    return a.f(a) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
