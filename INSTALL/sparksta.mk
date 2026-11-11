@@ -274,6 +274,30 @@ define SPARKSTA_REPEAT
 	 test -s "$(5).eco.tsv" || { echo "sparksta: no $(5).eco.tsv, see $(5).repeat.log"; exit 1; }; fi
 endef
 
+# Photon sizes a netlist before placement (size.sca sizeNetlist): sizing and
+# Vt rounds on an unplaced graph, so every load is pin capacitance and no
+# wire -- what synthesis' per-module abc cannot see across module
+# boundaries.  Writes <prefix>.resize.tsv for apply_advice -resize --hier and
+# <prefix>.size_rounds.txt.  Same cell table, Vts, SDC and held pins as
+# SPARKSTA_REPEAT; SPARKSTA_SIZE_ROUNDS rounds (default 5).
+# $(call SPARKSTA_SIZE,synth_sgraph,store,corner,period_ns,out_prefix)
+define SPARKSTA_SIZE
+	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to size $(1)"; exit 1; fi; \
+	 test -f "$(1)" || { echo "sparksta: $(1) does not exist -- run the synthesis first"; exit 1; }; \
+	 test -d "$(2)/arcs" || { echo "sparksta: no arc store at $(2)"; exit 1; }; \
+	 test -n "$(SPARKSTA_CELLS)" -a -f "$(SPARKSTA_CELLS)" || { echo "sparksta: sizing needs SPARKSTA_CELLS=<cell table> (got '$(SPARKSTA_CELLS)')"; exit 1; }; \
+	 grep -q "^def sizeNetlist" $(PYSPARK)/scala/size.sca || { echo "sparksta: $(PYSPARK) predates sizeNetlist"; exit 1; }; \
+	 mkdir -p $(dir $(5)); rm -f $(5).resize.tsv; \
+	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca > $(5).size.sca; \
+	 echo 'sizeNetlist("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", rounds = $(or $(SPARKSTA_SIZE_ROUNDS),5)$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).size.sca; \
+	 echo 'System.exit(0)' >> $(5).size.sca
+	@$(SPARKSTA_EXEC) \
+	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
+	    --jars $(PYSPARK)/scala/build/photon.jar -i $(abspath $(5)).size.sca < /dev/null" > $(5).size.log 2>&1; \
+	 tr '\r' '\n' < $(5).size.log | grep -E '^(sizeNetlist|sizeBound|  round|  best|  Vt mix|photon: read)|rror|xception'; \
+	 test -f "$(5).resize.tsv" || { echo "sparksta: no $(5).resize.tsv, see $(5).size.log"; exit 1; }
+endef
+
 # $(call SPARKSTA_STORE_FROM,list_of_liberty_paths_file,store_dir)
 define SPARKSTA_STORE_FROM
 	@if [ -z "$(PYSPARK)" ]; then echo "sparksta: set PYSPARK=<pyspark_cad checkout> to build $(2)"; exit 0; fi; \

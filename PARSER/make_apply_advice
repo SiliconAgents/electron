@@ -24,6 +24,16 @@
 #     rebuild the flat database from the definitions and undo them.  Run it
 #     on the placed design, then legalize, write_def and write_sgraph.
 #
+#     --hier (resizes only) is the exception, for a netlist that is not placed
+#     yet: Photon sizing a synthesis netlist (the kit's make synth_opt).  Each
+#     resize goes into the module DEFINITION and is replayed in the flat
+#     database under every path of that module, as repair_drive does, so
+#     write_verilog --hier writes it.  A definition is shared by every instance
+#     of its module: a copy Photon did not touch takes the change too, and
+#     where copies asked for different cells the largest one is taken -- the
+#     copy that needed the most drive keeps it, the others carry a little
+#     extra input load.  Both are counted.
+#
 #     A repeated net (-nets) becomes a buffer tree.  Photon times a long net as
 #     ideal repeaters -- a chain, one every segment, no detours -- which says
 #     how many and how far apart but not where: a 380-pin net is not a chain.
@@ -45,6 +55,7 @@ my $netsFile = "";
 my $report = "";
 my $dry = 0;
 my $force = 0;
+my $hier = 0;
 my $repCell = "";
 my $maxFan = 16;
 
@@ -62,8 +73,11 @@ if ( $noOfArguments < 1 || $_[0] eq '-h' || $_[0] eq '-help' ) {
   print "        -resize     inst / from / to cell changes (resize, Vt swap)\n";
   print "        --force     apply a resize even when the instance's cell is no longer\n";
   print "                    the advice's 'from'\n";
+  print "        --hier      resizes into the module definitions, replayed under every\n";
+  print "                    instance of the module (shared modules take the largest cell\n";
+  print "                    asked for); for an unplaced netlist, then write_verilog --hier\n";
   print "        Then: legalize_flat --incremental, write_def, write_sgraph.\n";
-  print "        Flat only: the module definitions are not changed.\n";
+  print "        Flat only, without --hier: the module definitions are not changed.\n";
   return;
 }
 for(my $i = 0; $i < $noOfArguments; $i++){
@@ -72,8 +86,17 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-report"){$report = $_[$i+1];}
   if($_[$i] eq "--dry_run"){$dry = 1;}
   if($_[$i] eq "--force"){$force = 1;}
+  if($_[$i] eq "--hier"){$hier = 1;}
   if($_[$i] eq "-repeater"){$repCell = $_[$i+1];}
   if($_[$i] eq "-max_fanout"){$maxFan = $_[$i+1];}
+}
+if ( $hier && ( $netsFile ne "" || $resize eq "" ) ) {
+  print "ERROR-PAR-AP_ADV : 013 : --hier applies resizes only; give -resize and not -nets\n";
+  return;
+}
+if ( $hier && !exists $MODULE_ALREADY{$TOP_MODULE} ) {
+  print "ERROR-PAR-AP_ADV : 014 : --hier needs the hierarchical netlist; read_verilog and elaborate first\n";
+  return;
 }
 if ( $maxFan < 2 ) {
   print "ERROR-PAR-AP_ADV : 012 : -max_fanout must be at least 2\n";
@@ -149,6 +172,24 @@ if ( $resize ne "" ) {
     return $pinsOf{$c};
   };
   my $area = sub { my ($c) = @_; my @s = $PLDB{$c}->dbMdbGetSize; return $s[0] * $s[1]; };
+  #<!-- --hier: where each module is instantiated, as repair_drive walks it,
+  #     and what each (definition, leaf) was asked to become -->
+  my (%pathMod, %modPaths, %want) = ();
+  if ( $hier ) {
+    my $walk;
+    $walk = sub {
+      my ($m, $p) = @_;
+      $pathMod{$p} = $m;
+      push(@{$modPaths{$m}}, $p);
+      foreach my $h ( sort $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+        my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($h);
+        next unless ( exists $MODULE_ALREADY{$c} );
+        next if ( $MODULE_ALREADY{$c}->dbVNOMGetClass == 11 );
+        $walk->($c, ( $p eq "" ? $h : "$p/$h" ));
+      }
+    };
+    $walk->($TOP_MODULE, "");
+  }
   while ( my $l = <$rf> ) {
     chomp($l);
     next if ( $l =~ /^\s*(#|$)/ );
@@ -164,12 +205,72 @@ if ( $resize ne "" ) {
     my $have = $pinSet->($to);
     my @missing = grep { !exists $have->{$_} } keys %{$COMP_ALREADY{$inst} || {}};
     if ( @missing ) { $skip{"a connected pin is not on the new cell"}++; next; }
+    if ( $hier ) {
+      my ($p, $lf) = ( $inst =~ m{^(.*)/([^/]+)$} ) ? ($1, $2) : ("", $inst);
+      if ( !exists $pathMod{$p} || !$MODULE_ALREADY{$pathMod{$p}}->dbVNOMHasLeafInst($lf) ) {
+        $skip{"instance not in a module definition the hierarchy walk reaches"}++; next;
+      }
+      $want{$pathMod{$p}}{$lf}{$to}++;
+      next;
+    }
     $dArea += $area->($to) - ( exists $PLDB{$cur} ? $area->($cur) : 0 );
     $CADB{$inst}->dbCadbSetCellref($to) unless ( $dry );
     $nApplied++; $trans{$tag}++;
     print $fh "resize\t$inst\t$cur\t$to\n" if ( $fh );
   }
   close($rf);
+  #<!-- --hier: one cell per (definition, leaf) -- the largest asked for,
+  #     then the most asked for, then the name -- written into the conn line
+  #     and the leaf record, and replayed under every path of the module -->
+  my ($nDefs, $nLeaves, $nAsked, $nCopies, $nConflict) = (0, 0, 0, 0, 0);
+  foreach my $m ( sort keys %want ) {
+    $nDefs++;
+    my $mod = $MODULE_ALREADY{$m};
+    my @paths = @{$modPaths{$m}};
+    my $marea = $mod->dbVNOMGetArea;
+    my @lines = ();
+    foreach my $line ( $mod->dbVNOMGetConn ) {
+      my ($cell, $lf) = ( split(/\s+/, $line) )[0, 1];
+      if ( defined $lf && exists $want{$m}{$lf} ) {
+        my $w = $want{$m}{$lf};
+        my ($to) = sort { $area->($b) <=> $area->($a) || $w->{$b} <=> $w->{$a} || $a cmp $b } keys %$w;
+        my $asked = 0; $asked += $_ foreach ( values %$w );
+        $nConflict++ if ( keys(%$w) > 1 );
+        $nAsked += $asked;
+        $nCopies += @paths - $asked;
+        $nLeaves++;
+        my $da = $area->($to) - ( exists $PLDB{$cell} ? $area->($cell) : 0 );
+        $marea += $da;
+        $dArea += $da * @paths;
+        $nApplied += @paths;
+        print $fh "resize\t$m\t$lf\t$cell\t$to\tx" . scalar(@paths) . "\n" if ( $fh );
+        unless ( $dry ) {
+          $line =~ s/^\s*\Q$cell\E\b/$to/;
+          $mod->dbVNOMSetLeafInstCell($lf, $to);
+          foreach my $pp ( @paths ) {
+            my $fi = ( $pp eq "" ) ? $lf : "$pp/$lf";
+            $CADB{$fi}->dbCadbSetCellref($to) if ( exists $CADB{$fi} );
+          }
+        }
+      }
+      push(@lines, $line);
+    }
+    unless ( $dry ) {
+      $mod->{conn} = \@lines;
+      $mod->dbVNOMSetArea($marea);
+    }
+  }
+  if ( $hier ) {
+    unless ( $dry ) {
+      foreach my $m ( keys %MODULE_ALREADY ) {
+        $MODULE_ALREADY{$m}->dbVNOMSetLeafArea(0);
+        $MODULE_ALREADY{$m}->dbVNOMSetHierArea(0);
+      }
+    }
+    printf("INFO-PAR-AP_ADV : 015 : %s%d instance(s) changed from %d resize(s) asked: %d leaf cell(s) in %d module definition(s); " .
+           "%d copy(ies) of a shared module took a change not asked for, %d leaf cell(s) asked for different cells took the largest\n",
+           ( $dry ? "dry run: " : "" ), $nApplied, $nAsked, $nLeaves, $nDefs, $nCopies, $nConflict);
+  }
   printf("INFO-PAR-AP_ADV : 005 : %s%d resize(s) applied from %s; cell area %+.2f um2%s\n",
          ( $dry ? "dry run: " : "" ), $nApplied, $resize, $dArea,
          ( %trans ? "; " . join(", ", map { "$trans{$_} $_" } sort { $trans{$b} <=> $trans{$a} } keys %trans) : "" ));
@@ -180,7 +281,7 @@ if ( $resize ne "" ) {
 
 close($fh) if ( defined $fh );
 print "INFO-PAR-AP_ADV : 009 : flat database only -- the module definitions are unchanged; " .
-      "run legalize_flat --incremental, write_def and write_sgraph next, and no hier2flat or elaborate after\n" unless ( $dry );
+      "run legalize_flat --incremental, write_def and write_sgraph next, and no hier2flat or elaborate after\n" unless ( $dry || $hier );
 printf("INFO-PAR-AP_ADV : 010 : apply_advice took %d s\n", time() - $t0);
 }# sub apply_advice
 #------------------------------------------------------------------------------------------#
