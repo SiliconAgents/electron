@@ -124,6 +124,9 @@ SPARKSTA_CELLS_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN
 SPARKSTA_WIRE_MODEL_OF = $(shell ELECTRON_HOME=$(ELECTRON) python3 $(ELECTRON)/3RDBIN/arc_store --config $(1) --foundry $(2) --node $(3) --wire-model)
 
 # $(call SPARKSTA,sgraph,store,corner,period_ns,out.tsv)
+# Photon writes its tables gzipped: out.tsv lands as out.tsv.gz, and so do
+# the .resize.tsv, .nets.tsv and the other tables beside it (PHOTON_TSV_GZ=0 in
+# the environment writes them plain).  Logs keep the name asked for: out.tsv.log.
 # period 0 means arrival only: no required time, no slack.
 # SPARKSTA_DEPTH=1 adds the logic-depth report (photon depth=): every
 # endpoint's worst path counted in levels of logic, buffers and inverters
@@ -136,12 +139,12 @@ define SPARKSTA
 	 test -f "$(1)" || { echo "sparksta: $(1) does not exist -- run the synthesis or placement first"; exit 1; }; \
 	 test -d "$(2)/arcs" || { echo "sparksta: no arc store at $(2)"; exit 1; }; \
 	 test -f "$(PYSPARK)/scala/build/photon.jar" || { echo "sparksta: no $(PYSPARK)/scala/build/photon.jar -- build it there first"; exit 1; }; \
-	 mkdir -p $(dir $(5)); rm -f $(5); \
+	 mkdir -p $(dir $(5)); rm -f $(5) $(5).gz; \
 	 cat $(PYSPARK)/scala/photon.sca > $(5).sca; \
 	 echo 'photon("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", period=$(4)$(if $(SPARKSTA_SPEF),$(_sparksta_comma) spef="$(abspath $(SPARKSTA_SPEF))")$(if $(word 2,$(SPARKSTA_WIRE_RC)),$(_sparksta_comma) wireResPerUm=$(word 1,$(SPARKSTA_WIRE_RC))$(_sparksta_comma) wireCapPerUm=$(word 2,$(SPARKSTA_WIRE_RC)))$(if $(SPARKSTA_WIRE_MODEL),$(_sparksta_comma) wireModel="$(abspath $(SPARKSTA_WIRE_MODEL))")$(if $(SPARKSTA_DEPTH),$(_sparksta_comma) depth="$(abspath $(patsubst %.seg.tsv,%,$(5)))"$(if $(SPARKSTA_CELLS),$(_sparksta_comma) depthCells="$(abspath $(SPARKSTA_CELLS))")$(_sparksta_comma) depthBudget=$(or $(SPARKSTA_DEPTH_BUDGET),0))$(if $(filter 0,$(SPARKSTA_STICKY_REPEAT)),$(_sparksta_comma) stickyRepeat=false)$(if $(SPARKSTA_CLOCK),$(_sparksta_comma) clock="$(if $(filter ideal propagated,$(SPARKSTA_CLOCK)),$(SPARKSTA_CLOCK),$(abspath $(SPARKSTA_CLOCK)))")$(if $(SPARKSTA_CLOCK_LATE),$(_sparksta_comma) clockLate=$(SPARKSTA_CLOCK_LATE))$(if $(SPARKSTA_CLOCK_EARLY),$(_sparksta_comma) clockEarly=$(SPARKSTA_CLOCK_EARLY))$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc=SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases="$(strip $(SPARKSTA_CASE))"))' >> $(5).sca; \
 	 echo 'System.exit(0)' >> $(5).sca
 	@if [ -n "$(PYSPARK)" ]; then $(call SPARKSTA_SPARK,$(abspath $(5)).sca) | tee $(5).log | grep -E '^photon|^  |rror|xception'; \
-	 test -s "$(5)" || { echo "sparksta: no $(5), see $(5).log"; exit 1; }; fi
+	 test -s "$(5)" -o -s "$(5).gz" || { echo "sparksta: no $(5)[.gz], see $(5).log"; exit 1; }; fi
 endef
 
 # Photon's optimisation advisor on a PLACED sgraph: what long wires cost and
@@ -288,7 +291,7 @@ define SPARKSTA_SIZE
 	 test -d "$(2)/arcs" || { echo "sparksta: no arc store at $(2)"; exit 1; }; \
 	 test -n "$(SPARKSTA_CELLS)" -a -f "$(SPARKSTA_CELLS)" || { echo "sparksta: sizing needs SPARKSTA_CELLS=<cell table> (got '$(SPARKSTA_CELLS)')"; exit 1; }; \
 	 grep -q "^def sizeNetlist" $(PYSPARK)/scala/size.sca || { echo "sparksta: $(PYSPARK) predates sizeNetlist"; exit 1; }; \
-	 mkdir -p $(dir $(5)); rm -f $(5).resize.tsv; \
+	 mkdir -p $(dir $(5)); rm -f $(5).resize.tsv $(5).resize.tsv.gz; \
 	 cat $(PYSPARK)/scala/photon.sca $(PYSPARK)/scala/wireplan.sca $(PYSPARK)/scala/size.sca > $(5).size.sca; \
 	 echo 'sizeNetlist("$(abspath $(1))", "$(2)", "$(3)", "$(abspath $(5))", $(4), "$(abspath $(SPARKSTA_CELLS))", vts = "$(SPARKSTA_VTS)", seqVts = "$(SPARKSTA_SEQ_VTS)", vtCap = "$(SPARKSTA_VT_CAP)", rounds = $(or $(SPARKSTA_SIZE_ROUNDS),5), budget = $(or $(SPARKSTA_LOAD_BUDGET),0.5), maxFan = $(or $(SPARKSTA_MAX_FANOUT),16)$(if $(SPARKSTA_SDC),$(_sparksta_comma) sdc = SdcParser.parse("$(abspath $(SPARKSTA_SDC))"))$(if $(strip $(SPARKSTA_CASE)),$(_sparksta_comma) cases = "$(strip $(SPARKSTA_CASE))"))' >> $(5).size.sca; \
 	 echo 'System.exit(0)' >> $(5).size.sca
@@ -296,7 +299,7 @@ define SPARKSTA_SIZE
 	   "$(_sparksta_env)spark-shell --master '$(SPARKSTA_MASTER)' --driver-memory $(SPARKSTA_ADVISE_MEM) --conf spark.ui.showConsoleProgress=false \
 	    --jars $(PYSPARK)/scala/build/photon.jar -i $(abspath $(5)).size.sca < /dev/null" > $(5).size.log 2>&1; \
 	 tr '\r' '\n' < $(5).size.log | grep -E '^(sizeNetlist|sizeBound|  round|  best|  Vt mix|photon: read)|rror|xception'; \
-	 test -f "$(5).resize.tsv" || { echo "sparksta: no $(5).resize.tsv, see $(5).size.log"; exit 1; }
+	 test -f "$(5).resize.tsv" -o -f "$(5).resize.tsv.gz" || { echo "sparksta: no $(5).resize.tsv[.gz], see $(5).size.log"; exit 1; }
 endef
 
 # $(call SPARKSTA_STORE_FROM,list_of_liberty_paths_file,store_dir)

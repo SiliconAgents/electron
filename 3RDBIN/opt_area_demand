@@ -30,11 +30,14 @@ are the parent's own -- "(top)" for the die.
 import argparse
 import collections
 import gzip
+import os
 import re
 import sys
 
 
 def opener(p):
+    if not os.path.exists(p) and os.path.exists(p + '.gz'):
+        p += '.gz'                      # Photon writes its tables gzipped
     return gzip.open(p, 'rt') if p.endswith('.gz') else open(p)
 
 
@@ -116,7 +119,7 @@ def main():
     sized = collections.Counter()
     n_sized = 0
     if a.resize:
-        for l in open(a.resize):
+        for l in opener(a.resize):
             f = l.rstrip('\n').split('\t')
             if l.startswith('inst\t') or len(f) < 3:
                 continue
@@ -129,7 +132,7 @@ def main():
     bufs = collections.Counter()
     n_bufs = collections.Counter()
     if a.eco:
-        for l in open(a.eco):
+        for l in opener(a.eco):
             f = l.rstrip('\n').split('\t')
             if f[0] != 'BUF' or len(f) < 5:
                 continue

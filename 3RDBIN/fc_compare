@@ -34,6 +34,7 @@ import argparse
 import csv
 import gzip
 import math
+import os
 import re
 import statistics as st
 import sys
@@ -138,7 +139,9 @@ def read_fc(path, scenario, group):
 def read_photon(path):
     """Photon's endpoint table: inst/pin -> (slack, setup, required), ns."""
     m = {}
-    with open(path) as f:
+    if not os.path.exists(path) and os.path.exists(path + ".gz"):
+        path += ".gz"                   # Photon writes its tables gzipped
+    with (gzip.open(path, "rt") if path.endswith(".gz") else open(path)) as f:
         for r in csv.DictReader(f, delimiter="\t"):
             if r["startpoint_pin"] == "PIN" or r["endpoint_pin"] == "PIN":
                 continue

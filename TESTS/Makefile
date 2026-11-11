@@ -592,7 +592,7 @@ nangate_advise: nangate_store $(NG_SIZING)
 	$(call SPARKSTA_ADVISE,workarea/vedic_16x16.place.sgraph,$(NG_STORE),slow,$(NG_ADVISE_PERIOD),workarea/sta/vedic_16x16.advise)
 	@if [ -n "$(PYSPARK)" ]; then \
 	  for f in summary.txt nets.tsv repeaters.tsv size_rounds.txt resize.tsv; do \
-	    test -s workarea/sta/vedic_16x16.advise.$$f || { echo "nangate_advise: no vedic_16x16.advise.$$f"; exit 1; }; done; \
+	    test -s workarea/sta/vedic_16x16.advise.$$f -o -s workarea/sta/vedic_16x16.advise.$$f.gz || { echo "nangate_advise: no vedic_16x16.advise.$$f[.gz]"; exit 1; }; done; \
 	  [ "$$(grep -cE '^  (no wires|wires, unbuffered|wires, ideal repeaters) ' workarea/sta/vedic_16x16.advise.summary.txt)" -eq 3 ] || { echo "nangate_advise: summary lacks its three timings"; exit 1; }; \
 	  grep -q "^  best:" workarea/sta/vedic_16x16.advise.size_rounds.txt || { echo "nangate_advise: sizing did not finish"; exit 1; }; \
 	  echo "nangate_advise: wire plan and sizing advice written"; fi
@@ -606,7 +606,7 @@ nangate_advise: nangate_store $(NG_SIZING)
 # advisor predicted (the few cells legalization moves account for the rest).
 nangate_apply: nangate_advise
 	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../apply/apply.tcl > apply.log 2>&1
-	n=$$(grep -vc '^inst' workarea/sta/vedic_16x16.advise.resize.tsv); \
+	n=$$(zcat -f $$(ls workarea/sta/vedic_16x16.advise.resize.tsv workarea/sta/vedic_16x16.advise.resize.tsv.gz 2>/dev/null | head -1) | grep -vc '^inst'); \
 	  grep -q "AP_ADV : 005 : $$n resize(s) applied" workarea/apply.log || { echo "nangate_apply: not every one of the $$n advised resize(s) applied, see workarea/apply.log"; exit 1; }
 	[ "$$(grep -c '^NETS' workarea/vedic_16x16.applied.sgraph)" -eq "$$(grep -c '^NETS' workarea/vedic_16x16.place.sgraph)" ] || { echo "nangate_apply: the applied graph's edges differ from the placed one"; exit 1; }
 	@if [ -n "$(PYSPARK)" ]; then \

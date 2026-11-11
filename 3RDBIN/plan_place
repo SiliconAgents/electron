@@ -181,7 +181,9 @@ def blame(d, s, tag):
         b = re.search(r"wires cost .*?TNS (-?[\d.]+): placement", l)
         if b: m["tns_placement"] = float(b.group(1))
     owners = []
-    for l in open(f"{d}/blame/{tag}.owners.tsv").read().splitlines()[1:]:
+    ow = f"{d}/blame/{tag}.owners.tsv"
+    ow = ow if os.path.exists(ow) or not os.path.exists(ow + ".gz") else ow + ".gz"   # Photon gzips its tables
+    for l in (gzip.open(ow, "rt") if ow.endswith(".gz") else open(ow)).read().splitlines()[1:]:
         f = l.split("\t")
         owners.append({"charge": float(f[0]), "paths": int(f[1]), "kind": f[2],
                        "module_path": "" if f[3] == "(top)" else f[3], "a": f[4], "b": f[5]})

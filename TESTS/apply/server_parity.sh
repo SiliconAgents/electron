@@ -48,7 +48,7 @@ print("server_parity: STA", "matches" if ok else "DIFFERS"); sys.exit(0 if ok el
 PY
 w1=$(grep -oE "^WNS -?[0-9.]+ +TNS -?[0-9.]+" $S/queries.txt | sed -n 2p); w0=$(grep -oE "^WNS -?[0-9.]+ +TNS -?[0-9.]+" $S/queries.txt | sed -n 1p)
 [ "$w0" = "$w1" ] && echo "server_parity: whatif_repeat undone cleanly ($w0)" || { echo "server_parity: timing after an undone whatif_repeat is $w1, was $w0"; exit 1; }
-diff <(awk -F'\t' 'NR>1 {print $1"\t"$2"\t"$3}' $S/batch.resize.tsv | sort) <(awk -F'\t' '$1=="RESIZE" {print $2"\t"$3"\t"$4}' $S/server.eco | sort) > $S/resize.diff \
+diff <(zcat -f $(ls $S/batch.resize.tsv $S/batch.resize.tsv.gz 2>/dev/null | head -1) | awk -F'\t' 'NR>1 {print $1"\t"$2"\t"$3}' | sort) <(awk -F'\t' '$1=="RESIZE" {print $2"\t"$3"\t"$4}' $S/server.eco | sort) > $S/resize.diff \
   && echo "server_parity: sizing: server and batch chose the same $(grep -c '^RESIZE' $S/server.eco) resize(s)" \
   || { echo "server_parity: sizing differs, $(wc -l < $S/resize.diff) line(s), see $S/resize.diff"; exit 1; }
 grep "best:" $S/batch.size_rounds.txt; grep -E "^\s+now:" $S/queries.txt
