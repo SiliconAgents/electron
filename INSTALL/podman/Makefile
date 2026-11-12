@@ -55,6 +55,6 @@ artemis:
 # without being told where it is.
 sparkpp:
 	    podman image exists localhost/pysparkplusbuild || $(MAKE) artemis
-	    podman build --net=host --build-arg ELECTRON_SRC=$(ELECTRON_SRC) -v $(PROJ_DATA_DIR):$(PROJ_DATA_DIR) -t pysparkpp -f ../pysparkppContainerFile
+	    podman build --net=host --build-arg ELECTRON_SRC=$(ELECTRON_SRC) -v $(ELECTRON_SRC):$(ELECTRON_SRC) -v $(PROJ_DATA_DIR):$(PROJ_DATA_DIR) -t pysparkpp -f ../pysparkppContainerFile
 		podman save -o oci-pysparkpp.tar --format oci-archive localhost/pysparkpp
 		apptainer build --force $(SIF_DIR)/pysparkpp.sif docker-archive://oci-pysparkpp.tar

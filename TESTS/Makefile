@@ -2,8 +2,8 @@ ELECTRON = $(abspath ..)
 include $(ELECTRON)/INSTALL/sparksta.mk
 
 # pysparkpp is pysparkplusbuild plus qrouter.  Build it with
-#   cd $(ELECTRON)/INSTALL/podman && make qrouter
-PPSIF    = $(ELECTRON)/INSTALL/podman/pysparkpp.sif
+#   cd $(ELECTRON)/INSTALL/podman && make sparkpp
+PPSIF    ?= $(if $(PROJ_DATA_DIR),$(PROJ_DATA_DIR)/pysparkpp.sif,$(ELECTRON)/INSTALL/podman/pysparkpp.sif)
 
 clean:
 	rm -rf placement.*
@@ -531,7 +531,9 @@ nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped n
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
 app:
-	apptainer shell --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /home/$$USER:/home/$$USER $(PPSIF)
+	apptainer shell $(SPARKSTA_BINDS) --bind /home/$$USER:/home/$$USER \
+	  --env ELECTRON_HOME=$(ELECTRON_HOME) --env PYSPARK_HOME=$(PYSPARK_HOME) \
+	  $(PPSIF)
 
 #-----------------------------------------------------------------------------
 # Timing graphs.  Synthesis writes one (nangate_rtl_hier), and so does every

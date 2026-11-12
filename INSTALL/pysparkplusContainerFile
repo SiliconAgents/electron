@@ -49,8 +49,7 @@ RUN pip install matplotlib
 # networkx does not fail at startup, it fails partway through a run.
 RUN pip install numpy scipy networkx pandas psutil openpyxl mysql-connector-python
 
-ENV ARTEMIS_HOME=/proj_pd/user_dev/rsrivastava/artemis
-ENV PATH=$ARTEMIS_HOME:$PATH
-ENV ELECTRON_HOME=/proj_pd/user_dev/rsrivastava/electron
+ARG ELECTRON_SRC
+ENV ELECTRON_HOME=${ELECTRON_SRC}
 ENV PATH=$ELECTRON_HOME:$PATH
 ENV LANG=C.UTF-8
