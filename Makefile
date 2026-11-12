@@ -14,7 +14,7 @@
 # and a failure there usually means nothing at all.
 ################################################################################
 ELECTRON  := $(abspath .)
-PPSIF     := $(ELECTRON)/INSTALL/podman/pysparkpp.sif
+PPSIF     := $(if $(PROJ_DATA_DIR),$(PROJ_DATA_DIR)/pysparkpp.sif,$(ELECTRON)/INSTALL/podman/pysparkpp.sif)
 
 # bash -c, NOT bash -lc: a login shell sources the host ~/.bashrc through the
 # bound home directory and puts a miniconda python3 ahead of the container's.

@@ -21,7 +21,7 @@
 # SPARKSTA_STORE_OF reads where a library config says it is.
 #-----------------------------------------------------------------------------
 PYSPARK        ?=
-SPARKSTA_SIF   ?= $(ELECTRON)/INSTALL/podman/pysparkpp.sif
+SPARKSTA_SIF   ?= $(if $(PROJ_DATA_DIR),$(PROJ_DATA_DIR)/pysparkpp.sif,$(ELECTRON)/INSTALL/podman/pysparkpp.sif)
 SPARKSTA_BINDS ?= --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /tmp:/tmp
 SPARKSTA_MASTER?= local[*]
 SPARKSTA_MEM   ?= 32g
