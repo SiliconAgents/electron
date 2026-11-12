@@ -38,23 +38,25 @@ RUN apt-get update && \
     make install && \
     cd && \
     git clone --recursive https://github.com/The-OpenROAD-Project/OpenSTA.git && \
-    cd OpenSTA && \
-    mkdir build && cd build && \
-    cmake .. && \
-    make -j$(nproc) && \
 
 
     rm -rf /var/lib/apt/lists/*
     
 
+#    cd OpenSTA && \
+#    mkdir build && cd build && \
+#    cmake .. && \
+#    make -j$(nproc) && \
+#
 # Copy application files into the image
 # COPY . /app
 
 # Set the working directory
 # WORKDIR /app
 #
-ENV ELECTRON_HOME=/proj_pd/user_dev/rsrivastava/potato
-ENV PATH=$ELECTRON_HOME:$PATH
+ARG ELECTRON_SRC
+ENV ELECTRON_HOME=$ELECTRON_SRC
+ENV PATH=$ELECTRON_SRC:$PATH
 
 # Define the command to run when the container starts
 # CMD /home/rsrivastava/potato/proton
