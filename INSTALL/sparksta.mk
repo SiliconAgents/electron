@@ -20,9 +20,18 @@
 # files into a directory of your choosing (a Nangate store takes seconds), and
 # SPARKSTA_STORE_OF reads where a library config says it is.
 #-----------------------------------------------------------------------------
-PYSPARK        ?=
-SPARKSTA_SIF   ?= $(ELECTRON)/INSTALL/podman/pysparkpp.sif
-SPARKSTA_BINDS ?= --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /tmp:/tmp
+PYSPARK        ?= $(PYSPARK_HOME)
+SPARKSTA_SIF   ?= $(if $(PROJ_DATA_DIR),$(PROJ_DATA_DIR)/pysparkpp.sif,$(ELECTRON)/INSTALL/podman/pysparkpp.sif)
+# Bind the two source trees, home, and /tmp.  /tech and /proj are present on
+# some systems; include them only when they exist so the same line works
+# everywhere.  Override SPARKSTA_BINDS in your Makefile for extra mounts.
+SPARKSTA_BINDS ?= \
+  $(if $(ELECTRON_HOME),--bind $(ELECTRON_HOME):$(ELECTRON_HOME)) \
+  $(if $(PYSPARK_HOME),--bind $(PYSPARK_HOME):$(PYSPARK_HOME)) \
+  $(if $(wildcard /proj_pd),--bind /proj_pd:/proj_pd) \
+  $(if $(wildcard /tech),--bind /tech:/tech) \
+  $(if $(wildcard /proj),--bind /proj:/proj) \
+  --bind /tmp:/tmp
 SPARKSTA_MASTER?= local[*]
 SPARKSTA_MEM   ?= 32g
 # Wire parasitics for the run, a SPEF.  Empty: a placed sgraph is timed with

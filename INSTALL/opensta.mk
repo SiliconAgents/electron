@@ -19,7 +19,7 @@
 #-----------------------------------------------------------------------------
 OPENSTA_BIN     ?= /root/OpenSTA/build/sta
 OPENSTA_THREADS ?= 4
-OPENSTA_SIF     ?= $(ELECTRON)/INSTALL/podman/pysparkpp.sif
+OPENSTA_SIF     ?= $(if $(PROJ_DATA_DIR),$(PROJ_DATA_DIR)/pysparkpp.sif,$(ELECTRON)/INSTALL/podman/pysparkpp.sif)
 OPENSTA_BINDS   ?= --bind /tech:/tech --bind /proj_pd:/proj_pd --bind /proj:/proj --bind /tmp:/tmp
 OPENSTA_EXEC    ?= $(if $(APPTAINER_CONTAINER),bash -c,apptainer exec $(OPENSTA_BINDS) $(OPENSTA_SIF) bash -c)
 

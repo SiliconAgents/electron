@@ -35,7 +35,8 @@ import os
 import subprocess
 import sys
 
-DEFAULT_PLACER = "/proj_pd/user_dev/rsrivastava/pyspark_cad/python/graph_embed_place.py"
+_pyspark = os.environ.get("PYSPARK_HOME", "")
+DEFAULT_PLACER = os.path.join(_pyspark, "python", "graph_embed_place.py") if _pyspark else ""
 
 
 def die(msg):
@@ -133,9 +134,11 @@ def main(argv):
             die("%s does not exist" % f)
 
     placer = os.environ.get("GRAPH_EMBED_PLACE", DEFAULT_PLACER)
+    if not placer:
+        die("graph embedding placer path unknown; set PYSPARK_HOME or GRAPH_EMBED_PLACE")
     if not os.path.exists(placer):
         die("graph embedding placer not found at %s\n"
-            "                  set GRAPH_EMBED_PLACE to point at it" % placer)
+            "                  set PYSPARK_HOME or GRAPH_EMBED_PLACE to point at it" % placer)
 
     base = os.path.splitext(os.path.basename(graph))[0]
     csv = base + ".placement.csv"
