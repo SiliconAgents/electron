@@ -33,7 +33,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-out <dir>] [-netlist <file>] [--read]\n";
   print "                       [-jobs <n>] [-flatten_below <cells>] [-flatten <glob>[,<glob>]]\n";
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
-  print "                       [-patch <rules.py>] [-latchmap <file>]\n";
+  print "                       [-patch <rules.py>] [-param_value <P.F=N>[,<P.F=N>]] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
   print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [-module_opts <file>] [-kb <dir>] [-reuse <hs/netlists>] [--booth] [--name_registers]\n";
   print "                       [-leaf_wrappers <glob>[,<glob>] [-leaf_soft <param>=<value>]\n";
@@ -55,6 +55,13 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        in copies, before elaborating: a python file of\n";
   print "                        PATCHES, see 3RDBIN/rtl_patch.  A rule that no longer\n";
   print "                        matches is an error.  Needs -rtl.\n";
+  print "        -param_value    struct-field parameter values the front end cannot\n";
+  print "                        evaluate as constants, comma-separated PARAM.FIELD=N:\n";
+  print "                        hier_synthesis scans the filelist for cast widths,\n";
+  print "                        replication counts and array sizes that use those fields\n";
+  print "                        and auto-generates patch rules to substitute the values.\n";
+  print "                        Combined with -patch when both are given.  Needs -rtl.\n";
+  print "                        Example: -param_value CVA6Cfg.XLEN=64,CVA6Cfg.VLEN=64\n";
   print "        -liberty        liberty for dfflibmap and abc.  Omitted, the list left\n";
   print "                        by get_std_cell_libs --set is used.\n";
   print "        -blackbox       standard cell stubs.  Omitted, they are built from the\n";
@@ -148,6 +155,7 @@ my $topModule;
 my $slangArgs = "";
 my $slangPlugin = "";
 my $patchRules = "";
+my $paramValues = "";
 my $netlistOut;
 my $readBack = 0;
 my $outDir = "hier_synthesis";
@@ -186,6 +194,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-slang_args"){$slangArgs = $_[$i+1];}
   if($_[$i] eq "-slang_plugin"){$slangPlugin = $_[$i+1];}
   if($_[$i] eq "-patch"){$patchRules = $_[$i+1];}
+  if($_[$i] eq "-param_value"){$paramValues = $_[$i+1];}
   if($_[$i] eq "-netlist"){$netlistOut = $_[$i+1];}
   if($_[$i] eq "--read"){$readBack = 1;}
   if($_[$i] eq "-out"){$outDir = $_[$i+1];}
@@ -251,6 +260,12 @@ if ( $patchRules ne "" ) {
   }
   unless ( -f $patchRules ) {
     print "ERROR-PAR-HR_SYN : 061 : patch rules $patchRules do not exist\n";
+    return;
+  }
+}
+if ( $paramValues ne "" ) {
+  unless ( defined $rtlList && $rtlList ne "" ) {
+    print "ERROR-PAR-HR_SYN : 088 : -param_value needs -rtl\n";
     return;
   }
 }
@@ -406,6 +421,17 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
       else { $slangPlugin = "slang"; }
     }
     print "INFO-PAR-HR_SYN : 063 : yosys-slang plugin: $slangPlugin\n";
+
+    #<!-- -param_value: scan the filelist for constant-context uses of the
+    #     specified struct-field parameters, generate patch rules, and merge
+    #     with any user -patch file into one combined rules file. -->
+    if ( $paramValues ne "" ) {
+      my $combined = &dbfHierSynthParamPatch($paramValues, $rtlList, $outDir, $patchRules);
+      if ( defined $combined && $combined ne "" ) {
+        $patchRules = $combined;
+        print "INFO-PAR-HR_SYN : 089 : auto-generated param-value patch rules: $patchRules\n";
+      }
+    }
 
     #<!-- -patch: the copies and the list that points at them go in the work
     #     directory; the RTL itself is never touched. -->
@@ -931,5 +957,215 @@ sub synthesis_mode {
   $SYNTH_MODE = $m;
   print "INFO-PAR-SYN_MD : 002 : synthesis mode $m\n";
 }#sub synthesis_mode
+#------------------------------------------------------------------------------------------#
+#<!-- Scan an RTL filelist for constant-context uses of struct-field parameters
+#     (cast widths, replication counts, array sizes) and emit rtl_patch rules
+#     that substitute the caller-supplied values.
+#
+#     paramStr  "CVA6Cfg.XLEN=64,CVA6Cfg.VLEN=64,CVA6Cfg.GPLEN=41,..."
+#     rtlList   the filelist passed to -rtl
+#     outDir    work directory; writes auto_param_patch.py there
+#     userRules path to -patch file, or ""; when non-empty the auto rules and
+#               the user rules are merged into one combined file
+#
+#     Returns the path to the final rules file, or "" on failure. -->
+sub dbfHierSynthParamPatch {
+my ($paramStr, $rtlList, $outDir, $userRules) = @_;
+
+# --- parse PARAM.FIELD=N pairs ---
+my %pval;
+for my $kv (split /\s*,\s*/, $paramStr) {
+  if ($kv =~ /^([\w]+\.[\w]+)\s*=\s*(-?\d+)$/) { $pval{$1} = int($2); }
+  else { print "WARN-PAR-HR_SYN : 090 : -param_value: ignoring unparseable '$kv'\n"; }
+}
+unless (%pval) {
+  print "WARN-PAR-HR_SYN : 091 : -param_value: no valid PARAM.FIELD=N entries\n";
+  return $userRules;
+}
+my @fields = sort { length($b) <=> length($a) } keys %pval;
+
+# --- collect RTL source files from the filelist ---
+my @rtlFiles;
+my $listDir = $rtlList; $listDir =~ s/[^\/]+$//;
+if (open(my $fl, "<", $rtlList)) {
+  while (<$fl>) {
+    chomp; s/\s*\/\/.*//; s/^\s+//; s/\s+$//;
+    next if /^\s*$/ || /^\+/ || /^-[fF]\b/;
+    $_ = "$listDir$_" unless m{^/};
+    push @rtlFiles, $_ if /\.(sv|v)$/i && -f $_;
+  }
+  close($fl);
+}
+
+# Evaluate an arithmetic expression after substituting known field values.
+# Returns undef if any identifier remains (unknown field) or eval fails.
+my $evalExpr = sub {
+  my $e = shift;
+  for my $f (@fields) { $e =~ s/\b\Q$f\E\b/$pval{$f}/g; }
+  return undef if $e =~ /[A-Za-z_]/;
+  return undef unless $e =~ /^[\d\s\+\-\*\/\(\)]+$/;
+  my $v = eval $e;
+  return defined $v ? int($v) : undef;
+};
+
+# Build a Python regex for an expression: normalise spaces around operators
+# so the pattern matches whether the source has spaces or not.
+my $exprPat = sub {
+  my $e = quotemeta(shift);
+  $e =~ s/\\ \\([+\-*\/])\\ /\\s*\\$1\\s*/g;  # " op " → \s*op\s*
+  $e =~ s/\\ /\\s*/g;                             # remaining spaces
+  return $e;
+};
+
+# --- scan for constant-context uses of param fields ---
+# Key: "basename\0pattern"  →  { rep, why }
+my %rules;
+for my $f (@rtlFiles) {
+  open(my $fh, "<", $f) or next;
+  my $content = do { local $/; <$fh> }; close($fh);
+  my $base = $f; $base =~ s/.*\///;
+
+  # Cast widths:  FIELD'(
+  for my $fld (@fields) {
+    if ($content =~ /\b\Q$fld\E\s*'(?=\()/) {
+      my $val = $evalExpr->($fld);
+      next unless defined $val && $val > 0;
+      my $pat = quotemeta($fld) . "'";
+      $rules{"$base\0$pat"} //= { rep => "${val}'",
+                                   why => "auto -param_value: $fld=$val" };
+    }
+  }
+
+  # Replications:  { EXPR {  where EXPR involves at least one known field
+  # Replications:  { EXPR {  or  { (EXPR) {
+  # Match with optional surrounding parens and trailing whitespace before {.
+  while ($content =~ /\{(\(?)(\s*[\w.]+(?:\s*[-+\/*]\s*(?:[\w.]+|\d+))*\s*)(\)?)\s*\{/g) {
+    my ($lp, $expr, $rp) = ($1, $2, $3);
+    next if ($lp eq "(") != ($rp eq ")");  # mismatched parens → skip
+    $expr =~ s/^\s+//; $expr =~ s/\s+$//;
+    next unless grep { $expr =~ /\b\Q$_\E\b/ } @fields;
+    my $val = $evalExpr->($expr);
+    next unless defined $val && $val >= 0;
+    my $pe = $exprPat->($expr);
+    # Allow for optional parens and optional space between expression and {.
+    my $pat = "\\{\\(?" . $pe . "\\)?\\s*\\{";
+    (my $normExpr = $expr) =~ s/\s+//g;
+    my $keySuffix = ($lp ? "p" : "") . $normExpr . ":rep";
+    $rules{"$base\0$keySuffix"} //= { rep => "{${val}{",
+                                       pat => $pat,
+                                       why => "auto -param_value: $expr=$val" };
+  }
+
+  # Indexed part-selects:  +: EXPR  (width must be positive)
+  while ($content =~ /\+:\s*([\w.]+(?:\s*[-+\/*]\s*(?:[\w.]+|\d+))*)/g) {
+    my $expr = $1; $expr =~ s/\s+$//;
+    next unless grep { $expr =~ /\b\Q$_\E\b/ } @fields;
+    my $val = $evalExpr->($expr);
+    next unless defined $val && $val > 0;
+    my $pat = "\\+:\\s*" . $exprPat->($expr);
+    (my $normExpr = $expr) =~ s/\s+//g;
+    $rules{"$base\0+:$normExpr"} //= { rep => "+:${val}",
+                                        pat => $pat,
+                                        why => "auto -param_value: +:$expr=${val}" };
+  }
+
+  # Array sizes and bit-selects:  [ EXPR ]  (single bracket, no colon)
+  while ($content =~ /\[\s*([\w.]+(?:\s*[-+\/*]\s*(?:[\w.]+|\d+))*)\s*\](?!\s*\[)/g) {
+    my $expr = $1; $expr =~ s/^\s+//; $expr =~ s/\s+$//;
+    # Skip if this is part of a range [ ... : ... ] — look-ahead already excluded
+    next if pos($content) > 0 && substr($content, pos($content) - length($&) - 1, 1) eq ":";
+    next unless grep { $expr =~ /\b\Q$_\E\b/ } @fields;
+    my $val = $evalExpr->($expr);
+    next unless defined $val && $val > 0;
+    my $pat = "\\[\\s*" . $exprPat->($expr) . "\\s*\\]";
+    (my $normExpr = $expr) =~ s/\s+//g;
+    $rules{"$base\0[$normExpr]"} //= { rep => "[$val]",
+                                        pat => $pat,
+                                        why => "auto -param_value: [$expr]=$val" };
+  }
+
+  # Range bounds:  [ EXPR : NUM ]  where EXPR involves known fields and NUM is a literal
+  while ($content =~ /\[\s*([\w.]+(?:\s*[-+\/*]\s*(?:[\w.]+|\d+))*)\s*:\s*(\d+)\s*\]/g) {
+    my ($expr, $lo) = ($1, $2);
+    $expr =~ s/^\s+//; $expr =~ s/\s+$//;
+    next unless grep { $expr =~ /\b\Q$_\E\b/ } @fields;
+    my $val = $evalExpr->($expr);
+    next unless defined $val && $val >= int($lo);
+    my $pat = "\\[\\s*" . $exprPat->($expr) . "\\s*:\\s*$lo\\s*\\]";
+    (my $normExpr = $expr) =~ s/\s+//g;
+    $rules{"$base\0[$normExpr:$lo]"} //= { rep => "[$val:$lo]",
+                                             pat => $pat,
+                                             why => "auto -param_value: [$expr:$lo]=$val:$lo" };
+  }
+
+  # Range bounds: [ EXPR : EXPR ] where both bounds involve known fields
+  # (the [EXPR:NUM] scanner above handles the common case; this catches the
+  # rest — e.g. [INDEX_WIDTH-1:OFFSET_WIDTH] or [TAG+INDEX-1:INDEX]).
+  # Use [ \t]* (not \s*) so the pattern never crosses a line boundary.
+  my $exprRe = qr/[\w.]+(?:[ \t]*[-+\/*][ \t]*(?:[\w.]+|\d+))*/;
+  while ($content =~ /\[[ \t]*($exprRe)[ \t]*:[ \t]*($exprRe)[ \t]*\]/g) {
+    my ($hi_expr, $lo_expr) = ($1, $2);
+    $hi_expr =~ s/^[ \t]+//; $hi_expr =~ s/[ \t]+$//;
+    $lo_expr =~ s/^[ \t]+//; $lo_expr =~ s/[ \t]+$//;
+    # lo_expr must not be a bare integer (already handled above)
+    next if $lo_expr =~ /^\d+$/;
+    # At least one bound must reference a known field
+    next unless (grep { $hi_expr =~ /\b\Q$_\E\b/ } @fields) ||
+                (grep { $lo_expr =~ /\b\Q$_\E\b/ } @fields);
+    my $hi_val = $evalExpr->($hi_expr);
+    my $lo_val = $evalExpr->($lo_expr);
+    next unless defined $hi_val && defined $lo_val && $hi_val >= $lo_val;
+    my $hi_pe = $exprPat->($hi_expr);
+    my $lo_pe = $exprPat->($lo_expr);
+    my $pat = "\\[\\s*" . $hi_pe . "\\s*:\\s*" . $lo_pe . "\\s*\\]";
+    (my $normHi = $hi_expr) =~ s/\s+//g;
+    (my $normLo = $lo_expr) =~ s/\s+//g;
+    $rules{"$base\0[$normHi:$normLo]"} //= { rep => "[$hi_val:$lo_val]",
+                                               pat => $pat,
+                                               why => "auto -param_value: [$hi_expr:$lo_expr]=$hi_val:$lo_val" };
+  }
+}
+
+unless (%rules) {
+  print "INFO-PAR-HR_SYN : 092 : -param_value: no patchable uses of the specified fields found\n";
+  return $userRules;
+}
+
+# --- write the auto patch file ---
+my $autoFile = "$outDir/auto_param_patch.py";
+open(my $af, ">", $autoFile) or do {
+  print "ERROR-PAR-HR_SYN : 093 : cannot write $autoFile: $!\n";
+  return $userRules;
+};
+print $af "# Auto-generated by hier_synthesis -param_value\n";
+print $af "# " . join(", ", map { "$_=$pval{$_}" } sort keys %pval) . "\n";
+print $af "PATCHES = [\n";
+for my $key (sort keys %rules) {
+  my $r    = $rules{$key};
+  my $file = $key; $file =~ s/\0.*//;
+  my $pat  = exists $r->{pat} ? $r->{pat} : (split(/\0/, $key, 2))[1];
+  (my $pat_py  = $pat)       =~ s/"/\\"/g;   # for r"..." delimiters
+  (my $rep_py  = $r->{rep}) =~ s/'/\\'/g;
+  (my $why_py  = $r->{why}) =~ s/'/\\'/g;
+  print $af "    (\"$file\", r\"$pat_py\", '$rep_py', '$why_py'),\n";
+}
+if ( $userRules ne "" ) {
+  print $af "]\n\n# Merged from -patch $userRules\n";
+  print $af "_ns = {}\nexec(open('$userRules').read(), _ns)\n";
+  print $af "PATCHES = PATCHES + _ns.get('PATCHES', [])\n";
+} else {
+  print $af "]\n";
+}
+# Sort longest pattern first so a longer specific pattern runs before any
+# shorter prefix that would clobber it (e.g. +: XLEN vs +:XLEN/8).
+print $af "PATCHES.sort(key=lambda x: -len(x[1]))\n";
+close($af);
+
+printf("INFO-PAR-HR_SYN : 094 : -param_value: %d rule(s) written to %s\n",
+       scalar keys %rules, $autoFile);
+return $autoFile;
+
+}# sub dbfHierSynthParamPatch
+#------------------------------------------------------------------------------------------#
 
 1;
