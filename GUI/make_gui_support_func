@@ -1758,14 +1758,21 @@ sub import_sel_library{
      &read_lef ("-lef","$lef");
      print WRITE "read_lef -lef $lef\n";
   }
-  
-  # Read liberty files
-  foreach my $lib (@libFiles){
-     &read_lib ("-lib","$lib");
-     print WRITE "read_lib -lib $lib\n";
+
+  # Read IO-cell / macro LEFs (io-cell-lefs in library.config)
+  if (defined $ioCellFullPath && $ioCellFullPath ne "") {
+     foreach my $lef (split(/,/, $ioCellFullPath)) {
+        next if $lef eq "";
+        &read_lef ("-lef","$lef");
+        print WRITE "read_lef -lef $lef\n";
+     }
   }
 
-  #<!-- Optional, and read after the liberty on purpose: read_cell_func_map
+  # Liberty files are registered in dbGlobalSetLibFiles above; not read here.
+  # read_config_file also does not read liberty at load time — use
+  # get_std_cell_libs to load them when needed.
+
+  #<!-- Optional: read_cell_func_map
   #     leaves alone any cell liberty already described, so with both present
   #     the map only fills in what the liberty did not cover. -->
   my @funcMapFiles = (split(/\,/,$$funcMapFile));
