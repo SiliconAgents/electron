@@ -1662,7 +1662,7 @@ sub displayLibrary {
 sub delete_lib_frame {
   my $data = $_[0];
   my $level = $_[1];
-  foreach my $lib (keys %$data){
+  foreach my $lib (grep { !/^_/ } keys %$data){
      if($level >= 0){
         foreach my $node (@{$data->{$lib}{node}}){
            my $type = $node->{type};
@@ -1691,7 +1691,7 @@ sub highlight_selected_lib{
   my $layer = $_[3];
 
   if($type eq "" && $layer eq ""){
-     foreach my $library (keys %$data){
+     foreach my $library (grep { !/^_/ } keys %$data){
         if($library eq $lib){
            ${"button".$library}->configure(-background=>"white");
         }else{
