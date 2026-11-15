@@ -1436,38 +1436,46 @@ sub clone_from_git_popup {
 ###############################################################################################################################
 sub import_foundry_lef_popup {
 
-my $config_file = "library.config";
-my $found_path;
+  # Pre-fill config path: current dir > home dir > empty
+  my $config_path = "";
+  if    (-e "library.config")                                    { $config_path = File::Spec->rel2abs("library.config"); }
+  elsif (-e File::Spec->catfile($ENV{HOME}, "library.config"))   { $config_path = File::Spec->catfile($ENV{HOME}, "library.config"); }
 
-if (-e $config_file) {
-    $found_path = File::Spec->rel2abs($config_file);
-    print "Found library.config in current directory: $found_path\n";
-} else {
-    my $home_path = File::Spec->catfile($ENV{HOME}, $config_file);
-    if (-e $home_path) {
-        $found_path = $home_path;
-        print "Found library.config in home directory: $found_path\n";
-        $filename = $found_path ;
-    } else {
-        print "library.config not found in current directory or home directory\n";
-        exit 1;
-    }
-}
-
-  if ( -e 'library.config' ) { $filename = 'library.config' ; }
-  print "$filename as config file \n"; 
-  my $data;
-  if (open (my $json_str, $filename))
-  {
-    local $/ = undef;
-    my $json = JSON->new;
-    $data = $json->decode(<$json_str>);
-    close($json_stream);
-  }
-  
   my $subWin = MainWindow->new();
-     $subWin->title ("Select Library");
-  
+     $subWin->title("Select Library");
+
+  # --- config file row ---
+  my $cfgFrame = $subWin->Frame()->pack(-side => 'top', -anchor => 'n', -fill => 'x', -pady => 4);
+  $cfgFrame->Label(-text => "library.config :", -foreground => "navy")->pack(-side => 'left');
+  my $cfgEntry = $cfgFrame->Entry(-textvariable => \$config_path, -width => 50)->pack(-side => 'left', -expand => 1, -fill => 'x');
+  $cfgFrame->Button(-text => "Browse...", -command => sub {
+      my @types = (["Config files", ".config"], ["All files", "*"]);
+      my $f = $subWin->getOpenFile(-filetypes => \@types, -initialdir => ($config_path ne "" ? (File::Spec->splitpath($config_path))[1] : $ENV{HOME}));
+      $config_path = $f if defined $f && $f ne "";
+  })->pack(-side => 'left', -padx => 4);
+
+  # Load button re-reads the file and rebuilds the foundry list
+  my $load_config = sub {
+    return unless -e $config_path;
+    my $data;
+    if (open(my $fh, "<", $config_path)) {
+      local $/ = undef;
+      my $raw = <$fh>;
+      close($fh);
+      eval { $data = JSON->new->decode($raw); };
+      if ($@) { print "library.config parse error: $@\n"; return; }
+    }
+    return unless defined $data;
+    print "library.config loaded from $config_path\n";
+    $data;
+  };
+
+  my $data = $load_config->();
+  unless (defined $data) {
+    print "library.config not loaded yet — use Browse to select one\n";
+    $data = {};
+  }
+
   my $techFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n',-fill=>'x');
   my $stdCellFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
   my $libFrame= $subWin->Frame()->pack(-side => 'top',-anchor=>'n', -fill=>'x');
@@ -1504,23 +1512,41 @@ if (-e $config_file) {
      $top_pane->Subwidget("xscrollbar")->configure(-width=>15,-borderwidth=>1);
      $top_pane->Subwidget("yscrollbar")->configure(-width=>15,-borderwidth=>1);
      $top_pane->pack(qw/-side left -anchor w -fill both -expand 1/);
-  my $exitButton = $buttonFrame->Button(-text=>"Exit", -command=>sub{$subWin->destroy;})->pack(-side=>"left");;
-  my $importButton = $buttonFrame->Button(-text=>"Import", -command=>sub{&import_sel_library();$subWin->destroy;})->pack(-side=>"left");;
-  
-  
-  my $cf = $top_pane->Frame(-relief=>"groove", -borderwidth=>4,-background=>"light gray");
-  $cf->pack(qw/-fill both -expand 1 -side left -anchor w /);
-  my $foundryLabel = $cf->Label(-text=>"FOUNDRY", -background=>'dark blue', -foreground=>'white', -height=>2)->pack(-side=>'top', -fill=>'x');
-  
-  foreach my $lib (keys %$data){
-     ${"button".$lib} = $cf->Button(-text=>$lib,-relief=>"flat", -foreground=>"dark green",-background=>"light gray", 
-                                    -command=>sub{&delete_lib_frame($data, 0); 
-                                                  &displayLibrary($data, $lib, "", $top_pane,0);
-                                                  &highlight_selected_lib($data, $lib, "", "");
-                                                  $GLOBAL->dbGlobalSetStdCellRailWidth($data->{$lib}{'std-cell-rail-width'});
-                                                  $GLOBAL->dbGlobalSetStdCellMetal($data->{$lib}{'std-cell-metal'});
-                                    })->pack(-side=>'top',-fill=>'x');
-  }
+  my $exitButton  = $buttonFrame->Button(-text => "Exit",
+                       -command => sub { $subWin->destroy; })->pack(-side => "left");
+  my $importButton = $buttonFrame->Button(-text => "Import",
+                       -command => sub { &import_sel_library(); $subWin->destroy; })->pack(-side => "left");
+
+  my $cf = $top_pane->Frame(-relief => "groove", -borderwidth => 4, -background => "light gray");
+  $cf->pack(qw/-fill both -expand 1 -side left -anchor w/);
+  my $foundryLabel = $cf->Label(-text => "FOUNDRY", -background => 'dark blue',
+                                -foreground => 'white', -height => 2)->pack(-side => 'top', -fill => 'x');
+
+  my $build_foundry_buttons = sub {
+    my ($d) = @_;
+    $_->destroy foreach $cf->packSlaves();
+    $cf->Label(-text => "FOUNDRY", -background => 'dark blue',
+               -foreground => 'white', -height => 2)->pack(-side => 'top', -fill => 'x');
+    foreach my $lib (sort grep { !/^_/ } keys %$d) {
+      ${"button".$lib} = $cf->Button(-text => $lib, -relief => "flat",
+                                     -foreground => "dark green", -background => "light gray",
+                                     -command => sub {
+                                       &delete_lib_frame($d, 0);
+                                       &displayLibrary($d, $lib, "", $top_pane, 0);
+                                       &highlight_selected_lib($d, $lib, "", "");
+                                       $GLOBAL->dbGlobalSetStdCellRailWidth($d->{$lib}{'std-cell-rail-width'});
+                                       $GLOBAL->dbGlobalSetStdCellMetal($d->{$lib}{'std-cell-metal'});
+                                     })->pack(-side => 'top', -fill => 'x');
+    }
+  };
+  $build_foundry_buttons->($data);
+
+  # Reload foundry list when the user picks a different library.config
+  $cfgFrame->Button(-text => "Load", -command => sub {
+      my $d = $load_config->();
+      if (defined $d) { $data = $d; $build_foundry_buttons->($data); }
+      else { $subWin->messageBox(-message => "Could not load $config_path", -type => 'ok', -icon => 'error'); }
+  })->pack(-side => 'left', -padx => 2);
 
 }#sub import_foundry_lef_popup
 
@@ -1566,13 +1592,22 @@ sub displayLibrary {
                if(ref $techFile eq "ARRAY"){
                   $techFile = join (",", @{$file->{tech}});
                }
-               my $stdCellFile = $file->{'std-cells'};
+               my $stdCellFile = $file->{'std-cells'} // $file->{'std-cell-lefs'};
                if(ref $stdCellFile eq "ARRAY"){
-                  $stdCellFile = join (",", @{$file->{'std-cells'}});
+                  $stdCellFile = join (",", @{$stdCellFile});
                }
-               my $ioCellFile = $file->{'io-cells'};
+               my $ioCellFile = $file->{'io-cells'} // $file->{'io-cell-lefs'};
+               if(ref $ioCellFile eq "ARRAY"){
+                  $ioCellFile = join (",", @{$ioCellFile});
+               }
                my $vmodelsFile = $file->{'verilog-models'};
-               my $libFile = $file->{'lib'};
+               if(ref $vmodelsFile eq "ARRAY"){
+                  $vmodelsFile = join (",", @{$vmodelsFile});
+               }
+               my $libFile = $file->{'lib'} // $file->{'std-cell-libs'};
+               if(ref $libFile eq "ARRAY"){
+                  $libFile = join (",", @{$libFile});
+               }
                #<!-- optional: says which cells are combinational, sequential or
                #     memory without anyone having to read the liberty -->
                my $funcMapFile = $file->{'cell-func-map'};
