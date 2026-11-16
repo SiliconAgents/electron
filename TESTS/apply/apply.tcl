@@ -6,6 +6,8 @@ elaborate
 # the placement nangate_flat legalized, restored onto the elaborated netlist
 read_def -def vedic_16x16.legal.def --floorplan --components
 apply_advice -resize sta/vedic_16x16.advise.resize.tsv -nets sta/vedic_16x16.advise.nets.tsv -report apply.rpt
+# the advice as applied, before legalization moves anything: what its prediction is checked against
+write_sgraph -output vedic_16x16.prelegal.sgraph
 legalize_flat --incremental
 write_def -output vedic_16x16.applied.def --overwrite
 write_sgraph -output vedic_16x16.applied.sgraph
