@@ -5,6 +5,8 @@ by run mode.
   plan_kb synth-save --kb <dir> --levels <hs/lvl> --opts <module_opts.tsv>
                      [--tile <name>] [--note <text>]
   plan_kb synth-opts --kb <dir> --levels <hs/lvl> --out <module_opts.tsv>
+  plan_kb place-save --kb <dir> --levels <plan dir>/plan.levels.json
+                     [--tile <name>] [--note <text>]
   plan_kb list --kb <dir>
 
 The knowledge base is a directory of the user's work area for a project,
@@ -41,6 +43,8 @@ from importlib.machinery import SourceFileLoader
 HERE = os.path.dirname(os.path.abspath(__file__))
 _yd = SourceFileLoader("yosys_dedup", os.path.join(HERE, "yosys_dedup")).load_module()
 SYNTH = "synth_plans.tsv"
+PLACE = "place_plans.tsv"
+PHEAD = "# fingerprint\tmodule\tspec_line\ttns_gain_pct\ttile\tsaved\tnote\n"
 HEAD = "# fingerprint\tps\tmode\tmodule\ttile\tsaved\tnote\n"
 MODES = ("area", "balance", "keep")
 
@@ -151,11 +155,51 @@ def cmd_synth_opts(a):
     print(f"plan_kb: {n} module(s) of this synthesis have a plan in {a.kb}")
 
 
+def cmd_place_save(a):
+    """level plans from plan_place's level walk: a module's floorplan-spec line,
+    per placement_kb fingerprint of the module (not the synthesis fingerprint --
+    the two are computed from different things and are not interchangeable)"""
+    import json
+    walk = json.load(open(a.levels))
+    os.makedirs(a.kb, exist_ok=True)
+    path = os.path.join(a.kb, PLACE)
+    rows = {}
+    if os.path.exists(path):
+        for ln in open(path):
+            if ln.startswith("#") or not ln.strip():
+                continue
+            f = ln.rstrip("\n").split("\t") + [""] * 7
+            rows[f[0]] = f[:7]
+    today = datetime.date.today().isoformat()
+    n = 0
+    for r in walk["levels"]:
+        if not r.get("spec_line") or not r.get("fingerprint"):
+            print(f"plan_kb: {r['module']}: no spec line of its own (the placer's arrangement) -- nothing to save")
+            continue
+        old = rows.get(r["fingerprint"])
+        rows[r["fingerprint"]] = [r["fingerprint"], r["module"], r["spec_line"], f"{r['gain'] * 100:.2f}",
+                                  a.tile or "", today, a.note or r.get("note", "")]
+        n += 1
+        print(f"plan_kb: {r['module']} ({r['fingerprint']}): {r['spec_line']}" + (" -- replaces an earlier plan" if old else ""))
+    with open(path + ".new", "w") as fh:
+        fh.write(PHEAD)
+        for k in sorted(rows):
+            fh.write("\t".join(rows[k]) + "\n")
+    os.replace(path + ".new", path)
+    print(f"plan_kb: {n} placement plan(s) saved; {len(rows)} in {path}")
+
+
 def cmd_list(a):
     plans = read_plans(a.kb)
     for p in sorted(plans.values(), key=lambda p: (p[4], p[3])):
         print("\t".join(p))
     print(f"plan_kb: {len(plans)} synthesis plan(s)")
+    pp = os.path.join(a.kb, PLACE)
+    if os.path.exists(pp):
+        rows = [ln.rstrip("\n") for ln in open(pp) if not ln.startswith("#") and ln.strip()]
+        for ln in rows:
+            print(ln)
+        print(f"plan_kb: {len(rows)} placement plan(s)")
 
 
 def main():
@@ -167,6 +211,9 @@ def main():
     x = sp.add_parser("synth-opts")
     x.add_argument("--kb", required=True); x.add_argument("--levels", required=True); x.add_argument("--out", required=True)
     x.set_defaults(f=cmd_synth_opts)
+    x = sp.add_parser("place-save")
+    x.add_argument("--kb", required=True); x.add_argument("--levels", required=True)
+    x.add_argument("--tile"); x.add_argument("--note"); x.set_defaults(f=cmd_place_save)
     x = sp.add_parser("list")
     x.add_argument("--kb", required=True); x.set_defaults(f=cmd_list)
     a = ap.parse_args()
