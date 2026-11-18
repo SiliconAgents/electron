@@ -178,13 +178,18 @@ my $noOfArguments = @_;
 if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "Usage : write_astar_files [-tech <file>] [-design <file>] [-layers <lo>:<hi>]\n";
   print "                          [-via_cost <um>] [-ports_on <layer>] [-out <dir>]\n";
+  print "                          [-seg_tsv <photon.seg.tsv[.gz]>]\n";
   print "\n";
   print "        -ports_on <layer> puts top-level ports that have no layer assigned\n";
   print "        on that layer.  PortDB defaults the layer to 0 and the flat flow\n";
   print "        never sets one, so without this every port is dropped and any net\n";
   print "        reaching one loses a terminal.\n";
   print "\n";
-  print "        Writes the two input files the A* router in pyspark_cad/scala reads.\n";
+  print "        -seg_tsv reads Photon's output to order NET lines by worst arrival\n";
+  print "        time, most critical first.  Pass order=\"file\" to rt_gc_route so\n";
+  print "        the router respects that ordering.\n";
+  print "\n";
+  print "        Writes the two input files the A* router in pyspark/scala reads.\n";
   print "        Both are plain text in microns; the tech file carries the DBU.\n";
   return;
 }
@@ -195,6 +200,7 @@ my $designFile;
 my $layerSpec;
 my $viaCost;
 my $portLayer;
+my $segTsv;
 
 for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-out"){$outDir = $_[$i+1];}
@@ -203,6 +209,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-layers"){$layerSpec = $_[$i+1];}
   if($_[$i] eq "-via_cost"){$viaCost = $_[$i+1];}
   if($_[$i] eq "-ports_on"){$portLayer = $_[$i+1];}
+  if($_[$i] eq "-seg_tsv"){$segTsv = $_[$i+1];}
 }#for
 
 unless ( -d $outDir ) {
@@ -408,9 +415,59 @@ foreach my $netName ( keys %NETS_ALREADY ) {
 
 print ASTAR_DES "$_\n" foreach ( @pinLines );
 
+#<!-- Criticality order from a Photon seg.tsv: read worst arrival time per net
+#     so the router works on timing-critical nets first.  The seg.tsv header is
+#     "arrival  endpoint  endpoint_pin  ..."; we build endpoint/pin -> net from
+#     %NETS_ALREADY, then take the max arrival per net. -->
+my %netCrit = ();
+my $critNets = 0;
+if ( defined $segTsv && $segTsv ne "" ) {
+  if ( ! -f $segTsv ) {
+    print "WARN-RTR-ASTAR : 065 : -seg_tsv file not found: $segTsv\n";
+  }
+  else {
+    my $fh;
+    if ( $segTsv =~ /\.gz$/ ) {
+      open($fh, "-|", "gzip -dc \Q$segTsv\E");
+    } else {
+      open($fh, "<$segTsv");
+    }
+    if ( defined $fh ) {
+      my %pinToNet = ();
+      foreach my $net ( keys %NETS_ALREADY ) {
+        foreach my $inst ( keys %{$NETS_ALREADY{$net}} ) {
+          my $pin = $NETS_ALREADY{$net}{$inst};
+          $pinToNet{"$inst/$pin"} = $net if ( defined $pin );
+        }
+      }
+      my $hdr = 1;
+      while ( my $line = <$fh> ) {
+        if ( $hdr ) { $hdr = 0; next; }
+        chomp $line;
+        my @f = split(/\t/, $line);
+        next unless ( @f >= 3 && $f[0] =~ /^[\d\.eE+\-]+$/ );
+        my $arr = $f[0] + 0;
+        my $net = $pinToNet{"$f[1]/$f[2]"};
+        next unless ( defined $net );
+        $netCrit{$net} = $arr if ( !exists $netCrit{$net} || $arr > $netCrit{$net} );
+      }
+      close($fh);
+      $critNets = scalar keys %netCrit;
+      print "INFO-RTR-ASTAR : 066 : criticality: $critNets net(s) mapped from $segTsv\n";
+    }
+  }
+}
+
+#<!-- Most critical nets first; alphabetical within the same criticality bucket.
+#     Nets not in the seg.tsv (combinational fanout, undriven, etc.) sort to the
+#     end. -->
+my @sortedNets = sort {
+  ( $netCrit{$b} || 0 ) <=> ( $netCrit{$a} || 0 ) || $a cmp $b
+} keys %pinOf;
+
 my $netCnt = 0;
 my $oneTermCnt = 0;
-foreach my $netName ( sort keys %pinOf ) {
+foreach my $netName ( @sortedNets ) {
   my @terms = @{$pinOf{$netName}};
   if ( @terms < 2 ) {
     #<!-- nothing to connect: a net with one terminal is already routed -->
@@ -429,7 +486,7 @@ print "WARN-RTR-ASTAR : 064 : $portsOnDefault port(s) had no layer assigned and 
   if ( $portsOnDefault > 0 );
 print "INFO-RTR-ASTAR : 015 : $oneTermCnt net(s) have one terminal and need no routing\n" if ( $oneTermCnt > 0 );
 
-return ( $techFile, $designFile );
+return ( $techFile, $designFile, $critNets > 0 ? 1 : 0 );
 
 }# sub write_astar_files
 #------------------------------------------------------------------------------------------#
@@ -484,7 +541,7 @@ return $total;
 sub dbfAstarRunGlobalDetail {
 my ($scalaDir, $techFile, $designFile, $routedFile, $logFile, $outDir, $top,
     $gcell, $order, $wrongDir, $maxExpand, $dtParts, $driverMem, $cores,
-    $noRun, $noRead) = @_;
+    $noRun, $noRead, $noAnalyze) = @_;
 
 foreach my $f ( "astarRoute.sca", "astarGlobal.sca", "astarDetail.sca" ) {
   unless ( -f "$scalaDir/$f" ) {
@@ -532,6 +589,16 @@ print ASTAR_SCALA "rt_dt_load(\"$grFile\")\n";
 print ASTAR_SCALA "rt_dt_route(wrongDir = $wrongDir, maxExpand = $maxExpand)\n";
 print ASTAR_SCALA "rt_dt_report()\n";
 print ASTAR_SCALA "rt_dt_write(\"$routedFile\")\n";
+#<!-- Analysis: per-net wire length, detour, congestion and blame.  Runs in the
+#     same spark-shell session as the routing, so there is no second JVM startup.
+#     $noAnalyze == 1 or the absence of astarAnalyze.sca silently skips it. -->
+my $analyzeScript = "$scalaDir/fluxroute.sca";
+if ( !$noAnalyze && -f $analyzeScript ) {
+  my $analyzeDir = "$outDir/fluxroute";
+  printf ASTAR_SCALA ":load %s\n", $analyzeScript;
+  printf ASTAR_SCALA "fr_all(\"%s\", \"%s\", \"%s\", \"%s\", %g)\n",
+         $techFile, $designFile, $routedFile, $analyzeDir, $gcell;
+}
 print ASTAR_SCALA ":quit\n";
 close(ASTAR_SCALA);
 print "INFO-RTR-ASTAR : 050 : wrote $scriptFile\n";
@@ -541,7 +608,7 @@ if ( $noRun == 1 ) {
   return;
 }
 
-$driverMem = "8g" unless ( defined $driverMem && $driverMem ne "" );
+$driverMem = "4g" unless ( defined $driverMem && $driverMem ne "" );
 $cores = "*" unless ( defined $cores && $cores ne "" );
 my $inner = "spark-shell --master 'local[$cores]'" .
             " --conf spark.ui.enabled=false" .
@@ -667,15 +734,18 @@ if ( $noOfArguments > 0 && $_[0] eq '-h' ) {
   print "                    [--no_run] [--no_read]\n";
   print "\n";
   print "        Writes the tech and design files, runs route.sh from\n";
-  print "        pyspark_cad/scala, and reads the routed segments back in.\n";
+  print "        pyspark/scala, and reads the routed segments back in.\n";
   print "        -chunks 1 routes the whole die on one grid; k routes a k by k\n";
-  print "        partition in parallel.  ELECTRON_ASTAR_DIR overrides where\n";
-  print "        route.sh is looked for.\n";
+  print "        partition in parallel.  ELECTRON_ASTAR_DIR or PYSPARK_HOME/scala\n";
+  print "        is where the router scripts are looked for.\n";
+  print "        -seg_tsv routes critical nets first using Photon arrival times.\n";
+  print "        --no_analyze skips the FluxRoute per-net detour/congestion analysis.\n";
   return;
 }
 
 my $outDir = "astar";
 my $layerSpec;
+my $segTsv;
 #<!-- 1, not 2.  route.sh sends k<=1 to rt_route, which gives every layer its
 #     own pitch, and k>1 to the divide-and-conquer router, which predates that
 #     and uses a single pitch for all layers -- the coarsest one, so every
@@ -699,10 +769,11 @@ my $mode = "auto";
 my $flatLimit = 20000000;
 my $gcell = 50;
 my $dtParts;
-my $driverMem = "8g";
+my $driverMem = "4g";
 my $cores = "*";
 my $noRun = 0;
 my $noRead = 0;
+my $noAnalyze = 0;
 
 for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-out"){$outDir = $_[$i+1];}
@@ -723,18 +794,24 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-parts"){$dtParts = $_[$i+1];}
   if($_[$i] eq "-driver_mem"){$driverMem = $_[$i+1];}
   if($_[$i] eq "-cores"){$cores = $_[$i+1];}
+  if($_[$i] eq "-seg_tsv"){$segTsv = $_[$i+1];}
   if($_[$i] eq "--global_detail"){$mode = "gd";}
   if($_[$i] eq "--flat"){$mode = "flat";}
   if($_[$i] eq "--no_run"){$noRun = 1;}
   if($_[$i] eq "--no_read"){$noRead = 1;}
+  if($_[$i] eq "--no_analyze"){$noAnalyze = 1;}
 }#for
 
 my @writeArgs = ("-out", $outDir);
-push(@writeArgs, "-layers", $layerSpec)  if ( defined $layerSpec && $layerSpec ne "" );
+push(@writeArgs, "-layers",  $layerSpec) if ( defined $layerSpec && $layerSpec ne "" );
 push(@writeArgs, "-via_cost", $viaCost)  if ( defined $viaCost   && $viaCost   ne "" );
 push(@writeArgs, "-ports_on", $portLayer) if ( defined $portLayer && $portLayer ne "" );
-my ($techFile, $designFile) = &write_astar_files(@writeArgs);
+push(@writeArgs, "-seg_tsv",  $segTsv)   if ( defined $segTsv    && $segTsv    ne "" );
+my ($techFile, $designFile, $hasCrit) = &write_astar_files(@writeArgs);
 return unless ( defined $designFile && -s $designFile );
+#<!-- When we pre-sorted by criticality, tell the router to route in that file
+#     order rather than its default short-first heuristic. -->
+$order = "file" if ( $hasCrit && !defined $order );
 
 my $top = $TOP_MODULE;
 $top = "design" unless ( defined $top && $top ne "" );
@@ -743,14 +820,22 @@ my $jsonFile   = "$outDir/$top.json";
 my $logFile    = "$outDir/$top.astar.log";
 unlink($routedFile) if ( -f $routedFile );
 
-#<!-- route.sh lives with the scala it loads, so it has to be found rather
-#     than copied.  pyspark_cad is a separate repository; nothing here writes
-#     to it. -->
+#<!-- Where the Scala router lives.  Checked in priority order:
+#     1. -scala_dir argument
+#     2. ELECTRON_ASTAR_DIR environment variable
+#     3. PYSPARK_HOME/scala (pyspark is kept in /efs and owned by this repo's
+#        authors, while pyspark_cad under /proj_pd is a shared read-only fork)
+#     4. PYSPARK/scala (alias that the flowbench Makefile also sets)
+#     Nothing is hardcoded here because a path to a home directory or a
+#     project-local directory breaks every other machine that clones this. -->
 unless ( defined $scalaDir && $scalaDir ne "" ) {
   $scalaDir = $ENV{ELECTRON_ASTAR_DIR};
 }
 unless ( defined $scalaDir && $scalaDir ne "" ) {
-  $scalaDir = "/proj_pd/user_dev/rsrivastava/pyspark_cad/scala";
+  $scalaDir = "$ENV{PYSPARK_HOME}/scala" if ( $ENV{PYSPARK_HOME} );
+}
+unless ( defined $scalaDir && $scalaDir ne "" ) {
+  $scalaDir = "$ENV{PYSPARK}/scala" if ( $ENV{PYSPARK} );
 }
 my $routeSh = "$scalaDir/route.sh";
 unless ( -f $routeSh ) {
@@ -792,7 +877,7 @@ if ( $mode eq "auto" ) {
 if ( $mode eq "gd" ) {
   return &dbfAstarRunGlobalDetail($scalaDir, $techFile, $designFile, $routedFile, $logFile,
                                   $outDir, $top, $gcell, $order, $wrongDir, $maxExpand,
-                                  $dtParts, $driverMem, $cores, $noRun, $noRead);
+                                  $dtParts, $driverMem, $cores, $noRun, $noRead, $noAnalyze);
 }
 $chunks = 1 if ( $mode eq "flat" );
 

@@ -1018,7 +1018,10 @@ foreach my $id (@instIdList) {
              my @POLY = $PLDB{$cellref}->dbMdbGetPinPolygon($pinName);
              foreach my $rectLine ( @RECTS ) {
                   my ($layer, $rllx1, $rlly1, $rurx1, $rury1)=(split(/\s+/,$rectLine))[0,2,3,4,5];
+                  next unless exists $PTDB{$layer};
+                  next if ($PTDB{$layer}->dbTechGetLayerType // '') eq 'MASTERSLICE';
                   my $color = $PTDB{$layer}->dbTechGetLayerColor;
+                  next unless defined $color;
                   my @PinRect = &xformCellPinToInstPin($location[0],$location[1],$cellOrigin[0], $cellOrigin[1],$orient,$cellSize[0],$cellSize[1],$rllx1,$rlly1,$rurx1,$rury1);
                   if($pinTextDis == 1){
                      my $midx = ($PinRect[0] + $PinRect[2])/2;
@@ -1039,7 +1042,10 @@ foreach my $id (@instIdList) {
                     my @rect_or_polygon = (split(/\s+/,$polyLine));
                     my $layer = shift @rect_or_polygon;
                     shift @rect_or_polygon;
+                    next unless exists $PTDB{$layer};
+                    next if ($PTDB{$layer}->dbTechGetLayerType // '') eq 'MASTERSLICE';
                     my $color = $PTDB{$layer}->dbTechGetLayerColor;
+                    next unless defined $color;
                     my @poly = &xformCellPinPolyToInstPin($location[0],$location[1],$cellOrigin[0], $cellOrigin[1],$orient,$cellSize[0],$cellSize[1],@rect_or_polygon);
                     if($pinTextDis == 1){
                        my $tx = 20 + $poly[0]*$MulFactor;

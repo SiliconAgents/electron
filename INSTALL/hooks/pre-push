@@ -64,9 +64,10 @@ fail() { echo "pre-push: $*" >&2; echo "pre-push: push refused. --no-verify over
 # when the check was written.
 CHECK="$REPO/INSTALL/hooks/name-check"
 if [[ -x "$CHECK" ]]; then
-  range="origin/master..HEAD"
-  git rev-parse --verify -q origin/master >/dev/null || range=""
-  if [[ -n "$range" ]]; then
+  # Use the branch's own upstream so this works on dev, master, or any branch.
+  upstream="$(git rev-parse --verify -q "@{u}" 2>/dev/null)"
+  if [[ -n "$upstream" ]]; then
+    range="$upstream..HEAD"
     say "checking for design and library names in $range"
     "$CHECK" --range "$range" --messages "$range" --quiet \
       || fail "a design or library name would be published"
