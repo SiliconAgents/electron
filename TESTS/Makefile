@@ -526,7 +526,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_aldff rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_fp_def nangate_flatten_below nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_aldff undefined_mod rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_fp_def nangate_flatten_below nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.
@@ -683,6 +683,22 @@ nangate_aldff:
 	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../aldff/read_always.tcl > read_always.log 2>&1
 	grep -q "ERROR-PAR-VERI : 018 : line 4 of" workarea/read_always.log || { echo "nangate_aldff: read_verilog did not report the always block"; exit 1; }
 	@echo "nangate_aldff: async-load flops mapped to set/clear flops, read back whole; an always block in a netlist is an error naming its line"
+
+# An instantiated module with no definition and no stub (a memory macro or a
+# custom cell nobody wrote a stub for).  yosys-slang's --ignore-unknown-modules
+# used to turn it into an empty box that was optimised away with its fan-out and
+# no error.  Default: hier_synthesis fails and writes no netlist; --allow_unknown
+# keeps the old behaviour.
+.PHONY: undefined_mod
+undefined_mod:
+	mkdir -p workarea
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../undefined_mod/strict.tcl > unknown_strict.log 2>&1; true
+	test ! -f workarea/strict.vg.gz || { echo "undefined_mod: a netlist was written for a design with an undefined module"; exit 1; }
+	grep -q "HR_SYN : 090" workarea/unknown_strict.log || { echo "undefined_mod: strict mode did not say it is on"; exit 1; }
+	grep -qi "unknown module.*macro\|macro.*unknown" workarea/hs_strict/elaborate.log || { echo "undefined_mod: the elaboration log does not name the undefined module"; exit 1; }
+	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../undefined_mod/allow.tcl > unknown_allow.log 2>&1; true
+	test -f workarea/allow.vg.gz || grep -q "HR_SYN : 067" workarea/unknown_allow.log || { echo "undefined_mod: --allow_unknown neither wrote a netlist nor said the plugin refuses it"; tail -5 workarea/unknown_allow.log; exit 1; }
+	@echo "undefined_mod: an undefined module is an error by default and an empty box with --allow_unknown on a plugin that takes it"
 
 # hier_synthesis -patch on a header the filelist only reaches through +incdir+:
 # a flop macro written as a ternary on its async reset, which yosys-slang will

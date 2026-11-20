@@ -32,7 +32,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-liberty <lib>] [-blackbox <cells.v>]\n";
   print "                       [-out <dir>] [-netlist <file>] [--read]\n";
   print "                       [-jobs <n>] [-flatten_below <cells>] [-flatten <glob>[,<glob>]]\n";
-  print "                       [-slang_args <args>] [-slang_plugin <slang.so>]\n";
+  print "                       [-slang_args <args>] [-slang_plugin <slang.so>] [--allow_unknown]\n";
   print "                       [-patch <rules.py>] [-param_value <P.F=N>[,<P.F=N>]] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
   print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [-module_opts <file>] [-kb <dir>] [-reuse <hs/netlists>] [--booth] [--name_registers]\n";
@@ -48,6 +48,10 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "        -top            top module.  Required with -rtl.\n";
   print "        -rtlil          skip elaboration and start from a dump written earlier.\n";
   print "        -slang_args     extra options for read_slang, appended to the defaults.\n";
+  print "        --allow_unknown a module with no definition and no stub becomes an empty\n";
+  print "                        box instead of an error.  Off by default: an unstubbed\n";
+  print "                        memory or custom cell is otherwise optimised away,\n";
+  print "                        with its fan-out, and nothing says so.\n";
   print "        -slang_plugin   the yosys-slang plugin to elaborate with.  Omitted:\n";
   print "                        \$ELECTRON_SLANG_PLUGIN, else INSTALL/slang/slang.so when\n";
   print "                        make slang-plugin has built it, else the image's own.\n";
@@ -154,6 +158,7 @@ my $rtlList;
 my $topModule;
 my $slangArgs = "";
 my $slangPlugin = "";
+my $allowUnknown = 0;
 my $patchRules = "";
 my $paramValues = "";
 my $netlistOut;
@@ -193,6 +198,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-top_module"){$topModule = $_[$i+1];}
   if($_[$i] eq "-slang_args"){$slangArgs = $_[$i+1];}
   if($_[$i] eq "-slang_plugin"){$slangPlugin = $_[$i+1];}
+  if($_[$i] eq "--allow_unknown"){$allowUnknown = 1;}
   if($_[$i] eq "-patch"){$patchRules = $_[$i+1];}
   if($_[$i] eq "-param_value"){$paramValues = $_[$i+1];}
   if($_[$i] eq "-netlist"){$netlistOut = $_[$i+1];}
@@ -465,8 +471,12 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
         "$outDir/slang_probe.log");
     #<!-- Not -q: that hides the diagnostic naming the flag and leaves only
     #     "elaboration failed", which says nothing about why. -->
-    my $unknownFlag = " --ignore-unknown-modules";
-    if ( defined $probeCmd ) {
+    #<!-- Off unless asked for: with the flag, a memory or custom cell that has
+    #     no stub elaborates as an EMPTY module, yosys optimises it and everything
+    #     it fed away, and the only trace is an "Optimizing module" line.  One
+    #     design lost all 16 instances of a memory macro that way, with no error. -->
+    my $unknownFlag = $allowUnknown ? " --ignore-unknown-modules" : "";
+    if ( defined $probeCmd && $allowUnknown ) {
       system("$probeCmd > /dev/null");
       if ( open(my $pl, "<", "$outDir/slang_probe.log") ) {
         while ( <$pl> ) {
@@ -475,7 +485,11 @@ if ( defined $rtlList && $rtlList ne "" && $noRun != 1 ) {
         close($pl);
       }
     }
-    if ( $unknownFlag eq "" ) {
+    if ( !$allowUnknown ) {
+      print "INFO-PAR-HR_SYN : 090 : a module with no definition and no stub is an error" .
+            " (--allow_unknown makes it an empty box)\n";
+    }
+    elsif ( $unknownFlag eq "" ) {
       print "INFO-PAR-HR_SYN : 067 : this plugin requires a definition for every module;" .
             " a missing one is an error, not an empty box\n";
     }
