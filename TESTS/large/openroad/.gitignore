@@ -1,0 +1,5 @@
+# per-run output: DEFs, ORFS results and logs, a few hundred MB per design
+work_*/
+*.run.log
+*.run2.log
+orfs_*.run.log
