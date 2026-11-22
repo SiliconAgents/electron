@@ -673,12 +673,14 @@ nangate_photon_repeat_push: nangate_store $(NG_SIZING)
 # Flops whose async reset loads a signal (aldff/aldff.sv): hier_synthesis must
 # map them to set/clear flops (DFFRS) and read the netlist back whole; and a
 # netlist holding an always block must make read_verilog stop with an error
-# that names the line, not drop what follows in silence.
+# that names the line, not drop what follows in silence.  Flops are named after
+# their register (q_reg), not _123_.
 nangate_aldff:
 	mkdir -p workarea
 	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../aldff/synth.tcl > aldff.log 2>&1
 	grep -q "HR_SYN : 030 : 3 sequential (2 DFFRS_" workarea/aldff.log || { echo "nangate_aldff: the async-load flops were not mapped to set/clear flops"; grep "HR_SYN : 030\|ERROR" workarea/aldff.log; exit 1; }
 	! zcat workarea/aldff.vg.gz | grep -qE "^\s*(always|initial)" || { echo "nangate_aldff: behavioural code in the netlist"; exit 1; }
+	! zcat workarea/aldff.vg.gz | grep -E "^\s+(DFF|DLH|DLL)\w* _[0-9]+_ \(" || { echo "nangate_aldff: a flop is named _123_, not after its register (--name_registers is the default)"; exit 1; }
 	grep -q "Instance count : 17" workarea/aldff.log || { echo "nangate_aldff: the netlist did not read back whole"; grep "Instance count" workarea/aldff.log; exit 1; }
 	cd workarea && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../aldff/read_always.tcl > read_always.log 2>&1
 	grep -q "ERROR-PAR-VERI : 018 : line 4 of" workarea/read_always.log || { echo "nangate_aldff: read_verilog did not report the always block"; exit 1; }

@@ -35,7 +35,7 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                       [-slang_args <args>] [-slang_plugin <slang.so>] [--allow_unknown]\n";
   print "                       [-patch <rules.py>] [-param_value <P.F=N>[,<P.F=N>]] [-latchmap <file>]\n";
   print "                       [-abc_delay <ps> [-abc_driver <cell>] [-abc_load <fF>]]\n";
-  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [-module_opts <file>] [-kb <dir>] [-reuse <hs/netlists>] [--booth] [--name_registers]\n";
+  print "                       [-adder brent_kung|kogge_stone|sklansky|han_carlson] [--abc_keep_structure] [--abc_balance] [-module_opts <file>] [-kb <dir>] [-reuse <hs/netlists>] [--booth] [--no_name_registers]\n";
   print "                       [-leaf_wrappers <glob>[,<glob>] [-leaf_soft <param>=<value>]\n";
   print "                        [-leaf_soft_mode resize|dissolve] [-leaf_hard <glob>[,<glob>]]\n";
   print "                        [-leaf_drop <glob>[,<glob>]]]\n";
@@ -112,8 +112,8 @@ if ( $noOfArguments == 0 || $_[0] eq '-h' ) {
   print "                        8 gates / 88 ps with 60 ps and balance, +31% cells\n";
   print "        --booth         multipliers as Booth-encoded trees (yosys booth), not\n";
   print "                        techmap's array: ~4% less area, no faster after abc\n";
-  print "        --name_registers  each flop and latch named after its register,\n";
-  print "                        e.g. a_ff.o_q[10]_reg, instead of _123_ (netlist ~1% larger)\n";
+  print "        --no_name_registers  leave flops and latches as _123_.  By default each is\n";
+  print "                        named after its register, e.g. a_ff.o_q[10]_reg (netlist ~1% larger)\n";
   print "        -abc_timeout    with -abc_delay, seconds a module may spend; past it\n";
   print "                        the module is mapped without buffering and sizing\n";
   print "                        (default 600; 0 = no limit)\n";
@@ -178,7 +178,7 @@ my $moduleOpts = ( defined $PLAN_MODULE_OPTS ) ? $PLAN_MODULE_OPTS : "";
 my $planKb = ( defined $PLAN_KB ) ? $PLAN_KB : "";
 my $reuseDir = ( defined $PLAN_REUSE ) ? $PLAN_REUSE : "";
 my $booth = 0;
-my $nameRegs = 0;
+my $nameRegs = 1;
 my $leafWrappers = "";
 my @leafSoft = ();
 my $leafSoftMode = "resize";
@@ -219,6 +219,7 @@ for(my $i = 0; $i < $noOfArguments; $i++){
   if($_[$i] eq "-reuse"){$reuseDir = $_[$i+1];}
   if($_[$i] eq "--booth"){$booth = 1;}
   if($_[$i] eq "--name_registers"){$nameRegs = 1;}
+  if($_[$i] eq "--no_name_registers"){$nameRegs = 0;}
   if($_[$i] eq "-leaf_wrappers"){$leafWrappers = $_[$i+1];}
   if($_[$i] eq "-leaf_soft"){push(@leafSoft, $_[$i+1]);}
   if($_[$i] eq "-leaf_soft_mode"){$leafSoftMode = $_[$i+1];}
