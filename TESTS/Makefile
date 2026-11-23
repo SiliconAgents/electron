@@ -259,11 +259,13 @@ nangate_fixed_fp:
 # its pins land on the netlist's ports (read_def --pins used to keep them unplaced, once per pin
 # "multiple definition"), a set_placement_blockage for the same notch is not added again,
 # legalize_flat holds it and moves the forty out (no component reaches into it, the macros and
-# pins stay where they were held), and write_def gives the eight-corner outline back.
+# pins stay where they were held), and write_def gives the eight-corner outline back.  The forty
+# are standard cells only: write_def's component order is Perl's hash order, and a macro among
+# the first forty was put in the notch and then, rightly, held there.
 LD_EXPECT = grep -q "$(1)" workarea/l_die.log || { echo "nangate_l_die: expected \"$(1)\" in workarea/l_die.log"; exit 1; }
 nangate_l_die: nangate_fixed_fp
 	awk 'BEGIN{n=0} /^DIEAREA/{print "DIEAREA ( 0 0 ) ( 440000 0 ) ( 440000 188000 ) ( 392000 188000 ) ( 392000 252000 ) ( 440000 252000 ) ( 440000 440000 ) ( 0 440000 ) ;"; next} \
-	  /\+ PLACED/ && n < 40 {sub(/\( [0-9]+ [0-9]+ \)/, "( " 396000 + (n % 4) * 8000 " " 196000 + int(n / 4) * 5600 " )"); n++} {print}' workarea/ff.legal.def > workarea/l_die.def
+	  /^- / {m = $$3} /\+ PLACED/ && m != "TESTRAM" && n < 40 {sub(/\( [0-9]+ [0-9]+ \)/, "( " 396000 + (n % 4) * 8000 " " 196000 + int(n / 4) * 5600 " )"); n++} {print}' workarea/ff.legal.def > workarea/l_die.def
 	cd workarea ; PATH=/usr/bin:$$PATH ELECTRON_HOME=$(ELECTRON) $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../nangate_l_die.tcl > l_die.log 2>&1
 	$(call LD_EXPECT,INFO-PAR-DEF : 043 : the die is rectilinear (8 corners))
 	$(call LD_EXPECT,INFO-PAR-DEF : 047 : 64 of the DEF's pins placed ports the netlist already had)
