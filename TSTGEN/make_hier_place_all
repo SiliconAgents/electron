@@ -2030,6 +2030,10 @@ my %instCnt = ();
 #     of -floorplan_spec, its own cells placed again.  The fast loop one level
 #     down: the parent is not touched, so nothing outside the module moves. -->
 my @onlyPaths = ();
+if ( $keepShapes && $HIER_STATE_FAILED ) {
+  print "ERR-TST-HR_PL_ALL : 087 : the last read_hier_state failed, so there is no placement to keep; not placing\n";
+  return;
+}
 if ( $replace ne "" && ( ! $keepShapes || $only ne "" || $maxDepth >= 0 ) ) {
   print "ERR-TST-HR_PL_ALL : 080 : -replace re-places parts of a placed design; it needs --keep_shapes, and not -only or -depth\n";
   return;
