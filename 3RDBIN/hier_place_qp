@@ -156,6 +156,42 @@ def spread(cx, cy, area, cap):
     return nx, ny
 
 
+def read_groups(path, names, movable):
+    """--groups: soft regions.  One line a group:
+         <regex> <x0> <y0> <x1> <y1> [strength=S] [bands=N]
+       in the module's own microns, '#' a comment; a cell takes the first line
+       whose regex matches its name (re.search).  With bands=N and a capture
+       group in the regex, the group's integer picks one of N equal bands of
+       the rectangle, 0 at the top -- entry k of an array on its own rows.
+       Returns per-cell (x0, y0, x1, y1, strength) arrays (NaN = no group) and
+       the group index of each cell (-1 = none)."""
+    import re
+    groups = []
+    for line in open(path):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        t = line.split()
+        opt = dict(kv.split("=", 1) for kv in t[5:] if "=" in kv)
+        groups.append((re.compile(t[0]), tuple(float(v) for v in t[1:5]),
+                       float(opt.get("strength", "1")), int(opt.get("bands", "0"))))
+    n = len(names)
+    box = np.full((n, 5), np.nan); gi = -np.ones(n, dtype=int)
+    for k, nm in enumerate(names):
+        if not movable[k]:
+            continue
+        for g, (rx, (x0, y0, x1, y1), s, nb) in enumerate(groups):
+            mt = rx.search(nm)
+            if not mt:
+                continue
+            if nb > 0 and mt.groups() and mt.group(1) is not None:
+                b = int(mt.group(1)) % nb; bh = (y1 - y0) / nb
+                y1, y0 = y1 - b * bh, y1 - (b + 1) * bh
+            box[k] = (x0, y0, x1, y1, s); gi[k] = g
+            break
+    return groups, box, gi
+
+
 def write_stats(save, stats):
     """<save>.stats.json, read by hier_place_cells for the per-module metrics."""
     try:
@@ -192,6 +228,12 @@ def main():
                          "(default 0.01, $HIER_QP_ALPHA)")
     ap.add_argument("--keepout", type=float, nargs=4, action="append", default=[], metavar=("X0", "Y0", "X1", "Y1"),
                     help="no cell in this rectangle, as if a fixed block were there; repeatable (set_placement_blockage)")
+    ap.add_argument("--groups", default=os.environ.get("HIER_QP_GROUPS", ""),
+                    help="soft regions: '<regex> x0 y0 x1 y1 [strength=S] [bands=N]' a line, module "
+                         "microns; a matching cell outside its rectangle is pulled to the rectangle's "
+                         "nearest point, S times the mean diagonal, in every solve (default $HIER_QP_GROUPS)")
+    ap.add_argument("--group_strength", type=float, default=float(os.environ.get("HIER_QP_GROUP_STRENGTH", "0.05") or 0.05),
+                    help="base pull of --groups, times each line's strength (default 0.05)")
     a, _unknown = ap.parse_known_args()   # hier_place's own switches are accepted and ignored
     t0 = time.time()
     hdr, nodes = read_nodes(a.nodefile)
@@ -279,6 +321,39 @@ def main():
           f"free capacity {cap.cap.sum():.0f} um2"
           + (f", inside region ({region[0]:.1f}, {region[1]:.1f})-({region[2]:.1f}, {region[3]:.1f}) of die {die}" if region else ""))
 
+    #<!-- --groups: a soft region per group of cells (a plan's arrangement of a
+    #     module's arrays and the logic between them).  Nothing is FIXED and no
+    #     hierarchy changes: a grouped cell outside its rectangle is tied to the
+    #     rectangle's nearest point by a spring in each solve, cells inside it
+    #     feel nothing, and the spread still uses the whole module.  The pull
+    #     scales with the solve's mean diagonal, like the spread's own anchor. -->
+    gbox = None
+    if a.groups:
+        groups, gb, ggi = read_groups(a.groups, [nd[1] for nd in nodes], movable)
+        gbox = gb[mi]; gidx = ggi[mi]
+        has = ~np.isnan(gbox[:, 0])
+        print(f"hier_place_qp: --groups {a.groups}: {len(groups)} group(s), {int(has.sum())} of {m} movable cells in one; "
+              + ", ".join(f"{g[0].pattern}={int((gidx == i).sum())}" for i, g in enumerate(groups)))
+        if not has.any():
+            gbox = None
+    def gpull(Lm, bvec, axis):
+        """Lm, bvec with the --groups springs added at the current placement."""
+        if gbox is None:
+            return Lm, bvec
+        cur = (cx if axis == 0 else cy)[mi]
+        lo, hi = gbox[:, axis], gbox[:, axis + 2]
+        tgt = np.clip(cur, lo, hi)
+        out = ~np.isnan(lo) & (np.abs(tgt - cur) > 1e-9)
+        gw = np.where(out, a.group_strength * np.nan_to_num(gbox[:, 4]) * Lm.diagonal().mean(), 0.0)
+        return (Lm + sp.diags(gw)).tocsr(), bvec + gw * np.nan_to_num(tgt)
+    def ginside(px_, py_):
+        if gbox is None:
+            return None
+        has = ~np.isnan(gbox[:, 0])
+        ins = has & (px_ >= gbox[:, 0]) & (px_ <= gbox[:, 2]) & (py_ >= gbox[:, 1]) & (py_ <= gbox[:, 3])
+        return {g[0].pattern: round(float(ins[gidx == i].mean()), 4) if (gidx == i).any() else None
+                for i, g in enumerate(groups)}
+
     x0 = np.where(movable, cx, dcx)[mi]; y0 = np.where(movable, cy, dcy)[mi]
     xs, _ = spla.cg(L, bx, x0=x0, rtol=1e-6, maxiter=2000)
     ys, _ = spla.cg(L, by, x0=y0, rtol=1e-6, maxiter=2000)
@@ -305,8 +380,9 @@ def main():
     if a.linear > 0:
         for _ in range(3):
             Lx, bxx, Ly, byy = relin()
-            xs, _ = spla.cg(Lx, bxx, x0=cx[mi], rtol=1e-6, maxiter=1000)
-            ys, _ = spla.cg(Ly, byy, x0=cy[mi], rtol=1e-6, maxiter=1000)
+            Lgx, bgx = gpull(Lx, bxx, 0); Lgy, bgy = gpull(Ly, byy, 1)
+            xs, _ = spla.cg(Lgx, bgx, x0=cx[mi], rtol=1e-6, maxiter=1000)
+            ys, _ = spla.cg(Lgy, bgy, x0=cy[mi], rtol=1e-6, maxiter=1000)
             cx[mi], cy[mi] = xs, ys
             print(f"  linearised solve: lower bound {hpwl(cx, cy, ea, eb):12.1f}")
     lb = hpwl(cx, cy, ea, eb)
@@ -317,9 +393,13 @@ def main():
         sx, sy = spread(cx[mi], cy[mi], area, cap)
         ux, uy = cx.copy(), cy.copy(); ux[mi], uy[mi] = sx, sy
         ub = hpwl(ux, uy, ea, eb)
-        if best is None or ub < best[0]:
+        # with --groups the springs act from round to round, so the last spread
+        # is the one that has felt them all: keep it rather than the shortest
+        if best is None or ub < best[0] or gbox is not None:
             best = (ub, sx.copy(), sy.copy())
-        print(f"  iter {it:2d}: lower bound {lb:12.1f}  spread {ub:12.1f}  gap {100*(ub-lb)/max(ub,1e-9):5.1f}%")
+        gin = ginside(sx, sy)
+        print(f"  iter {it:2d}: lower bound {lb:12.1f}  spread {ub:12.1f}  gap {100*(ub-lb)/max(ub,1e-9):5.1f}%"
+              + (f"  in region {np.mean([v for v in gin.values() if v is not None]):.3f}" if gin else ""))
         if ub - lb < a.stop_gap * ub:
             break
         if a.linear > 0:
@@ -329,8 +409,10 @@ def main():
         #     run every round lets the solve settle the cells into it: 12.0 -> 10.7
         #     um a net on the 924k-cell module (--stop_gap 0 --alpha 0.003). -->
         ax = a.alpha * (1 + it) * (Lx.diagonal().mean()); ay = a.alpha * (1 + it) * (Ly.diagonal().mean())
-        xs, _ = spla.cg((Lx + ax * sp.identity(m)).tocsr(), bxx + ax * sx, x0=cx[mi], rtol=1e-6, maxiter=1000)
-        ys, _ = spla.cg((Ly + ay * sp.identity(m)).tocsr(), byy + ay * sy, x0=cy[mi], rtol=1e-6, maxiter=1000)
+        Lgx, bgx = gpull((Lx + ax * sp.identity(m)).tocsr(), bxx + ax * sx, 0)
+        Lgy, bgy = gpull((Ly + ay * sp.identity(m)).tocsr(), byy + ay * sy, 1)
+        xs, _ = spla.cg(Lgx, bgx, x0=cx[mi], rtol=1e-6, maxiter=1000)
+        ys, _ = spla.cg(Lgy, bgy, x0=cy[mi], rtol=1e-6, maxiter=1000)
         cx[mi], cy[mi] = xs, ys
         lb = hpwl(cx, cy, ea, eb)
     _, sx, sy = best
@@ -351,6 +433,7 @@ def main():
                          "region": list(region) if region else None,
                          "outside_region": (int(((sx < region[0]) | (sx > region[2]) | (sy < region[1]) | (sy > region[3])).sum())
                                             if region else None),
+                         "groups_inside": ginside(sx, sy),
                          "seconds": round(time.time() - t0, 3)})
     print(f"hier_place_qp: wrote {a.save}, spread HPWL {best[0]:.1f}, {time.time() - t0:.1f}s")
 

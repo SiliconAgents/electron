@@ -292,20 +292,31 @@ printf("INFO-WR_HR_ST : 002 : %d module floorplan(s) of %s written to %s\n", sca
 }# sub write_hier_state
 
 
+#<!-- $HIER_STATE_FAILED: set when a read_hier_state stops on an error, so
+#     hier_place_all --keep_shapes refuses to re-place parts of a placement
+#     that was never loaded.  Without it a tile whose netlist had changed went
+#     on to place 628k of 2.46M cells and report a timing for that. -->
+$HIER_STATE_FAILED = 0;
 sub read_hier_state {
 
 use Benchmark;
 my $t0 = new Benchmark;
-my $in = "";
+my ($in, $replace) = ("", "");
 for ( my $i = 0 ; $i < @_ ; $i++ ) {
   $in = $_[$i+1] if ( $_[$i] eq "-input" );
+  $replace = $_[$i+1] if ( $_[$i] eq "-replace" );
 }
 if ( @_ == 0 || $_[0] eq "-h" || $in eq "" ) {
-  print "Usage : read_hier_state -input <file>\n";
+  print "Usage : read_hier_state -input <file> [-replace <module>[,<module>...]]\n";
   print "        What write_hier_state saved, after the script that read the same netlist and\n";
   print "        floorplan, in place of hier_place_all.  Ends with the top open and hier2flat run.\n";
+  print "        -replace: the modules hier_place_all -replace will place again.  One of them, or\n";
+  print "        a module under one, may have changed since the state was written (cells regrouped\n";
+  print "        into new blocks): its saved floorplan is left out, since it is placed again\n";
+  print "        anyway.  Any other changed module is still an error.\n";
   return;
 }
+$HIER_STATE_FAILED = 1;
 my $fh;
 unless ( -r $in && open($fh, "-|", "gzip", "-dc", $in) ) {
   print "ERR-RD_HR_ST : 001 : cannot read $in\n";
@@ -332,9 +343,35 @@ foreach my $m ( sort keys %{$s->{fpid}} ) {
   my $n = exists $MODULE_ALREADY{$m} ? scalar( my @l = $MODULE_ALREADY{$m}->dbVNOMGetLeafInst ) : -1;
   push(@bad, $m) unless ( $n == $s->{leaves}{$m} );
 }
+#<!-- a changed module that is placed again anyway -- named by -replace, or
+#     under one -- keeps nothing from the state: its floorplan is left out and
+#     the walk places it from scratch, with every module under it -->
+if ( @bad && $replace ne "" ) {
+  my %under = ();
+  my @todo = grep { exists $MODULE_ALREADY{$_} } split(/[,\s]+/, $replace);
+  while ( my $m = shift @todo ) {
+    next if ( $under{$m}++ );
+    foreach my $ci ( $MODULE_ALREADY{$m}->dbVNOMGetHierInst ) {
+      my $c = $MODULE_ALREADY{$m}->dbVNOMGetHierInstCell($ci);
+      push(@todo, $c) if ( defined $c && exists $MODULE_ALREADY{$c} );
+    }
+  }
+  my @drop = grep { $under{$_} } @bad;
+  @bad = grep { ! $under{$_} } @bad;
+  if ( @drop ) {
+    my %dropFp = map { $s->{fpid}{$_} => 1 } @drop;
+    delete $s->{fpid}{$_} foreach ( @drop );
+    my %used = map { $_ => 1 } values %{$s->{fpid}};
+    foreach my $k ( keys %{$s->{lk}} ) { delete $s->{lk}{$k} if ( $dropFp{ $s->{lk}{$k} } && ! $used{ $s->{lk}{$k} } ); }
+    foreach my $f ( keys %dropFp ) { delete $s->{fp}{$f} unless ( $used{$f} ); }
+    print "INFO-RD_HR_ST : 008 : " . scalar(@drop) . " module(s) changed since $in was written are placed again " .
+          "(-replace), their saved floorplans left out: @drop[0 .. ( $#drop < 4 ? $#drop : 4 )]\n";
+  }
+}
 if ( @bad ) {
   print "ERR-RD_HR_ST : 005 : " . scalar(@bad) . " module(s) missing or changed since $in was written: " .
         "@bad[0 .. ( $#bad < 4 ? $#bad : 4 )]\n";
+  print "ERR-RD_HR_ST : 009 : nothing was loaded; hier_place_all --keep_shapes will refuse to run\n";
   return;
 }
 #<!-- What the script before this held FIXED at the top -- the floorplan's
@@ -405,6 +442,7 @@ foreach my $pin ( keys %fixPin ) {
 }
 print "INFO-RD_HR_ST : 007 : $nI instance(s) and $nP port(s) of $top held FIXED again, as the script before this placed them\n" if ( $nI || $nP );
 &hier2flat("--physical");
+$HIER_STATE_FAILED = 0;
 my $t1 = new Benchmark;
 print "Command read_hier_state took:", timestr(timediff($t1, $t0)), "\n";
 

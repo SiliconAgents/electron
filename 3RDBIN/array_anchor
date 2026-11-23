@@ -1,0 +1,470 @@
+#!/usr/bin/env python3
+"""Lay the flops of a register array out as the array they are, where timing wants it.
+
+    hier_place_all ... -cells_anchor "<electron>/3RDBIN/array_anchor [options]"
+
+hier_place_cells runs it as `<command> <nodefile> <graph>` after the blocks of a
+module are placed and before its cells are; it rewrites the nodefile.
+
+WHAT IT IS FOR
+
+A register file or queue that synthesis flattened keeps its structure only in
+its names: `u_q/gen_entries[0].u_addr_q/...`, `u_q/gen_entries[1]...`.  The cell
+pass places every flop with its own logic, and a field read by a 40:1 mux or
+written by a broadcast ends up smeared over the module.  On one 3M-cell tile
+the 40 entries of a store queue had their centres within 4 um of each other
+and each entry spread over 299 um -- neither an entry nor a field was held
+together, and the broadcasts into it and the read muxes out of it were the
+module's worst paths.  The block pass's --array tiles identical sibling
+BLOCKS; this does the same for flops that are not blocks.
+
+WHAT IT DOES
+
+1. Finds the arrays.  An array is a name prefix ending in `[`, with at least
+   --min_entries distinct indices after it and at least --min_flops flops
+   (TYPE=seq) under most entries, the entries alike in size.  The outermost
+   such prefix wins, unless it is larger than --max_flops.  Within an entry a
+   flop's field is the rest of its name with the last index (the bit) taken
+   off.
+2. Places the module once without anchors (the same analytic placer,
+   3RDBIN/hier_place_qp), unless --p0 gives such a placement.
+3. Finds where each array belongs: a random walk from its flops through the
+   combinational cells, biased by the graph's edge weights (the timing weights
+   of -net_weights), ends on flops of other structures, ports and blocks; the
+   array goes to the centroid of where it ends, weighted.  Arrays that feed
+   each other are moved together, a few rounds.
+4. Lays each array out as a grid: an entry is a slab of rows, the entries
+   stacked in index order; inside an entry the fields keep one order -- by
+   where step 2 put them, so a field faces what it talks to -- and a field's
+   bits fill its columns.  So every field is one column across the entries and
+   every entry one slab across the fields.  Flops take --density of the slab's
+   width; the rest is for the logic that the cell pass puts between them.
+5. Moves each grid to the nearest spot clear of blocks and of the grids
+   already placed, inside the module, and writes its flops FIXED (with
+   --free, PLACED: a start only).  Nothing else in the nodefile changes.
+
+The arrays, their grids and where they went go to <module>.arrays.tsv in the
+working directory, one line each.
+"""
+
+import argparse
+import collections
+import math
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+import numpy as np
+import scipy.sparse as sp
+
+IDX = re.compile(r'\[(\d+)\]')
+
+
+def bare(n):
+    return n[1:] if n.startswith('\\') else n
+
+
+def read_nodes(path):
+    hdr, nodes = {}, []
+    for line in open(path):
+        if line.startswith('#') or not line.strip():
+            continue
+        t = line.split()
+        if t[0] in ('DBU', 'ROWHEIGHT'):
+            hdr[t[0]] = float(t[1]); continue
+        if t[0] == 'DIEAREA':
+            hdr['DIEAREA'] = tuple(float(v) for v in t[1:5]); continue
+        if t[0] == 'NODES':
+            continue
+        rest = t[6:]
+        x = y = None
+        if rest and '=' not in rest[0]:
+            x, y = float(rest[0]), float(rest[1]); rest = rest[2:]
+        typ = next((r[5:] for r in rest if r.startswith('TYPE=')), '')
+        nodes.append(dict(idx=int(t[0]), name=t[1], kind=t[2], w=float(t[3]), h=float(t[4]),
+                          status=t[5], x=x, y=y, type=typ, tail=rest))
+    return hdr, nodes
+
+
+def find_arrays(nodes, min_entries, min_flops, max_flops, only, skip):
+    """prefix -> {entry: [node index]}; each seq node in at most one array"""
+    seq = [k for k, nd in enumerate(nodes) if nd['type'] == 'seq' and nd['kind'] == 'INST']
+    cand = collections.defaultdict(lambda: collections.defaultdict(list))
+    for k in seq:
+        nm = bare(nodes[k]['name'])
+        for m in IDX.finditer(nm):
+            if m.end() == len(nm):          # the bit of a register, never an entry
+                continue
+            cand[nm[:m.start() + 1]][int(m.group(1))].append(k)
+    good = {}
+    for p, ents in cand.items():
+        if len(ents) < min_entries:
+            continue
+        if only and not re.search(only, p):
+            continue
+        if skip and re.search(skip, p):
+            continue
+        sizes = sorted(len(v) for v in ents.values())
+        med = sizes[len(sizes) // 2]
+        if med < min_flops:
+            continue
+        alike = sum(1 for s in sizes if abs(s - med) <= 0.25 * med)
+        if alike < 0.8 * len(sizes):
+            continue
+        good[p] = ents
+    # outermost first: a flop goes to the shortest qualifying prefix that is not too big
+    owner = {}
+    for p in sorted(good, key=len):
+        n = sum(len(v) for v in good[p].values())
+        if n > max_flops:
+            continue
+        for e, ks in good[p].items():
+            for k in ks:
+                owner.setdefault(k, (p, e))
+    arrays = collections.defaultdict(lambda: collections.defaultdict(list))
+    for k, (p, e) in owner.items():
+        arrays[p][e].append(k)
+    return {p: dict(v) for p, v in arrays.items() if len(v) >= min_entries}
+
+
+def field_of(name, prefix):
+    """the field of a flop in an entry: the name after `<prefix><n>]`, its last index (the bit) off"""
+    rest = bare(name)[len(prefix):]
+    rest = rest[rest.index(']') + 1:]
+    m = re.search(r'\[(\d+)\]$', rest)
+    return (rest[:m.start()], int(m.group(1))) if m else (rest, 0)
+
+
+def run_p0(nodefile, graph, out):
+    qp = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hier_place_qp')
+    cmd = [sys.executable, qp, nodefile, graph, '--save', out]
+    t = time.time()
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if r.returncode != 0 or not os.path.exists(out):
+        sys.stderr.write(r.stdout[-2000:])
+        raise RuntimeError('the placement without anchors failed (%s)' % ' '.join(cmd))
+    return time.time() - t
+
+
+def read_graph(path, pos, n):
+    a, b, w = [], [], []
+    for line in open(path):
+        t = line.split()
+        if len(t) >= 2:
+            p, q = pos.get(int(t[0])), pos.get(int(t[1]))
+            if p is not None and q is not None and p != q:
+                a.append(p); b.append(q); w.append(float(t[2]) if len(t) >= 3 else 1.0)
+    a = np.array(a, dtype=np.int64); b = np.array(b, dtype=np.int64); w = np.array(w)
+    A = sp.csr_matrix((np.concatenate([w, w]), (np.concatenate([a, b]), np.concatenate([b, a]))), shape=(n, n))
+    return A
+
+
+def opener(path):
+    import gzip
+    for q in (path, path + '.gz'):
+        if os.path.exists(q):
+            return gzip.open(q, 'rt') if q.endswith('.gz') else open(q)
+    raise FileNotFoundError(path)
+
+
+def read_plan(prefix, ipath):
+    """Photon `arrays`: array -> (x, y, pull_x, pull_y), (array, field) -> (pull_x, pull_y); names made
+    relative to this module (its instance path off), coordinates on the die"""
+    cut = ipath + '/' if ipath else ''
+    rel = lambda n: n[len(cut):] if n.startswith(cut) else None
+    arrays, fields = {}, {}
+    with opener(prefix + '.arrays.tsv') as fh:
+        hd = fh.readline().rstrip('\n').split('\t')
+        for line in fh:
+            r = dict(zip(hd, line.rstrip('\n').split('\t')))
+            n = rel(r['array'])
+            if n is not None:
+                arrays[n] = (float(r['x']), float(r['y']), float(r['pull_x']), float(r['pull_y']))
+    with opener(prefix + '.array_fields.tsv') as fh:
+        hd = fh.readline().rstrip('\n').split('\t')
+        for line in fh:
+            r = dict(zip(hd, line.rstrip('\n').split('\t')))
+            n = rel(r['array'])
+            if n is not None:
+                fields[(n, r['field'])] = (float(r['pull_x']), float(r['pull_y']))
+    return dict(arrays=arrays, fields=fields)
+
+
+def module_origin(module, spec):
+    """(x, y, instance path) of a module's box on the die: from --origin X,Y,path, or from the
+    <parent>.blocks.tsv (BLOCK inst w h x y . . module ...) and <parent>.blocks.placed.tsv (BLOCK inst
+    x y w h) files hier_place_all writes in the working directory, parent by parent up to the top"""
+    if spec:
+        x, y, path = spec.split(',', 2)
+        return float(x), float(y), path
+    import glob
+    parent = {}
+    for f in glob.glob('*.blocks.tsv'):
+        par = os.path.basename(f)[:-len('.blocks.tsv')]
+        for line in open(f):
+            t = line.split()
+            if len(t) >= 9 and t[0] == 'BLOCK':
+                parent[t[8]] = (par, t[1])
+    def at(mod):
+        if mod not in parent:
+            return (0.0, 0.0, '')                  # the top
+        par, inst = parent[mod]
+        base = at(par)
+        if base is None or not os.path.exists(par + '.blocks.placed.tsv'):
+            return None
+        for line in open(par + '.blocks.placed.tsv'):
+            t = line.split()
+            if len(t) >= 6 and t[0] == 'BLOCK' and t[1] == inst:
+                return (base[0] + float(t[2]), base[1] + float(t[3]), (base[2] + '/' if base[2] else '') + inst)
+        return None
+    if module not in parent:
+        return None
+    return at(module)
+
+
+def overlaps(r, s):
+    return r[0] < s[2] - 1e-9 and s[0] < r[2] - 1e-9 and r[1] < s[3] - 1e-9 and s[1] < r[3] - 1e-9
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('nodefile'); ap.add_argument('graph')
+    ap.add_argument('--min_entries', type=int, default=4)
+    ap.add_argument('--min_flops', type=int, default=4, help='flops an entry has at least (default 4)')
+    ap.add_argument('--max_flops', type=int, default=40000, help='an array larger than this is left to its inner ones')
+    ap.add_argument('--only', default='', help='arrays whose prefix matches this regex')
+    ap.add_argument('--skip', default='', help='arrays whose prefix matches this regex are left alone')
+    ap.add_argument('--modules', default='', help='only these modules (names, comma separated)')
+    ap.add_argument('--density', type=float, default=0.5, help='flop width over slot width in a slab (default 0.5)')
+    ap.add_argument('--aspect', type=float, default=0.0, help='grid width/height wanted; 0 = the module\'s')
+    ap.add_argument('--depth', type=int, default=6, help='random-walk steps through combinational cells')
+    ap.add_argument('--rounds', type=int, default=3)
+    ap.add_argument('--p0', default='', help='a placement of this nodefile without anchors, to use instead of making one')
+    ap.add_argument('--free', action='store_true', help='PLACED, not FIXED: a start only')
+    ap.add_argument('--dry', action='store_true', help='report, change nothing')
+    ap.add_argument('--save_input', default='', help='copy the nodefile and graph into this directory first')
+    ap.add_argument('--plan', default='', help="Photon's `arrays <prefix>` output prefix: lay out only its arrays, "
+                    "each at its pull, the fields in the order of theirs (no placement or walk of its own)")
+    ap.add_argument('--origin', default='', help='with --plan: X,Y of this module on the die and its instance path '
+                    '(X,Y,path); default from the <parent>.blocks.tsv / .blocks.placed.tsv hier_place_all writes here')
+    a = ap.parse_args()
+
+    module = os.path.basename(a.nodefile).split('.cells.nodefile')[0]
+    if a.modules and module not in a.modules.split(','):
+        return 0
+    if a.save_input:
+        os.makedirs(a.save_input, exist_ok=True)
+        shutil.copy(a.nodefile, os.path.join(a.save_input, os.path.basename(a.nodefile)))
+        shutil.copy(a.graph, os.path.join(a.save_input, os.path.basename(a.graph)))
+    t0 = time.time()
+    hdr, nodes = read_nodes(a.nodefile)
+    arrays = find_arrays(nodes, a.min_entries, a.min_flops, a.max_flops, a.only, a.skip)
+    if not arrays:
+        return 0
+    n = len(nodes)
+    say = lambda s: sys.stderr.write('array_anchor: %s: %s\n' % (module, s))
+    say('%d array(s), %d flop(s)' % (len(arrays), sum(len(k) for v in arrays.values() for k in v.values())))
+
+    names = sorted(arrays)
+    n_ = len(nodes)
+    member = -np.ones(n_, dtype=np.int64)
+    for j, p in enumerate(names):
+        for ks in arrays[p].values():
+            member[ks] = j
+    fpull = {}
+    if a.plan:
+        org = module_origin(module, a.origin)
+        if org is None:
+            say('--plan: where %s sits on the die is not known (no .blocks files here, no --origin); nothing anchored' % module)
+            return 0
+        ox, oy, ipath = org
+        plan = read_plan(a.plan, ipath)
+        keep = [p for p in names if p in plan['arrays']]
+        say('--plan %s: %d of its arrays are here (instance %s at %.2f, %.2f)' % (a.plan, len(keep), ipath, ox, oy))
+        if not keep:
+            return 0
+        arrays = {p: arrays[p] for p in keep}
+        names = sorted(arrays)
+        member[:] = -1
+        for j, p in enumerate(names):
+            for ks in arrays[p].values():
+                member[ks] = j
+        cx = np.array([plan['arrays'][p][2] - ox for p in names]); cy = np.array([plan['arrays'][p][3] - oy for p in names])
+        p0c = np.array([[plan['arrays'][p][0] - ox, plan['arrays'][p][1] - oy] for p in names])
+        fpull = {(p, f): (v[0] - ox) for (p, f), v in plan['fields'].items()}
+        X = np.full(n_, np.nan); Y = np.full(n_, np.nan)
+        pos = {nd['idx']: k for k, nd in enumerate(nodes)}
+        return layout(a, module, hdr, nodes, arrays, names, member, cx, cy, p0c, X, Y, pos, fpull, say, t0)
+
+    # 2. where the cell pass puts everything without anchors
+    p0 = a.p0
+    if not p0:
+        p0 = a.nodefile + '.array_p0'
+        say('placing once without anchors (%.0f s)' % run_p0(a.nodefile, a.graph, p0))
+    _, placed = read_nodes(p0)
+    at = {nd['idx']: (nd['x'] + nd['w'] / 2.0, nd['y'] + nd['h'] / 2.0) for nd in placed if nd['x'] is not None}
+    X = np.array([at.get(nd['idx'], (np.nan, np.nan))[0] for nd in nodes])
+    Y = np.array([at.get(nd['idx'], (np.nan, np.nan))[1] for nd in nodes])
+
+    # 3. where each array belongs: a weighted random walk through combinational cells
+    pos = {nd['idx']: k for k, nd in enumerate(nodes)}
+    A = read_graph(a.graph, pos, n)
+    deg = np.asarray(A.sum(axis=1)).ravel()
+    P = sp.diags(np.where(deg > 0, 1.0 / np.maximum(deg, 1e-12), 0.0)) @ A     # row-stochastic
+    PT = P.T.tocsr()
+    combi = np.array([nd['type'] in ('combi', 'und') and nd['kind'] == 'INST' for nd in nodes])
+    ends = []
+    for j, p in enumerate(names):
+        v = np.zeros(n); ks = np.flatnonzero(member == j); v[ks] = 1.0 / len(ks)
+        got = np.zeros(n)
+        for _ in range(a.depth):
+            v = PT @ v
+            stop = ~combi
+            got[stop] += v[stop]
+            v[stop] = 0.0
+        got[member == j] = 0.0                       # its own flops: inside the array
+        ends.append(got)
+    cx = np.array([np.nanmean(X[member == j]) for j in range(len(names))])
+    cy = np.array([np.nanmean(Y[member == j]) for j in range(len(names))])
+    p0c = np.stack([cx, cy], 1).copy()
+    for _ in range(a.rounds):
+        nx, ny = cx.copy(), cy.copy()
+        for j in range(len(names)):
+            g = ends[j]
+            ex = np.where(member >= 0, cx[np.maximum(member, 0)], X)
+            ey = np.where(member >= 0, cy[np.maximum(member, 0)], Y)
+            ok = (g > 0) & ~np.isnan(ex)
+            if g[ok].sum() > 0:
+                nx[j] = (g[ok] * ex[ok]).sum() / g[ok].sum()
+                ny[j] = (g[ok] * ey[ok]).sum() / g[ok].sum()
+        cx, cy = nx, ny
+    return layout(a, module, hdr, nodes, arrays, names, member, cx, cy, p0c, X, Y, pos, fpull, say, t0)
+
+
+def layout(a, module, hdr, nodes, arrays, names, member, cx, cy, p0c, X, Y, pos, fpull, say, t0):
+    # 4. the grids
+    die = hdr['DIEAREA']; rowh = hdr.get('ROWHEIGHT', 0.0)
+    if rowh <= 0:
+        rowh = min((nd['h'] for nd in nodes if nd['type'] == 'seq' and nd['h'] > 0), default=1.0)
+    DW, DH = die[2] - die[0], die[3] - die[1]
+    aspect = a.aspect if a.aspect > 0 else DW / DH
+    taken = [(nd['x'], nd['y'], nd['x'] + nd['w'], nd['y'] + nd['h']) for nd in nodes
+             if nd['kind'] == 'INST' and nd['type'] in ('block', 'mem') and nd['status'] == 'FIXED' and nd['x'] is not None]
+    new = {}
+    report = []
+    order = sorted(range(len(names)), key=lambda j: -int((member == j).sum()))
+    for j in order:
+        p = names[j]; ents = arrays[p]
+        fields = collections.defaultdict(lambda: [0, 0.0, 0.0, 0])   # bits, width, sum x, count
+        per = {}
+        for e, ks in ents.items():
+            for k in ks:
+                f, bit = field_of(nodes[k]['name'], p)
+                per[k] = (f, bit)
+                F = fields[f]; F[1] = max(F[1], nodes[k]['w'])
+                if not np.isnan(X[k]):
+                    F[2] += X[k]; F[3] += 1
+        cnt = collections.Counter((e, per[k][0]) for e, ks in ents.items() for k in ks)
+        for (e, f), c in cnt.items():
+            fields[f][0] = max(fields[f][0], c)          # a field's bits: the most any entry has
+        if fpull:
+            forder = sorted(fields, key=lambda f: fpull.get((p, f if f else '-'), cx[j]))
+        else:
+            forder = sorted(fields, key=lambda f: (fields[f][2] / fields[f][3]) if fields[f][3] else 0.0)
+        E = len(ents)
+        # an entry is one stream of slots, field after field in forder, each field
+        # given the slots its largest copy needs -- so a field starts at the same
+        # slot in every entry, and small fields share a column instead of each
+        # taking one.  One pitch for the array: its flops' 90th-percentile width.
+        start = {}; S = 0
+        for f in forder:
+            start[f] = S; S += fields[f][0]
+        widths = sorted(nodes[k]['w'] for ks in ents.values() for k in ks)
+        pitch = widths[int(0.9 * (len(widths) - 1))] / a.density
+        best = None
+        for R in range(1, 257):
+            W = math.ceil(S / R) * pitch
+            H = E * R * rowh
+            if W > DW or H > DH:
+                continue
+            sc = abs(math.log(W / H) - math.log(aspect))
+            if best is None or sc < best[0]:
+                best = (sc, R, W, H)
+        if best is None:
+            say('%s: %d entries do not fit the module on any grid, left to the placer' % (p, E))
+            continue
+        _, R, W, H = best
+        # entries in index order, the direction the placement without anchors leaned
+        eidx = sorted(ents)
+        if not fpull and len(eidx) > 2:
+            ey = [np.nanmean(Y[ents[e]]) for e in eidx]
+            if np.corrcoef(eidx, np.nan_to_num(ey, nan=np.nanmean(ey)))[0, 1] < 0:
+                eidx = eidx[::-1]
+        # 5. the nearest spot clear of blocks and other grids, inside the module
+        def rect(x, y):
+            return (x - W / 2, y - H / 2, x + W / 2, y + H / 2)
+        def clamp(x, y):
+            return (min(max(x, die[0] + W / 2), die[2] - W / 2), min(max(y, die[1] + H / 2), die[3] - H / 2))
+        tx, ty = clamp(cx[j], cy[j])
+        spot = None
+        step = max(4 * rowh, min(W, H) / 4)
+        for r in range(0, int(max(DW, DH) / step) + 1):
+            ring = [(0, 0)] if r == 0 else [(dx, dy) for dx in range(-r, r + 1) for dy in range(-r, r + 1)
+                                            if max(abs(dx), abs(dy)) == r]
+            ring.sort(key=lambda d: d[0] ** 2 + d[1] ** 2)
+            for dx, dy in ring:
+                x, y = clamp(tx + dx * step, ty + dy * step)
+                if not any(overlaps(rect(x, y), s) for s in taken):
+                    spot = (x, y); break
+            if spot:
+                break
+        if spot is None:
+            say('%s: no room clear of the blocks for %.1f x %.1f um (%d rows an entry), left to the placer' % (p, W, H, R))
+            continue
+        x0, y0 = spot[0] - W / 2, spot[1] - H / 2
+        taken.append(rect(*spot))
+        for r_, e in enumerate(eidx):
+            bits = collections.defaultdict(list)
+            for k in ents[e]:
+                bits[per[k][0]].append(k)
+            for f, ks in bits.items():
+                for i, k in enumerate(sorted(ks, key=lambda k: per[k][1])):
+                    c, rr = divmod(start[f] + i, R)
+                    new[k] = (x0 + c * pitch + (pitch - nodes[k]['w']) / 2.0,
+                              y0 + (r_ * R + rr) * rowh)
+        nflop = sum(len(v) for v in ents.values())
+        report.append((p, E, len(forder), nflop, R, W, H, p0c[j][0], p0c[j][1], cx[j], cy[j], spot[0], spot[1]))
+        say('%s: %d entries x %d fields, %d flops as %d row(s) an entry, %.1f x %.1f um at (%.1f, %.1f); '
+            'now (%.1f, %.1f), timing pull (%.1f, %.1f)'
+            % (p, E, len(forder), nflop, R, W, H, spot[0], spot[1], p0c[j][0], p0c[j][1], cx[j], cy[j]))
+
+    with open('%s.arrays.tsv' % module, 'w') as fh:
+        fh.write('array\tentries\tfields\tflops\trows_per_entry\tw_um\th_um\tunanchored_x\tunanchored_y\tpull_x\tpull_y\tx\ty\n')
+        for r in report:
+            fh.write('%s\t%d\t%d\t%d\t%d\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\n' % r)
+    if a.dry or not new:
+        say('%s: %d flop(s) would be %s; --dry, nodefile unchanged (%.0f s)'
+            % (module, len(new), 'started' if a.free else 'held', time.time() - t0))
+        return 0
+    st = 'PLACED' if a.free else 'FIXED'
+    out = []
+    for line in open(a.nodefile):
+        t = line.split()
+        if len(t) >= 6 and t[0].isdigit():
+            k = pos.get(int(t[0]))
+            if k is not None and k in new:
+                x, y = new[k]
+                rest = [r for r in t[6:] if '=' in r]
+                line = ' '.join(t[:5] + [st, '%.4f' % x, '%.4f' % y] + rest) + '\n'
+        out.append(line)
+    open(a.nodefile, 'w').writelines(out)
+    say('%d flop(s) of %d array(s) %s on their grids (%.0f s)'
+        % (len(new), len(report), 'started' if a.free else 'held', time.time() - t0))
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
