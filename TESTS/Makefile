@@ -436,6 +436,22 @@ nangate_escaped: $(NG_SIZING)
 	cd workarea/escaped && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire esc_repaired.v; hierarchy -check -top esc_top" > yosys.log 2>&1 || { echo "nangate_escaped: the repaired netlist does not parse, see workarea/escaped/yosys.log"; exit 1; }
 	@echo "nangate_escaped: escaped names survive synthesis, repair, write and read-back"
 
+# Escaped names through ungroup.  ungroup rewrites the dissolved child's cells
+# into the parent with each port bit mapped to the parent's net; an escaped
+# net written there without its trailing space swallows the ")" after it, and
+# another tool's reader stops on the netlist (a 2.2M-cell tile's place_opt
+# netlist did).  Checked: both writes -- assigns as assigns, and as buffer
+# cells (set_write_assign_as_buffer, what make route's netlist uses) -- parse
+# in yosys, and the second has the dissolved assign buffer as a cell.
+nangate_ungroup_escaped:
+	mkdir -p workarea/ungroup_esc && find workarea/ungroup_esc -mindepth 1 -maxdepth 1 ! -name ".nfs*" -exec rm -rf {} +
+	cd workarea/ungroup_esc && PATH=/usr/bin:$$PATH $(ELECTRON)/electron_hier --nogui --cleanlog --nolog -f ../../escaped/ungroup_esc.tcl > run.log 2>&1
+	grep -q "UNGROUP : 006 : 1 instance(s) dissolved into top" workarea/ungroup_esc/run.log || { echo "nangate_ungroup_escaped: the child was not dissolved, see workarea/ungroup_esc/run.log"; exit 1; }
+	for f in ug_assign ug_buf; do \
+	  (cd workarea/ungroup_esc && yosys -q -p "read_liberty -lib ../../library/NangateOpenCellLibrary_PDKv1_2_v2008_10_slow_conditional_ecsm.lib; read_verilog -noautowire $$f.v; hierarchy -check -top top; check -assert" > $$f.yosys.log 2>&1) || { echo "nangate_ungroup_escaped: $$f.v does not parse, see workarea/ungroup_esc/$$f.yosys.log"; exit 1; }; done
+	grep -qF 'bt_assign_buf_0 (' workarea/ungroup_esc/ug_buf.v && ! grep -q "^assign" workarea/ungroup_esc/ug_buf.v || { echo "nangate_ungroup_escaped: set_write_assign_as_buffer left an assign"; exit 1; }
+	@echo "nangate_ungroup_escaped: escaped nets survive ungroup, both ways of writing assigns parse"
+
 # Buffer trees, port-local.  A select fans out to 256 gates inside a child
 # module that is instantiated twice and kept as its own module (-flatten_below
 # 0); -margin 0.1 makes that load need a tree.  The tree must be built inside
@@ -528,7 +544,7 @@ nangate_print:
 	@echo "nangate_print: no simulation code in either netlist"
 
 nangate_both: nangate_flat nangate_hier
-nangate_all:  nangate_aldff undefined_mod rtl_patch_headers nangate_rowstart nangate_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_fp_def nangate_flatten_below nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
+nangate_all:  nangate_aldff undefined_mod rtl_patch_headers nangate_rowstart nangate_escaped nangate_ungroup_escaped nangate_buftree nangate_buftree_mixed nangate_assignload nangate_mpn nangate_flat nangate_hier nangate_recurse nangate_recurse_qp nangate_keep_shapes nangate_ungroup nangate_fixed_fp nangate_l_die nangate_fp_def nangate_flatten_below nangate_recurse_hl nangate_rtl_hier nangate_dead_logic nangate_print nangate_sgraph nangate_repeat
 
 # The container the targets above need.  apptainer shell inherits DISPLAY,
 # which is what lets the electron GUI open.

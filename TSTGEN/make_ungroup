@@ -114,7 +114,10 @@ foreach my $c ( @kids ) {
       my @bits = ();
       foreach my $b ( &array_of_blasted_expr($lp{$pin}, $cm) ) {
         if ( $b =~ m/^\d*\'[sS]?[bodhBODH]/ ) { push(@bits, $b); next; }
-        push(@bits, exists $map{"$c\0$b"} ? $map{"$c\0$b"} : $fresh->("$c\0$b"));
+        #<!-- an escaped net ends at whitespace: without its space back the
+        #     ")" written after it joins the name, and the netlist is not
+        #     verilog (another tool's reader stops on the line) -->
+        push(@bits, &dbfVerilogNetToken($parent, exists $map{"$c\0$b"} ? $map{"$c\0$b"} : $fresh->("$c\0$b")));
       }
       push(@pinTxt, "." . $pin . "(" . ( @bits == 1 ? $bits[0] : "{" . join(",", @bits) . "}" ) . ")");
     }
