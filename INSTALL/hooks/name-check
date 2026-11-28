@@ -71,7 +71,7 @@ DESIGN_EXEMPT = ("TESTS/",)
 ALLOW_SUFFIX = (".pdf", ".sif", ".png", ".gif", ".jpg", ".so", ".tar", ".gz")
 
 # Terms that look like a hit but are the ones we are allowed to say.
-ALLOW_TERMS = re.compile(r"nangate|45nm", re.I)
+ALLOW_TERMS = re.compile(r"nangate|45nm|asap7|7nm", re.I)
 
 RULES = [
     # A PDK standard cell carries a drive-strength segment and then more
